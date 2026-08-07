@@ -41,7 +41,10 @@ to treat dead links as fatal.
 `/package-lock.json`, and its CI description (§5) runs `npm ci` - which fails outright when no
 lockfile is present, which on a fresh clone is always.
 
-**What I assumed:** that the `npm ci` half is the deliberate one, so `package-lock.json` is
-committed and line 8 is gone from `.gitignore`. The author's other published packages commit their
-lockfile, which settles what the house style is, and `npm ci` is the stronger choice anyway: CI then
-builds the exact tree that was tested locally rather than whatever resolves on the day.
+**What I assumed:** nothing, in the end - the author decided. The `.gitignore` half stands and CI
+runs `npm install`. The reason is not that a lockfile is unwanted in principle but that resolving
+afresh is *what CI is for* at this stage: it tests the newest dependency tree against the pinned one
+sitting on the development machine, so upstream breakage surfaces on the day it happens instead of
+whenever someone next regenerates the lock. A committed lockfile is a deployment posture, not a
+development one. Worth revisiting at 1.0, when reproducibility starts to matter more than early
+warning.
