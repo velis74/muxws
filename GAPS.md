@@ -178,3 +178,30 @@ asserts no spaces and no `\u` escaping, and it is load-bearing for WSM-FRG-016: 
 started emitting spaces, fragment boundaries would diverge everywhere rather than only on floats.
 The redundant byte-exact comparisons that had crept into the D1 test in both ports were removed -
 the `to_mapping` and `decode` assertions beside them already covered what that test is for.
+
+## muxws-m2-peer-core.md — no rule id
+
+**What I needed:** a type for `on_close` to hand its handler.
+
+**What the brief says:** M2's `Peer` skeleton declares `on_close(handler: Callable[[CloseReason], None])`,
+but `CloseReason` is created in M5a's `observability.py` and gains its `will_retry` field in M5b.
+
+**What I assumed:** that the type has to exist as soon as the callback does, so
+`muxws/observability.py` is created here with `CloseReason` alone. M5a fills the module out with the
+one-line logger and `on_frame` dispatch as its brief says; `will_retry` is already present and always
+`False`, because until the reconnect helper lands there is nothing that retries.
+
+## muxws-m2-peer-core.md — WSM-TST-003, brief §7 test 30
+
+**What I needed:** to run all eight `conformance/invalid/` fixtures against a live peer.
+
+**What the brief says:** "Parametrized over all eight ... The over-cap and undecodable cases use a
+codec double, since size enforcement itself lands in M5a."
+
+**What I assumed:** seven of the eight run for real. The undecodable case needs no double - a codec
+that refuses to decode is exactly what `JsonCodec` already does, and the connection dies as the
+fixture declares. The over-cap case cannot be made honest with a double: the fixture asserts
+`reset(PAYLOAD_TOO_LARGE)`, which is receive-side size enforcement, and that is M5a's by the brief's
+own §9. Faking it with a codec double would assert that the double works, not that the peer does. It
+is marked `xfail(strict=True)` instead, so the moment M5a implements the cap the test fails as an
+unexpected pass and the marker has to be removed - a skip would have rotted silently.

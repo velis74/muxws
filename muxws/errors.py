@@ -133,11 +133,21 @@ _RESET_CODE_EXCEPTIONS: dict[ResetCode, type[StreamReset]] = {
 
 
 def exception_for_reset(
-    code: ResetCode | int, reason: str | None = None, *, stream_id: int | None = None
+    code: ResetCode | int,
+    reason: str | None = None,
+    *,
+    stream_id: int | None = None,
+    payload: Any = None,
 ) -> StreamReset:
-    """Build the `StreamReset` subclass that represents `code`, falling back to `StreamReset` itself."""
+    """Build the `StreamReset` subclass that represents `code`, falling back to `StreamReset` itself.
+
+    `payload` is the structured error object a `reset(APPLICATION_ERROR)` may carry (WSM-ERR-006); it
+    is meaningful only for `RemoteError` and ignored for every other code.
+    """
     code = ResetCode(code)
     cls = _RESET_CODE_EXCEPTIONS.get(code)
     if cls is None:
         return StreamReset(reason, code=code, stream_id=stream_id)
+    if cls is RemoteError:
+        return RemoteError(reason, stream_id=stream_id, payload=payload)
     return cls(reason, stream_id=stream_id)
