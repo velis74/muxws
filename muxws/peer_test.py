@@ -83,6 +83,27 @@ async def test_peer_id_is_prefix_plus_monotonic_counter(make_pair):
     assert counters == sorted(counters), "the counter never rewinds"
 
 
+async def test_closing_a_peer_does_not_free_its_id(make_pair):
+    """WSM-API-009's fourth clause. Reuse is the failure being prevented, so it needs a closed peer.
+
+    Counting distinct ids among peers that were never closed cannot fail against a scheme that
+    recycles the ids of closed connections - which is precisely the scheme the rule forbids.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    closed_ids = {pair.dialer.id, pair.acceptor.id}
+    await pair.stop()
+
+    assert pair.dialer.is_open is False
+    assert pair.acceptor.is_open is False
+
+    fresh = make_pair()
+    fresh_ids = {fresh.dialer.id, fresh.acceptor.id}
+    assert closed_ids.isdisjoint(fresh_ids), "a closed peer's id must not be reissued"
+    assert min(int(i.split("-")[1]) for i in fresh_ids) > max(int(i.split("-")[1]) for i in closed_ids)
+
+
 # --------------------------------------------------------------------------- retention
 
 
@@ -192,10 +213,12 @@ async def test_no_bookkeeping_survives_a_closed_stream(make_pair):
         assert pair.acceptor.streams == {}
         assert isinstance(pair.dialer._highest_local_open, int)
         assert isinstance(pair.acceptor._highest_remote_open, int)
-        # Nothing keyed by a closed stream may linger anywhere on the peer.
-        for value in vars(pair.dialer).values():
-            if isinstance(value, dict) and value is not pair.dialer.tags:
-                assert len(value) == 0, "a per-closed-stream map is a per-connection memory leak"
+        # Nothing keyed by a closed stream may linger anywhere on the peer, in a container of any
+        # kind. Checking only dicts would pass a `self._seen_ids: set[int]` growing without bound.
+        for name, value in vars(pair.dialer).items():
+            if name == "tags" or not isinstance(value, (dict, list, set, frozenset, tuple)):
+                continue
+            assert len(value) == 0, f"peer.{name} still holds {len(value)} entries after 200 closed streams"
     finally:
         await pair.stop()
 
@@ -437,12 +460,29 @@ async def test_socket_death_fails_every_shape(make_pair):
     pair.acceptor.on_stream(_hold)
     pair.start()
     closes: list[Any] = []
-    pair.dialer.on_close(closes.append)
+    #: What the world looked like at the instant `on_close` ran. WSM-STM-014 puts the synthesised
+    #: failures *before* it, so a handler that fires first would observe streams still live - and
+    #: counting the calls alone cannot tell the two orderings apart.
+    world_at_close: list[dict[str, Any]] = []
+    watched: list[Stream] = []
+
+    def record(reason: Any) -> None:
+        closes.append(reason)
+        world_at_close.append(
+            {
+                "live_streams": len(pair.dialer.streams),
+                "all_closed": [stream.closed.is_set() for stream in watched],
+                "all_failed": [stream.state.value for stream in watched],
+            }
+        )
+
+    pair.dialer.on_close(record)
 
     async def body() -> None:
         awaited = pair.dialer.open({"shape": "await"})
         iterated = pair.dialer.open({"shape": "iterate"})
         sender = pair.dialer.open({"shape": "send"})
+        watched.extend([awaited, iterated, sender])
         await pair.settle()
 
         request_task = asyncio.create_task(pair.dialer.request({"shape": "request"}))
@@ -483,6 +523,10 @@ async def test_socket_death_fails_every_shape(make_pair):
 
     assert len(closes) == 1, "on_close fires once per loss, after every stream has failed"
     assert closes[0].will_retry is False
+    snapshot = world_at_close[0]
+    assert snapshot["live_streams"] == 0, "on_close ran while the peer still held live streams"
+    assert all(snapshot["all_closed"]), f"on_close ran before every stream closed: {snapshot}"
+    assert snapshot["all_failed"] == ["closed"] * 3, snapshot
 
 
 async def _await_shape(stream: Stream) -> Any:
@@ -794,5 +838,137 @@ async def test_a_read_loop_failure_closes_the_peer_rather_than_zombifying_it(mak
         assert pair.dialer.is_open is False
         assert len(closes) == 1
         assert stream.closed.is_set()
+    finally:
+        await pair.stop()
+
+
+# --------------------------------------------------------------------------- audit regressions
+
+
+async def test_a_wrong_parity_open_cannot_pose_as_a_fragment_continuation(make_pair):
+    """WSM-SID-005: parity is checked before anything else, whatever reassembly is in flight.
+
+    Regression: "is this a continuation?" was inferred from whether *some* assembler was running on
+    that id. A stream this peer opened, receiving fragmented `data`, therefore accepted an `open`
+    carrying our own parity as a continuation - dispatching a handler for a stream we opened, and
+    skipping the connection-level error the rule requires.
+    """
+    pair = make_pair()
+    handled: list[Any] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = stream
+        handled.append(payload)
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        codec = pair.acceptor._codec
+        pair.acceptor.open({"mine": True})  # the acceptor's own stream 2
+        await pair.settle()
+
+        encoded = codec.encode_payload({"x": 1})
+        pair.acceptor_socket.inject(codec.encode(Frame("data", stream=2, fragment=encoded[:3], more=True)))
+        await pair.settle()
+        pair.acceptor_socket.inject(codec.encode(Frame("open", stream=2, fragment=encoded[3:])))
+        await pair.settle()
+
+        assert handled == [], "a handler ran for a stream the local peer opened"
+        assert pair.acceptor.is_open is False
+        assert pair.frames_of_type("acceptor", "goaway")
+    finally:
+        await pair.stop()
+
+
+async def test_a_duplicate_open_is_still_a_connection_error_mid_reassembly(make_pair):
+    """The same hole from the other side: a re-used id must not be laundered by a fragment."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        codec = pair.acceptor._codec
+        encoded = codec.encode_payload({"x": 1})
+        pair.acceptor_socket.inject(codec.encode(Frame("open", stream=3, fragment=encoded[:3], more=True)))
+        await pair.settle()
+        pair.acceptor_socket.inject(codec.encode(Frame("open", stream=1, fragment=encoded[3:])))
+        await pair.settle()
+
+        assert pair.acceptor.is_open is False, "an open below the high-water mark must be ILL-C"
+    finally:
+        await pair.stop()
+
+
+async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connection(make_pair):
+    """Regression: a codec that could not encode a frame took the writer task down in silence.
+
+    Nothing drained the queue afterwards, every later send sat in it forever, and the peer went on
+    reporting itself open - the same shape as the read-loop zombie, from the other end.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_reply_now)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        # Bytes are not a payload type under JSON, and the codec refuses rather than base64-ing.
+        await stream.send({"blob": b"\x00\xff"})
+        await pair.settle()
+
+        assert pair.dialer.is_open, "one unencodable frame must not end the connection"
+        with pytest.raises(StreamReset) as info:
+            await stream
+        assert info.value.code is ResetCode.INTERNAL_ERROR
+
+        # The writer is still alive: a later request still completes.
+        assert await pair.dialer.request({"q": 2}) == {"ok": True}
+    finally:
+        await pair.stop()
+
+
+async def test_an_error_serializer_that_raises_still_produces_the_reset(make_pair):
+    """WSM-STM-034 is unconditional - a broken hook must not turn a failure into silence."""
+
+    def exploding(_exc: BaseException) -> Any:
+        raise RuntimeError("the serializer itself is broken")
+
+    pair = make_pair(error_serializer=exploding)
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = (payload, stream)
+        raise ValueError("handler said no")
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        with pytest.raises(RemoteError) as info:
+            await pair.dialer.request({"q": 1})
+        assert info.value.code is ResetCode.APPLICATION_ERROR
+        reset = pair.frames_of_type("acceptor", "reset")[-1]
+        assert reset.code == int(ResetCode.APPLICATION_ERROR)
+        assert reset.reason == "handler said no"
+        assert reset.payload is ABSENT
+    finally:
+        await pair.stop()
+
+
+async def test_repeated_sends_on_a_reset_stream_do_not_grow_one_traceback(make_pair):
+    """Re-raising the stored instance appends a frame to its traceback on every call."""
+    import traceback
+
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        await stream.cancel()
+
+        depths: list[int] = []
+        for _ in range(5):
+            try:
+                await stream.send({"late": True})
+            except StreamReset as exc:
+                depths.append(len(traceback.extract_tb(exc.__traceback__)))
+        assert len(set(depths)) == 1, f"the traceback grows on every raise: {depths}"
     finally:
         await pair.stop()

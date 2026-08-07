@@ -90,6 +90,10 @@ class Stream:
         #: `StreamReset` that killed it (WSM-ERR-009).
         self._close_cause: str | StreamReset | None = None
         self._assembler = Assembler()
+        #: True between the first fragment of a *remote* opening payload and the frame that
+        #: completes it. Inferring this from the assembler instead let a wrong-parity `open` be
+        #: taken for a continuation of whatever reassembly happened to be running on that id.
+        self._opening = False
         #: The handler task, so an incoming reset(CANCELLED) can cancel it (WSM-ERR-013).
         self.handler_task: asyncio.Task[None] | None = None
 
@@ -121,7 +125,9 @@ class Stream:
         if self._close_cause is None:
             return
         if isinstance(self._close_cause, StreamReset):
-            raise self._close_cause
+            # A fresh instance each time: re-raising the stored one appends a frame to its traceback
+            # on every call, so a loop that keeps sending grows an object it never releases.
+            raise self._close_cause.clone()
         raise StreamClosed(f"stream {self.id} closed normally; nothing more can be sent on it")
 
     # ------------------------------------------------------------------ resetting

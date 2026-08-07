@@ -1,7 +1,9 @@
 """muxws - multiplexed, cancellable, bidirectional streams over one WebSocket."""
 
+from muxws.api import accept, connect, resolve_codec, select_subprotocol, serve
 from muxws.codecs import Codec, get_codec, register_codec, registered_codecs
 from muxws.codecs.json_ import JsonCodec
+from muxws.conf import Settings, settings
 from muxws.errors import (
     CodecError,
     CodecMismatch,
@@ -21,6 +23,10 @@ from muxws.errors import (
 )
 from muxws.fragment import Assembler, encoded_length, MAX_FRAME_BYTES, split_frame
 from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
+from muxws.observability import CloseReason
+from muxws.peer import default_error_serializer, ErrorSerializer, Peer, StreamHandler
+from muxws.stream import Stream, StreamState
+from muxws.transports import SocketAdapter
 
 __version__ = "0.1.0"
 
@@ -29,40 +35,47 @@ register_codec("json", JsonCodec())
 
 __all__ = [
     "ABSENT",
-    "MAX_FRAME_BYTES",
     "Assembler",
     "CloseReason",
     "Codec",
-    "ErrorSerializer",
     "CodecError",
     "CodecMismatch",
     "CodecNotRegistered",
     "ConnectionClosed",
     "ConnectionGoingAway",
     "ConnectionLost",
+    "ErrorSerializer",
     "Frame",
     "JsonCodec",
+    "MAX_FRAME_BYTES",
     "MuxwsError",
     "Peer",
     "ProtocolError",
     "RemoteError",
     "ResetCode",
+    "Settings",
     "SocketAdapter",
     "Stream",
     "StreamAlreadyConsumed",
     "StreamClosed",
     "StreamHandler",
     "StreamRefused",
-    "StreamState",
     "StreamReset",
+    "StreamState",
     "StreamTimeout",
     "__version__",
+    "accept",
+    "connect",
     "default_error_serializer",
     "encoded_length",
     "from_mapping",
     "get_codec",
     "register_codec",
     "registered_codecs",
+    "resolve_codec",
+    "select_subprotocol",
+    "serve",
+    "settings",
     "split_frame",
     "to_mapping",
 ]

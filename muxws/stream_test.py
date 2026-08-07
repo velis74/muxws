@@ -152,8 +152,28 @@ async def _assert_idle_cell(pair: Pair, event: str, outcome: str) -> None:
             assert pair.acceptor.streams[1].state is StreamState.OPEN
         return
     if outcome == "n/r":
-        # There is no public path to a stream before its open frame is enqueued.
-        assert "timeout" not in inspect.signature(Peer.open).parameters
+        # `idle` exists only inside the indivisible allocate-and-enqueue step (WSM-SID-006), so the
+        # cell is unreachable exactly when no stream the public API can hand out is ever in it.
+        # `open()` being synchronous is what makes that true: there is no suspension point at which
+        # a caller could be given a stream that has not yet been enqueued.
+        assert not inspect.iscoroutinefunction(Peer.open)
+
+        seen: list[Stream] = []
+        pair.acceptor.on_stream(_capture(seen))
+
+        local = pair.dialer.open({"n": 1})
+        assert local.state is not StreamState.IDLE, f"open() handed out an idle stream; {event} would be reachable"
+        ended = pair.dialer.open({"n": 2}, end=True)
+        assert ended.state is not StreamState.IDLE
+        await pair.settle()
+
+        observed = [*seen, *pair.dialer.streams.values(), *pair.acceptor.streams.values()]
+        assert observed, "the assertion below would be vacuous with nothing to observe"
+        for stream in observed:
+            assert stream.state is not StreamState.IDLE, (
+                f"a stream reachable through the public API is idle, so stream.{event.removeprefix('send_')}() "
+                f"could be called on it"
+            )
         return
     if outcome == "closed":
         await pair.dialer_socket.drop()
@@ -169,6 +189,17 @@ async def _assert_idle_cell(pair: Pair, event: str, outcome: str) -> None:
     pair.acceptor_socket.inject(pair.acceptor._codec.encode(frame))
     await pair.settle()
     assert _goaway_sent(pair, "acceptor"), f"{event} above the high-water mark must be ILL-C"
+
+
+def _capture(sink: list[Stream]):
+    """A handler that records the stream it was handed, so its state can be inspected."""
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        sink.append(stream)
+        await stream.closed.wait()
+
+    return handler
 
 
 async def _echo_handler(payload: Any, stream: Stream) -> None:
@@ -303,7 +334,14 @@ async def test_await_twice_returns_same_value(make_pair):
         stream = pair.dialer.open({"q": 1})
         first = await stream
         second = await stream
-        assert first == second == {"answer": 42}
+        assert first == {"answer": 42}
+        # Identity, not equality: an implementation that re-read the queue would build an equal dict
+        # and pass an equality check while having consumed a payload that is not there twice.
+        assert second is first
+        future = stream._future
+        assert future is not None
+        assert await stream is first
+        assert stream._future is future, "the future must be created once and kept"
     finally:
         await pair.stop()
 
@@ -367,8 +405,14 @@ async def test_result_timeout_uses_the_same_future(make_pair):
     pair.start()
     try:
         stream = pair.dialer.open({"q": 1})
-        assert await stream == {"answer": 1}
-        assert await stream.result(timeout=1.0) == {"answer": 1}
+        first = await stream
+        assert first == {"answer": 1}
+        # Same *object*, not merely an equal one: a second source would rebuild the value, and a
+        # stream whose remote sent two payloads would then hand out the second here (WSM-API-012).
+        assert await stream.result(timeout=1.0) is first
+        assert await stream.result() is first
+        assert stream._future is not None
+        assert stream._future.result() is first
     finally:
         await pair.stop()
 

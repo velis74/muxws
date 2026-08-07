@@ -216,6 +216,24 @@ class Peer:
                 return
             except asyncio.CancelledError:
                 raise
+            except Exception as exc:  # noqa: BLE001
+                # A codec that cannot encode this frame - a bytes payload under JSON, say - used to
+                # take the writer task down with it. Nothing then drained the queue, every later
+                # send sat in it forever, and the peer went on reporting itself open.
+                logger.exception("muxws conn=%s could not send a %s frame", self.id, frame.type)
+                self._fail_unsendable(frame, exc)
+
+    def _fail_unsendable(self, frame: Frame, exc: BaseException) -> None:
+        """One frame could not be encoded. Fail its stream and keep the connection working."""
+        stream = self._streams.get(frame.stream) if frame.stream is not None else None
+        if stream is None:
+            self._die(ConnectionClosed(f"could not encode a {frame.type} frame: {exc}", code=1011))
+            return
+        self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.INTERNAL_ERROR), reason=str(exc)))
+        stream._fail(
+            exception_for_reset(ResetCode.INTERNAL_ERROR, str(exc), stream_id=stream.id),
+            notify_remote=False,
+        )
 
     def _report_frame(self, direction: str, frame: Frame, encoded: str | bytes) -> None:
         length = encoded_length(encoded)
@@ -290,7 +308,7 @@ class Peer:
             return False
 
         existing = self._streams.get(stream_id)
-        if existing is not None and existing._assembler.in_progress and frame.fragment is not None:
+        if existing is not None and existing._opening and frame.fragment is not None:
             return await self._continue_open(existing, frame)
 
         remote_parity = 0 if self._is_dialer else 1
@@ -310,9 +328,11 @@ class Peer:
         self._streams[stream_id] = stream
 
         if frame.fragment is not None:
+            stream._opening = True
             payload = stream._assembler.feed(frame, self._codec)
             if payload is ABSENT:
                 return True
+            stream._opening = False
             stream.payload = payload
         else:
             stream.payload = frame.payload if frame.payload is not ABSENT else None
@@ -325,6 +345,7 @@ class Peer:
         payload = stream._assembler.feed(frame, self._codec)
         if payload is ABSENT:
             return True
+        stream._opening = False
         stream.payload = payload
         if frame.end:
             stream.state = StreamState.HALF_CLOSED_REMOTE
@@ -364,7 +385,13 @@ class Peer:
         REFUSED promises the operation definitively did not happen. A handler that debits an account
         and then raises would, under REFUSED, be inviting the client to retry the debit.
         """
-        payload = self._error_serializer(exc)
+        try:
+            payload = self._error_serializer(exc)
+        except Exception:  # noqa: BLE001
+            # WSM-STM-034 is unconditional. A serializer that raises must not swallow the reset with
+            # it, or the handler's failure reaches the opener as silence and the caller waits forever.
+            logger.exception("muxws conn=%s error_serializer raised; sending the reset without a payload", self.id)
+            payload = None
         if stream.state is not StreamState.CLOSED:
             self._enqueue(
                 Frame(

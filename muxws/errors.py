@@ -98,6 +98,18 @@ class StreamReset(MuxwsError):
         self.reason = reason
         self.stream_id = stream_id
 
+    def clone(self) -> StreamReset:
+        """A fresh instance of the same failure, carrying no traceback of its own.
+
+        `send()` on a reset stream raises the stream's stored failure. Raising the stored *instance*
+        appends a frame to its traceback every time, so a caller that keeps trying grows an object
+        that is never released.
+        """
+        fresh = self.__class__.__new__(self.__class__)
+        fresh.__dict__.update(self.__dict__)
+        Exception.__init__(fresh, *self.args)
+        return fresh
+
 
 class RemoteError(StreamReset):
     """The remote handler raised. Carries the serialized error object, if the remote sent one."""
