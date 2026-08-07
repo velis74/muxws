@@ -742,3 +742,57 @@ async def test_a_handler_whose_stream_died_mid_flight_ends_quietly(make_pair):
         assert pair.acceptor.is_open
     finally:
         await pair.stop()
+
+
+async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(make_pair):
+    """A peer of another generation - or one still using the retired 5 - must be heard, not crashed on.
+
+    Regression: converting the wire value straight to `ResetCode` raised `ValueError` out of the read
+    loop, which left `is_open` true, `on_close` unfired, and every pending await hanging against a
+    queue no writer was draining.
+    """
+    for wire_code in (5, 42):
+        pair = make_pair()
+        pair.acceptor.on_stream(_hold)
+        pair.start()
+        closes: list[Any] = []
+        pair.dialer.on_close(closes.append)
+        try:
+            stream = pair.dialer.open({"q": 1})
+            await pair.settle()
+            pair.dialer_socket.inject(f'{{"type":"reset","stream":{stream.id},"code":{wire_code},"reason":"old peer"}}')
+            await pair.settle()
+
+            assert pair.dialer.is_open, f"code {wire_code} must not kill the connection"
+            assert closes == []
+            with pytest.raises(StreamReset) as info:
+                await stream
+            assert info.value.code == wire_code
+            assert stream.closed.is_set()
+        finally:
+            await pair.stop()
+
+
+async def test_a_read_loop_failure_closes_the_peer_rather_than_zombifying_it(make_pair):
+    """A peer that reports itself open while its read loop is dead is worse than one that closed."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    closes: list[Any] = []
+    pair.dialer.on_close(closes.append)
+    try:
+
+        async def exploding(_frame: Frame) -> bool:
+            raise RuntimeError("simulated bug in dispatch")
+
+        pair.dialer._dispatch = exploding  # type: ignore[method-assign]
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        pair.dialer_socket.inject('{"type":"data","stream":1,"payload":{}}')
+        await pair.settle()
+
+        assert pair.dialer.is_open is False
+        assert len(closes) == 1
+        assert stream.closed.is_set()
+    finally:
+        await pair.stop()

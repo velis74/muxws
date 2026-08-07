@@ -252,7 +252,18 @@ class Peer:
                     await self._fail_connection(f"undecodable message: {exc}")
                     return
                 self._report_frame("rx", frame, message)
-                if not await self._dispatch(frame):
+                try:
+                    keep_going = await self._dispatch(frame)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # A peer whose read loop died while still reporting `is_open` is the worst
+                    # possible state: every pending await hangs, `on_close` never fires, and
+                    # `open()` keeps succeeding into a queue nobody drains.
+                    logger.exception("muxws conn=%s read loop failed on a %s frame", self.id, frame.type)
+                    self._die(ConnectionClosed(f"read loop failed: {exc}", code=1011, reason=str(exc)))
+                    return
+                if not keep_going:
                     return
         finally:
             await self._stop_writer()
@@ -390,7 +401,7 @@ class Peer:
         if frame.type == "reset":
             stream._fail(
                 exception_for_reset(
-                    ResetCode(frame.code or 0),
+                    frame.code or 0,
                     frame.reason,
                     stream_id=stream_id,
                     payload=frame.payload if frame.payload is not ABSENT else None,

@@ -38,6 +38,27 @@ class StreamState(str, Enum):
 _END = object()
 
 
+def _sendable_reset_code(code: ResetCode | int) -> ResetCode:
+    """Guard the one code that is synthesised locally and the numbers this generation does not use.
+
+    `CONNECTION_CLOSED` means "the socket under this stream died"; putting it on the wire would tell
+    a remote that *its* connection had died, which is both false and unfalsifiable (§8.1: it MUST
+    NEVER appear on the wire). Reset code 5 is retired and MUST NOT be reused. Anything outside the
+    enum would be this peer inventing wire vocabulary.
+    """
+    if code == ResetCode.CONNECTION_CLOSED:
+        raise ProtocolError(
+            "CONNECTION_CLOSED is synthesised locally when the socket dies and must never be sent; "
+            "use cancel() or another reset code (§8.1)"
+        )
+    try:
+        return ResetCode(code)
+    except ValueError:
+        raise ProtocolError(
+            f"{code!r} is not a reset code this generation defines; 5 is retired and must not be reused (§8.1)"
+        ) from None
+
+
 class Stream:
     """Simultaneously awaitable and async-iterable; the first use claims it (WSM-API-002/014)."""
 
@@ -115,6 +136,7 @@ class Stream:
         A no-op once the stream is closed - including after socket death, where there is nothing to
         send it on (WSM-RCN-041).
         """
+        code = _sendable_reset_code(code)
         if self.state is StreamState.CLOSED:
             return
         if self._peer.is_open:
@@ -155,8 +177,20 @@ class Stream:
 
     def _settle_future_if_empty(self) -> None:
         """A stream that ends without ever producing a payload must not leave an await hanging."""
-        if self._future is not None and not self._future.done():
-            self._future.set_exception(ProtocolError(f"stream {self.id} ended without producing a payload"))
+        self._fail_future(ProtocolError(f"stream {self.id} ended without producing a payload"))
+
+    def _fail_future(self, error: BaseException) -> None:
+        """Resolve the memoized future with an error, and make sure someone reads it.
+
+        The awaiter that created the future may since have been cancelled, so nobody is left to
+        retrieve the exception - and asyncio would then report it as never retrieved, which is a
+        warning the application did not cause and cannot act on. This is the Python side of the
+        precaution WSM-API-016 spells out for TypeScript.
+        """
+        if self._future is None or self._future.done():
+            return
+        self._future.set_exception(error)
+        self._future.add_done_callback(lambda future: future.exception())
 
     def _fail(self, error: StreamReset, *, notify_remote: bool) -> None:
         """Close the stream because it was reset, locally or remotely, or because the socket died."""
@@ -166,8 +200,7 @@ class Stream:
         self.state = StreamState.CLOSED
         self._close_cause = error
         self._assembler.reset()
-        if self._future is not None and not self._future.done():
-            self._future.set_exception(error)
+        self._fail_future(error)
         self._queue.put_nowait(error)
         self.closed.set()
         if self.handler_task is not None and not self.handler_task.done():
@@ -206,21 +239,21 @@ class Stream:
         if self._future is None or self._future.done():
             return
         if isinstance(self._close_cause, StreamReset):
-            self._future.set_exception(self._close_cause)
+            self._fail_future(self._close_cause)
             return
         if self._queue.empty():
             return
         pending = self._queue._queue[0]  # noqa: SLF001 - peek, without consuming
         if isinstance(pending, StreamReset):
-            self._future.set_exception(pending)
+            self._fail_future(pending)
         elif pending is _END:
-            self._future.set_exception(ProtocolError(f"stream {self.id} ended without producing a payload"))
+            self._fail_future(ProtocolError(f"stream {self.id} ended without producing a payload"))
         else:
             self._future.set_result(pending)
 
     def __await__(self):
         self._claim_for("await")
-        return self._memoized_future().__await__()
+        return self._wait(None).__await__()
 
     async def result(self, timeout: float | None = None) -> Any:
         """The same future with a deadline wrapped around the wait (WSM-API-012).
@@ -229,14 +262,27 @@ class Stream:
         one place, so a second read returns the first read's value rather than the next payload.
         """
         self._claim_for("await")
+        return await self._wait(timeout)
+
+    async def _wait(self, timeout: float | None) -> Any:
+        """The one wait both `await stream` and `result()` go through.
+
+        Shielded, so cancelling one awaiter does not cancel the memoized future itself - a second
+        await must still get the same answer (WSM-API-011). Local `CancelledError` propagating out of
+        it resets the stream and keeps going, rather than leaving the remote producing for a consumer
+        that has gone away (WSM-ERR-014).
+        """
         future = self._memoized_future()
-        if timeout is None:
-            return await future
         try:
+            if timeout is None:
+                return await asyncio.shield(future)
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except asyncio.TimeoutError:
             await self.reset(ResetCode.TIMEOUT, f"deadline of {timeout}s expired")
             raise StreamTimeout(f"stream {self.id} did not answer within {timeout}s", stream_id=self.id) from None
+        except asyncio.CancelledError:
+            await self.reset(ResetCode.CANCELLED, "consumer cancelled")
+            raise
 
     def __aiter__(self) -> AsyncIterator[Any]:
         self._claim_for("iterate")

@@ -79,18 +79,22 @@ class CodecMismatch(CodecError):
 class StreamReset(MuxwsError):
     """A stream ended early. Carries the reset code, its reason and the stream id."""
 
-    code: ResetCode = ResetCode.NO_ERROR
+    #: A `ResetCode` for every code this generation defines, and a bare `int` for one it does not -
+    #: a peer of another generation, or an implementation using the retired 5, still reset the
+    #: stream, and refusing to represent that would be refusing to hear it.
+    code: ResetCode | int = ResetCode.NO_ERROR
 
     def __init__(
         self,
         reason: str | None = None,
         *,
-        code: ResetCode | None = None,
+        code: ResetCode | int | None = None,
         stream_id: int | None = None,
     ) -> None:
         if code is not None:
-            self.code = ResetCode(code)
-        super().__init__(reason if reason is not None else self.code.name)
+            self.code = _as_reset_code(code)
+        label = self.code.name if isinstance(self.code, ResetCode) else f"reset code {self.code}"
+        super().__init__(reason if reason is not None else label)
         self.reason = reason
         self.stream_id = stream_id
 
@@ -132,6 +136,14 @@ _RESET_CODE_EXCEPTIONS: dict[ResetCode, type[StreamReset]] = {
 }
 
 
+def _as_reset_code(code: ResetCode | int) -> ResetCode | int:
+    """A defined code as its enum member, an undefined one as the raw integer."""
+    try:
+        return ResetCode(code)
+    except ValueError:
+        return int(code)
+
+
 def exception_for_reset(
     code: ResetCode | int,
     reason: str | None = None,
@@ -144,8 +156,8 @@ def exception_for_reset(
     `payload` is the structured error object a `reset(APPLICATION_ERROR)` may carry (WSM-ERR-006); it
     is meaningful only for `RemoteError` and ignored for every other code.
     """
-    code = ResetCode(code)
-    cls = _RESET_CODE_EXCEPTIONS.get(code)
+    code = _as_reset_code(code)
+    cls = _RESET_CODE_EXCEPTIONS.get(code) if isinstance(code, ResetCode) else None
     if cls is None:
         return StreamReset(reason, code=code, stream_id=stream_id)
     if cls is RemoteError:

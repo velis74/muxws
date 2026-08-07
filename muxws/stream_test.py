@@ -687,3 +687,100 @@ async def test_result_without_a_timeout_is_the_plain_future(make_pair):
 async def test_stream_repr_names_its_state(pair: Pair):
     stream = pair.dialer.open({"q": 1})
     assert repr(stream) == f"<Stream {stream.id} open>"
+
+
+# --------------------------------------------------------------------------- audit regressions
+
+
+async def test_cancelling_an_await_sends_reset_cancelled(make_pair):
+    """WSM-ERR-014, the half the iteration test never reached.
+
+    The rule names `await stream.result()` explicitly. Only `async for` used to honour it, so a
+    consumer that walked away from an await left the remote producing for nobody.
+    """
+    for shape in ("result", "await"):
+        pair = make_pair()
+        pair.acceptor.on_stream(_echo_handler)
+        pair.start()
+        try:
+            stream = pair.dialer.open({"q": 1})
+            await pair.settle()
+
+            waiter = asyncio.create_task(stream.result() if shape == "result" else _await_shape(stream))
+            await pair.settle()
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            await pair.settle()
+
+            codes = [f.code for f in pair.sent_by("dialer") if f.type == "reset"]
+            assert int(ResetCode.CANCELLED) in codes, f"{shape}: no reset(CANCELLED) went out"
+        finally:
+            await pair.stop()
+
+
+async def _await_shape(stream: Stream) -> Any:
+    return await stream
+
+
+async def test_a_cancelled_await_does_not_destroy_the_memoized_future(make_pair):
+    """WSM-API-011: the shield is what keeps a second await from inheriting the first's cancellation."""
+    pair = make_pair()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await asyncio.sleep(0.02)
+        await stream.reply({"late": True})
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        waiter = asyncio.create_task(stream.result())
+        await pair.settle()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        # The stream is reset by the cancellation, so a second await reports that - not a
+        # CancelledError leaked from the first awaiter.
+        with pytest.raises(StreamReset) as info:
+            await stream
+        assert info.value.code is ResetCode.CANCELLED
+    finally:
+        await pair.stop()
+
+
+@pytest.mark.parametrize("code", [ResetCode.CONNECTION_CLOSED, 5, 42, -1])
+async def test_the_application_cannot_put_an_unsendable_code_on_the_wire(code: Any, pair: Pair):
+    """§8.1: code 9 is synthesised locally and never sent; 5 is retired; the rest do not exist."""
+    stream = pair.dialer.open({"q": 1})
+    with pytest.raises(ProtocolError):
+        await stream.reset(code)
+    await pair.settle()
+    assert [f.code for f in pair.sent_by("dialer") if f.type == "reset"] == []
+
+
+async def test_an_unconsumed_failure_reports_no_never_retrieved_warning(make_pair, capsys):
+    """The Python side of WSM-API-016: a failure nobody reads must not become asyncio noise."""
+    import gc
+
+    pair = make_pair()
+    pair.acceptor.on_stream(_echo_handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        waiter = asyncio.create_task(stream.result())
+        await pair.settle()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await pair.settle()
+    finally:
+        await pair.stop()
+
+    del stream, waiter
+    gc.collect()
+    await asyncio.sleep(0)
+    assert "never retrieved" not in capsys.readouterr().err
