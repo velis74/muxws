@@ -307,3 +307,36 @@ describe('cross-language boundaries', () => {
     });
   });
 });
+
+describe('sequence termination', () => {
+  /**
+   * Regression. Trailers larger than the reservation used to make the closing frame too big at
+   * every slice point, so the loop emitted middle fragments until the payload ran out and then
+   * stopped - leaving a sequence with no terminator. The receiver's assembler never fires, the
+   * payload never reaches the application, and nothing anywhere reports an error.
+   */
+  it('always ends with a fragment carrying more:false - WSM-FRG-020/030', () => {
+    const trailers = { checksum: 'd'.repeat(130) };
+    const frame: Frame = { type: 'data', stream: 1, payload: { body: 'x'.repeat(900) }, end: true, trailers };
+    const parts = splitFrame(frame, 256, codec);
+
+    expect(parts[parts.length - 1].more).toBe(false);
+    expect(parts[parts.length - 1].end).toBe(true);
+    expect(parts[parts.length - 1].trailers).toEqual(trailers);
+    expect(parts.slice(0, -1).every((part) => part.more === true)).toBe(true);
+    expect(reassemble(parts, codec)).toEqual(frame.payload);
+  });
+
+  it('raises when trailers alone cannot fit, rather than splitting forever', () => {
+    const frame: Frame = { type: 'data', stream: 1, payload: { a: 1 }, end: true, trailers: { x: 'y'.repeat(500) } };
+    expect(() => splitFrame(frame, 256, codec)).toThrow(/closing envelope/);
+  });
+
+  it('accepts a closing fragment that carries no payload bytes', () => {
+    const trailers = { checksum: 'd'.repeat(130) };
+    const frame: Frame = { type: 'data', stream: 1, payload: { body: 'x'.repeat(900) }, end: true, trailers };
+    const parts = splitFrame(frame, 256, codec);
+    const rejoined = parts.map((part) => part.fragment as string).join('');
+    expect(codec.decodePayload(rejoined)).toEqual(frame.payload);
+  });
+});

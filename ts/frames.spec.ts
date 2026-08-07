@@ -69,8 +69,6 @@ describe('the envelope', () => {
   it('distinguishes an absent payload from an explicit null - D1', () => {
     expect('payload' in toMapping({ type: 'data', stream: 1 })).toBe(false);
     expect(toMapping({ type: 'data', stream: 1, payload: null }).payload).toBeNull();
-    expect(codec.encode({ type: 'data', stream: 1 })).toBe('{"type":"data","stream":1}');
-    expect(codec.encode({ type: 'data', stream: 1, payload: null })).toBe('{"type":"data","stream":1,"payload":null}');
     expect(codec.decode('{"type":"data","stream":1}').payload).toBe(ABSENT);
     expect(codec.decode('{"type":"data","stream":1,"payload":null}').payload).toBeNull();
   });

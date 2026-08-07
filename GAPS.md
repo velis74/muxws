@@ -122,3 +122,59 @@ seven of the specified ones do not - `ConnectionClosed`, `ConnectionGoingAway`,
 WSM-ERR-004 fixes these names in both languages precisely so cross-language tests can assert on
 error identity, so the rule is inapplicable to that one module and is disabled there by a per-file
 ignore carrying this reason.
+
+## muxws-m1-frames-and-codec.md — WSM-FRG-016, WSM-CDC-004
+
+**What I needed:** both ports to emit the same bytes for the same payload, since fragment boundaries
+are cut over exactly that form.
+
+**What the brief says:** WSM-FRG-016, a MUST: "Both ports MUST produce the **same fragment
+boundaries** for the same payload, cap and codec."
+
+**What I assumed:** that the rule holds for every value the shared corpus may contain, and no
+further. It cannot hold in general, and no amount of codec configuration makes it. Python's
+`json.dumps` and JavaScript's `JSON.stringify` agree on strings, containers, booleans, `null` and
+integers up to 2^53, and disagree on every float and on larger integers:
+
+| value | Python | JavaScript |
+|---|---|---|
+| `1.0` | `1.0` | `1` |
+| `-0.0` | `-0.0` | `0` |
+| `100.0` | `100.0` | `100` |
+| `1e16` | `1e+16` | `10000000000000000` |
+| `1e-7` | `1e-07` | `1e-7` |
+| `1e-6` | `1e-06` | `0.000001` |
+| `12345678901234567890` | exact | `12345678901234567000` |
+
+JavaScript has one number type and one canonical rendering of it, fixed by ECMAScript; the
+divergence is inherited from the language, not chosen by this codec.
+
+**Why this is accepted rather than fixed:** it costs nothing on the wire. Boundaries are chosen by
+the *sender*; a receiver concatenates whatever fragments arrive and never learns where the cuts
+were, so a Python sender and a TypeScript receiver interoperate on a float payload exactly as they
+do on any other. What the rule really buys is a corpus that replays identically in both languages,
+and that is preserved by keeping floats out of `conformance/frames/v1-fragment-boundaries.json` and
+out of the M6 sequence fixtures. Both ports carry a test pinning the divergence
+(`test_number_forms_that_the_two_ports_spell_differently` and its TypeScript twin) so it stays known
+and cannot silently widen, and both codec modules now scope their byte-identity claim to the types
+where it is true - they previously asserted it unconditionally, which was simply wrong.
+
+**If strict conformance is wanted instead:** the Python codec would have to emit ECMAScript-shaped
+numbers - strip `.0` from integral floats, normalise `-0.0`, and switch to exponent form only
+outside JavaScript's 1e21 / 1e-7 thresholds with unpadded exponents. That means a custom
+`JSONEncoder` with the C accelerator disabled, which is both slower and more fragile than the
+divergence it removes. It is a decision for the author, not for the implementer, and it is recorded
+here rather than taken.
+
+## muxws-m1-frames-and-codec.md — WSM-CDC-005
+
+**What I needed:** to assert that both ports emit compact, un-escaped JSON.
+
+**What the brief says:** "Exactly one separate test MAY pin a canonical key order ... no other test
+may depend on key order or whitespace." `test_canonical_key_order` is that one test.
+
+**What I assumed:** that one whitespace dependency has to stay. `test_encoding_is_compact_and_not_ascii_escaped`
+asserts no spaces and no `\u` escaping, and it is load-bearing for WSM-FRG-016: if either port
+started emitting spaces, fragment boundaries would diverge everywhere rather than only on floats.
+The redundant byte-exact comparisons that had crept into the D1 test in both ports were removed -
+the `to_mapping` and `decode` assertions beside them already covered what that test is for.

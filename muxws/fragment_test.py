@@ -278,3 +278,42 @@ def test_both_ports_agree_on_fragment_boundaries(case: dict[str, Any], codec: Js
     parts = split_frame(frame, case["cap"], codec)
     assert [part.fragment for part in parts] == case["fragments"]
     assert _reassemble(parts, codec) == case["payload"]
+
+
+def test_a_fragment_sequence_always_terminates(codec: JsonCodec):
+    """WSM-FRG-020/030: the last fragment must carry `more: false`, even if it carries no bytes.
+
+    Regression. Trailers larger than the reservation used to make the closing frame too big at every
+    slice point, so the loop emitted middle fragments until the payload ran out and then stopped -
+    leaving a sequence with no terminator. The receiver's assembler never fires, the payload never
+    reaches the application, and nothing anywhere reports an error.
+    """
+    frame = Frame("data", stream=1, payload={"body": "x" * 900}, end=True, trailers={"checksum": "d" * 130})
+    parts = split_frame(frame, 256, codec)
+
+    assert parts[-1].more is False
+    assert parts[-1].end is True
+    assert parts[-1].trailers == {"checksum": "d" * 130}
+    assert all(part.more for part in parts[:-1])
+
+    assembler = Assembler()
+    result: Any = ABSENT
+    for part in parts:
+        result = assembler.feed(part, codec)
+    assert result == frame.payload
+    assert not assembler.in_progress
+
+
+def test_trailers_too_large_for_the_cap_raise_rather_than_split(codec: JsonCodec):
+    """`trailers` ride the closing fragment whole, exactly as `headers` ride the first one."""
+    frame = Frame("data", stream=1, payload={"a": 1}, end=True, trailers={"x": "y" * 500})
+    with pytest.raises(ProtocolError, match="closing envelope"):
+        split_frame(frame, 256, codec)
+
+
+def test_the_closing_fragment_may_be_empty(codec: JsonCodec):
+    """A terminator carrying no payload bytes is still a terminator, and reassembles cleanly."""
+    frame = Frame("data", stream=1, payload={"body": "x" * 900}, end=True, trailers={"checksum": "d" * 130})
+    parts = split_frame(frame, 256, codec)
+    rejoined = "".join(str(part.fragment) for part in parts)
+    assert codec.decode_payload(rejoined) == frame.payload

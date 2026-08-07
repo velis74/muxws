@@ -119,9 +119,13 @@ function assertJsonEncodable(value: unknown, seen: Set<object> = new Set()): voi
  * `Codec` implementation over `JSON`.
  *
  * `JSON.stringify` emits no spaces and does not escape non-ASCII, which is exactly what Python's
- * `json.dumps(..., separators=(",", ":"), ensure_ascii=False)` emits. WSM-FRG-016 requires both
- * ports to cut fragments at identical boundaries, and boundaries are computed over the encoded form
- * - so byte-level agreement here is a protocol requirement, not a formatting preference.
+ * `json.dumps(..., separators=(",", ":"), ensure_ascii=False)` emits - for strings, containers,
+ * booleans, null and integers up to 2**53. The two do **not** agree on floats or on larger
+ * integers: JavaScript writes `1`, `0`, `10000000000000000`, `1e-7` where Python writes `1.0`,
+ * `-0.0`, `1e+16`, `1e-07`. Fragment boundaries are cut over this encoded form, so a payload
+ * carrying a float is cut differently by the two ports - see GAPS.md. It costs nothing on the wire
+ * (the sender chooses the cuts and the receiver only concatenates), but it does bound what the
+ * shared boundary corpus may contain.
  */
 export class JsonCodec implements Codec {
   readonly name = 'json';

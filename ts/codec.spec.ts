@@ -107,7 +107,7 @@ describe('JsonCodec', () => {
     expect(() => codec.decodePayload('{truncated')).toThrow(/reassembled/);
   });
 
-  it('emits compact, un-escaped JSON so both ports agree byte for byte - WSM-FRG-016', () => {
+  it('emits compact, un-escaped JSON, which is what lets the ports agree on strings - WSM-FRG-016', () => {
     const encoded = codec.encode({ type: 'data', stream: 1, payload: { a: 1, b: 'č' } });
     expect(encoded).not.toContain(' ');
     expect(encoded).not.toContain('\\u');
@@ -128,5 +128,46 @@ describe('JsonCodec', () => {
 
   it('encodes undefined as null rather than emitting nothing', () => {
     expect(codec.encodePayload(undefined)).toBe('null');
+  });
+});
+
+describe('number forms', () => {
+  /**
+   * The other half of the pinned WSM-FRG-016 divergence. Python spells these differently, so a
+   * payload carrying one is fragmented at different boundaries by the two ports. Invisible on the
+   * wire - the sender chooses the cuts and the receiver only concatenates - but it bounds what the
+   * shared boundary corpus may contain. See GAPS.md.
+   */
+  it('spells some numbers differently from Python, deliberately and knowably', () => {
+    const cases: [number, string, string][] = [
+      [1.0, '1', '1.0'],
+      [-0.0, '0', '-0.0'],
+      [100.0, '100', '100.0'],
+      [1e16, '10000000000000000', '1e+16'],
+      [1e-7, '1e-7', '1e-07'],
+      [1e-6, '0.000001', '1e-06'],
+    ];
+    cases.forEach(([value, javascriptForm, pythonForm]) => {
+      expect(codec.encodePayload(value)).toBe(javascriptForm);
+      expect(javascriptForm).not.toBe(pythonForm);
+    });
+  });
+
+  it('agrees with Python on integers, booleans, null and strings', () => {
+    const cases: [unknown, string][] = [
+      [0, '0'],
+      [1, '1'],
+      [-1, '-1'],
+      [42, '42'],
+      [9007199254740992, '9007199254740992'],
+      [0.1, '0.1'],
+      [1.5, '1.5'],
+      [1e21, '1e+21'],
+      [true, 'true'],
+      [false, 'false'],
+      [null, 'null'],
+      ['text', '"text"'],
+    ];
+    cases.forEach(([value, form]) => expect(codec.encodePayload(value)).toBe(form));
   });
 });

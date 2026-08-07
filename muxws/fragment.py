@@ -93,6 +93,19 @@ def _floor_error(cap: int) -> ProtocolError:
     )
 
 
+def _closing_floor_error(cap: int) -> ProtocolError:
+    """The closing fragment does not fit even carrying no payload at all.
+
+    `end` and `trailers` ride the final fragment and cannot themselves be fragmented (WSM-FRG-020),
+    exactly as `headers` cannot (WSM-FRG-021). If they do not fit, no valid split exists and saying
+    so is the only honest answer - the alternative is a sequence that never terminates.
+    """
+    return ProtocolError(
+        f"a frame cap of {cap} bytes cannot hold this frame's closing envelope; `trailers` ride the "
+        f"final fragment whole and are never fragmented (WSM-FRG-020/034)"
+    )
+
+
 def _largest_fitting_count(
     source: Frame,
     encoded: str | bytes,
@@ -158,13 +171,18 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
     position = 0
     total = len(encoded)
 
-    while position < total:
+    while True:
         # Everything left, as the closing fragment? `end` and `trailers` ride only this one, so it is
-        # a different size from a middle fragment and has to be measured as itself.
+        # a different size from a middle fragment and has to be measured as itself. This is checked
+        # first on every pass, including the one where the payload is already spent: the sequence
+        # MUST end with a fragment carrying `more: false`, even if that fragment carries no bytes.
         tail = _fragment_frame(frame, encoded[position:], first=not parts, last=True)
         if encoded_length(codec.encode(tail)) <= cap:
             parts.append(tail)
             break
+
+        if position >= total:
+            raise _closing_floor_error(cap)
 
         # Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013)...
         _, reserved_end = _take(encoded, position, budget)

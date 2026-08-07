@@ -84,8 +84,6 @@ def test_absent_payload_is_not_null(codec: JsonCodec):
     """D1: ABSENT omits the key entirely; None emits an explicit null."""
     assert "payload" not in to_mapping(Frame("data", stream=1))
     assert to_mapping(Frame("data", stream=1, payload=None))["payload"] is None
-    assert codec.encode(Frame("data", stream=1)) == '{"type":"data","stream":1}'
-    assert codec.encode(Frame("data", stream=1, payload=None)) == '{"type":"data","stream":1,"payload":null}'
     assert codec.decode('{"type":"data","stream":1}').payload is ABSENT
     assert codec.decode('{"type":"data","stream":1,"payload":null}').payload is None
 

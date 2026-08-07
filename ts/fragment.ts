@@ -97,6 +97,20 @@ function fragmentFrame(source: Frame, chunk: string | ArrayBuffer, options: { fi
   };
 }
 
+/**
+ * The closing fragment does not fit even carrying no payload at all.
+ *
+ * `end` and `trailers` ride the final fragment and cannot themselves be fragmented (WSM-FRG-020),
+ * exactly as `headers` cannot (WSM-FRG-021). If they do not fit, no valid split exists and saying so
+ * is the only honest answer - the alternative is a sequence that never terminates.
+ */
+function closingFloorError(cap: number): ProtocolError {
+  return new ProtocolError(
+    `a frame cap of ${cap} bytes cannot hold this frame's closing envelope; \`trailers\` ride the ` +
+      'final fragment whole and are never fragmented (WSM-FRG-020/034)',
+  );
+}
+
 function floorError(cap: number): ProtocolError {
   return new ProtocolError(
     `a frame cap of ${cap} bytes cannot hold this frame's envelope plus one indivisible unit of ` +
@@ -166,15 +180,19 @@ export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: 
   const parts: Frame[] = [];
   let position = 0;
 
-  while (position < total) {
+  for (;;) {
     // Everything left, as the closing fragment? `end` and `trailers` ride only this one, so it is a
-    // different size from a middle fragment and has to be measured as itself.
+    // different size from a middle fragment and has to be measured as itself. This is checked first
+    // on every pass, including the one where the payload is already spent: the sequence MUST end
+    // with a fragment carrying `more: false`, even if that fragment carries no bytes.
     const first = parts.length === 0;
     const tail = fragmentFrame(frame, sliceUnits(units, position, total - position), { first, last: true });
     if (encodedLength(codec.encode(tail)) <= cap) {
       parts.push(tail);
       break;
     }
+
+    if (position >= total) throw closingFloorError(cap);
 
     // Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013)...
     let count = unitsWithinBudget(units, position, budget);

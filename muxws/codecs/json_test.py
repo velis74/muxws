@@ -82,3 +82,37 @@ def test_unencodable_non_bytes_value_is_refused_too(codec: JsonCodec):
     """The default hook refuses everything it cannot represent, not just bytes."""
     with pytest.raises(TypeError, match="cannot encode set"):
         codec.encode_payload({"tags": {1, 2}})
+
+
+@pytest.mark.parametrize(
+    ("value", "python_form", "javascript_form"),
+    [
+        (1.0, "1.0", "1"),
+        (-0.0, "-0.0", "0"),
+        (100.0, "100.0", "100"),
+        (1e16, "1e+16", "10000000000000000"),
+        (1e-7, "1e-07", "1e-7"),
+        (1e-6, "1e-06", "0.000001"),
+        (12345678901234567890, "12345678901234567890", "12345678901234567000"),
+    ],
+)
+def test_number_forms_that_the_two_ports_spell_differently(
+    value: float | int, python_form: str, javascript_form: str, codec: JsonCodec
+):
+    """Pins the known WSM-FRG-016 divergence so it stays known, and cannot silently widen.
+
+    Fragment boundaries are cut over the encoded payload, so any value the two ports spell
+    differently is cut differently by them. That is invisible on the wire - the sender chooses the
+    cuts and the receiver only concatenates - but it bounds what the shared boundary corpus may
+    contain, and a future reader deserves the list rather than a surprise. See GAPS.md.
+    """
+    assert codec.encode_payload(value) == python_form
+    assert python_form != javascript_form
+
+
+@pytest.mark.parametrize("value", [0, 1, -1, 42, 9007199254740992, 0.1, 1.5, 1e21, True, False, None, "text"])
+def test_number_and_scalar_forms_the_two_ports_agree_on(value: object, codec: JsonCodec):
+    """The complement of the list above: everything here is safe in the shared boundary corpus."""
+    encoded = codec.encode_payload(value)
+    assert encoded == encoded.strip()
+    assert codec.decode_payload(encoded) == value

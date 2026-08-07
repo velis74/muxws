@@ -18,9 +18,13 @@ from muxws.errors import ProtocolError
 from muxws.frames import Frame, from_mapping, to_mapping
 
 #: Compact separators and no ASCII escaping, so that `json.dumps` here and `JSON.stringify` in the
-#: TypeScript port emit the *same bytes* for the same value. WSM-FRG-016 requires both ports to cut
-#: fragments at identical boundaries, and boundaries are computed over the encoded form - which makes
-#: byte-level agreement of this call a protocol requirement rather than a formatting preference.
+#: TypeScript port emit the same bytes for the same value - for strings, containers, booleans, null
+#: and integers up to 2**53. They do **not** agree on floats or on larger integers: Python writes
+#: `1.0`, `-0.0`, `1e+16`, `1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`,
+#: and JavaScript rounds an integer beyond 2**53 to the nearest double. Fragment boundaries are cut
+#: over this encoded form, so a payload carrying a float is cut differently by the two ports - see
+#: GAPS.md. It costs nothing on the wire (the sender chooses the cuts and the receiver only
+#: concatenates), but it does bound what the shared boundary corpus may contain.
 _DUMP_KWARGS: dict[str, Any] = {"separators": (",", ":"), "ensure_ascii": False, "allow_nan": False}
 
 
