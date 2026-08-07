@@ -41,9 +41,7 @@ to treat dead links as fatal.
 `/package-lock.json`, and its CI description (§5) runs `npm ci` - which fails outright when no
 lockfile is present, which on a fresh clone is always.
 
-**What I assumed:** the `.gitignore` entry is the deliberate half. It carries a leading slash, which
-is a considered choice rather than a stray line, and not shipping a lockfile is the normal posture
-for a published library, whose consumers resolve their own tree. CI therefore runs `npm install`.
-The done-when's "`npm ci` succeeds" is still checked, locally, where a lockfile does exist - it
-passed. If the intent was the reverse, the fix is to drop line 8 from `.gitignore`, commit
-`package-lock.json`, and restore `npm ci` here.
+**What I assumed:** that the `npm ci` half is the deliberate one, so `package-lock.json` is
+committed and line 8 is gone from `.gitignore`. The author's other published packages commit their
+lockfile, which settles what the house style is, and `npm ci` is the stronger choice anyway: CI then
+builds the exact tree that was tested locally rather than whatever resolves on the day.
