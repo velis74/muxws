@@ -314,8 +314,7 @@ and no others:
 - `@typescript-eslint/no-unused-vars` is an error; `no-explicit-any` is off, so the handler signature
   `(payload: any, stream: Stream)` is fine as specified.
 - Python `B008` fires on a FastAPI `Depends()` in a default argument - the sample endpoint in the docs
-  and in `starlette_test.py` needs `# noqa: B008`, exactly as `fastapi_viewsets/decorators/
-  route_viewset.py` does.
+  and in `starlette_test.py` needs `# noqa: B008`.
 - Python `S101` still bans `assert` outside `*_test.py`; the interop script under `interop/` must
   therefore raise explicitly rather than assert.
 - `muxws/transports/websockets_.py` keeps its trailing underscore: a module named `websockets.py`

@@ -99,7 +99,7 @@ authors = [
     { name = "Jure Erznožnik", email = "jure.erznoznik@gmail.com" },
 ]
 requires-python = ">=3.10"
-keywords = ["websocket", "multiplexing", "streams", "dynamicforms", "asyncio"]
+keywords = ["websocket", "multiplexing", "streams", "asyncio"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -267,7 +267,7 @@ Note the blank line between `import json` and the `from ...` block: ruff isort r
     "docs:build": "npm run docs:build -w docs",
     "docs:preview": "npm run docs:preview -w docs"
   },
-  "keywords": ["websocket", "multiplexing", "streams", "dynamicforms", "velis"],
+  "keywords": ["websocket", "multiplexing", "streams"],
   "license": "MIT",
   "repository": { "type": "git", "url": "git@github.com:velis74/muxws.git" },
   "issues": "https://github.com/velis74/muxws/issues",

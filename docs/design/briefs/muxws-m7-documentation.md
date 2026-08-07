@@ -10,7 +10,7 @@ outline: deep
 ## 1. Goal
 
 At the end of M7 the repository ships a VitePress documentation site in a `docs/` workspace, laid out
-exactly like `@dynamicforms/fastapi-viewsets` - a home page, a `guide/` narrative and an `api/`
+- a home page, a `guide/` narrative and an `api/`
 reference, with a configured sidebar. A developer who has never seen muxws can read the rationale,
 copy the quick start into two files, run them, and watch a stream open; and a developer who already
 uses muxws can look up **any** public symbol in either language and find its signature, every
@@ -204,7 +204,7 @@ Documentation gets tests because the alternative is documentation that rots.
   `'/guide/'` and `'/api/'` with nested `items`, `socialLinks` pointing at the muxws GitHub
   repository, and a footer reading "Released under the MIT License." with
   "Copyright © 2025 Jure Erznožnik". muxws has no Vue components, so the reference repo's
-  `vite-plugin-vuetify` block is **omitted** - do not copy it in.
+  Vue-specific plugin block is **omitted** - muxws has no Vue components.
 - **`docs/index.md` is `layout: home`** with a hero (name, text, tagline, three actions: Get Started
   → `/guide/getting-started`, API Reference → `/api/connect`, GitHub) and six `features` entries.
   Write the features from what muxws does: many streams on one socket, symmetric peers, automatic
@@ -265,7 +265,7 @@ npm run docs:build          # vitepress build, dead links fatal
 - **Changing the library.** If documenting a symbol reveals a bad signature, file it; do not change
   the frozen 1.0 surface in a documentation milestone.
 - **`SPEC.md` and `conformance/README.md`** - written in M6 and unchanged here.
-- **Tutorials for backchannel or any consumer of muxws.** They document themselves; this site
+- **Tutorials for any consumer of muxws.** They document themselves; this site
   documents the transport.
 - **A hosted deployment, a custom theme, versioned docs, i18n, or search beyond VitePress's
   default.**

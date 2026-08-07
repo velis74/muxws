@@ -1,20 +1,18 @@
 # Implementing from these briefs
 
-This directory contains milestone briefs for **two new libraries** — `muxws` (a WebSocket transport
-with HTTP/3-like semantics) and `backchannel` (progress reporting and dialogs for long-running
-operations). Each library is its own new repository, shipping a Python package and a TypeScript
-package from one repo. Neither is implemented inside *this* repository; this is only where they were
-designed.
+This directory contains the milestone briefs for **muxws**, a WebSocket transport with HTTP/3-like
+semantics. It ships a Python package and a TypeScript package from this one repository, and this is
+where it is implemented.
 
 `README.md` lists every brief in dependency order and says what each one delivers. Start there.
 
-## The four documents, and which one to open
+## The three documents, and which one to open
 
 | Document | Answers | When you open it |
 |---|---|---|
-| `<library>-m<N>-*.md` (a brief) | What do I build now, and how do I know I'm done? | Always. This is your work order. |
-| `../<library>-spec.md` | What is true of the finished system? | When two briefs disagree, or a rule's exact wording matters. It is the adjudicator. |
-| `../<library>-*.md` (the design doc) | *Why* is this rule what it is? | Only when you are tempted to change a rule. It exists to change your mind, not to be implemented from. |
+| `briefs/muxws-m<N>-*.md` (a brief) | What do I build now, and how do I know I'm done? | Always. This is your work order. |
+| `muxws-spec.md` | What is true of the finished system? | When two briefs disagree, or a rule's exact wording matters. It is the adjudicator. |
+| `muxws-websocket-transport.md` (the design doc) | *Why* is this rule what it is? | Only when you are tempted to change a rule. It exists to change your mind, not to be implemented from. |
 | `README.md` | Which brief is next? | Between milestones. |
 
 The briefs deliberately duplicate the spec. That is not an oversight — a brief reproduces the
@@ -45,9 +43,9 @@ entry.
 criteria. If you believe earlier code is wrong, say so rather than rewriting it — a change there may
 invalidate tests a later brief depends on.
 
-**Do not add dependencies** beyond those the brief names. Both libraries have a deliberate policy of
-a small required core with optional extras, and `backchannel`'s core in particular must install and
-pass its full test suite with none of its optional dependencies present.
+**Do not add dependencies** beyond those the brief names. muxws has a deliberate policy of a core
+with *zero* required runtime dependencies and everything else behind an optional extra, and it must
+install and pass its full test suite with none of those extras present.
 
 ## How to work a milestone
 

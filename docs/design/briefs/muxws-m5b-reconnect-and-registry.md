@@ -9,9 +9,9 @@ outline: deep
 
 > M5 in the specification's §17 table is one milestone. It is split here into **M5a**
 > (`muxws-m5a-fragmentation-and-writer.md`: the send/receive path) and **M5b** (this brief). "muxws
-> M5" in any other document - including backchannel's M5 prerequisite - means both halves.
-> **This is the last brief of the first production-usable release: at the end of M5b, backchannel can
-> be built against muxws.**
+> M5" in any other document means both halves.
+> **This is the last brief of the first production-usable release: at the end of M5b, muxws can be
+> built against.**
 
 ## 1. Goal
 
@@ -430,7 +430,7 @@ npm test
       still has zero required runtime dependencies (WSM-PKG-002).
 - [ ] **The release gate:** a consumer can `pip install muxws` /
       `npm i muxws`, dial with a `hello`, register the acceptor-side peer under a tag,
-      and find it again with `peers_for`. This is what backchannel M5 builds against.
+      and find it again with `peers_for`. This is the release a consumer builds against.
 
 ## 9. Out of scope
 
