@@ -1,0 +1,29 @@
+{
+  "name": "open-id-not-monotonic",
+  "description": "The dialer opens 5 and then 3. Opens must be monotonic per peer and ids are never reused, so 3 cannot follow 5: connection-level (WSM-SID-005).",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 5,
+      "payload": {
+        "action": "list"
+      },
+      "end": true
+    },
+    {
+      "type": "open",
+      "stream": 3,
+      "payload": {
+        "action": "list"
+      },
+      "end": true
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "goaway",
+      "code": 3
+    }
+  ],
+  "connection_survives": false
+}

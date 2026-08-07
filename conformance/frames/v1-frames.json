@@ -1,0 +1,114 @@
+[
+  {
+    "name": "unary-open-with-end",
+    "frame": { "type": "open", "stream": 1, "payload": { "action": "list" }, "end": true },
+    "json_wire": "{\"type\":\"open\",\"stream\":1,\"end\":true,\"payload\":{\"action\":\"list\"}}"
+  },
+  {
+    "name": "open-with-headers",
+    "frame": {
+      "type": "open",
+      "stream": 3,
+      "payload": { "action": "export" },
+      "headers": { "trace": "abc123", "attempt": 2 }
+    },
+    "json_wire": "{\"type\":\"open\",\"stream\":3,\"headers\":{\"trace\":\"abc123\",\"attempt\":2},\"payload\":{\"action\":\"export\"}}"
+  },
+  {
+    "name": "open-without-payload",
+    "frame": { "type": "open", "stream": 5 },
+    "json_wire": "{\"type\":\"open\",\"stream\":5}"
+  },
+  {
+    "name": "data-chunk",
+    "frame": { "type": "data", "stream": 7, "payload": { "rows": 128 } },
+    "json_wire": "{\"type\":\"data\",\"stream\":7,\"payload\":{\"rows\":128}}"
+  },
+  {
+    "name": "data-end-with-trailers",
+    "frame": {
+      "type": "data",
+      "stream": 7,
+      "payload": { "rows": 4 },
+      "end": true,
+      "trailers": { "checksum": "deadbeef" }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":7,\"end\":true,\"payload\":{\"rows\":4},\"trailers\":{\"checksum\":\"deadbeef\"}}"
+  },
+  {
+    "name": "data-end-with-no-payload",
+    "frame": { "type": "data", "stream": 7, "end": true },
+    "json_wire": "{\"type\":\"data\",\"stream\":7,\"end\":true}"
+  },
+  {
+    "name": "data-with-explicit-null-payload",
+    "frame": { "type": "data", "stream": 9, "payload": null },
+    "json_wire": "{\"type\":\"data\",\"stream\":9,\"payload\":null}"
+  },
+  {
+    "name": "fragmented-open-first",
+    "frame": { "type": "open", "stream": 11, "fragment": "{\"body\":\"aaaa", "more": true },
+    "json_wire": "{\"type\":\"open\",\"stream\":11,\"fragment\":\"{\\\"body\\\":\\\"aaaa\",\"more\":true}"
+  },
+  {
+    "name": "fragmented-open-last",
+    "frame": { "type": "open", "stream": 11, "fragment": "aaaa\"}", "end": true },
+    "json_wire": "{\"type\":\"open\",\"stream\":11,\"end\":true,\"fragment\":\"aaaa\\\"}\"}"
+  },
+  {
+    "name": "reset-with-structured-error",
+    "frame": {
+      "type": "reset",
+      "stream": 13,
+      "code": 2,
+      "reason": "handler raised",
+      "payload": { "type": "ValueError", "message": "no such report" }
+    },
+    "json_wire": "{\"type\":\"reset\",\"stream\":13,\"code\":2,\"payload\":{\"type\":\"ValueError\",\"message\":\"no such report\"},\"reason\":\"handler raised\"}"
+  },
+  {
+    "name": "reset-cancelled",
+    "frame": { "type": "reset", "stream": 15, "code": 1, "reason": "user navigated away" },
+    "json_wire": "{\"type\":\"reset\",\"stream\":15,\"code\":1,\"reason\":\"user navigated away\"}"
+  },
+  {
+    "name": "ping",
+    "frame": { "type": "ping", "nonce": "8f14e45fceea167a" },
+    "json_wire": "{\"type\":\"ping\",\"nonce\":\"8f14e45fceea167a\"}"
+  },
+  {
+    "name": "pong",
+    "frame": { "type": "pong", "nonce": "8f14e45fceea167a" },
+    "json_wire": "{\"type\":\"pong\",\"nonce\":\"8f14e45fceea167a\"}"
+  },
+  {
+    "name": "goaway",
+    "frame": { "type": "goaway", "code": 0, "last_stream": 7, "reason": "shutting down" },
+    "json_wire": "{\"type\":\"goaway\",\"code\":0,\"last_stream\":7,\"reason\":\"shutting down\"}"
+  },
+  {
+    "name": "goaway-protocol-error",
+    "frame": { "type": "goaway", "code": 3, "last_stream": 0 },
+    "json_wire": "{\"type\":\"goaway\",\"code\":3,\"last_stream\":0}"
+  },
+  {
+    "name": "payload-with-non-bmp-characters",
+    "frame": { "type": "data", "stream": 17, "payload": { "label": "napis 🛰️ z emojiji 𝕄𝕦𝕩" } },
+    "json_wire": "{\"type\":\"data\",\"stream\":17,\"payload\":{\"label\":\"napis 🛰️ z emojiji 𝕄𝕦𝕩\"}}"
+  },
+  {
+    "name": "payload-with-multibyte-and-escapes",
+    "frame": { "type": "data", "stream": 19, "payload": { "text": "č š ž — \"quoted\"\n\ttabbed" } },
+    "json_wire": "{\"type\":\"data\",\"stream\":19,\"payload\":{\"text\":\"č š ž — \\\"quoted\\\"\\n\\ttabbed\"}}"
+  },
+  {
+    "name": "payload-that-is-a-bare-list",
+    "frame": { "type": "data", "stream": 21, "payload": [1, 2, 3] },
+    "json_wire": "{\"type\":\"data\",\"stream\":21,\"payload\":[1,2,3]}"
+  },
+  {
+    "name": "payload-that-is-a-bare-string",
+    "frame": { "type": "data", "stream": 23, "payload": "plain" },
+    "json_wire": "{\"type\":\"data\",\"stream\":23,\"payload\":\"plain\"}"
+  }
+]

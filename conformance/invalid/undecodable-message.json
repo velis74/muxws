@@ -1,0 +1,16 @@
+{
+  "name": "undecodable-message",
+  "description": "A message the configured codec refuses to decode. Nothing can be said about which stream it concerned, so the connection cannot continue (WSM-FRM-005).",
+  "inbound": [
+    {
+      "raw": "{this is not json"
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "goaway",
+      "code": 3
+    }
+  ],
+  "connection_survives": false
+}

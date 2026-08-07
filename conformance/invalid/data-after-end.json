@@ -1,0 +1,36 @@
+{
+  "name": "data-after-end",
+  "description": "The dialer sends data on a stream it already ended. The peers still agree about every other stream, so only this one dies: stream-level (WSM-STM-020/021).",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 1,
+      "payload": {
+        "action": "upload"
+      }
+    },
+    {
+      "type": "data",
+      "stream": 1,
+      "payload": {
+        "chunk": 1
+      },
+      "end": true
+    },
+    {
+      "type": "data",
+      "stream": 1,
+      "payload": {
+        "chunk": 2
+      }
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "reset",
+      "stream": 1,
+      "code": 3
+    }
+  ],
+  "connection_survives": true
+}

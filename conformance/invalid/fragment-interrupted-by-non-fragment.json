@@ -1,0 +1,27 @@
+{
+  "name": "fragment-interrupted-by-non-fragment",
+  "description": "A non-fragment frame lands on a stream with a reassembly in progress. The partial payload can never be completed, but other streams are unaffected: stream-level (WSM-FRG-033).",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 1,
+      "fragment": "{\"body\":\"aaa",
+      "more": true
+    },
+    {
+      "type": "data",
+      "stream": 1,
+      "payload": {
+        "surprise": true
+      }
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "reset",
+      "stream": 1,
+      "code": 3
+    }
+  ],
+  "connection_survives": true
+}

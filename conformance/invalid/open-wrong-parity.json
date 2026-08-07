@@ -1,0 +1,21 @@
+{
+  "name": "open-wrong-parity",
+  "description": "The dialer opens an even id. Ids are the acceptor's to allocate, so the two peers no longer agree about the id space: connection-level (WSM-SID-005).",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 2,
+      "payload": {
+        "action": "list"
+      },
+      "end": true
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "goaway",
+      "code": 3
+    }
+  ],
+  "connection_survives": false
+}

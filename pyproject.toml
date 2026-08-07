@@ -100,6 +100,10 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.per-file-ignores]
 "*_test.py" = ["S101"]
+# N818 wants every exception name to end in "Error". WSM-ERR-004 fixes these names exactly, in
+# both languages, so that cross-language tests can assert on error identity - the rule is simply
+# inapplicable to this module. See GAPS.md.
+"muxws/errors.py" = ["N818"]
 
 [tool.ruff.format]
 quote-style = "double"

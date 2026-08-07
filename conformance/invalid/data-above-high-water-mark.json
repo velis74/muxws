@@ -1,0 +1,28 @@
+{
+  "name": "data-above-high-water-mark",
+  "description": "Data for an id the dialer never opened. This is a genuine disagreement about the id space rather than a late frame, and must not be swallowed: connection-level (WSM-STM-003, WSM-INV-006).",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 1,
+      "payload": {
+        "action": "list"
+      },
+      "end": true
+    },
+    {
+      "type": "data",
+      "stream": 9,
+      "payload": {
+        "chunk": 1
+      }
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "goaway",
+      "code": 3
+    }
+  ],
+  "connection_survives": false
+}

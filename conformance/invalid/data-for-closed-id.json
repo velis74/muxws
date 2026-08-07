@@ -1,0 +1,28 @@
+{
+  "name": "data-for-closed-id",
+  "description": "A late frame for a stream that closed, below the high-water mark. Expected during a normal race and silently ignored - no reset, no connection error, at most a counter (WSM-STM-002).",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 1,
+      "payload": {
+        "action": "list"
+      },
+      "end": true
+    },
+    {
+      "type": "reset",
+      "stream": 1,
+      "code": 1
+    },
+    {
+      "type": "data",
+      "stream": 1,
+      "payload": {
+        "chunk": 1
+      }
+    }
+  ],
+  "expect_out": [],
+  "connection_survives": true
+}
