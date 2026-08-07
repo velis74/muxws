@@ -131,10 +131,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dynamicforms/muxws"
-Repository = "https://github.com/dynamicforms/muxws"
-Issues = "https://github.com/dynamicforms/muxws/issues"
-Documentation = "https://docs.velis.si/dynamicforms/muxws/"
+Homepage = "https://github.com/velis74/muxws"
+Repository = "https://github.com/velis74/muxws"
+Issues = "https://github.com/velis74/muxws/issues"
+Documentation = "https://docs.velis.si/muxws/"
 
 [tool.hatch.version]
 path = "muxws/__init__.py"
@@ -269,8 +269,8 @@ Note the blank line between `import json` and the `from ...` block: ruff isort r
   },
   "keywords": ["websocket", "multiplexing", "streams", "dynamicforms", "velis"],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git@github.com:dynamicforms/muxws.git" },
-  "issues": "https://github.com/dynamicforms/muxws/issues",
+  "repository": { "type": "git", "url": "git@github.com:velis74/muxws.git" },
+  "issues": "https://github.com/velis74/muxws/issues",
   "peerDependencies": { "ws": "^8", "@msgpack/msgpack": "^3" },
   "peerDependenciesMeta": {
     "ws": { "optional": true },
@@ -465,7 +465,7 @@ export default defineConfig({
       '/guide/': [{ text: 'Guide', items: [{ text: 'Getting Started', link: '/guide/getting-started' }] }],
       '/api/': [{ text: 'API Reference', items: [{ text: 'Overview', link: '/api/' }] }],
     },
-    socialLinks: [{ icon: 'github', link: 'https://github.com/dynamicforms/muxws' }],
+    socialLinks: [{ icon: 'github', link: 'https://github.com/velis74/muxws' }],
     footer: { message: 'Released under the MIT License.', copyright: 'Copyright © 2025 Jure Erznožnik' },
   },
   ignoreDeadLinks: [/^http:\/\/localhost/],

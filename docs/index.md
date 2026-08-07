@@ -14,7 +14,7 @@ hero:
       link: /api/
     - theme: alt
       text: GitHub
-      link: https://github.com/dynamicforms/muxws
+      link: https://github.com/velis74/muxws
 
 features:
   - title: Many streams on one socket

@@ -25,8 +25,8 @@
   },
   "keywords": ["websocket", "multiplexing", "streams"],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git@github.com:dynamicforms/muxws.git" },
-  "issues": "https://github.com/dynamicforms/muxws/issues",
+  "repository": { "type": "git", "url": "git@github.com:velis74/muxws.git" },
+  "issues": "https://github.com/velis74/muxws/issues",
   "peerDependencies": { "ws": "^8", "@msgpack/msgpack": "^3" },
   "peerDependenciesMeta": {
     "ws": { "optional": true },

@@ -17,7 +17,7 @@ export default defineConfig({
       '/guide/': [{ text: 'Guide', items: [{ text: 'Getting Started', link: '/guide/getting-started' }] }],
       '/api/': [{ text: 'API Reference', items: [{ text: 'Overview', link: '/api/' }] }],
     },
-    socialLinks: [{ icon: 'github', link: 'https://github.com/dynamicforms/muxws' }],
+    socialLinks: [{ icon: 'github', link: 'https://github.com/velis74/muxws' }],
     footer: { message: 'Released under the MIT License.', copyright: 'Copyright © 2025 Jure Erznožnik' },
   },
   ignoreDeadLinks: [/^http:\/\/localhost/],
