@@ -205,3 +205,57 @@ fixture declares. The over-cap case cannot be made honest with a double: the fix
 own §9. Faking it with a codec double would assert that the double works, not that the peer does. It
 is marked `xfail(strict=True)` instead, so the moment M5a implements the cap the test fails as an
 unexpected pass and the marker has to be removed - a skip would have rotted silently.
+
+## muxws-m3-transports.md — WSM-API-002, WSM-API-015
+
+**What I needed:** a helper that builds a stream and hands it back.
+
+**What the brief says:** `Stream` is awaitable (WSM-API-002) and reaches that by implementing
+`PromiseLike` rather than subclassing `Promise` (WSM-API-015). Neither rule mentions the
+consequence.
+
+**What I assumed:** nothing - I found it out. `await` unwraps thenables *recursively*, so a
+`Promise<Stream>` never resolves to the stream: awaiting it awaits the stream and yields its first
+payload, or throws the reset that closed it. **A `Stream` can never be the resolution value of a
+promise anywhere in TypeScript.** Any `async function openIt(): Promise<Stream>` is silently wrong,
+and it fails in a way that reads as a state-machine bug rather than a language rule - in the test
+suite it surfaced as nine state-table cells failing with `StreamReset: NO_ERROR` from a helper. The
+fix is to box it: `Promise<{ stream: Stream }>`. Python has no such trap, because a
+`__await__`-bearing object is only awaited when it is awaited. M7's `call-shapes.md` must say this
+out loud, because every user will write that signature eventually.
+
+## muxws-m3-transports.md — WSM-ERR-014
+
+**What I needed:** the TypeScript half of "a consumer that walks away resets the stream".
+
+**What the brief says:** WSM-ERR-014 requires local cancellation propagating out of
+`await stream.result()` or an `async for` to send `reset(CANCELLED)` and re-raise. It is written in
+Python's terms, where `CancelledError` is delivered *into* the awaiting frame.
+
+**What I assumed:** that it carries across only where JavaScript can observe the walking away, and
+that saying so is better than pretending. Three cases:
+- **`for await` that breaks, returns or throws** - carries across. The async generator is finalised
+  and its `finally` sends the reset. This is the case the rule names explicitly.
+- **`result({ signal })`** - carries across, via an `AbortSignal` the caller supplies. Aborting
+  resets the stream with CANCELLED and throws, which is the analogue of re-raising.
+- **A bare `await stream` the caller drops** - does **not** carry across, and cannot. Nothing in
+  JavaScript observes an abandoned promise; there is no `CancelledError` to deliver and no hook to
+  hang one on. A consumer that needs the reset passes a signal.
+
+The remote is therefore told in two of the three shapes rather than three. `stream.signal` and
+`stream.closed` are the TypeScript observation points either way (WSM-API-023, WSM-ERR-013).
+
+## muxws-m3-transports.md — WSM-ERR-006, interop
+
+**What I needed:** an interop assertion on the structured error a `reset(APPLICATION_ERROR)` carries.
+
+**What the brief says:** WSM-ERR-006 fixes the default serializer as
+`{"type": type(exc).__name__, "message": str(exc)}`.
+
+**What I assumed:** that `type` is **not portable across languages** and an interop check must not
+assert equality on it. The same failing handler produces `{"type": "ValueError"}` from a Python
+acceptor and `{"type": "Error"}` from a TypeScript one, because the field is by definition the
+remote's own exception class name. `message` is portable; `type` identifies which language answered.
+An application that switches on `type` works within one language and breaks the moment the other end
+is reimplemented - worth a sentence in M7's `errors.md`, since the default serializer invites exactly
+that.

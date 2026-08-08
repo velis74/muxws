@@ -8,6 +8,7 @@ peer (WSM-CDC-023).
 from __future__ import annotations
 
 import logging
+import re
 
 from muxws.errors import CodecMismatch
 
@@ -26,6 +27,17 @@ def offer(codec_name: str, extra: list[str] | None = None) -> list[str]:
     ignores every one of them (WSM-CDC-021).
     """
     return [f"{PREFIX}{codec_name}", *(extra or [])]
+
+
+#: Any generation, so an offer from a future peer can be named as such rather than reported as an
+#: absent muxws entry. WSM-CDC-025 makes rejecting it the acceptor's job; saying *why* is this one's.
+_ANY_GENERATION = re.compile(r"^muxws\.v(\d+)\.")
+
+
+def generation_of(entry: str) -> int | None:
+    """The generation integer in a muxws subprotocol name, or None if it is not one."""
+    match = _ANY_GENERATION.match(entry)
+    return int(match.group(1)) if match else None
 
 
 def find_offer(offered: list[str]) -> str | None:
@@ -64,9 +76,16 @@ def select(offered: list[str], configured: str) -> str | None:
 
 
 def _describe(offered: list[str], entry: str | None) -> str:
-    if entry is None:
-        return f"no {PREFIX}* subprotocol at all (offered {offered!r})"
-    return f"{entry!r}"
+    if entry is not None:
+        return f"{entry!r}"
+    other = next((value for value in offered if generation_of(value) is not None), None)
+    if other is not None:
+        return (
+            f"{other!r}, which is generation {generation_of(other)} and not 1 - a frame type the "
+            f"remote must act on requires a new generation, and a v1 acceptor rejects it here "
+            f"(WSM-CDC-025)"
+        )
+    return f"no {PREFIX}* subprotocol at all (offered {offered!r})"
 
 
 def mismatch_error(configured: str) -> CodecMismatch:

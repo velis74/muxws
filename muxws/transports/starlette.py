@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from muxws.errors import ProtocolError
+from muxws.errors import CodecMismatch, ProtocolError
 from muxws.subprotocol import PREFIX, select
 
 
@@ -75,7 +75,13 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     if selected is None:
         await websocket.send({"type": "websocket.http.response.start", "status": 400, "headers": []})
         await websocket.send({"type": "websocket.http.response.body", "body": b""})
-        raise ProtocolError(f"refused the upgrade: offered {offered!r}, this acceptor speaks {PREFIX}{configured}")
+        # CodecMismatch rather than a bare ProtocolError: this is the acceptor's half of the same
+        # failure the dialer composes for itself (WSM-CDC-024/029), and `serve()` knows to answer it
+        # with silence because the 400 has already gone out.
+        raise CodecMismatch(
+            f"refused the upgrade: offered {offered!r}, this acceptor speaks {PREFIX}{configured}",
+            configured=configured,
+        )
 
     await websocket.accept(subprotocol=selected)
     return StarletteSocket(websocket)

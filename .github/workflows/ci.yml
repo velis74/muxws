@@ -41,3 +41,20 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run docs:build
+
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -e .[dev]
+      - run: npm install
+      # Both role assignments over one scenario (WSM-TST-004's first half). A codec, a call shape or
+      # a fragment boundary that disagrees between the ports fails here rather than in production.
+      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts
+      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python

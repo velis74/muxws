@@ -13,7 +13,7 @@ from typing import Any
 
 from muxws.codecs import Codec, get_codec
 from muxws.conf import settings
-from muxws.errors import ConnectionClosed
+from muxws.errors import CodecMismatch, ConnectionClosed, ProtocolError
 from muxws.fragment import MAX_FRAME_BYTES
 from muxws.peer import ErrorSerializer, Peer, StreamHandler
 from muxws.subprotocol import mismatch_error, offer, PREFIX
@@ -144,25 +144,52 @@ async def accept(
 
 
 async def _adapt(socket: Any, codec_name: str) -> SocketAdapter:
-    if isinstance(socket, SocketAdapter):
-        return socket
+    """Wrap whatever the application handed us, upgrading it first when that is still to be done.
+
+    The framework checks come **before** the `SocketAdapter` one. `SocketAdapter` is a
+    `runtime_checkable` Protocol, and `isinstance` against one of those tests only that the four
+    method *names* exist - which Starlette's `WebSocket` happens to satisfy. Checking it first meant
+    a Starlette socket was taken as an already-adapted one and the upgrade never happened, which
+    surfaces only against a real ASGI server.
+    """
     if _is_starlette_websocket(socket):
         from muxws.transports.starlette import perform_upgrade
 
         return await perform_upgrade(socket, codec_name)
-    from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
 
-    verify_negotiated(getattr(socket, "subprotocol", None), codec_name)
-    return WebsocketsSocket(socket)
+    if _is_websockets_connection(socket):
+        from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
+
+        verify_negotiated(getattr(socket, "subprotocol", None), codec_name)
+        return WebsocketsSocket(socket)
+
+    if isinstance(socket, SocketAdapter):
+        return socket
+
+    raise ProtocolError(
+        f"{type(socket).__name__} is neither a SocketAdapter nor a socket muxws knows how to "
+        f"upgrade; wrap it in an adapter (WSM-API-021)"
+    )
 
 
 def _is_starlette_websocket(socket: Any) -> bool:
     return hasattr(socket, "scope") and hasattr(socket, "client_state")
 
 
+def _is_websockets_connection(socket: Any) -> bool:
+    """A `websockets` connection, which has already handshaken by the time we see it."""
+    return hasattr(socket, "recv") and hasattr(socket, "send") and hasattr(socket, "subprotocol")
+
+
 async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_options: Any) -> None:
     """Accept, register `handler`, and run the read loop until the socket closes."""
-    peer = await accept(socket, **peer_options)
+    try:
+        peer = await accept(socket, **peer_options)
+    except CodecMismatch:
+        # The upgrade was refused and the 400 has already been sent (WSM-CDC-022). There is no peer
+        # and nothing further to do; raising here would turn an ordinary misconfiguration into a
+        # traceback out of the application's endpoint.
+        return
     peer.on_stream(handler)
     try:
         await peer.serve()

@@ -176,3 +176,21 @@ def test_the_generation_prefix_is_the_only_version():
     """WSM-CON-009/WSM-PKG-005: one version on the wire, and it lives in the subprotocol name."""
     assert PREFIX == "muxws.v1."
     assert offer("json")[0].count(".") == 2
+
+
+def test_a_different_generation_is_named_as_such(caplog):
+    """WSM-CDC-025 is its own case: an offer from a future peer is not an absent muxws entry."""
+    with caplog.at_level(logging.ERROR, logger="muxws.codec"):
+        assert select(["muxws.v2.json"], "json") is None
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "generation 2" in logged
+    assert "WSM-CDC-025" in logged
+
+
+def test_generation_of_reads_the_only_version_on_the_wire():
+    from muxws.subprotocol import generation_of
+
+    assert generation_of("muxws.v1.json") == 1
+    assert generation_of("muxws.v2.msgpack") == 2
+    assert generation_of("bearer.abc") is None
+    assert generation_of("muxws.json") is None

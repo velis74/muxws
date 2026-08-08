@@ -6,15 +6,28 @@
   "sideEffects": false,
   "description": "Multiplexed, cancellable, bidirectional streams over one WebSocket",
   "author": "Jure Erznožnik",
-  "files": ["dist/*"],
+  "files": [
+    "dist/*"
+  ],
   "main": "dist/index.cjs",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "require": "./dist/index.cjs", "import": "./dist/index.js" },
-    "./node": { "require": "./dist/node.cjs", "import": "./dist/node.js" },
-    "./msgpack": { "require": "./dist/msgpack.cjs", "import": "./dist/msgpack.js" }
+    ".": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js"
+    },
+    "./node": {
+      "require": "./dist/node.cjs",
+      "import": "./dist/node.js"
+    },
+    "./msgpack": {
+      "require": "./dist/msgpack.cjs",
+      "import": "./dist/msgpack.js"
+    }
   },
-  "workspaces": ["docs"],
+  "workspaces": [
+    "docs"
+  ],
   "scripts": {
     "build": "vite build",
     "test": "vitest run --coverage",
@@ -23,14 +36,28 @@
     "docs:build": "npm run docs:build -w docs",
     "docs:preview": "npm run docs:preview -w docs"
   },
-  "keywords": ["websocket", "multiplexing", "streams"],
+  "keywords": [
+    "websocket",
+    "multiplexing",
+    "streams"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git@github.com:velis74/muxws.git" },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:velis74/muxws.git"
+  },
   "issues": "https://github.com/velis74/muxws/issues",
-  "peerDependencies": { "ws": "^8", "@msgpack/msgpack": "^3" },
+  "peerDependencies": {
+    "@msgpack/msgpack": "^3",
+    "ws": "^8"
+  },
   "peerDependenciesMeta": {
-    "ws": { "optional": true },
-    "@msgpack/msgpack": { "optional": true }
+    "ws": {
+      "optional": true
+    },
+    "@msgpack/msgpack": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24",
@@ -39,6 +66,7 @@
     "eslint-config-velis": "^2.0.12",
     "jsdom": "^26.0.0",
     "rollup-plugin-visualizer": "^5.14.0",
+    "tsx": "^4.23.11",
     "typescript": "^5",
     "vite": "^8",
     "vite-plugin-dts": "^5",
