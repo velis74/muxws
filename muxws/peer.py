@@ -13,6 +13,7 @@ from typing import Any
 from muxws.codecs import Codec
 from muxws.errors import (
     ConnectionClosed,
+    ConnectionGoingAway,
     ConnectionLost,
     exception_for_reset,
     ProtocolError,
@@ -23,6 +24,7 @@ from muxws.errors import (
 )
 from muxws.fragment import encoded_length, MAX_FRAME_BYTES
 from muxws.frames import ABSENT, Frame
+from muxws.lifecycle import GoawayState, MAX_STREAM_ID, new_nonce, PingRegistry
 from muxws.observability import CloseReason
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
@@ -79,10 +81,15 @@ class Peer:
         self._close_handlers: list[Callable[[Any], None]] = []
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
 
+        self._pings = PingRegistry()
+        self._ping_started: dict[str, float] = {}
+        self._goaway = GoawayState()
         self._outbound: asyncio.Queue[Frame | None] = asyncio.Queue()
         self._writer_task: asyncio.Task[None] | None = None
         self._is_open = True
         self._death: ConnectionClosed | None = None
+        #: Held so the garbage collector cannot cancel the orderly shutdown WSM-SID-007 requires.
+        self._exhaustion_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ properties
 
@@ -128,9 +135,15 @@ class Peer:
         error this peer would be committing against itself (WSM-INV-005).
         """
         self._raise_if_unopenable()
+        if self._exhausted():
+            raise ConnectionGoingAway(
+                f"stream ids are exhausted at {MAX_STREAM_ID}; this connection can open no more (WSM-SID-007)"
+            )
         stream_id = self._next_id
         self._next_id += 2
         self._highest_local_open = stream_id
+        if self._exhausted():
+            self._begin_exhaustion_shutdown()
         stream = Stream(self, stream_id, headers=headers, payload=payload, local=True)
         stream.state = StreamState.HALF_CLOSED_LOCAL if end else StreamState.OPEN
         self._streams[stream_id] = stream
@@ -141,6 +154,13 @@ class Peer:
         """WSM-API-004: exactly two synchronous raises, and never one for concurrency."""
         if not self._is_open:
             raise ConnectionLost("the peer is between sockets; nothing is buffered for the next one")
+        if self._goaway.received:
+            raise ConnectionGoingAway(
+                f"the remote sent goaway (code {self._goaway.received_code}); no new stream can be "
+                f"opened on this connection. Dial again to get one that can."
+            )
+        if self._goaway.sent:
+            raise ConnectionGoingAway("this peer sent goaway and opens no further streams (WSM-CON-021)")
 
     async def notify(self, payload: Any = None, *, headers: dict[str, Any] | None = None) -> None:
         """One-shot push. Returns nothing and produces no awaitable handle (WSM-API-005)."""
@@ -292,12 +312,124 @@ class Peer:
             return await self._on_open(frame)
         if frame.type in ("data", "reset"):
             return await self._on_stream_frame(frame)
-        if frame.type in ("ping", "pong", "goaway"):
-            # Connection-level frames arrive in M4; tolerating them now costs nothing.
+        if frame.type == "ping":
+            # Echoed verbatim and at once, with no application involvement whatever (WSM-CON-010).
+            self._enqueue(Frame("pong", nonce=frame.nonce))
             return True
+        if frame.type == "pong":
+            self._on_pong(frame)
+            return True
+        if frame.type == "goaway":
+            return await self._on_goaway(frame)
         # WSM-FRM-002: unknown types are ignored, logged once, and are never an error.
         logger.info("muxws conn=%s ignoring unknown frame type %r (WSM-FRM-002)", self.id, frame.type)
         return True
+
+    # ------------------------------------------------------------------ liveness
+
+    async def ping(self, timeout: float = 5.0) -> float:
+        """Round-trip time in **seconds**.
+
+        A `ping` frame, not a WebSocket control frame: browsers do not expose those to JavaScript, so
+        a liveness mechanism built on them cannot work on half the peers that exist (WSM-CON-011).
+        """
+        if not self._is_open:
+            raise ConnectionLost("cannot ping a peer that is between sockets")
+
+        nonce = new_nonce()
+        waiting = self._pings.open(nonce)
+        self._ping_started[nonce] = asyncio.get_running_loop().time()
+        self._enqueue(Frame("ping", nonce=nonce))
+        try:
+            return await asyncio.wait_for(waiting, timeout)
+        except asyncio.TimeoutError:
+            self._pings.give_up(nonce)
+            self._ping_started.pop(nonce, None)
+            raise ConnectionClosed(f"no pong within {timeout}s", code=1006) from None
+
+    def _on_pong(self, frame: Frame) -> None:
+        """Settle the ping this nonce belongs to; a nonce nobody is waiting for is dropped."""
+        if frame.nonce is None:
+            return
+        elapsed = asyncio.get_running_loop().time() - self._ping_started.get(frame.nonce, 0.0)
+        if not self._pings.settle(frame.nonce, elapsed):
+            logger.debug("muxws conn=%s pong for an unknown nonce, ignored", self.id)
+        self._ping_started.pop(frame.nonce, None)
+
+    # ------------------------------------------------------------------ shutdown
+
+    async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None = None, drain: float = 10.0) -> None:
+        """`goaway`, drain, then close - in that order (WSM-CON-025)."""
+        if not self._is_open:
+            return
+        self._send_goaway(code, reason)
+        await self._drain(drain)
+        await self._socket.close(1000, reason or "")
+        self._die(ConnectionClosed(reason or "closed", code=1000, reason=reason or "", was_clean=True))
+
+    def _send_goaway(self, code: ResetCode, reason: str | None) -> None:
+        """`last_stream` is the highest id **the remote** opened that we have dispatched.
+
+        Their parity, not ours. Getting it backwards makes every drain reset everything, which looks
+        like a race rather than like an arithmetic mistake.
+        """
+        if self._goaway.sent:
+            return
+        self._goaway.sent = True
+        self._goaway.sent_code = int(code)
+        self._enqueue(Frame("goaway", code=int(code), reason=reason, last_stream=self._highest_remote_open))
+
+    async def _on_goaway(self, frame: Frame) -> bool:
+        """The remote is stopping. Refuse what it never processed; let the rest finish."""
+        self._goaway.received = True
+        self._goaway.received_code = frame.code
+        self._goaway.received_reason = frame.reason
+        self._goaway.remote_last_stream = frame.last_stream
+
+        # Streams above the cut-off were never processed, so they are safe to retry elsewhere - and
+        # nothing goes out for them: the remote has already stopped reading (WSM-CON-023).
+        for stream in list(self._streams.values()):
+            if stream.local and not self._goaway.survives_drain(stream.id):
+                stream._fail(
+                    exception_for_reset(
+                        ResetCode.REFUSED,
+                        f"the remote went away before processing stream {stream.id}",
+                        stream_id=stream.id,
+                    ),
+                    notify_remote=False,
+                )
+        return True
+
+    async def _drain(self, timeout: float) -> None:
+        """Let streams at or below the cut-off finish, then close regardless (WSM-CON-024).
+
+        A deadline, not a poll loop: a peer that waited for quiet would never close against a remote
+        that keeps one stream open.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while self._streams and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0)
+        # Whatever is still live at the deadline takes the socket-death path: it fails locally and
+        # nothing is sent for it, because the socket is about to be gone.
+        await self._drain_outbound()
+
+    def _exhausted(self) -> bool:
+        return self._next_id > MAX_STREAM_ID
+
+    def _begin_exhaustion_shutdown(self) -> None:
+        """WSM-SID-007: running out of ids is an orderly shutdown, not an error.
+
+        The rule asks for four things - send `goaway`, stop opening, let in-flight streams drain,
+        then close - and only the second of them is something `open()` can do by returning. The other
+        three are scheduled rather than awaited, because `open()` is specified to return a `Stream`
+        without suspending (WSM-API-001): a call that blocked here to drain would be a different
+        method. The stream just allocated is in flight and gets its drain window like any other.
+        """
+        if self._goaway.sent or self._exhaustion_task is not None:
+            return
+        self._exhaustion_task = asyncio.create_task(
+            self.close(ResetCode.NO_ERROR, f"stream ids exhausted at {MAX_STREAM_ID} (WSM-SID-007)")
+        )
 
     # ------------------------------------------------------------------ inbound opens
 
@@ -354,6 +486,17 @@ class Peer:
 
     def _start_handler(self, stream: Stream) -> None:
         """Dispatch to the one handler, or refuse when there is none (WSM-STM-033)."""
+        if self._goaway.sent:
+            # We have said we are stopping; nothing new runs here. REFUSED promises it did not run,
+            # so the opener may safely take it elsewhere (WSM-CON-021).
+            self._enqueue(
+                Frame("reset", stream=stream.id, code=int(ResetCode.REFUSED), reason="this peer is going away")
+            )
+            stream._fail(
+                exception_for_reset(ResetCode.REFUSED, "peer is going away", stream_id=stream.id),
+                notify_remote=False,
+            )
+            return
         if self._handler is None:
             self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.REFUSED), reason="no on_stream handler"))
             stream._fail(exception_for_reset(ResetCode.REFUSED, "no handler", stream_id=stream.id), notify_remote=False)
@@ -508,6 +651,7 @@ class Peer:
         self._is_open = False
         self._death = cause
 
+        self._pings.fail_all(cause)
         for stream in list(self._streams.values()):
             stream._fail(
                 ConnectionLost(f"connection closed: {cause.reason or cause}", stream_id=stream.id),

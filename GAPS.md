@@ -259,3 +259,131 @@ remote's own exception class name. `message` is portable; `type` identifies whic
 An application that switches on `type` works within one language and breaks the moment the other end
 is reimplemented - worth a sentence in M7's `errors.md`, since the default serializer invites exactly
 that.
+
+## muxws-m4-connection-lifecycle.md — WSM-CON-024, TypeScript port
+
+**What I needed:** the TypeScript shape of the drain window.
+
+**What the brief says:** "Drain is a deadline, not a poll loop: `await asyncio.wait_for(
+all_draining_streams_closed, drain)` then close regardless." The Python implementation of `_drain`
+does the opposite - it spins `while self._streams and loop.time() < deadline: await
+asyncio.sleep(0)`, a busy wait that burns the whole ten seconds of the default when any stream is
+still live.
+
+**What I assumed:** the brief, not the Python code. `Peer.drain` races `Promise.all` over the live
+streams' `closed` promises against one `setTimeout`, which is observably identical - streams at or
+below the cut-off finish, whatever is still live at the deadline takes the socket-death path - and
+does not occupy the event loop for the duration. The consequence for the tests is that the two
+suites' drain values differ: `test_goaway_carries_code_reason_and_last_stream` leaves Python's
+default 10 s drain in place and sits it out, while its TypeScript mirror passes `drainMs: 20`,
+because the frame under test is on the wire before the drain begins and vitest's per-test deadline is
+5 s. No assertion is weakened by that.
+
+## muxws-m4-connection-lifecycle.md — no rule id
+
+**What I needed:** to know whether `GoawayState.draining` carries anything.
+
+**What the brief says:** nothing. `muxws/lifecycle.py` gives the dataclass a
+`draining: asyncio.Event` field, and no code in `muxws/` ever sets, waits on or reads it.
+
+**What I assumed:** that it is vestigial and that mirroring it would be mirroring dead weight.
+`ts/lifecycle.ts`'s `GoawayState` carries the six fields that are actually consulted - `sent`,
+`received`, `remoteLastStream`, `sentCode`, `receivedCode`, `receivedReason` - plus `isGoingAway` and
+`survivesDrain`. If a later milestone gives `draining` a job, it comes back on both sides at once.
+
+## muxws-m4-connection-lifecycle.md — WSM-SID-007 (closed)
+
+**What I needed:** what a peer does when the id space runs out.
+
+**What the brief says:** "the exhausting peer MUST send `goaway` with `last_stream` set to the
+highest id it has processed, MUST stop opening new streams, MUST let in-flight streams drain, and
+MUST then close." Four obligations.
+
+**What I did first, and why it was wrong:** only the second. `open()` raised `ConnectionGoingAway`
+once the allocator passed 2^31-1 and nothing else happened - no `goaway`, no drain, no close. The
+test asserted the raise and stopped there, so the gap was invisible. An audit of the TypeScript port
+found it and correctly declined to fix it unilaterally, because the obvious repair looks like it
+conflicts with WSM-API-001: `open()` returns a `Stream` without suspending, so it cannot await a
+drain.
+
+**How it is resolved:** the conflict is only apparent. Taking the *last* id now starts the shutdown
+rather than the next call reporting it - `asyncio.create_task` / an unawaited promise schedules the
+goaway-drain-close sequence without suspending the caller, so `open()` still returns a `Stream`
+synchronously and the stream just allocated gets its drain window like any other. Both ports
+implement it, and the test in each fails when the trigger is removed. Nothing is deferred here any
+more; this entry is kept because the shape of the mistake - satisfying one clause of a four-clause
+MUST and writing a test that agrees with you - is worth remembering.
+
+
+## muxws-m4-connection-lifecycle.md — WSM-CON-012
+
+**What I needed:** the type of `peer.ping()`'s return value in TypeScript.
+
+**What the brief says:** it returns "seconds (Python) / milliseconds (TypeScript)", and its
+configuration table says durations are "milliseconds as integers in TypeScript".
+
+**What I assumed:** that "integers" governs the *options* the caller supplies (`timeoutMs`,
+`drainMs`) and not the measurement handed back. `ping()` returns a fractional number of milliseconds,
+measured with `performance.now()`, because an in-memory round trip completes in well under one
+millisecond and an integer result would report every such ping as `0` - which is the one value that
+cannot be distinguished from a broken clock. `performance.now()` rather than `Date.now()` also makes
+the measurement monotonic, so a wall-clock adjustment mid-flight cannot produce a negative RTT.
+
+## muxws-m4-connection-lifecycle.md — §7 test 9, tooling
+
+**What I needed:** somewhere to put the TypeScript-only test that native WebSocket ping frames are
+never used (WSM-CON-011).
+
+**What the brief says:** `ts/peer.spec.ts::native websocket ping frames are never used`.
+
+**What I assumed:** that the file it lives in is not load-bearing and that keeping M4's tests
+together is worth more. It is in `ts/lifecycle.spec.ts` beside the rest of the ping material, as the
+one test in that file with no Python counterpart, labelled as such. Separately: the shared eslint
+configuration's `globals` list knows `console` and `setTimeout` but not `crypto` or `performance`, so
+both are reached through `globalThis` - a `no-undef` disable comment would suppress more than the one
+name it is about.
+
+## muxws-m4-connection-lifecycle.md / muxws-m6-conformance.md — WSM-TST-002
+
+**What I needed:** the schema of a `conformance/sequences/` fixture, in enough detail to write the
+first one and the two runners that replay it.
+
+**What the brief says:** two things that cannot both hold. WSM-TST-002 is a MUST: "Fixtures MUST
+refer to streams by `stream_ref` (an ordinal the runner resolves), **never by a raw id** - a raw id
+bakes in one side's parity." The worked example reproduced immediately below it then writes
+`{"expect_frame": {"type": "open", "stream": 1, "end": true}}` and `{"type": "data", "stream": 1}` -
+raw ids, and the dialer's parity at that. Beyond those seven lines the schema is undefined: there is
+no list of step kinds, no statement of which peer an `expect_frame` is about, and no way at all to
+express `goaway.last_stream`, whose whole point (WSM-CON-020) is that it carries the *other* peer's
+parity and so can never be written as a literal.
+
+**What I assumed:** the MUST wins and the example is illustrative. `conformance/sequences/goaway-
+drains-then-closes.json` carries no raw stream id anywhere, and the two runners resolve four things:
+
+- `stream_ref: n` -> the id the n-th stream *the script opens* actually got. It appears both as a
+  call argument (`{"call": "reply", "stream_ref": 1}`) and inside an `expect_frame`, where it
+  replaces the example's raw `stream` key.
+- `last_stream_ref: n` -> the same resolution applied to `goaway.last_stream`. Without it the one
+  field this fixture exists to pin could only be asserted as a number, which is precisely the parity
+  the rule forbids baking in.
+- `drain_ms` -> milliseconds in the corpus, as in TypeScript; the Python runner divides by 1000,
+  because Python's durations are seconds (WSM-CON-012). A corpus carrying both units would be two
+  corpora.
+- `peer` on an `expect_frame` / `expect_no_frame` step -> which side's wire is searched. The example
+  omits it and leaves the direction to be inferred from the preceding step; two peers write two
+  independent `sent` lists with no shared clock between them, so the runner would have to invent a
+  merge order that the fixture never stated. Naming the sender is one word and removes the guess.
+
+The step kinds both runners implement are `settle`, `call` (`open`, `reply`, `close`, `await_close`),
+`expect_frame`, `expect_no_frame`, `expect_result`, `expect_error` and `expect_closed` - the calls
+this one fixture needs and no more. An unrecognised call fails loudly rather than being skipped, so
+M6 extends the pair deliberately rather than discovering that one runner quietly ignored a step the
+other executed. `expect_frame` is a subset match in both, as WSM-TST-002's implementation note
+requires; `expect_no_frame` searches the whole of a peer's wire rather than the unmatched tail,
+because "nothing goes out for them" (WSM-CON-023) is a claim about all of it.
+
+**Still open, and deliberately not done here:** M6 §7 test 3 replays every sequence fixture *twice*,
+with the roles swapped. The schema above is what makes that possible and the fixture is written to
+survive it, but the swap itself is M6's test and is not run by these runners. Neither is a schema
+test over `conformance/sequences/` in `conformance_schema_test.py`; M6 owns `conformance/README.md`,
+which is where that schema is supposed to be pinned first.

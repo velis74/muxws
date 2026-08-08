@@ -9,6 +9,7 @@
 import type { Codec } from './codec';
 import {
   ConnectionClosed,
+  ConnectionGoingAway,
   ConnectionLost,
   exceptionForReset,
   ProtocolError,
@@ -19,6 +20,7 @@ import {
 } from './errors';
 import { encodedLength, MAX_FRAME_BYTES } from './fragment';
 import { ABSENT, type Absent, type Frame } from './frames';
+import { GoawayState, MAX_STREAM_ID, newNonce, PingRegistry } from './lifecycle';
 import { Stream, StreamState } from './stream';
 import type { SocketAdapter } from './transports';
 
@@ -117,6 +119,24 @@ export interface PeerOptions {
   maxFrameBytes?: number;
 }
 
+/**
+ * `close()`'s options (WSM-CON-025).
+ *
+ * Every duration in the TypeScript port is **milliseconds as an integer**, where Python's is seconds
+ * as a float; `drainMs` is the mirror of Python's `drain=10.0` (WSM-CON-024).
+ */
+export interface CloseOptions {
+  code?: ResetCode;
+  reason?: string;
+  drainMs?: number;
+}
+
+/** `peer.ping()`'s default deadline, in milliseconds - Python's `timeout=5.0` (WSM-CON-012). */
+export const DEFAULT_PING_TIMEOUT_MS = 5000;
+
+/** `peer.close()`'s default drain window, in milliseconds - Python's `drain=10.0` (WSM-CON-024). */
+export const DEFAULT_DRAIN_MS = 10_000;
+
 /** WSM-ERR-006's default. A public-facing deployment should replace it with a redacting one. */
 export function defaultErrorSerializer(error: unknown): unknown {
   if (error instanceof Error) return { type: error.name, message: error.message };
@@ -187,6 +207,16 @@ function yieldToEventLoop(): Promise<void> {
   });
 }
 
+/**
+ * A monotonic clock in milliseconds - the mirror of Python's `asyncio.get_running_loop().time()`.
+ *
+ * `performance.now()` rather than `Date.now()`: it is monotonic (a clock adjustment mid-flight cannot
+ * produce a negative round-trip time) and sub-millisecond, so an in-memory ping does not measure zero.
+ */
+function monotonicNowMs(): number {
+  return globalThis.performance.now();
+}
+
 /** The sentinel a deadline rejects with; never an `Error`, so it cannot be confused with one. */
 const DEADLINE_EXPIRED: unique symbol = Symbol('DEADLINE_EXPIRED');
 
@@ -242,7 +272,11 @@ export class Peer {
   private readonly maxFrameBytes: number;
 
   /** The dialer allocates odd ids, the acceptor even ones (WSM-SID-002). */
-  private nextId: number;
+  /**
+   * @internal The next id this peer will allocate. Public so a test can drive the allocator to the
+   * end of the id space without waiting for two billion opens; nothing in the library writes it.
+   */
+  nextId: number;
 
   private readonly liveStreams = new Map<number, Stream>();
 
@@ -262,6 +296,15 @@ export class Peer {
   private readonly frameHandlers: ((direction: 'tx' | 'rx', frame: Frame, byteLength: number) => void)[] = [];
 
   private readonly errorHandlers: ((error: unknown, stream: Stream | null) => void)[] = [];
+
+  /** Outstanding pings, keyed by nonce and never by order (see `ts/lifecycle.ts`). */
+  private readonly pings = new PingRegistry();
+
+  /** When each outstanding ping went out, so a `pong` can be turned into an elapsed time. */
+  private readonly pingStarted = new Map<string, number>();
+
+  /** What each side has said about stopping; the two directions mean different things. */
+  private readonly goaway = new GoawayState();
 
   private readonly outbound = new AsyncQueue<Frame | null>();
 
@@ -380,6 +423,11 @@ export class Peer {
   open<T = unknown>(options: OpenOptions): Stream<T>;
   open<T = unknown>(first?: unknown, second?: OpenOptions): Stream<T> {
     this.throwIfUnopenable();
+    if (this.exhausted()) {
+      throw new ConnectionGoingAway(
+        `stream ids are exhausted at ${MAX_STREAM_ID}; this connection can open no more (WSM-SID-007)`,
+      );
+    }
     const { payload, headers, end } = resolveCall(first, second, OPEN_OPTION_KEYS);
 
     const streamId = this.nextId;
@@ -389,14 +437,49 @@ export class Peer {
     stream.state = end ? StreamState.HALF_CLOSED_LOCAL : StreamState.OPEN;
     this.liveStreams.set(streamId, stream);
     this.enqueue({ type: 'open', stream: streamId, payload, headers, end });
+    if (this.exhausted()) this.beginExhaustionShutdown();
     return stream;
   }
 
-  /** WSM-API-004: exactly one synchronous throw, and never one for concurrency. */
+  /**
+   * WSM-SID-007: running out of ids is an orderly shutdown, not an error.
+   *
+   * The rule asks for four things - send `goaway`, stop opening, let in-flight streams drain, then
+   * close - and only the second is something `open()` can do by returning. The other three are
+   * started rather than awaited, because `open()` returns a `Stream` without suspending
+   * (WSM-API-001): a call that blocked here to drain would be a different method. The stream just
+   * allocated is in flight and gets its drain window like any other.
+   */
+  private beginExhaustionShutdown(): void {
+    if (this.goaway.sent || this.exhaustionShutdown !== null) return;
+    this.exhaustionShutdown = this.close({
+      code: ResetCode.NO_ERROR,
+      reason: `stream ids exhausted at ${MAX_STREAM_ID} (WSM-SID-007)`,
+    });
+    void this.exhaustionShutdown.catch(() => undefined);
+  }
+
+  /** WSM-API-004: exactly two synchronous throws, and never one for concurrency. */
   private throwIfUnopenable(): void {
     if (!this.open_) {
       throw new ConnectionLost('the peer is between sockets; nothing is buffered for the next one');
     }
+    if (this.goaway.received) {
+      throw new ConnectionGoingAway(
+        `the remote sent goaway (code ${this.goaway.receivedCode}); no new stream can be opened on ` +
+          'this connection. Dial again to get one that can.',
+      );
+    }
+    if (this.goaway.sent) {
+      throw new ConnectionGoingAway('this peer sent goaway and opens no further streams (WSM-CON-021)');
+    }
+  }
+
+  /** Held so the shutdown WSM-SID-007 requires can be awaited by a test rather than raced. */
+  exhaustionShutdown: Promise<void> | null = null;
+
+  private exhausted(): boolean {
+    return this.nextId > MAX_STREAM_ID;
   }
 
   /** One-shot push. Returns nothing and produces no awaitable handle (WSM-API-005). */
@@ -584,13 +667,151 @@ export class Peer {
   private async dispatch(frame: Frame): Promise<boolean> {
     if (frame.type === 'open') return this.onOpenFrame(frame);
     if (frame.type === 'data' || frame.type === 'reset') return this.onStreamFrame(frame);
-    if (frame.type === 'ping' || frame.type === 'pong' || frame.type === 'goaway') {
-      // Connection-level frames arrive in M4; tolerating them now costs nothing.
+    if (frame.type === 'ping') {
+      // Echoed verbatim and at once, with no application involvement whatever (WSM-CON-010). It goes
+      // through the ordinary outbound queue, so it is a `ping` frame on the wire and never a native
+      // WebSocket control frame - browsers do not expose those to JavaScript (WSM-CON-011).
+      this.enqueue({ type: 'pong', nonce: frame.nonce ?? null });
       return true;
     }
+    if (frame.type === 'pong') {
+      this.onPong(frame);
+      return true;
+    }
+    if (frame.type === 'goaway') return this.onGoaway(frame);
     // WSM-FRM-002: unknown types are ignored, logged once, and are never an error.
     logger.info(`muxws conn=${this.id} ignoring unknown frame type '${frame.type}' (WSM-FRM-002)`);
     return true;
+  }
+
+  // ------------------------------------------------------------------ liveness
+
+  /**
+   * Round-trip time in **milliseconds** (WSM-CON-012; Python returns seconds).
+   *
+   * A `ping` frame, not a WebSocket control frame: browsers do not expose those to JavaScript, so a
+   * liveness mechanism built on them cannot work on half the peers that exist (WSM-CON-011).
+   */
+  async ping(timeoutMs: number = DEFAULT_PING_TIMEOUT_MS): Promise<number> {
+    if (!this.open_) throw new ConnectionLost('cannot ping a peer that is between sockets');
+
+    const nonce = newNonce();
+    const waiting = this.pings.open(nonce);
+    this.pingStarted.set(nonce, monotonicNowMs());
+    this.enqueue({ type: 'ping', nonce });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(DEADLINE_EXPIRED);
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([waiting, deadline]);
+    } catch (error) {
+      if (error !== DEADLINE_EXPIRED) throw error;
+      // A lost pong is not a lost connection: the call fails and the connection is untouched. M5b is
+      // where a run of them becomes liveness detection.
+      this.pings.giveUp(nonce);
+      this.pingStarted.delete(nonce);
+      throw new ConnectionClosed(`no pong within ${timeoutMs}ms`, { code: 1006 });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Settle the ping this nonce belongs to; a nonce nobody is waiting for is dropped. */
+  private onPong(frame: Frame): void {
+    const nonce = frame.nonce;
+    if (nonce === null || nonce === undefined) return;
+    const elapsed = monotonicNowMs() - (this.pingStarted.get(nonce) ?? 0);
+    if (!this.pings.settle(nonce, elapsed)) {
+      logger.debug(`muxws conn=${this.id} pong for an unknown nonce, ignored`);
+    }
+    this.pingStarted.delete(nonce);
+  }
+
+  // ------------------------------------------------------------------ shutdown
+
+  /** `goaway`, drain, then close - in that order (WSM-CON-025). */
+  async close(options: CloseOptions = {}): Promise<void> {
+    const { code = ResetCode.NO_ERROR, reason = null, drainMs = DEFAULT_DRAIN_MS } = options;
+    if (!this.open_) return;
+    this.sendGoaway(code, reason);
+    await this.drain(drainMs);
+    try {
+      await this.socket.close(1000, reason ?? '');
+    } catch (error) {
+      // A socket that cannot be closed is already gone; the peer must still die.
+      logger.warn(`muxws conn=${this.id} closing the socket failed`, error);
+    }
+    this.die(new ConnectionClosed(reason ?? 'closed', { code: 1000, reason: reason ?? '', wasClean: true }));
+  }
+
+  /**
+   * `last_stream` is the highest id **the remote** opened that we have dispatched.
+   *
+   * Their parity, not ours. Getting it backwards makes every drain reset everything, which looks like
+   * a race rather than like an arithmetic mistake.
+   */
+  private sendGoaway(code: ResetCode, reason: string | null): void {
+    if (this.goaway.sent) return;
+    this.goaway.sent = true;
+    this.goaway.sentCode = code;
+    this.enqueue({ type: 'goaway', code, reason, last_stream: this.highestRemoteOpen });
+  }
+
+  /** The remote is stopping. Refuse what it never processed; let the rest finish. */
+  private onGoaway(frame: Frame): boolean {
+    this.goaway.received = true;
+    this.goaway.receivedCode = frame.code ?? null;
+    this.goaway.receivedReason = frame.reason ?? null;
+    this.goaway.remoteLastStream = frame.last_stream ?? null;
+
+    // Streams above the cut-off were never processed, so they are safe to retry elsewhere - and
+    // nothing goes out for them: the remote has already stopped reading (WSM-CON-023). `fail()` is
+    // the local-only path; `reset()` would put a frame on a wire nobody is reading.
+    [...this.liveStreams.values()].forEach((stream) => {
+      if (!stream.local || this.goaway.survivesDrain(stream.id)) return;
+      stream.fail(
+        exceptionForReset(ResetCode.REFUSED, `the remote went away before processing stream ${stream.id}`, {
+          streamId: stream.id,
+        }),
+      );
+    });
+    return true;
+  }
+
+  /**
+   * Let streams at or below the cut-off finish, then close regardless (WSM-CON-024).
+   *
+   * A deadline, not a poll loop: a peer that waited for quiet would never close against a remote that
+   * keeps one stream open. Whatever is still live when the deadline expires takes the socket-death
+   * path - it fails locally and nothing is sent for it, because the socket is about to be gone.
+   */
+  private async drain(timeoutMs: number): Promise<void> {
+    if (this.liveStreams.size > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      });
+      try {
+        await Promise.race([this.allStreamsClosed(), deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await this.drainOutbound();
+  }
+
+  /**
+   * Resolves once nothing is live. Re-read each round because a stream can close while we wait, and
+   * `Stream.closed` resolves on every close path and never rejects (WSM-API-023).
+   */
+  private async allStreamsClosed(): Promise<void> {
+    while (this.liveStreams.size > 0) {
+      await Promise.all([...this.liveStreams.values()].map((stream) => stream.closed));
+    }
   }
 
   // ------------------------------------------------------------------ inbound opens
@@ -656,6 +877,18 @@ export class Peer {
 
   /** Dispatch to the one handler, or refuse when there is none (WSM-STM-033). */
   private startHandler(stream: Stream): void {
+    if (this.goaway.sent) {
+      // We have said we are stopping; nothing new runs here. REFUSED promises it did not run, so the
+      // opener may safely take it elsewhere (WSM-CON-021).
+      this.enqueue({
+        type: 'reset',
+        stream: stream.id,
+        code: ResetCode.REFUSED,
+        reason: 'this peer is going away',
+      });
+      stream.fail(exceptionForReset(ResetCode.REFUSED, 'peer is going away', { streamId: stream.id }));
+      return;
+    }
     if (this.handler === null) {
       // The wire `reason` is spelled the way Python spells it, so the two ports put the same bytes
       // on the wire for the same event; the local diagnostics below use the TypeScript names.
@@ -867,6 +1100,10 @@ export class Peer {
     if (!this.open_) return;
     this.open_ = false;
     this.death = cause;
+
+    // Nobody is going to answer a ping now, so nobody should keep waiting for one.
+    this.pings.failAll(cause);
+    this.pingStarted.clear();
 
     const detail = cause.reason || errorMessage(cause);
     [...this.liveStreams.values()].forEach((stream) => {

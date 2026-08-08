@@ -69,10 +69,11 @@ WebSocket, in Python and TypeScript. It depends on nothing above it in the stack
 | M5b | [`muxws-m5b-reconnect-and-registry.md`](./briefs/muxws-m5b-reconnect-and-registry.md) | The dialer-only reconnect helper (jittered backoff, heartbeat, `hello` replay, established-only counter reset, and `connect()` raising when the *first* attempt fails), the socket-death fan-out that fails every stream shape with `ConnectionLost`, `peer.tags` and `PeerRegistry`. **This is the first production-usable release.** |
 | M6 | [`muxws-m6-conformance.md`](./briefs/muxws-m6-conformance.md) | The full `conformance/sequences/` corpus replayed by both languages in both role assignments, the live cross-language CI matrix including a reconnect scenario, the msgpack codec with its own pair, `SPEC.md`, and the 1.0 wire freeze. |
 | M7 | [`muxws-m7-documentation.md`](./briefs/muxws-m7-documentation.md) | The VitePress site: a guide, a complete two-language API reference, a runnable quick start, and tests that fail when a symbol is added without a page entry. |
+| M8 | [`muxws-m8-demo.md`](./briefs/muxws-m8-demo.md) | A runnable demo - FastAPI plus Vue 3 and Vuetify - in which every distinguishing claim is something a reader can watch happen. A market board, chosen because it is the smallest honest application that needs all four call shapes at once; its headline is a 1 MB export that does **not** stall the tick counter beside it. |
 
 M5 in the specification's §17 table is one milestone; it is split here into **M5a** and **M5b**
 because the two halves share no code and have disjoint test suites. "muxws M5" elsewhere means both.
-M0 and M7 are additions to the specification's §17 list, explained in their own briefs.
+M0, M7 and M8 are additions to the specification's §17 list, explained in their own briefs.
 
 **M4 shrank and M5a grew, and nothing was renumbered.** The `settings` frame was removed from the
 protocol entirely (WSM-CON-031): `MAX_FRAME_BYTES` is a protocol constant, `max_payload_bytes` and
@@ -85,7 +86,7 @@ against in-flight streams needs one where it is the thing being tested.
 ## The dependency chain
 
 ```
-M0 → M1 → M2 → M3 → M4 → M5a → M5b → M6 → M7
+M0 → M1 → M2 → M3 → M4 → M5a → M5b → M6 → M7 → M8
                            │
                            │  (muxws is production-usable here: Peer.notify,
                            │   PeerRegistry.peers_for, peer.tags, peer.close,
@@ -95,7 +96,9 @@ M0 → M1 → M2 → M3 → M4 → M5a → M5b → M6 → M7
 ```
 
 Every milestone depends only on the ones before it. M5a comes before M5b because M5b's socket-death
-fan-out discards the writer's queues.
+fan-out discards the writer's queues. M8 is a consumer rather than a layer: it depends on everything
+and nothing depends on it, and it leans hardest on M5a - without the round-robin writer its headline
+demonstration would be a lie.
 
 ## Where the rules come from
 

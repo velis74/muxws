@@ -1,0 +1,30 @@
+{
+  "name": "goaway-drains-then-closes",
+  "description": "The acceptor goes away with one stream already in flight and one opened a moment too late. The stream at or below last_stream finishes inside the drain window (WSM-CON-024); the late one is answered with reset(REFUSED) by the peer that is going away (WSM-CON-021), is refused locally by its opener, and has nothing sent for it (WSM-CON-023); the socket then closes (WSM-CON-025). last_stream carries the *other* peer's parity, which is why it is written here as an ordinal the runner resolves rather than as a number (WSM-CON-020, WSM-TST-002).",
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "q": "before the goaway" }, "end": true, "as": "below" },
+    { "settle": 12 },
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "end": true } },
+
+    { "peer": "acceptor", "call": "close", "code": 0, "reason": "shutting down", "drain_ms": 2000 },
+    { "peer": "dialer", "call": "open", "payload": { "q": "after the goaway" }, "end": true, "as": "above" },
+    { "settle": 12 },
+
+    {
+      "peer": "acceptor",
+      "expect_frame": { "type": "goaway", "code": 0, "reason": "shutting down", "last_stream_ref": 1 }
+    },
+    { "peer": "acceptor", "expect_frame": { "type": "reset", "stream_ref": 2, "code": 4 } },
+    { "expect_error": { "ref": "above", "error": "StreamRefused", "code": 4 } },
+    { "peer": "dialer", "expect_no_frame": { "type": "reset", "stream_ref": 2 } },
+
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "finished": true } },
+    { "settle": 12 },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "end": true } },
+    { "expect_result": { "ref": "below", "value": { "finished": true } } },
+
+    { "peer": "acceptor", "call": "await_close" },
+    { "expect_closed": { "peer": "acceptor", "socket": true } },
+    { "expect_closed": { "peer": "dialer" } }
+  ]
+}

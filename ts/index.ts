@@ -24,8 +24,12 @@ export {
 } from './errors';
 export { ABSENT, type Absent, type Frame, V1_FRAME_TYPES, framesEqual, fromMapping, toMapping } from './frames';
 export { Assembler, MAX_FRAME_BYTES, encodedLength, splitFrame } from './fragment';
+export { GoawayState, MAX_STREAM_ID, PingRegistry, newNonce } from './lifecycle';
 export {
+  type CloseOptions,
   type CloseReason,
+  DEFAULT_DRAIN_MS,
+  DEFAULT_PING_TIMEOUT_MS,
   type ErrorSerializer,
   type OpenOptions,
   Peer,
