@@ -387,3 +387,37 @@ with the roles swapped. The schema above is what makes that possible and the fix
 survive it, but the swap itself is M6's test and is not run by these runners. Neither is a schema
 test over `conformance/sequences/` in `conformance_schema_test.py`; M6 owns `conformance/README.md`,
 which is where that schema is supposed to be pinned first.
+
+## muxws-m5a-fragmentation-and-writer.md — WSM-FRG-019, the TypeScript writer
+
+**What I needed:** a TypeScript spelling for four things `muxws/writer.py` gets from Python and
+`writer_test.py` asserts against directly.
+
+**What the brief says:** §6 describes the writer structurally (`dict[int, StreamQueue]`, a rotating
+cursor, at most one prepared frame) and requires that "a `list` used as a FIFO of frames anywhere in
+the send path is an automatic failure". It says nothing about how the port names any of it.
+
+**What I assumed:** the structure is normative and the spelling is not, so `ts/writer.ts` mirrors
+`writer.py` member for member with four mechanical substitutions:
+
+- `__len__` on `Writer` and `StreamQueue` becomes a `depth` getter (`len(writer)` has no operator to
+  overload). `depth_of` / `prepared_depth_of` keep their names as `depthOf` / `preparedDepthOf`.
+- `_rotate()` and `_queues` become `private`. Python's underscore is a convention a test can reach
+  through; TypeScript's `private` is erased at runtime, so `writer.spec.ts` reaches through one
+  narrowly-typed cast (`internals(writer)`) rather than widening the public surface past Python's.
+  Anything the peer needs is public: `nextFrame`, `enqueue`, `advance`, `discard`, `discardAll`,
+  `stop`.
+- `asyncio.Event` becomes a five-line latching `Gate`. Latching matters and is the reason it is not a
+  bare promise: an `enqueue` landing between two turns of the write loop must not be missed.
+- `LaneEncodingError` extends `Error`, not `MuxwsError`, because `muxws/writer.py` extends
+  `Exception` and not `MuxwsError`. Keeping the inheritance identical keeps `instanceof` and
+  `isinstance` answering the same question in both ports; the alternative would make a
+  cross-language error-identity test pass in one language only.
+
+**The one place this is genuinely weaker than Python.** `writer_test.py` proves the absence of a
+send-path FIFO by counting occurrences of the type annotation `deque[Frame]` in the module source.
+The TypeScript equivalent counts `Frame[]`, which `writer.spec.ts` does. It is a weaker witness: a
+TypeScript array can be introduced as `const waiting = []` with its element type inferred and never
+written down, and such an array would evade the count. The check is still worth having — it is the
+only witness a rule about what must *not* exist can have — but it is a tripwire, not a proof, and a
+reviewer should read the file rather than trust it alone.

@@ -18,50 +18,17 @@ import {
   StreamReset,
   StreamTimeout,
 } from './errors';
-import { encodedLength, MAX_FRAME_BYTES } from './fragment';
+import { encodedLength, MAX_FRAME_BYTES, splitFrame } from './fragment';
 import { ABSENT, type Absent, type Frame } from './frames';
 import { GoawayState, MAX_STREAM_ID, newNonce, PingRegistry } from './lifecycle';
+import { type CloseReason, type FrameDirection, logFrame, logger } from './observability';
 import { Stream, StreamState } from './stream';
 import type { SocketAdapter } from './transports';
 
-// --------------------------------------------------------------------------- the logger shim
-
-/**
- * The browser entry point has zero runtime dependencies (WSM-PKG-003), so there is no logging library
- * to reach for. This is the whole of it: `muxws.frames` in Python, four methods over `console` here.
- *
- * `level` starts at `'warn'` because that is what an unconfigured Python logger does - `logger.info`
- * and `logger.debug` on the Python side print nothing until an application configures logging, and a
- * port that spammed every frame to the console by default would not be mirroring it. M5a's
- * observability module takes ownership of configuring this.
- */
-type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
-
-const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
-
-/**
- * @internal Exported so a test can raise the level the way `caplog.at_level` does in Python, and so
- * M5a's observability module has something to configure. Not re-exported from `ts/index.ts`: it is a
- * seam, not public API.
- */
-export const logger = {
-  level: 'warn' as LogLevel,
-  isEnabledFor(level: LogLevel): boolean {
-    return LEVEL_ORDER[level] >= LEVEL_ORDER[this.level];
-  },
-  debug(message: string, ...rest: unknown[]): void {
-    if (this.isEnabledFor('debug')) console.debug(message, ...rest);
-  },
-  info(message: string, ...rest: unknown[]): void {
-    if (this.isEnabledFor('info')) console.info(message, ...rest);
-  },
-  warn(message: string, ...rest: unknown[]): void {
-    if (this.isEnabledFor('warn')) console.warn(message, ...rest);
-  },
-  error(message: string, ...rest: unknown[]): void {
-    if (this.isEnabledFor('error')) console.error(message, ...rest);
-  },
-};
+// The log seam moved to `ts/observability.ts` at M5a, where the frame line lives; it is re-exported
+// here because every call site that had one imported it from this module.
+export { logger };
+export type { CloseReason };
 
 // --------------------------------------------------------------------------- connection identity
 
@@ -87,18 +54,6 @@ export type StreamHandler = (payload: any, stream: Stream) => void | Promise<voi
 /** Turns a handler's failure into a payload for the `reset(APPLICATION_ERROR)` frame (WSM-ERR-006). */
 export type ErrorSerializer = (error: unknown) => unknown;
 
-/** Why a socket ended. The same four fields in both languages (WSM-RCN-045). */
-export interface CloseReason {
-  readonly code: number;
-  readonly reason: string;
-  readonly wasClean: boolean;
-  /**
-   * False only when `maxAttempts` is exhausted or `close()` was called deliberately. Until the
-   * reconnect helper lands in M5b there is nothing that retries, so it is always false here.
-   */
-  readonly willRetry: boolean;
-}
-
 /** `open()`'s options. It carries no `timeoutMs` in any milestone (WSM-API-018). */
 export interface OpenOptions {
   payload?: unknown;
@@ -116,8 +71,29 @@ export interface PeerOptions {
   codec: Codec;
   isDialer: boolean;
   errorSerializer?: ErrorSerializer;
+  /**
+   * Test-only (WSM-FRG-005). The cap is a protocol constant; the conformance runner lowers it to
+   * exercise fragmentation without megabyte fixtures, and a value too small to hold an envelope plus
+   * one indivisible unit is rejected here rather than looping in the splitter (WSM-FRG-034).
+   */
   maxFrameBytes?: number;
+  /**
+   * The largest reassembled payload this peer accepts, in bytes. **Local** (WSM-FRG-035): never
+   * announced, and a sender learns of it only from the reset it provokes.
+   */
+  maxPayloadBytes?: number;
+  /**
+   * How many streams the **remote** may have open here at once. Also local, also unannounced, and
+   * never checked by the sender (WSM-STM-036/037).
+   */
+  maxConcurrentStreams?: number;
 }
+
+/** WSM-FRG-035's default: 64 MiB of reassembled payload. */
+export const DEFAULT_MAX_PAYLOAD_BYTES = 67_108_864;
+
+/** WSM-STM-036's default: 100 streams the remote may hold open here at once. */
+export const DEFAULT_MAX_CONCURRENT_STREAMS = 100;
 
 /**
  * `close()`'s options (WSM-CON-025).
@@ -200,6 +176,28 @@ function resolveCall(first: unknown, second: RequestOptions | undefined, keys: R
   };
 }
 
+/**
+ * WSM-FRG-034: a cap too small to hold an envelope plus one unit is a configuration error.
+ *
+ * Discovered here, at construction, rather than later as an infinite split loop. The cap is a
+ * protocol constant (WSM-FRG-004); the only way a smaller number reaches a peer is the test-only
+ * construction argument of WSM-FRG-005, which the conformance runner uses.
+ */
+function checkedFrameCap(cap: number, codec: Codec): number {
+  if (cap === MAX_FRAME_BYTES) return cap;
+  const probe: Frame = { type: 'data', stream: 1, payload: { a: 'aaaaaaaa' } };
+  try {
+    splitFrame(probe, cap, codec);
+  } catch (error) {
+    if (!(error instanceof ProtocolError)) throw error;
+    throw new ProtocolError(
+      `maxFrameBytes=${cap} cannot hold an envelope plus one indivisible unit of payload: ` +
+        `${error.message} (WSM-FRG-034)`,
+    );
+  }
+  return cap;
+}
+
 /** One turn of the event loop, the closest equivalent of `await asyncio.sleep(0)`. */
 function yieldToEventLoop(): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -268,8 +266,14 @@ export class Peer {
 
   private readonly errorSerializer: ErrorSerializer;
 
-  /** M5a wires the splitter into the send path; it is stored here so the signature stays stable. */
+  /** The cap the send path fragments at, and the receive path measures whole messages against. */
   private readonly maxFrameBytes: number;
+
+  /** WSM-FRG-035. Local, unannounced, and enforced as fragments accumulate (WSM-FRG-032). */
+  private readonly maxPayloadBytes: number;
+
+  /** WSM-STM-036. Local, unannounced, and counted over the remote's opens alone (WSM-STM-037). */
+  private readonly maxConcurrentStreams: number;
 
   /** The dialer allocates odd ids, the acceptor even ones (WSM-SID-002). */
   /**
@@ -333,7 +337,9 @@ export class Peer {
     this.codec = options.codec;
     this.dialer = options.isDialer;
     this.errorSerializer = options.errorSerializer ?? defaultErrorSerializer;
-    this.maxFrameBytes = options.maxFrameBytes ?? MAX_FRAME_BYTES;
+    this.maxFrameBytes = checkedFrameCap(options.maxFrameBytes ?? MAX_FRAME_BYTES, options.codec);
+    this.maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
+    this.maxConcurrentStreams = options.maxConcurrentStreams ?? DEFAULT_MAX_CONCURRENT_STREAMS;
     this.nextId = options.isDialer ? 1 : 2;
   }
 
@@ -592,18 +598,18 @@ export class Peer {
     stream.fail(exceptionForReset(ResetCode.INTERNAL_ERROR, detail, { streamId: stream.id }));
   }
 
-  private reportFrame(direction: 'tx' | 'rx', frame: Frame, encoded: string | ArrayBuffer): void {
+  /**
+   * WSM-OBS-003: the hook sees the logical frame and the encoded length, before encode on the way
+   * out and after decode on the way in - so on tx the encoding is computed first and the hook called
+   * with the result, never the other way round.
+   */
+  private reportFrame(direction: FrameDirection, frame: Frame, encoded: string | ArrayBuffer): void {
     const length = encodedLength(encoded);
     this.frameHandlers.forEach((handler) => {
       handler(direction, frame, length);
     });
-    if (logger.isEnabledFor('debug')) {
-      // Never the payload's contents: application data routinely holds secrets (WSM-OBS-002).
-      logger.debug(
-        `muxws conn=${this.id} dir=${direction} type=${frame.type.padEnd(6)} ` +
-          `stream=${frame.stream ?? '-'} end=${frame.end === true ? 1 : 0} bytes=${length}`,
-      );
-    }
+    // Never the payload's contents: application data routinely holds secrets (WSM-OBS-002).
+    logFrame(this.id, direction, frame, length);
   }
 
   // ------------------------------------------------------------------ the read loop
@@ -646,6 +652,9 @@ export class Peer {
       }
 
       this.reportFrame('rx', frame, message);
+      // Measured before dispatch, so an over-cap message is never assembled, decoded further, or
+      // handed to a handler (WSM-FRG-031).
+      if (!(await this.withinFrameCap(frame, message))) continue;
 
       let keepGoing: boolean;
       try {
@@ -661,6 +670,41 @@ export class Peer {
       }
       if (!keepGoing) return;
     }
+  }
+
+  /**
+   * WSM-FRG-031: measure the **whole encoded message**, never the `fragment` field alone.
+   *
+   * A receiver must accept anything up to `MAX_FRAME_BYTES` (WSM-FRG-004), so the check only bites
+   * above the constant - or, in a test, above the lowered construction cap. A size violation is
+   * stream-level (WSM-STM-020): the connection survives it.
+   */
+  private async withinFrameCap(frame: Frame, message: string | ArrayBuffer): Promise<boolean> {
+    const size = encodedLength(message);
+    if (size <= this.maxFrameBytes) return true;
+    if (frame.stream === null || frame.stream === undefined) {
+      await this.failConnection(`a connection-level frame of ${size} bytes exceeds the cap`);
+      return false;
+    }
+
+    const stream = this.liveStreams.get(frame.stream);
+    if (stream !== undefined) {
+      this.resetStream(
+        stream,
+        ResetCode.PAYLOAD_TOO_LARGE,
+        `an encoded message of ${size} bytes exceeds this receiver's cap (WSM-FRG-031)`,
+      );
+    } else {
+      // No stream to fail - an over-cap `open`, most often. The reset still goes out: the sender is
+      // owed an answer, and it is the only way it can learn of a limit nothing announces.
+      this.enqueue({
+        type: 'reset',
+        stream: frame.stream,
+        code: ResetCode.PAYLOAD_TOO_LARGE,
+        reason: `an encoded message of ${size} bytes exceeds this receiver's cap`,
+      });
+    }
+    return false;
   }
 
   /** Route one decoded frame. Returns false when the connection must end. */
@@ -845,12 +889,29 @@ export class Peer {
     }
 
     this.highestRemoteOpen = streamId;
+
+    if (this.remoteStreamCount() >= this.maxConcurrentStreams) {
+      // Refused **without invoking the handler**: nothing ran, so the opener may safely take it
+      // elsewhere (WSM-STM-036). There is no STREAM_LIMIT code and no announced quota - the sender is
+      // told nothing in advance and learns only from this reset.
+      this.enqueue({
+        type: 'reset',
+        stream: streamId,
+        code: ResetCode.REFUSED,
+        reason: `this receiver already holds ${this.maxConcurrentStreams} of your streams`,
+      });
+      return true;
+    }
+
     const stream = new Stream(this, streamId, { headers: frame.headers ?? null, local: false });
     stream.state = frame.end === true ? StreamState.HALF_CLOSED_REMOTE : StreamState.OPEN;
     this.liveStreams.set(streamId, stream);
 
     if (hasFragment(frame)) {
       stream.opening = true;
+      // A fragmented *open* is the same memory exposure as a fragmented *data*, and was the one path
+      // into this peer that no cap watched.
+      if (!this.withinPayloadCap(stream, frame)) return true;
       const payload = stream.assembler.feed(frame, this.codec);
       if (isAbsent(payload)) return true;
       stream.opening = false;
@@ -866,6 +927,7 @@ export class Peer {
 
   /** A later fragment of an opening payload: not a second open (WSM-STM-031). */
   private continueOpen(stream: Stream, frame: Frame): boolean {
+    if (!this.withinPayloadCap(stream, frame)) return true;
     const payload = stream.assembler.feed(frame, this.codec);
     if (isAbsent(payload)) return true;
     stream.opening = false;
@@ -1012,6 +1074,20 @@ export class Peer {
     return exceptionForReset(code as ResetCode, reason, { streamId });
   }
 
+  /**
+   * Only the streams the **remote** opened (WSM-STM-037).
+   *
+   * The limit bounds work the other side can impose. Counting our own would be the announced quota
+   * rebuilt by hand, against a number this peer cannot know (WSM-INV-007).
+   */
+  private remoteStreamCount(): number {
+    let count = 0;
+    this.liveStreams.forEach((stream) => {
+      if (!stream.local) count += 1;
+    });
+    return count;
+  }
+
   private isOurParity(streamId: number): boolean {
     return streamId % 2 === (this.dialer ? 1 : 0);
   }
@@ -1029,6 +1105,7 @@ export class Peer {
     }
 
     if (hasFragment(frame)) {
+      if (!this.withinPayloadCap(stream, frame)) return true;
       const payload = stream.assembler.feed(frame, this.codec);
       if (isAbsent(payload)) return true;
       stream.acceptPayload(payload);
@@ -1039,6 +1116,28 @@ export class Peer {
 
     if (frame.end === true) stream.remoteEnd(frame.trailers ?? null);
     return true;
+  }
+
+  /**
+   * WSM-FRG-032/WSM-INV-017: reject **on the crossing fragment**, not after reassembly.
+   *
+   * Bounding memory is the limit's whole purpose. A receiver that assembles the payload in order to
+   * measure it has already spent everything the limit existed to protect, and the partial buffer is
+   * dropped in the same step for the same reason (M5a decision 1) - `resetStream` fails the stream,
+   * and `Stream.fail` resets its assembler, but the buffer is released here first so the order does
+   * not depend on that.
+   */
+  private withinPayloadCap(stream: Stream, frame: Frame): boolean {
+    const incoming = hasFragment(frame) ? encodedLength(frame.fragment as string | ArrayBuffer) : 0;
+    if (stream.assembler.byteLength + incoming <= this.maxPayloadBytes) return true;
+
+    stream.assembler.reset();
+    this.resetStream(
+      stream,
+      ResetCode.PAYLOAD_TOO_LARGE,
+      `a payload crossed this receiver's ${this.maxPayloadBytes}-byte limit (WSM-FRG-032)`,
+    );
+    return false;
   }
 
   private resetStream(stream: Stream, code: ResetCode, reason: string): void {

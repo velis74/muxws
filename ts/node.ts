@@ -58,6 +58,10 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
     isDialer: false,
     errorSerializer: options.errorSerializer,
     maxFrameBytes: options.maxFrameBytes,
+    // The two local caps (WSM-FRG-035, WSM-STM-036). Neither is ever encoded into a frame and
+    // neither has a remote counterpart to consult.
+    maxPayloadBytes: options.maxPayloadBytes,
+    maxConcurrentStreams: options.maxConcurrentStreams,
   });
 }
 

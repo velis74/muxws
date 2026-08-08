@@ -149,13 +149,36 @@ function largestFittingCount(
 }
 
 /**
- * Return `[frame]` when it already fits, else the fragment frames that replace it.
+ * Every fragment at once. `iterFragments` is the same computation, one slice at a time.
+ *
+ * Kept because the pure-function tests and the conformance corpus want the whole list, and because a
+ * caller with a small payload should not have to think about generators.
+ */
+export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Frame[] {
+  return [...iterFragments(frame, cap, codec)];
+}
+
+/**
+ * Yield `frame` when it already fits, else the fragment frames that replace it, **lazily**.
+ *
+ * The writer consumes this one slice at a time, because WSM-FRG-018 says a stream holds at most one
+ * unsent fragment: fragment *n+1* is sliced only once fragment *n* has been handed to the socket.
+ * Computing them all up front would commit the wire order in advance, and interleaving - the whole
+ * point of WSM-FRG-019 - becomes impossible once the order is already decided.
+ *
+ * Every boundary decision lives here, so `splitFrame` and the writer cut in exactly the same places
+ * by construction rather than by two implementations agreeing.
  *
  * A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads nothing else and mutates neither
  * argument. `cap` defaults to the protocol constant; a smaller value comes only from a test or the
  * conformance runner (WSM-FRG-005) and is never a value read off the wire.
+ *
+ * The sender encodes the logical payload with the codec, slices *that* encoded form, and puts each
+ * slice into a frame the codec then encodes again (WSM-FRG-011). Slicing budgets for the envelope
+ * (WSM-FRG-013) and then **verifies and re-splits** (WSM-FRG-014): the reservation is a per-codec
+ * hint, the loop is the guarantee.
  */
-export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Frame[] {
+export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Generator<Frame> {
   if (codec === undefined) {
     throw new ProtocolError('splitFrame requires a codec: fragment boundaries are defined over its output');
   }
@@ -163,7 +186,10 @@ export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: 
     throw new ProtocolError(`a frame cap of ${cap} bytes is too small to hold any frame (WSM-FRG-034)`);
   }
 
-  if (encodedLength(codec.encode(frame)) <= cap) return [frame];
+  if (encodedLength(codec.encode(frame)) <= cap) {
+    yield frame;
+    return;
+  }
 
   if (frame.payload === ABSENT || frame.payload === undefined) {
     throw new ProtocolError(
@@ -177,19 +203,19 @@ export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: 
   const total = units.length;
   const budget = Math.max(1, cap - reservation(cap));
 
-  const parts: Frame[] = [];
   let position = 0;
+  let emitted = 0;
 
   for (;;) {
     // Everything left, as the closing fragment? `end` and `trailers` ride only this one, so it is a
     // different size from a middle fragment and has to be measured as itself. This is checked first
     // on every pass, including the one where the payload is already spent: the sequence MUST end
     // with a fragment carrying `more: false`, even if that fragment carries no bytes.
-    const first = parts.length === 0;
+    const first = emitted === 0;
     const tail = fragmentFrame(frame, sliceUnits(units, position, total - position), { first, last: true });
     if (encodedLength(codec.encode(tail)) <= cap) {
-      parts.push(tail);
-      break;
+      yield tail;
+      return;
     }
 
     if (position >= total) throw closingFloorError(cap);
@@ -206,11 +232,10 @@ export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: 
       candidate = fragmentFrame(frame, sliceUnits(units, position, count), { first, last: false });
     }
 
-    parts.push(candidate);
+    yield candidate;
+    emitted += 1;
     position += count;
   }
-
-  return parts;
 }
 
 /**
