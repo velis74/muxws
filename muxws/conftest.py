@@ -73,3 +73,53 @@ async def pair(make_pair: Callable[..., Pair]) -> AsyncIterator[Pair]:
     built.start()
     yield built
     await built.stop()
+
+
+class Lone:
+    """One peer, fed frames from the wire by hand.
+
+    A live pair cannot test a receiver's reaction to a frame no correct sender would produce: the
+    counterpart peer sees the answer, cannot account for it, and kills the connection - correctly,
+    and entirely beside the point. Injecting into a peer with no counterpart is how the conformance
+    runner does it, and it is what these tests need too.
+    """
+
+    def __init__(self, peer: Peer, socket: MemorySocket, codec: JsonCodec) -> None:
+        self.peer = peer
+        self.socket = socket
+        self.codec = codec
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self.peer.serve())
+
+    def inject(self, frame: Frame | str | bytes) -> None:
+        self.socket.inject(frame if isinstance(frame, (str, bytes)) else self.codec.encode(frame))
+
+    async def settle(self, rounds: int = 12) -> None:
+        for _ in range(rounds):
+            await asyncio.sleep(0)
+
+    def sent(self) -> list[Frame]:
+        return [self.codec.decode(message) for message in self.socket.sent]
+
+    def frames_of_type(self, frame_type: str) -> list[Frame]:
+        return [frame for frame in self.sent() if frame.type == frame_type]
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+
+
+@pytest.fixture
+def make_lone() -> Callable[..., Lone]:
+    """An acceptor with no counterpart, so injected frames cannot confuse a real peer."""
+
+    def build(**peer_options: Any) -> Lone:
+        _, socket = memory_pair()
+        codec = JsonCodec()
+        peer = Peer(socket, codec=codec, is_dialer=False, **peer_options)
+        return Lone(peer, socket, codec)
+
+    return build

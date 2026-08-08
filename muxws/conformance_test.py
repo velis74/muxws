@@ -31,11 +31,10 @@ async def _hold(payload: Any, stream: Stream) -> None:
     await stream.closed.wait()
 
 
-#: The receive-side frame-size check is M5a's, not M2's (M5a §4, WSM-FRG-031), so this one case
-#: cannot pass yet. `strict=True` on purpose: the moment M5a implements the cap, this test starts
-#: failing as an unexpected pass, which is what forces the marker to be removed rather than left to
-#: rot into a permanently skipped case.
-NOT_YET_ENFORCED = {"frame-over-max-frame-bytes": "receive-side size enforcement lands in M5a"}
+#: Empty since M5a. It held `frame-over-max-frame-bytes` while receive-side size enforcement was
+#: still that milestone's work, marked `xfail(strict=True)` so that implementing the cap would fail
+#: the suite as an unexpected pass rather than leave a skip to rot. It did exactly that.
+NOT_YET_ENFORCED: dict[str, str] = {}
 
 
 @pytest.mark.parametrize("path", FIXTURES, ids=[p.stem for p in FIXTURES])

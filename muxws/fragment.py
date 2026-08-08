@@ -6,6 +6,7 @@ isolation, which is what WSM-FRG-015 asks for.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, Final
 
 from muxws.codecs import Codec
@@ -140,7 +141,24 @@ def _largest_fitting_count(
 
 
 def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> list[Frame]:
-    """Return `[frame]` when it already fits, else the fragment frames that replace it.
+    """Every fragment at once. `iter_fragments` is the same computation, one slice at a time.
+
+    Kept because the pure-function tests and the conformance corpus want the whole list, and because
+    a caller with a small payload should not have to think about generators.
+    """
+    return list(iter_fragments(frame, cap, codec))
+
+
+def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> Iterator[Frame]:
+    """Yield `frame` when it already fits, else the fragment frames that replace it, **lazily**.
+
+    The writer consumes this one slice at a time, because WSM-FRG-018 says a stream holds at most one
+    unsent fragment: fragment *n+1* is sliced only once fragment *n* has been handed to the socket.
+    Computing them all up front would commit the wire order in advance, and interleaving - the whole
+    point of WSM-FRG-019 - becomes impossible once the order is already decided.
+
+    Every boundary decision lives here, so `split_frame` and the writer cut in exactly the same
+    places by construction rather than by two implementations agreeing.
 
     A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads nothing else and mutates neither
     argument. `cap` defaults to the protocol constant; a smaller value comes only from a test or the
@@ -157,7 +175,8 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
         raise ProtocolError(f"a frame cap of {cap} bytes is too small to hold any frame (WSM-FRG-034)")
 
     if encoded_length(codec.encode(frame)) <= cap:
-        return [frame]
+        yield frame
+        return
 
     if frame.payload is ABSENT:
         raise ProtocolError(
@@ -167,8 +186,8 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
 
     encoded = codec.encode_payload(frame.payload)
     budget = max(1, cap - _reservation(cap))
-    parts: list[Frame] = []
     position = 0
+    emitted = 0
     total = len(encoded)
 
     while True:
@@ -176,10 +195,10 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
         # a different size from a middle fragment and has to be measured as itself. This is checked
         # first on every pass, including the one where the payload is already spent: the sequence
         # MUST end with a fragment carrying `more: false`, even if that fragment carries no bytes.
-        tail = _fragment_frame(frame, encoded[position:], first=not parts, last=True)
+        tail = _fragment_frame(frame, encoded[position:], first=emitted == 0, last=True)
         if encoded_length(codec.encode(tail)) <= cap:
-            parts.append(tail)
-            break
+            yield tail
+            return
 
         if position >= total:
             raise _closing_floor_error(cap)
@@ -187,20 +206,19 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
         # Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013)...
         _, reserved_end = _take(encoded, position, budget)
         count = max(1, reserved_end - position)
-        candidate = _fragment_frame(frame, encoded[position : position + count], first=not parts, last=False)
+        candidate = _fragment_frame(frame, encoded[position : position + count], first=emitted == 0, last=False)
 
         # ...then verify, and re-split if the reservation guessed low (WSM-FRG-014). The reservation
         # is a per-codec hint; this is the guarantee.
         if encoded_length(codec.encode(candidate)) > cap:
-            count = _largest_fitting_count(frame, encoded, position, count, first=not parts, cap=cap, codec=codec)
+            count = _largest_fitting_count(frame, encoded, position, count, first=emitted == 0, cap=cap, codec=codec)
             if count == 0:
                 raise _floor_error(cap)
-            candidate = _fragment_frame(frame, encoded[position : position + count], first=not parts, last=False)
+            candidate = _fragment_frame(frame, encoded[position : position + count], first=emitted == 0, last=False)
 
-        parts.append(candidate)
+        yield candidate
+        emitted += 1
         position += count
-
-    return parts
 
 
 class Assembler:

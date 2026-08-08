@@ -90,6 +90,8 @@ async def connect(
         is_dialer=True,
         error_serializer=error_serializer,
         max_frame_bytes=max_frame_bytes,
+        max_payload_bytes=max_payload_bytes,
+        max_concurrent_streams=max_concurrent_streams,
     )
     peer._pending_options = {  # type: ignore[attr-defined]
         "hello": hello,
@@ -98,8 +100,6 @@ async def connect(
         "ping_interval": ping_interval,
         "ping_timeout": ping_timeout,
         "hello_timeout": hello_timeout,
-        "max_payload_bytes": max_payload_bytes,
-        "max_concurrent_streams": max_concurrent_streams,
         "url": url,
     }
     peer._serve_task = asyncio.create_task(peer.serve())  # type: ignore[attr-defined]
@@ -135,11 +135,9 @@ async def accept(
         is_dialer=False,
         error_serializer=error_serializer,
         max_frame_bytes=max_frame_bytes,
+        max_payload_bytes=max_payload_bytes,
+        max_concurrent_streams=max_concurrent_streams,
     )
-    peer._pending_options = {  # type: ignore[attr-defined]
-        "max_payload_bytes": max_payload_bytes,
-        "max_concurrent_streams": max_concurrent_streams,
-    }
     return peer
 
 

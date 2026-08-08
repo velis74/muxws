@@ -25,9 +25,10 @@ from muxws.errors import (
 from muxws.fragment import encoded_length, MAX_FRAME_BYTES
 from muxws.frames import ABSENT, Frame
 from muxws.lifecycle import GoawayState, MAX_STREAM_ID, new_nonce, PingRegistry
-from muxws.observability import CloseReason
+from muxws.observability import CloseReason, log_frame
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
+from muxws.writer import CONNECTION_LANE, LaneEncodingError, Writer
 
 logger = logging.getLogger("muxws.frames")
 
@@ -58,6 +59,8 @@ class Peer:
         is_dialer: bool,
         error_serializer: ErrorSerializer | None = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
+        max_payload_bytes: int = 67_108_864,
+        max_concurrent_streams: int = 100,
     ) -> None:
         self.id = f"{_PROCESS_PREFIX}-{next(_CONNECTION_COUNTER)}"
         #: An ordinary dict with ordinary dict semantics. muxws never reads it (WSM-REG-001/002).
@@ -67,7 +70,13 @@ class Peer:
         self._codec = codec
         self._is_dialer = is_dialer
         self._error_serializer = error_serializer or default_error_serializer
-        self._max_frame_bytes = max_frame_bytes
+        self._max_frame_bytes = _checked_frame_cap(max_frame_bytes, codec)
+        #: The largest reassembled payload this peer accepts. **Local** (WSM-FRG-035): never
+        #: announced, and a sender learns of it only from the reset it provokes.
+        self._max_payload_bytes = max_payload_bytes
+        #: How many streams the **remote** may have open here at once. Also local, also unannounced,
+        #: and never checked by the sender (WSM-STM-036).
+        self._max_concurrent_streams = max_concurrent_streams
 
         # The dialer allocates odd ids, the acceptor even ones (WSM-SID-002).
         self._next_id = 1 if is_dialer else 2
@@ -81,10 +90,10 @@ class Peer:
         self._close_handlers: list[Callable[[Any], None]] = []
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
 
+        self._writer = Writer(codec, max_frame_bytes=self._max_frame_bytes)
         self._pings = PingRegistry()
         self._ping_started: dict[str, float] = {}
         self._goaway = GoawayState()
-        self._outbound: asyncio.Queue[Frame | None] = asyncio.Queue()
         self._writer_task: asyncio.Task[None] | None = None
         self._is_open = True
         self._death: ConnectionClosed | None = None
@@ -218,11 +227,15 @@ class Peer:
 
     def _enqueue(self, frame: Frame) -> None:
         """Synchronous by contract: `open()` must not suspend between allocating and enqueuing."""
-        self._outbound.put_nowait(frame)
+        self._writer.enqueue(frame)
 
     async def _write_loop(self) -> None:
         while True:
-            frame = await self._outbound.get()
+            try:
+                frame = await self._writer.next_frame()
+            except LaneEncodingError as failure:
+                self._fail_lane(failure)
+                continue
             if frame is None:
                 return
             try:
@@ -232,6 +245,9 @@ class Peer:
                     await self._socket.send_bytes(encoded)  # type: ignore[arg-type]
                 else:
                     await self._socket.send_text(encoded)  # type: ignore[arg-type]
+                # Only now: fragment n+1 is sliced once fragment n has reached the socket, never
+                # before (WSM-FRG-018).
+                self._writer.advance(frame.stream if frame.stream is not None else CONNECTION_LANE)
             except ConnectionClosed:
                 return
             except asyncio.CancelledError:
@@ -242,6 +258,21 @@ class Peer:
                 # send sat in it forever, and the peer went on reporting itself open.
                 logger.exception("muxws conn=%s could not send a %s frame", self.id, frame.type)
                 self._fail_unsendable(frame, exc)
+
+    def _fail_lane(self, failure: LaneEncodingError) -> None:
+        """One lane's frame could not be encoded. Fail its stream; keep the connection working."""
+        logger.exception(
+            "muxws conn=%s could not encode a frame on stream %s", self.id, failure.lane, exc_info=failure.cause
+        )
+        stream = self._streams.get(failure.lane)
+        if stream is None:
+            self._die(ConnectionClosed(str(failure), code=1011))
+            return
+        self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.INTERNAL_ERROR), reason=str(failure.cause)))
+        stream._fail(
+            exception_for_reset(ResetCode.INTERNAL_ERROR, str(failure.cause), stream_id=stream.id),
+            notify_remote=False,
+        )
 
     def _fail_unsendable(self, frame: Frame, exc: BaseException) -> None:
         """One frame could not be encoded. Fail its stream and keep the connection working."""
@@ -259,17 +290,7 @@ class Peer:
         length = encoded_length(encoded)
         for handler in self._frame_handlers:
             handler(direction, frame, length)
-        if logger.isEnabledFor(logging.DEBUG):
-            # Never the payload's contents: application data routinely holds secrets (WSM-OBS-002).
-            logger.debug(
-                "muxws conn=%s dir=%s type=%-6s stream=%s end=%d bytes=%d",
-                self.id,
-                direction,
-                frame.type,
-                frame.stream if frame.stream is not None else "-",
-                int(frame.end),
-                length,
-            )
+        log_frame(self.id, direction, frame, length)
 
     # ------------------------------------------------------------------ the read loop
 
@@ -290,6 +311,8 @@ class Peer:
                     await self._fail_connection(f"undecodable message: {exc}")
                     return
                 self._report_frame("rx", frame, message)
+                if not await self._within_frame_cap(frame, message):
+                    continue
                 try:
                     keep_going = await self._dispatch(frame)
                 except asyncio.CancelledError:
@@ -305,6 +328,37 @@ class Peer:
                     return
         finally:
             await self._stop_writer()
+
+    async def _within_frame_cap(self, frame: Frame, message: str | bytes) -> bool:
+        """WSM-FRG-031: measure the **whole encoded message**, never the `fragment` field alone.
+
+        A receiver must accept anything up to `MAX_FRAME_BYTES` (WSM-FRG-004), so the check only
+        bites above the constant - or, in a test, above the lowered construction cap.
+        """
+        size = encoded_length(message)
+        if size <= self._max_frame_bytes:
+            return True
+        if frame.stream is None:
+            await self._fail_connection(f"a connection-level frame of {size} bytes exceeds the cap")
+            return False
+
+        stream = self._streams.get(frame.stream)
+        if stream is not None:
+            await self._reset_stream(
+                stream,
+                ResetCode.PAYLOAD_TOO_LARGE,
+                f"an encoded message of {size} bytes exceeds this receiver's cap (WSM-FRG-031)",
+            )
+        else:
+            self._enqueue(
+                Frame(
+                    "reset",
+                    stream=frame.stream,
+                    code=int(ResetCode.PAYLOAD_TOO_LARGE),
+                    reason=f"an encoded message of {size} bytes exceeds this receiver's cap",
+                )
+            )
+        return False
 
     async def _dispatch(self, frame: Frame) -> bool:
         """Route one decoded frame. Returns False when the connection must end."""
@@ -455,12 +509,31 @@ class Peer:
             return False
 
         self._highest_remote_open = stream_id
+
+        if self._remote_stream_count() >= self._max_concurrent_streams:
+            # Refused **without invoking the handler**: nothing ran, so the opener may safely take it
+            # elsewhere (WSM-STM-036). There is no STREAM_LIMIT code and no announced quota - the
+            # sender is told nothing in advance and learns only from this reset.
+            self._enqueue(
+                Frame(
+                    "reset",
+                    stream=stream_id,
+                    code=int(ResetCode.REFUSED),
+                    reason=f"this receiver already holds {self._max_concurrent_streams} of your streams",
+                )
+            )
+            return True
+
         stream = Stream(self, stream_id, headers=frame.headers, local=False)
         stream.state = StreamState.HALF_CLOSED_REMOTE if frame.end else StreamState.OPEN
         self._streams[stream_id] = stream
 
         if frame.fragment is not None:
             stream._opening = True
+            # A fragmented *open* is the same memory exposure as a fragmented *data*, and was the one
+            # path into this peer that no cap watched.
+            if not await self._within_payload_cap(stream, frame):
+                return True
             payload = stream._assembler.feed(frame, self._codec)
             if payload is ABSENT:
                 return True
@@ -474,6 +547,8 @@ class Peer:
 
     async def _continue_open(self, stream: Stream, frame: Frame) -> bool:
         """A later fragment of an opening payload: not a second open (WSM-STM-031)."""
+        if not await self._within_payload_cap(stream, frame):
+            return True
         payload = stream._assembler.feed(frame, self._codec)
         if payload is ABSENT:
             return True
@@ -581,6 +656,14 @@ class Peer:
             return True
         return await self._on_data(stream, frame)
 
+    def _remote_stream_count(self) -> int:
+        """Only the streams the **remote** opened (WSM-STM-037).
+
+        The limit bounds work the other side can impose. Counting our own would be the announced
+        quota rebuilt by hand, against a number this peer cannot know (WSM-INV-007).
+        """
+        return sum(1 for stream in self._streams.values() if not stream.local)
+
     def _is_our_parity(self, stream_id: int) -> bool:
         return stream_id % 2 == (1 if self._is_dialer else 0)
 
@@ -597,6 +680,8 @@ class Peer:
             return True
 
         if frame.fragment is not None:
+            if not await self._within_payload_cap(stream, frame):
+                return True
             payload = stream._assembler.feed(frame, self._codec)
             if payload is ABSENT:
                 return True
@@ -607,6 +692,25 @@ class Peer:
         if frame.end:
             stream._remote_end(frame.trailers)
         return True
+
+    async def _within_payload_cap(self, stream: Stream, frame: Frame) -> bool:
+        """WSM-FRG-032/WSM-INV-017: reject **on the crossing fragment**, not after reassembly.
+
+        Bounding memory is the limit's whole purpose. A receiver that assembles the payload in order
+        to measure it has already spent everything the limit existed to protect, and the partial
+        buffer is dropped in the same step for the same reason (M5a decision 1).
+        """
+        incoming = encoded_length(frame.fragment) if frame.fragment is not None else 0
+        if stream._assembler.byte_length + incoming <= self._max_payload_bytes:
+            return True
+
+        stream._assembler.reset()
+        await self._reset_stream(
+            stream,
+            ResetCode.PAYLOAD_TOO_LARGE,
+            f"a payload crossed this receiver's {self._max_payload_bytes}-byte limit (WSM-FRG-032)",
+        )
+        return False
 
     async def _reset_stream(self, stream: Stream, code: ResetCode, reason: str) -> None:
         self._enqueue(Frame("reset", stream=stream.id, code=int(code), reason=reason))
@@ -631,14 +735,14 @@ class Peer:
 
     async def _drain_outbound(self) -> None:
         """Let the writer flush what is already queued, so `goaway` actually reaches the wire."""
-        for _ in range(100):
-            if self._outbound.empty():
+        for _ in range(200):
+            if len(self._writer) == 0:
                 break
             await asyncio.sleep(0)
 
     async def _stop_writer(self) -> None:
         if self._writer_task is not None and not self._writer_task.done():
-            await self._outbound.put(None)
+            self._writer.stop()
             try:
                 await asyncio.wait_for(self._writer_task, 1.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -652,6 +756,8 @@ class Peer:
         self._death = cause
 
         self._pings.fail_all(cause)
+        # Nothing is held for a next socket (WSM-RCN-042); M5b calls exactly this one method.
+        self._writer.discard_all()
         for stream in list(self._streams.values()):
             stream._fail(
                 ConnectionLost(f"connection closed: {cause.reason or cause}", stream_id=stream.id),
@@ -670,3 +776,24 @@ class Peer:
     def __repr__(self) -> str:
         role = "dialer" if self._is_dialer else "acceptor"
         return f"<Peer {self.id} {role} streams={len(self._streams)}>"
+
+
+def _checked_frame_cap(cap: int, codec: Codec) -> int:
+    """WSM-FRG-034: a cap too small to hold an envelope plus one unit is a configuration error.
+
+    Discovered here, at construction, rather than later as an infinite split loop. The cap is a
+    protocol constant (WSM-FRG-004); the only way a smaller number reaches a peer is the test-only
+    construction argument of WSM-FRG-005, which the conformance runner uses.
+    """
+    from muxws.fragment import split_frame
+
+    if cap == MAX_FRAME_BYTES:
+        return cap
+    probe = Frame("data", stream=1, payload={"a": "aaaaaaaa"})
+    try:
+        split_frame(probe, cap, codec)
+    except ProtocolError as exc:
+        raise ProtocolError(
+            f"max_frame_bytes={cap} cannot hold an envelope plus one indivisible unit of payload: {exc} (WSM-FRG-034)"
+        ) from None
+    return cap
