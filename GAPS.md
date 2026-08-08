@@ -476,3 +476,122 @@ through a real `Peer` pair, one fragmenting a 40 kB payload and one sending 200 
 frame must reach the wire within four frames. Replacing the rotation with a genuine FIFO fails that
 test and two others; the earlier isolated tests alone did not notice the peer bypassing the writer
 entirely. The same shape of blind spot applies to any port: test the seam, not only the part.
+
+## muxws-m5b-reconnect-and-registry.md — WSM-RCN-011, the close code a locally-declared-dead socket carries
+
+**What I needed:** the WebSocket close code to send when *this* peer decides the socket is dead —
+after a swallowed pong (WSM-RCN-011), or after a hello that was never acknowledged (WSM-RCN-026).
+
+**What the brief says:** "the socket MUST be declared dead, closed locally". It names no code, and
+neither does the spec.
+
+**What I assumed:** 1000. 1006 is reserved for "closed abnormally" and a peer may never put it on the
+wire; `websockets` rejects it outright (`Close(1006, ...).check()` raises `ProtocolError`). The first
+implementation chose 1006 in Python, the rejection was swallowed by the surrounding `except`, and the
+socket therefore stayed **open** — so `serve()` never returned, the supervisor never saw the loss, and
+WSM-RCN-011's re-dial never happened on a real transport. Nothing caught it because every driver test
+dialled the in-memory rig, whose `close()` discards the code, and the one test that used a real server
+had the heartbeat disabled. The rule needs the code stated, and a locally-declared death needs a named
+seam (`Peer._close_socket_locally` / `closeSocketLocally`) rather than a raw `socket.close` at each
+call site.
+
+## muxws-m5b-reconnect-and-registry.md — WSM-RCN-006, which exception a failed hello raises
+
+**What I needed:** the exception class `connect()` raises when the hello times out or is reset.
+
+**What the brief says:** `connect()` MUST raise "with the underlying error". It does not say what the
+underlying error of a hello failure is, and the two ports independently chose differently —
+`ConnectionClosed` in Python, `StreamTimeout` / `StreamReset` in TypeScript.
+
+**What I assumed:** the underlying error, unwrapped: `StreamTimeout` for the deadline and the raw
+`StreamReset` for a reset hello. A timeout wrapped in a connection close is not the underlying error,
+and WSM-ERR-002 already makes both of those stream-shaped failures — which is what a hello is.
+
+## muxws-m5b-reconnect-and-registry.md — WSM-RCN-043, `is_open` during the hello window
+
+**What I needed:** whether a connection whose socket is open but whose hello has not been acknowledged
+counts as open.
+
+**What the brief says:** WSM-RCN-043 — `is_open` MUST be false "for the whole window between a socket
+loss and the next **established** connection" — and WSM-RCN-004 defines established as socket **and**
+hello ack. WSM-RCN-023 separately requires the hello to precede every application frame. But the brief
+also lists `is_open` among the things a socket-open sets, and its §6 note says "for a peer with no
+hello, established really is socket-open", which reads as if socket-open were the flag.
+
+**What I assumed:** the rules win over the note. `is_open` is socket-open **and** established, so
+during the hello window `open()` raises `ConnectionLost` and `notify()`/`request()` reject — which is
+also the only way WSM-RCN-023 can be enforced rather than hoped for. A peer with no hello is
+established at socket-open, exactly as the note says, so nothing changes for it. This needed a private
+allocate-and-enqueue path for the driver's own hello, since it goes through `open()` itself; that path
+keeps WSM-SID-006's indivisibility.
+
+**What it cost, found afterwards:** `Stream.reset()` in both ports read `peer.is_open` meaning *"is
+there a wire I can put this frame on"*, which is a different question from *"may the application start
+something here"* — and narrowing `is_open` silently changed the answer to the first one. A stream the
+acceptor pushed inside the hello window and this side then reset was failed locally with **no `reset`
+on the wire**, leaving the remote holding a stream this peer had already closed (WSM-STM-021). Both
+ports now have an explicit `_has_a_socket` / `hasASocket` for the wire question, and `is_open` answers
+only the application's. The lesson is narrower than the rule: a predicate that two call sites read for
+two different questions cannot be narrowed for one of them without checking the other.
+
+## muxws-m5b-reconnect-and-registry.md — WSM-RCN-040/044, `max_attempts = 0` and double reporting
+
+**What I needed:** what `max_attempts=0` means, and how many `will_retry=False` closes a peer may fire.
+
+**What the brief says:** WSM-RCN-040 — `on_close` fires on every socket loss, exactly once per loss,
+with `will_retry` false only when the cap is exhausted or `close()` was deliberate. WSM-RCN-044 —
+exhaustion fires `on_close` once with `will_retry` false. Nothing reconciles the two when the loss
+that exhausts the cap is itself the last one.
+
+**What I assumed:** at most one `will_retry=False` close per peer, ever; whichever path reaches it
+first wins and the other is suppressed. `max_attempts=0` therefore means the first loss reports
+`will_retry=False` and no dial follows — not a silent return, which is what one port did.
+
+## muxws-m5b-reconnect-and-registry.md — an application callback must not be able to kill the driver
+
+**What I needed:** what happens when an `on_reconnect` or `on_close` handler raises.
+
+**What the brief says:** nothing. It specifies when the callbacks fire and what they guarantee, not
+what their failure costs.
+
+**What I assumed:** the conservative option — every application callback is isolated, logged, and the
+next handler still runs. A throwing `on_reconnect` handler unwound into the supervisor and stopped it
+permanently: the peer then looked alive and never dialled again, with no error anywhere, which is the
+same silent-spinner failure WSM-INV-011 exists to prevent one level up.
+
+## muxws-m3-transports.md — `connect()` was never implemented in TypeScript
+
+**What I needed:** the TypeScript dialer entry point, which is where the reconnect helper lives.
+
+**What the brief says:** m3 §4.5 declares `export function connect(url: string, options?:
+ConnectOptions): Promise<Peer>` and says `ConnectOptions` accepts `hello`, `helloHeaders`,
+`reconnect`, `pingIntervalMs`, `pingTimeoutMs`, `helloTimeoutMs`, `codec`, `onStream`, `onClose`,
+`onReconnect` — "accepted and stored in M3 but not acted on".
+
+**What went wrong:** M3 shipped `BrowserSocket.connect` and `accept`/`serve`, and no `connect()` at
+all. Nothing noticed, because M3's own tests exercised the socket adapter rather than the factory, and
+the Python port — which does have `connect()` — kept the milestone looking symmetric. M5b had to build
+it before it could put a reconnect helper in it.
+
+**What I assumed:** m3 §4.5's declaration verbatim, including all three callbacks. Python's `connect()`
+gained the same three, which m3 §4.5's Python declaration does not list — that declaration does not
+list `max_payload_bytes` either, so it was never the exhaustive signature. Without `on_stream` at
+`connect()` there is no way to register a handler before the first hello, and an acceptor that pushes a
+stream on the hello is answered `reset(REFUSED, "no on_stream handler")` in one port and served in the
+other.
+
+## muxws-m5b-reconnect-and-registry.md — WSM-RCN-003/011, how far the injected clock reaches
+
+**What I needed:** to test the heartbeat's `ping_interval + ping_timeout` detection bound "against an
+injected clock", as WSM-RCN-011's named test requires.
+
+**What the brief says:** the schedule MUST be a pure function of `(attempts, options, draw)` tested
+against an injected clock and random source (WSM-RCN-003), and the heartbeat test must not wait on
+anything resembling a TCP timeout (WSM-RCN-011).
+
+**What I assumed:** the injection reaches as far as the code this library owns. The backoff schedule is
+genuinely pure and is tested with an injected draw, and the heartbeat's *idle* arithmetic runs off an
+injected clock and an injected sleep. The pong deadline itself is `asyncio.wait_for`, which no
+injection reaches without reimplementing it, so the end-to-end bound is asserted against the real clock
+with interval and timeout in the tens of milliseconds. That waits on nothing TCP-shaped, which is what
+the rule is protecting; a fake clock wrapped around `wait_for` would test the wrapper.

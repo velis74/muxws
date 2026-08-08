@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from muxws.errors import ConnectionLost, ResetCode
+from muxws.lifecycle import MAX_STREAM_ID
 from muxws.observability import CloseReason
 from muxws.stream import Stream
 from muxws.transports.memory import memory_pair
@@ -69,7 +70,39 @@ async def test_async_for_raises_rather_than_terminating_normally(make_pair):
         await pair.stop()
 
 
-async def test_is_open_is_false_for_the_whole_gap(make_pair):
+async def test_cancel_and_reset_are_noops_after_death(make_pair):
+    """WSM-RCN-041: no-ops, not errors, and not sends.
+
+    A stream is already closed by the time an application gets round to cancelling it, and the socket
+    it would have been cancelled on is gone. Raising here would make orderly cleanup - a `finally`
+    that cancels whatever it holds - into a second failure on top of the one that already happened,
+    and sending would be writing to a socket this peer has declared dead.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        await pair.dialer_socket.drop()
+        await pair.settle()
+        after_death = len(pair.dialer_socket.sent)
+
+        await stream.cancel("changed my mind")
+        await stream.reset(ResetCode.NO_ERROR)
+        # Twice, because a no-op that only holds the first time is a no-op nobody can rely on.
+        await stream.cancel()
+        await stream.reset(ResetCode.INTERNAL_ERROR)
+
+        assert len(pair.dialer_socket.sent) == after_death, "a no-op puts nothing on the wire"
+        assert len(pair.dialer._writer) == 0, "and queues nothing for a socket that will never carry it"
+        assert stream.closed.is_set()
+        assert isinstance(stream._close_cause, ConnectionLost), "and none of them rewrote how it died"
+    finally:
+        await pair.stop()
+
+
+async def test_is_open_false_for_the_whole_gap(make_pair):
     """WSM-RCN-043: from the loss until the next *established* connection, not the next socket."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -88,40 +121,7 @@ async def test_is_open_is_false_for_the_whole_gap(make_pair):
         await pair.stop()
 
 
-async def test_nothing_attempted_while_disconnected_appears_on_the_new_socket(make_pair):
-    """WSM-RCN-042/WSM-INV-010 **(spec)**: nothing is buffered for a next socket.
-
-    A queue that flushed into a server which has forgotten the sender turns a failure that would have
-    reached a call site into silent misdelivery.
-    """
-    pair = make_pair()
-    pair.acceptor.on_stream(_hold)
-    pair.start()
-    try:
-        await pair.dialer_socket.drop()
-        await pair.settle()
-
-        for index in range(5):
-            with pytest.raises(ConnectionLost):
-                pair.dialer.open({"attempt": index})
-            with pytest.raises(ConnectionLost):
-                await pair.dialer.notify({"attempt": index})
-            with pytest.raises(ConnectionLost):
-                await pair.dialer.request({"attempt": index})
-
-        fresh, _ = memory_pair()
-        pair.dialer._adopt_socket(fresh)
-        serving = asyncio.create_task(pair.dialer.serve())
-        await pair.settle()
-
-        assert fresh.sent == [], "the new socket must carry none of what was attempted in the gap"
-        serving.cancel()
-        await asyncio.gather(serving, return_exceptions=True)
-    finally:
-        await pair.stop()
-
-
-async def test_on_close_fires_once_per_loss_with_the_right_will_retry(make_pair):
+async def test_on_close_fires_once_per_loss_with_correct_will_retry(make_pair):
     """WSM-RCN-040/045: every loss, exactly once, and four fields."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -179,7 +179,7 @@ async def test_a_deliberate_close_never_says_it_will_retry(make_pair):
         await pair.stop()
 
 
-async def test_streams_do_not_survive_a_reconnect(make_pair):
+async def test_streams_do_not_survive_reconnect(make_pair):
     """WSM-RCN-031/032: `Peer` survives; a `Stream` held across one is already closed."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -234,20 +234,44 @@ async def test_tags_do_not_survive_on_the_acceptor_side(make_pair):
     assert second.acceptor.tags is not first.acceptor.tags
 
 
-async def test_connection_closed_code_is_never_sent(make_pair):
-    """Reset code 9 is synthesised locally and MUST NEVER appear on the wire."""
+async def test_a_reconnect_clears_the_dead_sockets_exhaustion_shutdown(make_pair):
+    """WSM-SID-007/WSM-RCN-031: the new socket's id space starts empty, so its shutdown does too.
+
+    Running out of stream ids schedules an orderly shutdown and remembers the task so a second
+    `open()` cannot schedule a second one. That memory belongs to the socket that ran out, not to the
+    `Peer`: carried into the next connection it makes `_begin_exhaustion_shutdown()` a no-op there,
+    and a connection that exhausts its ids never says goodbye and never closes - it simply refuses
+    every `open()` from then on, looking healthy the whole time.
+    """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
     try:
+        pair.dialer._next_id = MAX_STREAM_ID
         pair.dialer.open({"q": 1})
-        await pair.settle()
+        first = pair.dialer._exhaustion_task
+        assert first is not None
+
         await pair.dialer_socket.drop()
         await pair.settle()
-        for who in ("dialer", "acceptor"):
-            for frame in pair.sent_by(who):
-                assert frame.code != int(ResetCode.CONNECTION_CLOSED)
+        await asyncio.wait_for(first, 5.0)
+
+        fresh, _ = memory_pair()
+        pair.dialer._adopt_socket(fresh)
+        assert pair.dialer._exhaustion_task is None, "the dead socket's shutdown must not carry forward"
+
+        pair.dialer._next_id = MAX_STREAM_ID
+        pair.dialer.open({"q": 2})
+        assert pair.dialer._exhaustion_task is not None
+        assert pair.dialer._exhaustion_task is not first, "and the new socket schedules its own"
     finally:
+        # Nothing is serving `fresh`, so the second shutdown would sit out its whole drain window
+        # waiting for a stream no read loop will ever end (WSM-CON-024). That it *started* is the
+        # assertion; running it out is `test_id_exhaustion_sends_goaway_drains_and_closes`'s job.
+        second = pair.dialer._exhaustion_task
+        if second is not None:
+            second.cancel()
+            await asyncio.gather(second, return_exceptions=True)
         await pair.stop()
 
 

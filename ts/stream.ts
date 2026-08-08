@@ -72,7 +72,8 @@ export interface ResultOptions {
  * real `Peer` satisfies it by shape.
  */
 export interface StreamPeer {
-  readonly isOpen: boolean;
+  /** @internal Whether a wire still exists - not whether the connection is established. See `Peer`. */
+  readonly hasASocket: boolean;
   /** @internal Synchronous by contract: `open()` must not suspend between allocating and enqueuing. */
   enqueue(frame: Frame): void;
   /** @internal Drop a closed stream from the live map. */
@@ -333,7 +334,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   async reset(code: ResetCode, reason?: string): Promise<void> {
     const sendable = sendableResetCode(code);
     if (this.state === StreamState.CLOSED) return;
-    if (this.peer.isOpen) {
+    // `hasASocket`, not `isOpen`: the question here is whether a wire exists, and the hello window
+    // makes `isOpen` false while the socket is perfectly alive (WSM-RCN-043). Asking the wrong one
+    // loses the `reset` for any stream the acceptor pushed inside that window.
+    if (this.peer.hasASocket) {
       this.peer.enqueue({ type: 'reset', stream: this.id, code: sendable, reason: reason ?? null });
     }
     this.fail(exceptionForReset(sendable, reason ?? null, { streamId: this.id }));

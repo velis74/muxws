@@ -8,7 +8,7 @@ import logging
 import random
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from muxws.codecs import Codec
 from muxws.errors import (
@@ -30,6 +30,9 @@ from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
 from muxws.writer import CONNECTION_LANE, LaneEncodingError, Writer
 
+if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to a type checker
+    from muxws.reconnect import ConnectionLoop
+
 logger = logging.getLogger("muxws.frames")
 
 #: Three lowercase hex characters, drawn once per process. A log correlation id is not
@@ -41,6 +44,11 @@ _CONNECTION_COUNTER = itertools.count()
 
 StreamHandler = Callable[[Any, Stream], Any]
 ErrorSerializer = Callable[[BaseException], Any]
+
+
+def _loop_time() -> float:
+    """The heartbeat's clock. One function, so an injected clock moves both halves together."""
+    return asyncio.get_running_loop().time()
 
 
 def default_error_serializer(exc: BaseException) -> Any:
@@ -90,8 +98,11 @@ class Peer:
         self._close_handlers: list[Callable[[Any], None]] = []
         self._reconnect_handlers: list[Callable[[int, Any], None]] = []
         #: True while the reconnect helper intends to dial again. `CloseReason.will_retry` reads it,
-        #: and it is false whenever `max_attempts` is exhausted or `close()` was deliberate.
+        #: and it is false whenever `max_attempts` is exhausted or `close()` was deliberate. Read
+        #: only: what the helper *does* next is decided by `should_retry`, never by this field.
         self._will_retry = False
+        #: Latched by the first `will_retry=False` close, so there is never a second (WSM-RCN-044).
+        self._final_close_reported = False
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
 
         self._writer = Writer(codec, max_frame_bytes=self._max_frame_bytes)
@@ -100,15 +111,55 @@ class Peer:
         self._goaway = GoawayState()
         self._writer_task: asyncio.Task[None] | None = None
         self._is_open = True
+        #: Socket-open is not established. WSM-RCN-043 asks for `is_open` to be false for the whole
+        #: window between a socket loss and the next *established* connection, and when a hello is
+        #: configured the hello ack is the whole of the difference (WSM-RCN-004). Default **true**,
+        #: so an acceptor - which has no hello and no helper - is established the moment its socket
+        #: is (WSM-CON-030); only the reconnect helper ever writes it.
+        self._established = True
         self._death: ConnectionClosed | None = None
         #: Held so the garbage collector cannot cancel the orderly shutdown WSM-SID-007 requires.
         self._exhaustion_task: asyncio.Task[None] | None = None
+
+        #: One clock for both halves of the heartbeat: the stamp and the idle check read the same
+        #: function, so an injected clock cannot move one without the other (WSM-RCN-010).
+        self._clock: Callable[[], float] = _loop_time
+        #: Stamped by `_report_frame` in **both** directions, because idle means idle: a busy socket
+        #: must not pay for a ping every interval (WSM-RCN-010, §6).
+        self._last_activity: float = 0.0
+        #: The dialer's reconnect helper, held here so `close()` can stop it - a deliberate close
+        #: MUST never dial again (WSM-RCN-040/044) - and so the GC cannot collect the supervisor.
+        self._connection_loop: ConnectionLoop | None = None
 
     # ------------------------------------------------------------------ properties
 
     @property
     def is_open(self) -> bool:
+        """Socket-open **and** established (WSM-RCN-043).
+
+        Both halves, because a socket that is up but whose hello has not been acknowledged is not a
+        connection an application may send on: frames put on it would precede the hello (WSM-RCN-023)
+        and reach an acceptor that has not yet been told who is speaking.
+        """
+        return self._is_open and self._established
+
+    @property
+    def _has_a_socket(self) -> bool:
+        """Whether a frame put on the writer now can still reach a wire.
+
+        Not the same question as `is_open`, and the difference is why this exists. `is_open` answers
+        "may the application start something here", which the hello window makes false (WSM-RCN-043).
+        This answers "is there a socket underneath", which that window does not make false - the
+        hello itself travels on it. `Stream.reset()` needs the second question: a stream the acceptor
+        pushed during the hello window that is reset by its handler must put the `reset` on the wire,
+        or the remote is left holding a stream this side has already closed (WSM-STM-021).
+        """
         return self._is_open
+
+    @property
+    def last_activity(self) -> float:
+        """When a frame last crossed this socket, in either direction, on `self._clock`."""
+        return self._last_activity
 
     @property
     def streams(self) -> Mapping[int, Stream]:
@@ -143,8 +194,15 @@ class Peer:
         return handler
 
     def _fire_reconnect(self, attempt: int) -> None:
+        # Isolated, because this runs on the supervisor's own task: an application handler that
+        # raised would unwind into the reconnect loop and stop it for good, and the next socket loss
+        # would never be dialled out of (WSM-RCN-011/030). A library whose reconnect loop can be
+        # killed by an application's logging call is not a reconnect loop.
         for handler in self._reconnect_handlers:
-            handler(attempt, self)
+            try:
+                handler(attempt, self)
+            except Exception:  # noqa: BLE001 - one bad handler must not cost the others their turn
+                logger.exception("muxws conn=%s an on_reconnect handler raised", self.id)
 
     def on_frame(self, handler: Callable[[str, Frame, int], None]) -> Callable[[str, Frame, int], None]:
         """`(direction, frame, byte_length)`, before encode and after decode (WSM-OBS-003)."""
@@ -156,12 +214,23 @@ class Peer:
     def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, end: bool = False) -> Stream:
         """Open a stream. **Synchronous**, and it never queues (WSM-API-001/004).
 
-        Allocation and enqueue are one indivisible step with no suspension point between them, so
-        wire order is allocation order by construction (WSM-SID-006). Two concurrent `open()` calls
-        that could interleave here would put a non-monotonic id sequence on the wire - a protocol
-        error this peer would be committing against itself (WSM-INV-005).
+        The guard and the allocation are separate methods because the reconnect helper's hello is the
+        one stream that goes out while `is_open` is still false - it is what *makes* the connection
+        established (WSM-RCN-004/043) - and it takes `_allocate_and_enqueue` directly. The guard is
+        not parameterised for it: an `open(..., ignore_the_guard=True)` on the public method is one
+        misread argument away from an application frame preceding the hello (WSM-RCN-023).
         """
         self._raise_if_unopenable()
+        return self._allocate_and_enqueue(payload, headers=headers, end=end)
+
+    def _allocate_and_enqueue(self, payload: Any, *, headers: dict[str, Any] | None, end: bool) -> Stream:
+        """Allocate an id and enqueue the `open` - one indivisible step (WSM-SID-006).
+
+        There is no suspension point anywhere between the allocation and the enqueue, so wire order
+        is allocation order by construction. Two concurrent `open()` calls that could interleave here
+        would put a non-monotonic id sequence on the wire - a protocol error this peer would be
+        committing against itself (WSM-INV-005).
+        """
         if self._exhausted():
             raise ConnectionGoingAway(
                 f"stream ids are exhausted at {MAX_STREAM_ID}; this connection can open no more (WSM-SID-007)"
@@ -179,7 +248,9 @@ class Peer:
 
     def _raise_if_unopenable(self) -> None:
         """WSM-API-004: exactly two synchronous raises, and never one for concurrency."""
-        if not self._is_open:
+        # `is_open`, not `_is_open`: a socket whose hello has not been acknowledged is not yet a
+        # connection, and a frame opened on it would precede the hello (WSM-RCN-023/043).
+        if not self.is_open:
             raise ConnectionLost("the peer is between sockets; nothing is buffered for the next one")
         if self._goaway.received:
             raise ConnectionGoingAway(
@@ -305,9 +376,19 @@ class Peer:
         )
 
     def _report_frame(self, direction: str, frame: Frame, encoded: str | bytes) -> None:
+        # Both directions, and every frame type: a socket carrying data one way only is not idle, and
+        # a heartbeat that pinged it anyway would burn an interval's worth of frames for nothing
+        # (WSM-RCN-010).
+        self._last_activity = self._clock()
         length = encoded_length(encoded)
+        # Isolated for the same reason as `_fire_reconnect`: this runs inside the read loop and
+        # inside the write loop, so an observer that raised would kill the connection it was only
+        # meant to be watching (WSM-OBS-003).
         for handler in self._frame_handlers:
-            handler(direction, frame, length)
+            try:
+                handler(direction, frame, length)
+            except Exception:  # noqa: BLE001 - an observer is not allowed to break what it observes
+                logger.exception("muxws conn=%s an on_frame handler raised", self.id)
         log_frame(self.id, direction, frame, length)
 
     # ------------------------------------------------------------------ the read loop
@@ -432,6 +513,15 @@ class Peer:
 
     async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None = None, drain: float = 10.0) -> None:
         """`goaway`, drain, then close - in that order (WSM-CON-025)."""
+        # Both of these come **before** the `is_open` guard, and that ordering is the whole of
+        # WSM-RCN-040/044 for a dialer. The gap between two sockets is precisely the window in which
+        # `is_open` is already false and the helper is asleep in its backoff: a close that returned
+        # early there would stop nothing, the driver would dial again behind the caller, and the
+        # application would be handed back a live connection it had already given up on - on the same
+        # `Peer`, so it would never think to close it a second time.
+        self._will_retry = False
+        if self._connection_loop is not None:
+            await self._connection_loop.stop()
         if not self._is_open:
             return
         self._send_goaway(code, reason)
@@ -766,14 +856,25 @@ class Peer:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._writer_task.cancel()
 
-    def _die(self, cause: ConnectionClosed) -> None:
-        """Socket death: every live stream fails with ConnectionLost **before** on_close fires."""
+    def _die(self, cause: ConnectionClosed, *, notify: bool = True) -> None:
+        """Socket death: every live stream fails with ConnectionLost **before** on_close fires.
+
+        `notify=False` is the one case where a peer dies without a report: the **first** connection
+        that never established. `connect()` raising is the report (WSM-RCN-006), and there is nobody
+        who could have received the callback - the caller never got the peer back, so it never
+        attached a handler. Marking it dead is still not optional: leaving `is_open` to a race
+        between the read loop and the cancel is how a peer that failed its hello reads as alive.
+        """
         if not self._is_open:
             return
         self._is_open = False
         self._death = cause
 
         self._pings.fail_all(cause)
+        # `ping()` prunes its own start time on a pong and on its own deadline, but neither of those
+        # happens when the socket dies underneath an outstanding ping - which is the ordinary case
+        # for a heartbeat-driven peer, once per reconnect, for the life of the process.
+        self._ping_started.clear()
         # Nothing is held for a next socket (WSM-RCN-042); M5b calls exactly this one method.
         self._writer.discard_all()
         for stream in list(self._streams.values()):
@@ -783,18 +884,49 @@ class Peer:
             )
         self._streams.clear()
 
-        reason = CloseReason(
-            code=cause.code, reason=cause.reason, was_clean=cause.was_clean, will_retry=self._will_retry
-        )
+        if notify:
+            self._notify_close(
+                CloseReason(
+                    code=cause.code, reason=cause.reason, was_clean=cause.was_clean, will_retry=self._will_retry
+                )
+            )
+
+    def _notify_close(self, reason: CloseReason) -> None:
+        """Fire `on_close` once with an already-built reason.
+
+        Separate from `_die` because exhausting `max_attempts` is not a socket loss - the socket is
+        long gone - and yet it MUST fire `on_close` once with `will_retry` false (WSM-RCN-044). Two
+        callers and no more: `_die` for every socket loss, and the helper for that one withdrawal.
+
+        **At most one `will_retry=False` close per peer, ever**, whichever gets here first. When the
+        attempt cap is spent by failed *hellos* rather than by refused dials, the last loss already
+        reported `will_retry=False` - the helper knew, before it adopted that socket, that it was the
+        last one - and the helper's own withdrawal would then say the same thing twice. An
+        application that treats it as "give up now" would run its teardown twice (WSM-RCN-044).
+        """
+        if not reason.will_retry:
+            if self._final_close_reported:
+                return
+            self._final_close_reported = True
+        # Isolated: `on_close` is where an application tears down, and a handler that raised would
+        # take the rest of the fan-out with it - and, on the helper's path, the supervisor too.
         for handler in self._close_handlers:
-            handler(reason)
+            try:
+                handler(reason)
+            except Exception:  # noqa: BLE001 - one bad handler must not cost the others their turn
+                logger.exception("muxws conn=%s an on_close handler raised", self.id)
 
     def _adopt_socket(self, socket: SocketAdapter) -> None:
         """Take a freshly established socket, for a `Peer` that survived a reconnect.
 
-        `Peer` survives; `Stream` objects do not (WSM-RCN-032). The id space starts empty, the
-        high-water marks reset, and `tags` on the *acceptor* side belong to a new peer object
-        entirely (WSM-RCN-033) - nothing is carried forward here either.
+        `Peer` survives; `Stream` objects do not (WSM-RCN-032). The id space starts empty and the
+        high-water marks reset.
+
+        `tags` is deliberately **not** cleared here, and this method is the only place it could be.
+        WSM-RCN-033 is a statement about the *acceptor*, where a reconnect is a whole new `Peer` and
+        there is nothing to carry forward; only a dialer ever adopts a socket, and a dialer's tags are
+        indexed by nothing. WSM-INV-014 states the rule without that qualification, which is why this
+        is written down rather than assumed.
 
         The connection id advances, so a log shows the reconnect as a new `conn=` rather than as one
         continuous connection (WSM-API-009).
@@ -808,8 +940,33 @@ class Peer:
         self._goaway = GoawayState()
         self._writer = Writer(self._codec, max_frame_bytes=self._max_frame_bytes)
         self._writer_task = None
+        # The id space starts empty, so the shutdown the *previous* socket started when it ran out
+        # of ids is over. A stale task reference here would make `_begin_exhaustion_shutdown()` a
+        # no-op on this socket, and the connection that exhausted its ids would never go away
+        # (WSM-SID-007).
+        self._exhaustion_task = None
         self._is_open = True
         self._death = None
+
+    async def _close_socket_locally(self, code: int = 1000, reason: str = "") -> None:
+        """Close the underlying socket, and nothing else.
+
+        WSM-RCN-011 asks for two things when the heartbeat declares a socket dead - declared dead
+        **and closed locally** - and `_die()` only does the first. Without the second the read loop
+        stays parked inside `socket.receive()` on a socket the remote will never write to again,
+        `serve()` never returns, and the supervisor waits for a loss it is never told about: no
+        backoff, no re-dial (WSM-RCN-011).
+
+        `code` defaults to 1000 and is never 1006: 1006 is reserved for "the connection dropped
+        without a close frame" and a peer may not send it - the `websockets` adapter hands it
+        straight to `connection.close(code=...)`, which rejects it, and the exception below would
+        swallow the failure and leave the socket open. What the peer *reports* for the death is 1006;
+        what it *sends* to end the socket is not.
+        """
+        try:
+            await self._socket.close(code, reason)
+        except Exception:  # noqa: BLE001 - a socket that cannot be closed is already gone
+            logger.debug("muxws conn=%s closing a locally-declared-dead socket failed", self.id)
 
     def _forget(self, stream: Stream) -> None:
         """Drop a closed stream. Nothing is retained per closed stream (WSM-STM-001)."""

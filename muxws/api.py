@@ -7,8 +7,7 @@ deployment fail as a puzzling decode error on the tenth frame rather than as a n
 
 from __future__ import annotations
 
-import asyncio
-
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from muxws.codecs import Codec, get_codec
@@ -16,6 +15,7 @@ from muxws.conf import settings
 from muxws.errors import CodecMismatch, ConnectionClosed, ProtocolError
 from muxws.fragment import MAX_FRAME_BYTES
 from muxws.peer import ErrorSerializer, Peer, StreamHandler
+from muxws.reconnect import ConnectionLoop, Hello, Reconnect
 from muxws.subprotocol import mismatch_error, offer, PREFIX
 from muxws.transports import SocketAdapter
 
@@ -38,7 +38,7 @@ async def connect(
     subprotocols: list[str] | None = None,
     hello: Any = None,
     hello_headers: dict[str, Any] | None = None,
-    reconnect: Any = None,
+    reconnect: Reconnect | None = None,
     ping_interval: float = 20.0,
     ping_timeout: float = 10.0,
     hello_timeout: float = 10.0,
@@ -47,45 +47,33 @@ async def connect(
     error_serializer: ErrorSerializer | None = None,
     codec: Codec | None = None,
     max_frame_bytes: int = MAX_FRAME_BYTES,
+    on_stream: StreamHandler | None = None,
+    on_close: Callable[[Any], None] | None = None,
+    on_reconnect: Callable[[int, Any], None] | None = None,
 ) -> Peer:
     """Dial `url` and return a serving peer.
 
     Raises if the **first** attempt fails, with the underlying error, whatever `reconnect` says
     (WSM-RCN-006). Reconnection applies to connections that were established and then lost; a peer
-    that retried its first dial forever would turn a typo in the URL into silence.
+    that retried its first dial forever would turn a typo in the URL into silence. There is
+    deliberately no option that changes this (WSM-INV-018): a caller who wants the first dial retried
+    writes that loop itself, where it can decide what a permanent failure looks like.
 
-    `hello`, `reconnect`, `ping_interval`, `ping_timeout` and `hello_timeout` are accepted and stored
-    here but acted on in M5b. Accepting them now keeps the signature stable.
+    Everything after that first dial belongs to the reconnect helper: the backoff schedule, the
+    heartbeat, and the hello replayed verbatim on every connection this peer ever makes.
+
+    `on_stream`, `on_close` and `on_reconnect` are the same handlers `peer.on_stream(...)` and
+    friends register, and they are registered **before** the hello goes out. That is the whole reason
+    they are parameters rather than a line the caller writes afterwards: the acceptor may push a
+    stream the instant it sees the hello, and a peer whose handler is registered one await later
+    answers that push `reset(REFUSED, "no on_stream handler")` (WSM-STM-033).
     """
-    import websockets
-
-    from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
-
     resolved = resolve_codec(codec)
-    offered = offer(resolved.name, subprotocols)
+    dial = _websocket_dialer(url, resolved, headers=headers, subprotocols=subprotocols)
 
-    try:
-        connection = await websockets.connect(
-            url,
-            subprotocols=offered,  # type: ignore[arg-type]
-            additional_headers=headers,
-        )
-    except Exception as exc:
-        if _looks_like_a_refused_handshake(exc):
-            raise mismatch_error(resolved.name) from exc
-        raise
-
-    negotiated = getattr(connection, "subprotocol", None)
-    try:
-        verify_negotiated(negotiated, resolved.name)
-    except Exception:
-        from muxws.transports.websockets_ import POLICY_VIOLATION
-
-        await connection.close(code=POLICY_VIOLATION, reason="codec mismatch")
-        raise
-
+    socket = await dial()
     peer = Peer(
-        WebsocketsSocket(connection),
+        socket,
         codec=resolved,
         is_dialer=True,
         error_serializer=error_serializer,
@@ -93,17 +81,72 @@ async def connect(
         max_payload_bytes=max_payload_bytes,
         max_concurrent_streams=max_concurrent_streams,
     )
-    peer._pending_options = {  # type: ignore[attr-defined]
-        "hello": hello,
-        "hello_headers": hello_headers,
-        "reconnect": reconnect,
-        "ping_interval": ping_interval,
-        "ping_timeout": ping_timeout,
-        "hello_timeout": hello_timeout,
-        "url": url,
-    }
-    peer._serve_task = asyncio.create_task(peer.serve())  # type: ignore[attr-defined]
+    if on_stream is not None:
+        peer.on_stream(on_stream)
+    if on_close is not None:
+        peer.on_close(on_close)
+    if on_reconnect is not None:
+        peer.on_reconnect(on_reconnect)
+    loop = ConnectionLoop(
+        peer,
+        dial,
+        options=reconnect or Reconnect(),
+        # Captured **here**, once, by value: replayed verbatim on every later connection and never
+        # re-read from the application's object (WSM-RCN-020).
+        hello=Hello(payload=hello, headers=hello_headers, timeout=hello_timeout),
+        ping_interval=ping_interval,
+        ping_timeout=ping_timeout,
+    )
+    await loop.establish()
+    loop.start()
+    # Held so the garbage collector cannot collect the supervisor out from under the peer.
+    peer._connection_loop = loop
     return peer
+
+
+def _websocket_dialer(
+    url: str,
+    resolved: Codec,
+    *,
+    headers: dict[str, str] | None,
+    subprotocols: list[str] | None,
+) -> Callable[[], Awaitable[SocketAdapter]]:
+    """One closure that dials, verifies the subprotocol, and hands back a `SocketAdapter`.
+
+    The helper is given this rather than a URL because it knows nothing about transports: every
+    reconnect is the same dial as the first one, down to the offered subprotocol list, so there is
+    exactly one place where a connection is made and no way for a reconnect to negotiate something
+    the first connection did not (WSM-CDC-016/020).
+    """
+    offered = offer(resolved.name, subprotocols)
+
+    async def dial() -> SocketAdapter:
+        import websockets
+
+        from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
+
+        try:
+            connection = await websockets.connect(
+                url,
+                subprotocols=offered,  # type: ignore[arg-type]
+                additional_headers=headers,
+            )
+        except Exception as exc:
+            if _looks_like_a_refused_handshake(exc):
+                raise mismatch_error(resolved.name) from exc
+            raise
+
+        try:
+            verify_negotiated(getattr(connection, "subprotocol", None), resolved.name)
+        except Exception:
+            from muxws.transports.websockets_ import POLICY_VIOLATION
+
+            await connection.close(code=POLICY_VIOLATION, reason="codec mismatch")
+            raise
+
+        return WebsocketsSocket(connection)
+
+    return dial
 
 
 def _looks_like_a_refused_handshake(exc: BaseException) -> bool:

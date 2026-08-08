@@ -145,7 +145,10 @@ class Stream:
         code = _sendable_reset_code(code)
         if self.state is StreamState.CLOSED:
             return
-        if self._peer.is_open:
+        # `_has_a_socket`, not `is_open`: the question here is whether a wire exists, and the hello
+        # window makes `is_open` false while the socket is perfectly alive (WSM-RCN-043). Asking the
+        # wrong one loses the `reset` for any stream the acceptor pushed inside that window.
+        if self._peer._has_a_socket:
             self._peer._enqueue(Frame("reset", stream=self.id, code=int(code), reason=reason))
         self._fail(exception_for_reset(code, reason, stream_id=self.id), notify_remote=False)
 

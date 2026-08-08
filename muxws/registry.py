@@ -11,6 +11,7 @@ do not look up.** A consumer needing both on one key calls `register(peer)` afte
 from __future__ import annotations
 
 import logging
+import weakref
 
 from collections.abc import Hashable, Iterator
 from contextlib import contextmanager
@@ -32,6 +33,12 @@ class PeerRegistry:
         #: The reverse map, so `register` can replace a peer's entries **wholesale** in one pass
         #: (WSM-REG-012) rather than scanning the index for it.
         self._entries: dict[Peer, set[tuple[str, Hashable]]] = {}
+        #: Peers whose close hook is already installed. WSM-REG-017 tells a consumer that both looks
+        #: up and mutates a key to call `register(peer)` after **every** write, so a hook appended
+        #: per call would leave a long-lived peer carrying one handler per write, all of them doing
+        #: the same already-idempotent deregistration - bookkeeping WSM-REG-001 says a rewrite must
+        #: not cost. Weak, so a registry never keeps a peer alive that nothing else holds.
+        self._hooked: weakref.WeakSet[Peer] = weakref.WeakSet()
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -65,7 +72,19 @@ class PeerRegistry:
             self._index.setdefault(entry, set()).add(peer)
 
         self._entries[peer] = entries
-        peer.on_close(lambda _reason, target=peer: self.deregister(target))
+        if peer not in self._hooked:
+            self._hooked.add(peer)
+            peer.on_close(lambda _reason, target=peer: self._forget_closed(target))
+
+    def _forget_closed(self, peer: Peer) -> None:
+        """The one hook per peer, fired by the connection it was registered on.
+
+        It forgets that the hook exists as well as the entries, so a `Peer` that survives a reconnect
+        (WSM-RCN-032) and is registered again on its next connection gets a fresh hook rather than a
+        second one.
+        """
+        self._hooked.discard(peer)
+        self.deregister(peer)
 
     def deregister(self, peer: Peer) -> None:
         """Forget `peer` entirely. Idempotent."""

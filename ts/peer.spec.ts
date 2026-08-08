@@ -12,8 +12,17 @@
 import { vi } from 'vitest';
 
 import { type Codec, JsonCodec } from './codec';
-import { ConnectionLost, ProtocolError, RemoteError, ResetCode, StreamReset, StreamTimeout } from './errors';
+import {
+  ConnectionClosed,
+  ConnectionLost,
+  ProtocolError,
+  RemoteError,
+  ResetCode,
+  StreamReset,
+  StreamTimeout,
+} from './errors';
 import { ABSENT, type Frame, framesEqual } from './frames';
+import { MAX_STREAM_ID } from './lifecycle';
 import {
   type CloseReason,
   defaultErrorSerializer,
@@ -134,8 +143,12 @@ function makePair(options: { errorSerializer?: ErrorSerializer; codec?: Codec } 
  */
 interface PeerInternals {
   ignoredLateFrames: number;
+  /** The next id `open()` will allocate, so a test can walk the peer up to WSM-SID-007's ceiling. */
+  nextId: number;
   highestLocalOpen: number;
   highestRemoteOpen: number;
+  /** M5a's writer, so a test can see what the peer is still holding for a socket that is gone. */
+  writer: { depth: number; lanes: number };
   dispatch(frame: Frame): Promise<boolean>;
 }
 
@@ -659,6 +672,94 @@ async function within(label: string, work: Promise<unknown>, deadlineMs = SHAPE_
   }
 }
 
+/** What one shape needs: a peer to open on, and the two moments the runner synchronises it against. */
+class Rig {
+  stream: Stream | null = null;
+
+  constructor(
+    readonly name: string,
+    readonly peer: Peer,
+    private readonly watched: Stream[],
+    /** Say this shape is in position. The socket is not dropped until every shape has said so. */
+    readonly arm: () => void,
+    /** Resolves once the socket has been dropped, for the shapes that act only afterwards. */
+    readonly dropped: Promise<void>,
+  ) {}
+
+  open(): Stream {
+    this.stream = this.peer.open({ shape: this.name });
+    this.watched.push(this.stream);
+    return this.stream;
+  }
+}
+
+async function awaitShape(rig: Rig): Promise<void> {
+  const stream = rig.open();
+  rig.arm();
+  await stream;
+}
+
+async function resultShape(rig: Rig): Promise<void> {
+  const stream = rig.open();
+  rig.arm();
+  await stream.result();
+}
+
+async function iterateShape(rig: Rig): Promise<void> {
+  const stream = rig.open();
+  rig.arm();
+  for await (const item of stream) void item;
+  // A clean end would read as "the export finished", which is exactly the lie WSM-RCN-041 forbids.
+  throw new Error('an async for must raise on socket death, not terminate normally');
+}
+
+async function requestShape(rig: Rig): Promise<void> {
+  rig.arm();
+  await rig.peer.request({ shape: rig.name });
+}
+
+async function sendShape(rig: Rig): Promise<void> {
+  const stream = rig.open();
+  rig.arm();
+  for (;;) {
+    // Mid-send when the socket dies, rather than sending once and waiting: a sender that had already
+    // stopped would be testing `send()` on a closed stream, which is a different rule.
+    await stream.send({ shape: rig.name });
+    // A macrotask and not `Promise.resolve()`: a loop of resolved microtasks never yields to the
+    // timer queue, so the drop this shape is waiting for could never happen and it would starve the
+    // whole test instead of being killed by it. Python's `asyncio.sleep(0)` buys the same turn.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+  }
+}
+
+async function cancelShape(rig: Rig): Promise<void> {
+  const stream = rig.open();
+  rig.arm();
+  await rig.dropped;
+  await stream.cancel();
+  await stream.reset(ResetCode.NO_ERROR);
+}
+
+/**
+ * Every shape WSM-RCN-041 names, with what the socket dying under it must do to that shape. **This
+ * map is the only place they are listed**: the runner below opens one stream per entry, waits for all
+ * of them to be armed, kills the socket once, and checks each outcome against the expectation
+ * recorded here - so adding a seventh shape is one line in one place (§6).
+ */
+const DEATH_SHAPES: Record<string, { run: (rig: Rig) => Promise<void>; expected: typeof ConnectionLost | null }> = {
+  'await stream': { run: awaitShape, expected: ConnectionLost },
+  'await stream.result()': { run: resultShape, expected: ConnectionLost },
+  'async for': { run: iterateShape, expected: ConnectionLost },
+  'in-flight request()': { run: requestShape, expected: ConnectionLost },
+  'sender mid-send()': { run: sendShape, expected: ConnectionLost },
+  // `cancel()` and `reset()` are the shapes WSM-RCN-041 makes **no-ops** rather than failures, so
+  // `null` is the expectation. They belong here anyway: "does not raise" is worth nothing if it
+  // hangs, and hanging is what this test detects.
+  'a stream awaiting cancel()': { run: cancelShape, expected: null },
+};
+
 describe('socket death', () => {
   it('names the shape that hung rather than timing out anonymously - WSM-INV-011', async () => {
     // The safety net below is the point of the next test, so it is itself tested. A `within` that
@@ -675,6 +776,13 @@ describe('socket death', () => {
   });
 
   it('fails every shape and none of them hangs - WSM-RCN-041/WSM-STM-014', async () => {
+    // One stream per shape, all of them live at the same instant, and one socket death underneath all
+    // of them at once. What each shape must do is read from `DEATH_SHAPES` rather than written out
+    // here, so the list of shapes has exactly one home.
+    //
+    // **This test fails by hang detection.** A shape that never finishes is named in the failure,
+    // because the failure WSM-INV-011 describes is not an exception: it is a caller who sees no
+    // error, no log and no timeout, just a spinner that never stops.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -700,43 +808,51 @@ describe('socket death', () => {
     });
 
     const body = async (): Promise<void> => {
-      const awaited = pair.dialer.open({ shape: 'await' });
-      const iterated = pair.dialer.open({ shape: 'iterate' });
-      const sender = pair.dialer.open({ shape: 'send' });
-      watched.push(awaited, iterated, sender);
-      await pair.settle();
+      let dropped: () => void = () => undefined;
+      const hasDropped = new Promise<void>((resolve) => {
+        dropped = resolve;
+      });
+      const armed: Promise<void>[] = [];
+      const rigs = new Map<string, Rig>();
+      const outcomes = new Map<string, Promise<unknown>>();
 
-      const requestOutcome = settled(pair.dialer.request({ shape: 'request' }));
-      const awaitOutcome = settled((async () => awaited)());
-      const iterateOutcome = settled(
-        (async () => {
-          const collected: unknown[] = [];
-          for await (const item of iterated) collected.push(item);
-          // A clean end would read as "the export finished", which is exactly the lie WSM-RCN-041
-          // forbids.
-          throw new Error('an async for must raise on socket death, not terminate normally');
-        })(),
-      );
+      Object.entries(DEATH_SHAPES).forEach(([name, shape]) => {
+        let arm: () => void = () => undefined;
+        armed.push(
+          new Promise<void>((resolve) => {
+            arm = resolve;
+          }),
+        );
+        const rig = new Rig(name, pair.dialer, watched, arm, hasDropped);
+        rigs.set(name, rig);
+        outcomes.set(name, settled(shape.run(rig)));
+      });
+
+      // Nothing dies until every shape says it is in position, or the test would be asserting about
+      // whichever shapes happened to be ready.
+      await within('arming', Promise.all(armed), 5_000);
       await pair.settle();
 
       pair.dialerSocket.drop();
+      dropped();
       await pair.settle();
 
-      expect(await within('await', awaitOutcome)).toBeInstanceOf(ConnectionLost);
-      expect(await within('iterate', iterateOutcome)).toBeInstanceOf(ConnectionLost);
-      expect(await within('request', requestOutcome)).toBeInstanceOf(ConnectionLost);
-      expect(await within('send', settled(sender.send({ late: true })))).toBeInstanceOf(ConnectionLost);
-      expect(await within('end', settled(sender.end()))).toBeInstanceOf(ConnectionLost);
+      for (const [name, shape] of Object.entries(DEATH_SHAPES)) {
+        const outcome = await within(name, outcomes.get(name) as Promise<unknown>);
+        if (shape.expected === null) {
+          expect(outcome, `${name} must be a no-op after death, and it produced ${String(outcome)}`).toBeUndefined();
+        } else {
+          expect(outcome, `${name} ended with ${String(outcome)}`).toBeInstanceOf(shape.expected);
+        }
+      }
 
-      // cancel() and reset() are no-ops, and every stream reports itself closed.
-      expect(await within('cancel', settled(sender.cancel()))).toBeUndefined();
-      expect(await within('reset', settled(sender.reset(ResetCode.NO_ERROR)))).toBeUndefined();
       await within('closed', settled(Promise.all(watched.map((stream) => stream.closed))));
       watched.forEach((stream) => {
         expect(stream.signal.aborted).toBe(true);
       });
 
-      // A second await gets the same error rather than hanging (WSM-API-010).
+      // The memoized future was resolved once, so a second await gets the same error (WSM-API-010).
+      const awaited = rigs.get('await stream')?.stream as Stream;
       expect(await within('second await', settled((async () => awaited)()))).toBeInstanceOf(ConnectionLost);
     };
 
@@ -758,8 +874,8 @@ describe('socket death', () => {
     expect(closes[0].willRetry).toBe(false);
     const snapshot = worldAtClose[0];
     expect(snapshot.liveStreams, 'onClose ran while the peer still held live streams').toBe(0);
-    expect(snapshot.allClosed, 'onClose ran before every stream closed').toEqual([true, true, true]);
-    expect(snapshot.allFailed).toEqual([StreamState.CLOSED, StreamState.CLOSED, StreamState.CLOSED]);
+    expect(snapshot.allClosed, 'onClose ran before every stream closed').toEqual(watched.map(() => true));
+    expect([...new Set(snapshot.allFailed)]).toEqual([StreamState.CLOSED]);
   }, 20_000);
 
   it('refuses to open while disconnected - WSM-RCN-042/WSM-INV-010', async () => {
@@ -777,21 +893,294 @@ describe('socket death', () => {
     expect(pair.dialer.isOpen).toBe(false);
   });
 
+  it('gives a second await after death the same error - WSM-RCN-041/WSM-API-010', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    const stream = pair.dialer.open({ q: 1 });
+    await pair.settle();
+    pair.dialerSocket.drop();
+    await pair.settle();
+
+    // The memoized future is resolved **once**. A second await that hung, or that raised something
+    // different, would mean the failure had been delivered rather than recorded.
+    const first = await within('await', rejection((async () => stream)()));
+    const second = await within('second await', rejection((async () => stream)()));
+    expect(first).toBeInstanceOf(ConnectionLost);
+    expect(second).toBeInstanceOf(ConnectionLost);
+    expect((first as ConnectionLost).code).toBe(ResetCode.CONNECTION_CLOSED);
+    expect((second as ConnectionLost).code).toBe((first as ConnectionLost).code);
+  });
+
+  it('raises out of an async for rather than terminating it normally - WSM-RCN-041', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(async (payload, stream) => {
+      await stream.send({ row: 0 });
+      await stream.closed;
+    });
+    pair.start();
+
+    const stream = pair.dialer.open({ q: 1 });
+    const collected: unknown[] = [];
+    const consuming = settled(
+      (async () => {
+        for await (const item of stream) collected.push(item);
+        // A clean end would read as "the export finished", which is exactly the lie the rule forbids.
+        throw new Error('the loop terminated normally instead of raising ConnectionLost');
+      })(),
+    );
+    await pair.settle();
+    pair.dialerSocket.drop();
+    await pair.settle();
+
+    expect(await within('iterate', consuming)).toBeInstanceOf(ConnectionLost);
+    expect(collected, 'what did arrive is still delivered').toEqual([{ row: 0 }]);
+  });
+
+  it('makes cancel and reset no-ops after death - WSM-RCN-041', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    const stream = pair.dialer.open({ q: 1 });
+    await pair.settle();
+    const framesBefore = pair.sentBy('dialer').length;
+    pair.dialerSocket.drop();
+    await pair.settle();
+
+    // No-ops, not errors: the caller asked for something the socket already did, and neither may put
+    // a frame on a wire that is gone.
+    expect(await within('cancel', settled(stream.cancel()))).toBeUndefined();
+    expect(await within('reset', settled(stream.reset(ResetCode.NO_ERROR)))).toBeUndefined();
+    expect(pair.sentBy('dialer')).toHaveLength(framesBefore);
+    expect(stream.signal.aborted).toBe(true);
+    expect(stream.state).toBe(StreamState.CLOSED);
+  });
+
+  it('puts nothing attempted while disconnected on the new socket - WSM-RCN-042/WSM-INV-010', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    pair.dialerSocket.drop();
+    await pair.settle();
+
+    for (let index = 0; index < 5; index += 1) {
+      expect(() => pair.dialer.open({ attempt: index })).toThrow(ConnectionLost);
+      expect(await rejection(pair.dialer.notify({ attempt: index }))).toBeInstanceOf(ConnectionLost);
+      expect(await rejection(pair.dialer.request({ attempt: index }))).toBeInstanceOf(ConnectionLost);
+    }
+
+    // A queue that flushed into the next socket would deliver work the server has forgotten the
+    // sender of, turning a failure that would have reached a call site into silent misdelivery.
+    const [fresh] = memoryPair();
+    pair.dialer.adoptSocket(fresh);
+    const serving = pair.dialer.serve();
+    void serving.catch(() => undefined);
+    await pair.settle();
+
+    expect(fresh.sent, 'the new socket must carry none of what was attempted in the gap').toEqual([]);
+    fresh.drop();
+    await serving.catch(() => undefined);
+  });
+
+  it("discards the writer's queues when the socket dies - WSM-RCN-042/WSM-INV-010", async () => {
+    // M5a shipped `discardAll()` and M5b is what calls it. `ts/writer.spec.ts` proves the method
+    // empties the queues when it is called, which is a different claim from proving that socket death
+    // reaches it - and until this test, deleting the call from `die()` would have failed nothing
+    // anywhere. That is exactly the failure M5a shipped once already.
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    for (let index = 0; index < 5; index += 1) {
+      pair.dialer.open({ body: 'x'.repeat(5000), n: index });
+    }
+    // Not settled first, deliberately: the queues have to still be full at the instant the socket
+    // dies, or a writer that had already drained them would make this pass against a peer that holds
+    // everything for the next socket.
+    expect(internals(pair.dialer).writer.depth, 'the queues must be full at the moment of death').toBeGreaterThan(0);
+
+    pair.dialerSocket.drop();
+    await pair.settle();
+
+    // Nothing is held for a next socket: a queue that flushed into it would deliver work the server
+    // has forgotten the sender of, turning a failure that would have reached a call site into silent
+    // misdelivery (WSM-INV-010).
+    expect(internals(pair.dialer).writer.depth, 'frames were kept for a socket that will never carry them').toBe(0);
+    expect(internals(pair.dialer).writer.lanes).toBe(0);
+  });
+
+  it('reports isOpen false for the whole gap - WSM-RCN-043', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    expect(pair.dialer.isOpen).toBe(true);
+    pair.dialerSocket.drop();
+    await pair.settle();
+    expect(pair.dialer.isOpen, 'false from the loss until the next connection, not until the next call').toBe(false);
+
+    const [fresh] = memoryPair();
+    pair.dialer.adoptSocket(fresh);
+    expect(pair.dialer.isOpen).toBe(true);
+    fresh.drop();
+  });
+
+  it("clears the dead socket's exhaustion shutdown on adopt - WSM-SID-007/WSM-RCN-031", async () => {
+    // Running out of stream ids schedules an orderly shutdown and remembers it, so a second `open()`
+    // cannot schedule a second one. That memory belongs to the socket that ran out and not to the
+    // `Peer`, which outlives it: carried into the next connection it makes `beginExhaustionShutdown`
+    // a no-op there, and a socket that exhausts its ids never says goodbye and never closes - it
+    // refuses every `open()` from then on while reporting itself perfectly healthy.
+    // `muxws/socket_death_test.py` asserts the same on the field Python resets on the line above.
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    internals(pair.dialer).nextId = MAX_STREAM_ID;
+    pair.dialer.open({ q: 1 });
+    const first = pair.dialer.exhaustionShutdown;
+    expect(first).not.toBeNull();
+
+    pair.dialerSocket.drop();
+    await pair.settle();
+    await first?.catch(() => undefined);
+
+    const [fresh] = memoryPair();
+    pair.dialer.adoptSocket(fresh);
+    expect(pair.dialer.exhaustionShutdown, "the dead socket's shutdown must not carry forward").toBeNull();
+
+    internals(pair.dialer).nextId = MAX_STREAM_ID;
+    pair.dialer.open({ q: 2 });
+    expect(pair.dialer.exhaustionShutdown, 'and the new socket schedules its own').not.toBeNull();
+    // Nothing reads `fresh`, so dropping it tells nobody and the second shutdown would sit out its
+    // whole drain window waiting for a stream no read loop will ever end (WSM-CON-024). Killing the
+    // peer is what ends that wait here; that the shutdown *started* is the whole claim.
+    pair.dialer.die(new ConnectionClosed('the test is over', { code: 1006 }));
+    await pair.dialer.exhaustionShutdown?.catch(() => undefined);
+  });
+
+  it('fires onClose once per loss with the right willRetry - WSM-RCN-040/045', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    const seen: CloseReason[] = [];
+    pair.dialer.onClose((reason) => seen.push(reason));
+    pair.start();
+
+    pair.dialerSocket.drop();
+    await pair.settle();
+    pair.dialerSocket.drop();
+    // The heartbeat and the read loop are two code paths that can both notice one dead socket, and
+    // the reconnect helper calls `die()` from the first of them. Whichever arrives second must add
+    // nothing: `onClose` fires exactly once per loss, not once per witness.
+    pair.dialer.die(new ConnectionClosed('the heartbeat noticed the same death', { code: 1006 }));
+    await pair.settle();
+
+    expect(seen, 'one loss, one call - a second witness of a dead socket is not a second loss').toHaveLength(1);
+    expect(Object.keys(seen[0]).sort()).toEqual(['code', 'reason', 'wasClean', 'willRetry']);
+    // Nothing retries until the helper says so: `willRetry` reads the intention set when the socket
+    // was established, and this peer has no helper at all.
+    expect(seen[0].willRetry).toBe(false);
+  });
+
+  it('says willRetry true only while the helper intends to dial again - WSM-RCN-040', async () => {
+    const retrying = makePair();
+    retrying.acceptor.onStream(hold);
+    const seen: CloseReason[] = [];
+    retrying.dialer.onClose((reason) => seen.push(reason));
+    retrying.dialer.willRetry = true;
+    retrying.start();
+    retrying.dialerSocket.drop();
+    await retrying.settle();
+    expect(seen[0].willRetry).toBe(true);
+
+    // A deliberate close never says it will retry, whatever the helper meant a moment earlier.
+    const deliberate = makePair();
+    deliberate.acceptor.onStream(hold);
+    const closes: CloseReason[] = [];
+    deliberate.dialer.onClose((reason) => closes.push(reason));
+    deliberate.dialer.willRetry = true;
+    deliberate.start();
+    await deliberate.dialer.close();
+    await deliberate.settle();
+    expect(closes[0].willRetry).toBe(false);
+    expect(closes[0].wasClean).toBe(true);
+  });
+
+  it('does not let a stream survive a reconnect - WSM-RCN-031/032', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    const held = pair.dialer.open({ q: 1 });
+    await pair.settle();
+    pair.dialerSocket.drop();
+    await pair.settle();
+
+    const [fresh] = memoryPair();
+    pair.dialer.adoptSocket(fresh);
+
+    // `Peer` survives a reconnect; `Stream` objects do not, and nothing is replayed on the new one.
+    expect(held.signal.aborted).toBe(true);
+    expect(pair.dialer.streams.size, "the new socket's id space starts empty").toBe(0);
+    expect(pair.dialer.open({ q: 2 }).id, 'and the allocator starts over').toBe(1);
+    fresh.drop();
+  });
+
+  it('advances peer.id on every reconnect - WSM-API-009', async () => {
+    const pair = makePair();
+    pair.start();
+    const seen = [pair.dialer.id];
+    const sockets: MemorySocket[] = [];
+
+    for (let round = 0; round < 3; round += 1) {
+      pair.dialerSocket.drop();
+      await pair.settle();
+      const [fresh] = memoryPair();
+      sockets.push(fresh);
+      pair.dialer.adoptSocket(fresh);
+      seen.push(pair.dialer.id);
+    }
+
+    // A reconnect reads as a new `conn=` in a log rather than as one continuous connection, and no
+    // id from a dropped socket is handed out again.
+    expect(new Set(seen).size, 'no id may repeat').toBe(seen.length);
+    const counters = seen.map((id) => Number(id.split('-')[1]));
+    expect(counters, 'the counter never rewinds').toEqual([...counters].sort((a, b) => a - b));
+    sockets.forEach((socket) => socket.drop());
+  });
+
   it('never puts reset code 9 on the wire', async () => {
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
 
     pair.dialer.open({ q: 1 });
+    pair.dialer.open({ q: 2 });
     await pair.settle();
-    pair.dialerSocket.drop();
+    const sentBefore = pair.sentBy('dialer').length;
+
+    // Declared dead on a socket that is still perfectly **writable** - which is exactly what the
+    // reconnect helper does when a pong is swallowed. Dropping the socket first and then looking for
+    // code 9 proves nothing at all: nothing can reach a wire that is already gone, so that version
+    // of this test passes against an implementation that resets every stream on the wire.
+    pair.dialer.die(new ConnectionClosed('declared dead with the socket still up', { code: 1006 }));
     await pair.settle();
 
+    expect(
+      pair.sentBy('dialer'),
+      'the synthesised reset is local: nothing whatever is sent for it (WSM-STM-014)',
+    ).toHaveLength(sentBefore);
     (['dialer', 'acceptor'] as const).forEach((who) => {
       pair.sentBy(who).forEach((frame) => {
         expect(frame.code).not.toBe(ResetCode.CONNECTION_CLOSED);
       });
     });
+
+    pair.dialerSocket.drop();
+    await pair.settle();
   });
 });
 

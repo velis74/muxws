@@ -227,14 +227,30 @@ const DEADLINE_EXPIRED: unique symbol = Symbol('DEADLINE_EXPIRED');
 
 // --------------------------------------------------------------------------- the peer
 
+/**
+ * What `Peer` needs from the reconnect helper, and nothing more.
+ *
+ * Structural rather than an import of `ConnectionLoop`: `ts/reconnect.ts` imports `Peer`, so naming
+ * the class here would close a cycle for one method call.
+ */
+export interface ConnectionSupervisor {
+  stop(): Promise<void>;
+}
+
 /** One symmetric peer type per language: server push is a client request with the roles swapped. */
 export class Peer {
-  readonly id: string;
+  /**
+   * Not `readonly`: `Peer` survives a reconnect while its connection does not, so `adoptSocket` takes
+   * the **next** counter value (WSM-API-009). A log then shows the reconnect as a new `conn=` rather
+   * than as one continuous connection, and no id from a dropped socket is handed out again.
+   */
+  id: string;
 
   /** An ordinary object with ordinary object semantics. muxws never reads it (WSM-REG-001/002). */
   readonly tags: Record<string, unknown> = {};
 
-  private readonly socket: SocketAdapter;
+  /** Not `readonly`: `adoptSocket` replaces it when the helper re-establishes the connection. */
+  private socket: SocketAdapter;
 
   private readonly codec: Codec;
 
@@ -284,7 +300,7 @@ export class Peer {
   private readonly pingStarted = new Map<string, number>();
 
   /** What each side has said about stopping; the two directions mean different things. */
-  private readonly goaway = new GoawayState();
+  private goaway = new GoawayState();
 
   /**
    * The send path. Round-robin across streams, never a FIFO of frames (WSM-FRG-019) - without this
@@ -307,7 +323,48 @@ export class Peer {
 
   private open_ = true;
 
+  /**
+   * @internal False from the moment the helper adopts a socket until the hello is acknowledged.
+   *
+   * Default **true**, so an acceptor built by `accept()` is unaffected: it has no hello and no
+   * helper, and for it "established" is exactly what socket-open already means (WSM-CON-030). Only
+   * the reconnect driver ever writes it, and only across the window WSM-RCN-043 puts `isOpen` false
+   * for.
+   */
+  established = true;
+
+  /**
+   * Whether a `willRetry: false` close has already been reported (WSM-RCN-044).
+   *
+   * There is at most one per peer, ever: the attempt cap can be spent by hello failures rather than
+   * by refused dials, and then the last loss already carried `willRetry: false` before the helper's
+   * own give-up reached `notifyClose` - two endings reported for one peer, the second of which
+   * claims a socket loss that never happened.
+   */
+  private finalCloseReported = false;
+
   private death: ConnectionClosed | null = null;
+
+  /**
+   * @internal The monotonic clock both halves of the heartbeat read (WSM-RCN-010).
+   *
+   * One clock, not two: `Heartbeat` reads this same function, so an injected one moves the stamp and
+   * the idle measurement together. A test that advanced only one of them would be measuring itself.
+   */
+  clock: () => number = monotonicNowMs;
+
+  private lastActivityMs = 0;
+
+  /**
+   * @internal True while the reconnect helper intends to dial again.
+   *
+   * `CloseReason.willRetry` reads it at socket death, so it is set when a connection is
+   * **established** and not when one is lost - by then it is too late to be right (WSM-RCN-040).
+   */
+  willRetry = false;
+
+  /** @internal Held so `close()` can tell the helper to stop dialling (WSM-RCN-040/044). */
+  connectionLoop: ConnectionSupervisor | null = null;
 
   constructor(socket: SocketAdapter, options: PeerOptions) {
     this.id = `${PROCESS_PREFIX}-${connectionCounter}`;
@@ -326,8 +383,53 @@ export class Peer {
 
   // ------------------------------------------------------------------ properties
 
+  /**
+   * Socket-open **and** established (WSM-RCN-043).
+   *
+   * Both halves, because a hello makes them two different moments (WSM-RCN-004): a socket that is
+   * open but whose hello has not been acknowledged is not yet a connection an application may send
+   * on, and an `open()` accepted in that window would put an application frame ahead of the hello
+   * (WSM-RCN-023). Reporting `true` there also hands the application a peer that looks alive one
+   * failed hello before the helper backs off and dials again.
+   */
   get isOpen(): boolean {
+    return this.open_ && this.established;
+  }
+
+  /**
+   * @internal Whether a frame put on the writer now can still reach a wire.
+   *
+   * Not the same question as `isOpen`, and the difference is why this exists. `isOpen` answers "may
+   * the application start something here", which the hello window makes false (WSM-RCN-043). This
+   * answers "is there a socket underneath", which that window does not make false - the hello itself
+   * travels on it. `Stream.reset()` needs the second question: a stream the acceptor pushed during
+   * the hello window that is reset by its handler must put the `reset` on the wire, or the remote is
+   * left holding a stream this side has already closed (WSM-STM-021).
+   */
+  get hasASocket(): boolean {
     return this.open_;
+  }
+
+  /**
+   * When a frame last crossed this socket **in either direction**, on `clock`'s scale.
+   *
+   * Idle means idle (WSM-RCN-010): a busy connection must not spend a ping every interval, so the
+   * heartbeat's timer is this stamp rather than a fixed schedule. Both directions count - a socket
+   * carrying inbound frames is demonstrably alive, and pinging it proves nothing new.
+   */
+  get lastActivity(): number {
+    return this.lastActivityMs;
+  }
+
+  /**
+   * @internal Mark the socket as having been busy just now.
+   *
+   * Every frame does this through `reportFrame`; `Heartbeat` also does it once when it starts,
+   * because a socket that has just been established is the most recent thing that happened on it and
+   * an unused peer would otherwise read as infinitely idle and be pinged immediately.
+   */
+  stampActivity(): void {
+    this.lastActivityMs = this.clock();
   }
 
   /** Live streams, read-only. */
@@ -354,13 +456,37 @@ export class Peer {
   }
 
   /**
-   * Accepted, stored, and not acted on until M5b.
+   * Fires once per **re-established** connection (WSM-RCN-030).
    *
-   * Registering it now is what keeps every call site stable across the milestone that adds the
-   * reconnect helper; nothing in M3 ever calls these back.
+   * It guarantees exactly two things and nothing more: a live socket, and an identity the acceptor
+   * has already accepted on it. No stream survives a reconnect, nothing is replayed, and the new
+   * socket's id space starts empty (WSM-RCN-031/032).
    */
   onReconnect(handler: (attempt: number, peer: Peer) => void): void {
     this.reconnectHandlers.push(handler);
+  }
+
+  /** @internal ConnectionLoop -> Peer. Fired after the hello acknowledgement, never before. */
+  fireReconnect(attempt: number): void {
+    this.fanOut('onReconnect', this.reconnectHandlers, attempt, this);
+  }
+
+  /**
+   * Run every handler, and let none of them out.
+   *
+   * The caller of `fireReconnect` and `notifyClose` is the reconnect supervisor, so an application
+   * callback that throws would otherwise unwind into it and stop it for good: a library whose
+   * reconnect loop can be killed by an application's logging call is not a reconnect loop. The same
+   * applies within one fan-out - the second handler is not the first one's business.
+   */
+  private fanOut<T extends unknown[]>(what: string, handlers: ((...args: T) => void)[], ...args: T): void {
+    handlers.forEach((handler) => {
+      try {
+        handler(...args);
+      } catch (error) {
+        logger.error(`muxws conn=${this.id} a ${what} handler threw; the rest still run`, error);
+      }
+    });
   }
 
   /** `(direction, frame, byteLength)`, before encode and after decode (WSM-OBS-003). */
@@ -399,17 +525,32 @@ export class Peer {
   /**
    * Open a stream. **Synchronous**, and it never queues (WSM-API-001/004).
    *
-   * Allocation and enqueue are one indivisible step (WSM-SID-006). JavaScript gives this for free -
-   * a synchronous function body cannot be preempted, and there is no `await` between the two - but it
-   * is stated rather than left to luck: inserting an `await` anywhere between the allocation and the
-   * `enqueue` below would let two concurrent `open()` calls interleave and put a non-monotonic id
-   * sequence on the wire, a protocol error this peer would be committing against itself
-   * (WSM-INV-005).
+   * The guard, then the body. Both halves run in one synchronous turn, so allocation and enqueue
+   * remain the indivisible step WSM-SID-006 asks for - see `allocateAndEnqueue`, which is where that
+   * is stated rather than left to luck.
    */
   open<T = unknown>(payload?: unknown, options?: OpenOptions): Stream<T>;
   open<T = unknown>(options: OpenOptions): Stream<T>;
   open<T = unknown>(first?: unknown, second?: OpenOptions): Stream<T> {
     this.throwIfUnopenable();
+    return this.allocateAndEnqueue<T>(first, second);
+  }
+
+  /**
+   * @internal `open()`'s body, without the between-sockets guard. The hello's one route in.
+   *
+   * `isOpen` is false for the whole window between adopting a socket and the hello acknowledgement
+   * (WSM-RCN-043), so `open()` itself refuses there - which is the point, since an application frame
+   * accepted in that window would precede the hello (WSM-RCN-023). The hello is the one frame that
+   * has to go out inside it, and it is the driver's rather than the application's, so it calls this
+   * instead. A parameter on the public `open()` would have offered the same bypass to everyone.
+   *
+   * **Allocation and enqueue stay one indivisible step** (WSM-SID-006): this is the same body
+   * `open()` runs and there is no `await` anywhere in it. Inserting one between the allocation and
+   * the `enqueue` below would let two concurrent calls interleave and put a non-monotonic id
+   * sequence on the wire (WSM-INV-005).
+   */
+  allocateAndEnqueue<T = unknown>(first?: unknown, second?: OpenOptions): Stream<T> {
     if (this.exhausted()) {
       throw new ConnectionGoingAway(
         `stream ids are exhausted at ${MAX_STREAM_ID}; this connection can open no more (WSM-SID-007)`,
@@ -448,7 +589,9 @@ export class Peer {
 
   /** WSM-API-004: exactly two synchronous throws, and never one for concurrency. */
   private throwIfUnopenable(): void {
-    if (!this.open_) {
+    // `isOpen` and not `open_`: the hello window is a socket that is open and not yet a connection,
+    // and nothing an application sends may precede the hello on it (WSM-RCN-023/043).
+    if (!this.isOpen) {
       throw new ConnectionLost('the peer is between sockets; nothing is buffered for the next one');
     }
     if (this.goaway.received) {
@@ -613,10 +756,13 @@ export class Peer {
    * with the result, never the other way round.
    */
   private reportFrame(direction: FrameDirection, frame: Frame, encoded: string | ArrayBuffer): void {
+    // Every frame, both directions, before the hooks: a handler that throws must not be able to
+    // leave the heartbeat believing an active socket has gone quiet (WSM-RCN-010).
+    this.stampActivity();
     const length = encodedLength(encoded);
-    this.frameHandlers.forEach((handler) => {
-      handler(direction, frame, length);
-    });
+    // Isolated like every other application callback: an `onFrame` handler runs on the read loop and
+    // on the write loop, so one that throws would take the whole connection down for a log line.
+    this.fanOut('onFrame', this.frameHandlers, direction, frame, length);
     // Never the payload's contents: application data routinely holds secrets (WSM-OBS-002).
     logFrame(this.id, direction, frame, length);
   }
@@ -789,6 +935,12 @@ export class Peer {
   /** `goaway`, drain, then close - in that order (WSM-CON-025). */
   async close(options: CloseOptions = {}): Promise<void> {
     const { code = ResetCode.NO_ERROR, reason = null, drainMs = DEFAULT_DRAIN_MS } = options;
+    // Above the `isOpen` guard, and not below it: a deliberate close never dials again
+    // (WSM-RCN-040/044), and the case that most needs saying so is a peer *between* sockets, where
+    // there is no socket to close but a helper is still counting down to the next dial. `willRetry`
+    // has to be false before `die()` composes the `CloseReason` at the bottom of this method.
+    this.willRetry = false;
+    void this.connectionLoop?.stop();
     if (!this.open_) return;
     this.sendGoaway(code, reason);
     await this.drain(drainMs);
@@ -1203,8 +1355,20 @@ export class Peer {
     this.writerStopped = true;
   }
 
-  /** Socket death: every live stream fails with ConnectionLost **before** onClose fires. */
-  private die(cause: ConnectionClosed): void {
+  /**
+   * @internal Socket death: every live stream fails with ConnectionLost **before** onClose fires.
+   *
+   * Public to the reconnect helper (`ts/reconnect.ts`), which calls it when a swallowed pong or a
+   * hello that never completed means the socket is dead but nothing on it has said so. Both go
+   * through here so the loss is reported down exactly one path (WSM-RCN-011).
+   *
+   * `notify: false` is the one death that fires no `onClose`: the **first** connection, which never
+   * established. `connect()` throwing is the report (WSM-RCN-006), and there is nobody who could
+   * have received the callback - the caller never got the peer back, so it never attached a handler.
+   * Marking it dead is still not optional: leaving `isOpen` to a race between the read loop and the
+   * socket close is how a peer whose hello failed reads as alive.
+   */
+  die(cause: ConnectionClosed, options: { notify?: boolean } = {}): void {
     if (!this.open_) return;
     this.open_ = false;
     this.death = cause;
@@ -1220,15 +1384,90 @@ export class Peer {
     });
     this.liveStreams.clear();
 
-    const reason: CloseReason = {
-      code: cause.code,
-      reason: cause.reason,
-      wasClean: cause.wasClean,
-      willRetry: false,
-    };
-    this.closeHandlers.forEach((handler) => {
-      handler(reason);
-    });
+    if (options.notify ?? true) {
+      this.notifyClose({
+        code: cause.code,
+        reason: cause.reason,
+        wasClean: cause.wasClean,
+        willRetry: this.willRetry,
+      });
+    }
+  }
+
+  /**
+   * @internal Fire `onClose`, and nothing else.
+   *
+   * Extracted from `die` so the reconnect helper can report the one close that has no socket death
+   * behind it: `maxAttempts` exhausted, which must fire once with `willRetry` false and then never
+   * dial again (WSM-RCN-044). Without this seam that close would either be silent or would have to
+   * fake a socket loss.
+   */
+  notifyClose(reason: CloseReason): void {
+    // At most one `willRetry: false` close per peer, ever. When the cap is spent by failed *hellos*
+    // rather than by refused dials, the last loss already reported the ending and the helper's
+    // give-up would report it a second time - the same peer ending twice, once as a socket loss and
+    // once as a decision (WSM-RCN-040/044). Whichever fires first wins.
+    if (!reason.willRetry) {
+      if (this.finalCloseReported) return;
+      this.finalCloseReported = true;
+    }
+    this.fanOut('onClose', this.closeHandlers, reason);
+  }
+
+  /**
+   * @internal Take a freshly established socket, for a `Peer` that survived a reconnect.
+   *
+   * `Peer` survives; `Stream` objects do not (WSM-RCN-032). The id space starts empty, the high-water
+   * marks reset, and nothing whatever is carried forward from the dead socket (WSM-RCN-031): a queue
+   * that flushed into the new one would deliver work the server has forgotten the sender of
+   * (WSM-INV-010).
+   *
+   * The connection id advances, so a log shows the reconnect as a new `conn=` (WSM-API-009).
+   */
+  adoptSocket(socket: SocketAdapter): void {
+    this.id = `${PROCESS_PREFIX}-${connectionCounter}`;
+    connectionCounter += 1;
+
+    this.socket = socket;
+    this.liveStreams.clear();
+    this.nextId = this.dialer ? 1 : 2;
+    this.highestLocalOpen = 0;
+    this.highestRemoteOpen = 0;
+    this.goaway = new GoawayState();
+    this.writer = new Writer(this.codec, { maxFrameBytes: this.maxFrameBytes });
+    // `writerTask` has a Python twin (`_writer_task = None`); the two below do not, because Python
+    // cancels the task where JavaScript can only flag it. A `writerTask` left pointing at the dead
+    // socket's loop - or a `writerStopped` still true from its teardown - would make `serve()` on
+    // the new socket send nothing at all.
+    this.writerTask = null;
+    this.writerStopped = false;
+    this.pendingFrames = 0;
+    this.exhaustionShutdown = null;
+    this.open_ = true;
+    this.death = null;
+  }
+
+  /**
+   * @internal Close the underlying socket, and nothing else.
+   *
+   * WSM-RCN-011 asks for two things when the heartbeat declares a socket dead - declared dead **and
+   * closed locally** - and `die()` only does the first. Without the second the read loop stays parked
+   * inside `socket.receive()` on a socket the remote will never write to again, `serve()` never
+   * settles, and the reconnect supervisor waits for it forever: a peer that reports itself closed and
+   * never reconnects.
+   *
+   * `code` defaults to 1000 and never to 1006: 1006 is reserved for "the connection dropped without a
+   * close frame" and MUST NOT be put on the wire - `ws` rejects it outright, which would leave the
+   * socket open and this method silently useless. What the peer *reports* for the death is 1006; what
+   * it *sends* to end the socket is not.
+   */
+  async closeSocketLocally(code = 1000, reason = ''): Promise<void> {
+    try {
+      await this.socket.close(code, reason);
+    } catch (error) {
+      // A socket that cannot be closed is already gone, which is the outcome this method wanted.
+      logger.debug(`muxws conn=${this.id} closing a locally-declared-dead socket failed`, error);
+    }
   }
 
   /** @internal Stream -> Peer. Nothing is retained per closed stream (WSM-STM-001). */

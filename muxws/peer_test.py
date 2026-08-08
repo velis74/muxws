@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -449,22 +451,112 @@ async def test_notify_returns_none_and_leaves_no_handle(make_pair):
 # --------------------------------------------------------------------------- socket death
 
 
-async def test_socket_death_fails_every_shape(make_pair):
-    """WSM-RCN-041/WSM-STM-014 **(spec)**: every shape fails, none hangs.
+@dataclasses.dataclass
+class _Rig:
+    """What one shape is handed: a peer, a way to say it is armed, and the death it is waiting on."""
 
-    The whole assertion block runs under a deadline, so a shape that hangs is reported as a hang -
-    a caller who sees no error, no log and no timeout, just a spinner that never stops, is the exact
-    failure WSM-INV-011 names.
+    name: str
+    peer: Peer
+    armed: asyncio.Event
+    dropped: asyncio.Event
+    watched: list[Stream]
+    stream: Stream | None = None
+
+    def open(self) -> Stream:
+        self.stream = self.peer.open({"shape": self.name})
+        self.watched.append(self.stream)
+        return self.stream
+
+    def arm(self) -> None:
+        """Say this shape is in position. The socket is not dropped until every shape has said so."""
+        self.armed.set()
+
+
+async def _await_shape(rig: _Rig) -> None:
+    stream = rig.open()
+    rig.arm()
+    await stream
+
+
+async def _result_shape(rig: _Rig) -> None:
+    stream = rig.open()
+    rig.arm()
+    await stream.result()
+
+
+async def _iterate_shape(rig: _Rig) -> None:
+    stream = rig.open()
+    rig.arm()
+    async for _item in stream:
+        pass
+    # A clean end would read as "the export finished", which is exactly the lie WSM-RCN-041 forbids.
+    raise AssertionError("an async for must raise on socket death, not terminate normally")
+
+
+async def _request_shape(rig: _Rig) -> None:
+    rig.arm()
+    await rig.peer.request({"shape": rig.name})
+
+
+async def _send_shape(rig: _Rig) -> None:
+    stream = rig.open()
+    rig.arm()
+    while True:
+        # Mid-send when the socket dies, rather than sending once and waiting: a sender that had
+        # already stopped would be testing `send()` on a closed stream, which is a different rule.
+        await stream.send({"shape": rig.name})
+        await asyncio.sleep(0)
+
+
+async def _cancel_shape(rig: _Rig) -> None:
+    stream = rig.open()
+    rig.arm()
+    await rig.dropped.wait()
+    await stream.cancel()
+    await stream.reset(ResetCode.NO_ERROR)
+
+
+#: Every shape WSM-RCN-041 names, with what the socket dying under it must do to that shape. **This
+#: map is the only place they are listed**: the runner below opens one stream per entry, waits for
+#: all of them to be armed, kills the socket once, and checks each outcome against the expectation
+#: recorded here - so adding a seventh shape is one line in one place (§6).
+_DEATH_SHAPES: dict[str, tuple[Callable[[_Rig], Awaitable[None]], type[BaseException] | None]] = {
+    "await stream": (_await_shape, ConnectionLost),
+    "await stream.result()": (_result_shape, ConnectionLost),
+    "async for": (_iterate_shape, ConnectionLost),
+    "in-flight request()": (_request_shape, ConnectionLost),
+    "sender mid-send()": (_send_shape, ConnectionLost),
+    # `cancel()` and `reset()` are the shapes WSM-RCN-041 makes **no-ops** rather than failures, so
+    # `None` is the expectation. They belong here anyway: "does not raise" is worth nothing if it
+    # hangs, and hanging is what this test detects.
+    "a stream awaiting cancel()": (_cancel_shape, None),
+}
+
+
+async def test_socket_death_fails_every_shape(make_pair):
+    """WSM-RCN-041/WSM-STM-014 **(spec)**: every shape ends, none hangs.
+
+    One stream per shape, all of them live at the same instant, and one socket death underneath all
+    of them at once. What each shape must do is read from `_DEATH_SHAPES` rather than written out
+    here, so the list of shapes has exactly one home.
+
+    **This test fails by hang detection.** A shape that never finishes is named in the failure,
+    because the failure WSM-INV-011 describes is not an exception: it is a caller who sees no error,
+    no log and no timeout, just a spinner that never stops. Asserting on an exception nobody raised
+    would report that as a deadline somewhere else entirely, long after the fact, without saying
+    which of the six shapes was the one that never came back.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
+
     closes: list[Any] = []
     #: What the world looked like at the instant `on_close` ran. WSM-STM-014 puts the synthesised
-    #: failures *before* it, so a handler that fires first would observe streams still live - and
+    #: failures *before* it, so a handler that fired first would observe streams still live - and
     #: counting the calls alone cannot tell the two orderings apart.
     world_at_close: list[dict[str, Any]] = []
     watched: list[Stream] = []
+    dropped = asyncio.Event()
 
     def record(reason: Any) -> None:
         closes.append(reason)
@@ -472,53 +564,43 @@ async def test_socket_death_fails_every_shape(make_pair):
             {
                 "live_streams": len(pair.dialer.streams),
                 "all_closed": [stream.closed.is_set() for stream in watched],
-                "all_failed": [stream.state.value for stream in watched],
+                "states": sorted({stream.state.value for stream in watched}),
             }
         )
 
     pair.dialer.on_close(record)
+    rigs = {name: _Rig(name, pair.dialer, asyncio.Event(), dropped, watched) for name in _DEATH_SHAPES}
+    tasks = {name: asyncio.create_task(shape(rigs[name])) for name, (shape, _) in _DEATH_SHAPES.items()}
 
-    async def body() -> None:
-        awaited = pair.dialer.open({"shape": "await"})
-        iterated = pair.dialer.open({"shape": "iterate"})
-        sender = pair.dialer.open({"shape": "send"})
-        watched.extend([awaited, iterated, sender])
-        await pair.settle()
-
-        request_task = asyncio.create_task(pair.dialer.request({"shape": "request"}))
-        await_task = asyncio.create_task(_await_shape(awaited))
-        iterate_task = asyncio.create_task(_iterate_shape(iterated))
+    try:
+        await asyncio.wait_for(asyncio.gather(*(rig.armed.wait() for rig in rigs.values())), 5.0)
         await pair.settle()
 
         await pair.dialer_socket.drop()
+        dropped.set()
         await pair.settle()
 
-        with pytest.raises(ConnectionLost):
-            await await_task
-        with pytest.raises(ConnectionLost):
-            await iterate_task
-        with pytest.raises(ConnectionLost):
-            await request_task
-        with pytest.raises(ConnectionLost):
-            await sender.send({"late": True})
-        with pytest.raises(ConnectionLost):
-            await sender.end()
+        _, pending = await asyncio.wait(tasks.values(), timeout=5.0)
+        if pending:  # pragma: no cover - the failure this test exists to report
+            hung = sorted(name for name, task in tasks.items() if task in pending)
+            for task in pending:
+                task.cancel()
+            pytest.fail(f"these shapes hung instead of ending when the socket died: {hung} (WSM-INV-011)")
 
-        # cancel() and reset() are no-ops, and every stream reports itself closed.
-        await sender.cancel()
-        await sender.reset(ResetCode.NO_ERROR)
-        for stream in (awaited, iterated, sender):
-            assert stream.closed.is_set()
+        for name, (_, expected) in _DEATH_SHAPES.items():
+            outcome = tasks[name].exception()
+            if expected is None:
+                assert outcome is None, f"{name} must be a no-op after death, and it raised {outcome!r}"
+            else:
+                assert isinstance(outcome, expected), f"{name} ended with {outcome!r}, not {expected.__name__}"
 
-        # A second await gets the same error rather than hanging (WSM-API-010).
+        # The memoized future was resolved once, so a second await gets the same error (WSM-API-010).
         with pytest.raises(ConnectionLost):
-            await awaited
-
-    try:
-        await asyncio.wait_for(body(), timeout=5.0)
-    except asyncio.TimeoutError:  # pragma: no cover - the failure this test exists to report
-        pytest.fail("a stream shape hung instead of failing with ConnectionLost (WSM-INV-011)")
+            await rigs["await stream"].stream
     finally:
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
         await pair.stop()
 
     assert len(closes) == 1, "on_close fires once per loss, after every stream has failed"
@@ -526,19 +608,47 @@ async def test_socket_death_fails_every_shape(make_pair):
     snapshot = world_at_close[0]
     assert snapshot["live_streams"] == 0, "on_close ran while the peer still held live streams"
     assert all(snapshot["all_closed"]), f"on_close ran before every stream closed: {snapshot}"
-    assert snapshot["all_failed"] == ["closed"] * 3, snapshot
+    assert snapshot["states"] == ["closed"], snapshot
 
 
-async def _await_shape(stream: Stream) -> Any:
-    return await stream
+async def test_nothing_attempted_while_disconnected_appears_on_the_new_socket(make_pair):
+    """WSM-RCN-042/WSM-INV-010 **(spec)**: nothing is buffered for a next socket.
 
+    Every call an application can make during the gap raises, and the socket that ends the gap
+    carries none of them. A queue that flushed into a server which has forgotten the sender turns a
+    failure that would have reached a call site into silent misdelivery - which no test on the
+    calling side can detect, because the call site was told nothing.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        await pair.dialer_socket.drop()
+        await pair.settle()
 
-async def _iterate_shape(stream: Stream) -> list[Any]:
-    collected: list[Any] = []
-    async for item in stream:
-        collected.append(item)
-    # A clean end would read as "the export finished", which is exactly the lie WSM-RCN-041 forbids.
-    raise AssertionError("an async for must raise on socket death, not terminate normally")
+        for index in range(5):
+            with pytest.raises(ConnectionLost):
+                pair.dialer.open({"attempt": index})
+            with pytest.raises(ConnectionLost):
+                await pair.dialer.notify({"attempt": index})
+            with pytest.raises(ConnectionLost):
+                await pair.dialer.request({"attempt": index})
+
+        fresh, _ = memory_pair()
+        pair.dialer._adopt_socket(fresh)
+        serving = asyncio.create_task(pair.dialer.serve())
+        await pair.settle()
+        assert fresh.sent == [], "the new socket must carry none of what was attempted in the gap"
+
+        # And the id space starts empty rather than resuming where the gap left off (WSM-RCN-031).
+        assert pair.dialer.open({"after": "the gap"}).id == 1
+        await pair.settle()
+        assert [pair.dialer._codec.decode(message).payload for message in fresh.sent] == [{"after": "the gap"}]
+
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+    finally:
+        await pair.stop()
 
 
 async def test_open_while_disconnected_raises_connection_lost(make_pair):
@@ -562,9 +672,28 @@ async def test_open_while_disconnected_raises_connection_lost(make_pair):
 
 
 async def test_connection_closed_code_never_appears_on_the_wire(make_pair):
-    """Reset code 9 is synthesised locally and MUST NEVER be sent."""
+    """Reset code 9 is synthesised locally and MUST NEVER be sent.
+
+    Reading the socket alone cannot prove this, and that is worth saying: the socket the streams died
+    on is dead, so a peer that *did* synthesise a `reset(9)` for each of them would enqueue every one
+    and put none of them on any wire this test can read. The assertion has to be what was **queued**,
+    which is the last point at which the decision is still this peer's own.
+    """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
+    queued: list[Frame] = []
+
+    def watch(peer: Any) -> None:
+        original = peer._enqueue
+
+        def record(frame: Frame) -> None:
+            queued.append(frame)
+            original(frame)
+
+        peer._enqueue = record
+
+    watch(pair.dialer)
+    watch(pair.acceptor)
     pair.start()
     try:
         pair.dialer.open({"q": 1})
@@ -572,6 +701,9 @@ async def test_connection_closed_code_never_appears_on_the_wire(make_pair):
         await pair.dialer_socket.drop()
         await pair.settle()
 
+        assert any(frame.type == "open" for frame in queued), "the watch has to be on the real path"
+        for frame in queued:
+            assert frame.code != int(ResetCode.CONNECTION_CLOSED), f"code 9 was queued for the wire: {frame}"
         for who in ("dialer", "acceptor"):
             for frame in pair.sent_by(who):
                 assert frame.code != int(ResetCode.CONNECTION_CLOSED)
@@ -595,6 +727,36 @@ async def test_on_frame_sees_both_directions_with_byte_lengths(make_pair):
         assert ("tx", "open", seen[0][2]) == seen[0]
         assert any(direction == "rx" for direction, _, _ in seen)
         assert all(length > 0 for _, _, length in seen)
+    finally:
+        await pair.stop()
+
+
+async def test_a_throwing_on_frame_handler_does_not_break_the_connection(make_pair, caplog):
+    """WSM-OBS-003: an observer must not be able to break what it observes.
+
+    `on_frame` is called from inside the read loop and from inside the write loop. A handler that
+    raised - a metrics counter, a debug print with a bad format string - took the read loop down with
+    it, which the peer then reports as a socket that died. The connection an application was watching
+    is ended by the watching.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_reply_now)
+    seen: list[str] = []
+
+    def explode(_direction: str, _frame: Frame, _length: int) -> None:
+        raise RuntimeError("the application's frame counter is broken")
+
+    pair.dialer.on_frame(explode)
+    pair.dialer.on_frame(lambda direction, _frame, _length: seen.append(direction))
+    pair.start()
+    try:
+        with caplog.at_level("ERROR"):
+            answer = await pair.dialer.request({"q": 1})
+
+        assert answer == {"ok": True}, "the connection carried on working"
+        assert pair.dialer.is_open is True
+        assert {"tx", "rx"} <= set(seen), "and the handler behind the broken one still ran"
+        assert any("on_frame handler raised" in record.getMessage() for record in caplog.records)
     finally:
         await pair.stop()
 

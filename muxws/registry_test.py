@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any
 
 import pytest
 
+from muxws.conftest import DialableServer
+from muxws.reconnect import Hello
 from muxws.registry import PeerRegistry
+from muxws.stream import Stream
 
 
 @pytest.fixture
@@ -96,6 +101,49 @@ async def test_overwriting_a_never_indexed_key_is_free(registry: PeerRegistry, m
     assert registry.index_size == size_before, "a rewrite must cost the registry nothing"
 
 
+async def test_reconnect_starts_with_empty_tags(registry: PeerRegistry, dialable_server: DialableServer):
+    """WSM-RCN-033/WSM-INV-014 **(spec)**: a reconnect is a new acceptor-side peer, tagless.
+
+    Driven through the real reconnect driver rather than by building two peers by hand, because the
+    claim is about what a *reconnect* leaves behind: the acceptor never learns that the socket it
+    just accepted belongs to the client that was here a moment ago, so there is nowhere for the old
+    peer's tags to come from unless an implementation deliberately carries them - and a tab that
+    silenced something and then died would keep a successor silent that never asked to be.
+    """
+
+    async def index_the_tab(payload: Any, stream: Stream) -> None:
+        acceptor = stream._peer
+        acceptor.tags["tab"] = payload["tab"]
+        registry.register(acceptor)
+
+    dialable_server.handler = index_the_tab
+    peer, loop = await dialable_server.driver(hello=Hello(payload={"tab": "abc"}))
+    again = asyncio.Event()
+    peer.on_reconnect(lambda _attempt, _peer: again.set())
+    await loop.establish()
+    loop.start()
+    try:
+        # Something the *application* wrote on this connection, which no hello ever replays.
+        first = dialable_server.acceptors[0]
+        first.tags["muted"] = True
+        registry.register(first)
+        assert registry.peers_for(muted=True) == [first]
+
+        await dialable_server.drop()
+        await asyncio.wait_for(again.wait(), 5.0)
+        successor = dialable_server.acceptors[-1]
+
+        assert successor is not first, "the acceptor side of a reconnect is a new peer object"
+        assert successor.tags == {"tab": "abc"}, "carrying only what this connection itself set"
+        assert "muted" not in successor.tags, "a tab that silenced something must not silence its successor"
+
+        # And the dead connection's index entries went with it, so nothing finds it either.
+        await asyncio.wait_for(_until(lambda: registry.peers_for(tab="abc") == [successor]), 5.0)
+        assert registry.peers_for(muted=True) == []
+    finally:
+        await loop.stop()
+
+
 async def test_peers_for_returns_a_list_in_stable_order(registry: PeerRegistry, make_pair):
     """WSM-REG-015: a list, never a set, so two runs agree."""
     peers = []
@@ -141,6 +189,24 @@ async def test_close_removes_the_peer_from_the_index_automatically(registry: Pee
         await pair.stop()
 
 
+async def test_reregistering_costs_the_peer_no_bookkeeping_either(registry: PeerRegistry, make_pair):
+    """WSM-REG-001/012/017: a rewrite pays nothing - on the peer as well as in the index.
+
+    WSM-REG-017 tells a consumer that both looks up and mutates one key to call `register(peer)`
+    after every write, so this is the documented pattern rather than a pathological one. A hook
+    appended per call would leave a long-lived peer carrying one close handler per write, all of them
+    doing the same already-idempotent deregistration, and nothing anywhere would ever look wrong.
+    """
+    peer = make_pair().dialer
+    for generation in range(50):
+        peer.tags["session"] = f"s{generation}"
+        registry.register(peer)
+
+    assert len(peer._close_handlers) == 1, "one hook per peer, however often it is re-registered"
+    assert registry.peers_for(session="s49") == [peer]
+    assert registry.peers_for(session="s0") == []
+
+
 async def test_registered_is_a_scope(registry: PeerRegistry, make_pair):
     pair = make_pair()
     pair.dialer.tags["session"] = "abc"
@@ -180,3 +246,9 @@ def test_the_registry_ships_no_cross_process_backplane():
 async def _hold(payload: Any, stream: Any) -> None:
     _ = payload
     await stream.closed.wait()
+
+
+async def _until(condition: Any) -> None:
+    """Poll until `condition` holds. A reconnect finishes when it finishes, not on a fixed delay."""
+    while not condition():
+        await asyncio.sleep(0.005)

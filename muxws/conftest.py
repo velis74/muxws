@@ -10,8 +10,11 @@ from typing import Any
 import pytest
 
 from muxws.codecs.json_ import JsonCodec
+from muxws.errors import ResetCode
 from muxws.frames import Frame
-from muxws.peer import Peer
+from muxws.peer import Peer, StreamHandler
+from muxws.reconnect import ConnectionLoop, Hello, Reconnect
+from muxws.stream import Stream
 from muxws.transports.memory import memory_pair, MemorySocket
 
 
@@ -123,3 +126,150 @@ def make_lone() -> Callable[..., Lone]:
         return Lone(peer, socket, codec)
 
     return build
+
+
+class DialableServer:
+    """A fake server the reconnect driver can actually dial (§7).
+
+    Every `dial()` builds a fresh `memory_pair()`, stands an acceptor `Peer` up over one end, starts
+    its `serve()` task and returns the other end - so `server.dial` is a `Dial` callable a
+    `ConnectionLoop` can be constructed with directly. Each connection is a *new* acceptor peer,
+    which is the acceptor-side truth of a reconnect (WSM-RCN-033): nothing carries forward.
+
+    It can be told to refuse the next dial, and to answer the hello in each of the four ways the
+    driver has to survive - acknowledge it, reset it, never answer it, or drop the socket while it is
+    outstanding - because those are the branches of WSM-RCN-026 and of WSM-RCN-004's named test.
+
+    Everything the dialer put on the wire is kept per connection, so "three drops replay
+    byte-identical hellos" (WSM-RCN-027) can be asserted on the raw messages rather than on decoded
+    objects that would compare equal after a mutation the encoder happened to smooth over.
+    """
+
+    def __init__(self) -> None:
+        self.codec = JsonCodec()
+        #: A handler a test supplies. When set it replaces `on_hello` entirely.
+        self.handler: StreamHandler | None = None
+        #: How the built-in handler answers a stream: `"ack"` acknowledges it by returning
+        #: (WSM-RCN-022), `"reset"` resets it, `"hang"` never answers, `"drop"` kills the socket with
+        #: the hello outstanding.
+        self.on_hello = "ack"
+        self.acceptors: list[Peer] = []
+        #: The dialer-side socket of each connection, in dial order. `.sent` is the raw wire.
+        self.sockets: list[MemorySocket] = []
+        #: Every payload every acceptor received, in arrival order.
+        self.received: list[Any] = []
+        self.dials = 0
+        self.refusals = 0
+        self._refuse = 0
+        self._tasks: list[asyncio.Task[None]] = []
+
+    # ------------------------------------------------------------------ the dial
+
+    def refuse_next(self, count: int = 1) -> None:
+        """The next `count` dials fail before any socket exists - not a socket loss (WSM-RCN-040)."""
+        self._refuse += count
+
+    async def dial(self) -> MemorySocket:
+        self.dials += 1
+        if self._refuse > 0:
+            self._refuse -= 1
+            self.refusals += 1
+            raise ConnectionRefusedError(f"nothing is listening (dial {self.dials})")
+
+        dialer_side, acceptor_side = memory_pair()
+        acceptor = Peer(acceptor_side, codec=self.codec, is_dialer=False)
+        acceptor.on_stream(self._handle)
+        self.acceptors.append(acceptor)
+        self.sockets.append(dialer_side)
+        self._tasks.append(asyncio.create_task(acceptor.serve()))
+        return dialer_side
+
+    async def driver(
+        self,
+        *,
+        options: Reconnect | None = None,
+        hello: Hello | None = None,
+        **loop_options: Any,
+    ) -> tuple[Peer, ConnectionLoop]:
+        """The first connection and its driver, unestablished: `connect()`'s first three steps.
+
+        `establish()` is deliberately left to the caller. It is the step that raises (WSM-RCN-006),
+        and a fixture that called it would hide the one thing several of these tests are about.
+
+        The defaults are what a driver test wants: a hundredth of a second of backoff with no jitter,
+        so waiting three attempts out costs milliseconds rather than seconds, and no heartbeat unless
+        the test asks for one - a heartbeat nobody asked for would put `ping` frames on a wire other
+        tests read.
+        """
+        socket = await self.dial()
+        peer = Peer(socket, codec=self.codec, is_dialer=True)
+        loop_options.setdefault("ping_interval", 0.0)
+        loop = ConnectionLoop(
+            peer,
+            self.dial,
+            options=options or Reconnect(initial_delay=0.01, jitter=0.0),
+            hello=hello or Hello(),
+            **loop_options,
+        )
+        return peer, loop
+
+    async def _handle(self, payload: Any, stream: Stream) -> None:
+        self.received.append(payload)
+        if self.handler is not None:
+            result = self.handler(payload, stream)
+            if asyncio.iscoroutine(result):
+                await result
+            return
+        if self.on_hello == "ack":
+            # Returning is the acknowledgement: WSM-STM-035 ends the stream implicitly, and
+            # WSM-RCN-022 says that is all an acceptor has to do.
+            return
+        if self.on_hello == "reset":
+            await stream.reset(ResetCode.REFUSED, "the hello was refused")
+            return
+        if self.on_hello == "drop":
+            await self.sockets[-1].drop()
+            return
+        await stream.closed.wait()
+
+    # ------------------------------------------------------------------ reading the wire
+
+    async def drop(self) -> None:
+        """Kill the current socket the way a server going down kills one: no close frame."""
+        await self.sockets[-1].drop()
+
+    async def go_silent(self) -> None:
+        """Stop reading on the current connection without closing it.
+
+        The socket stays up and every frame the dialer sends is swallowed, `ping` included - which is
+        the only thing a heartbeat can be tested against (WSM-RCN-011). A closed socket would be
+        detected by the read loop instead, and would prove nothing about the heartbeat.
+        """
+        task = self._tasks[-1]
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def raw(self, index: int) -> list[str | bytes]:
+        """Every message the dialer put on connection `index`, exactly as it went out."""
+        return list(self.sockets[index].sent)
+
+    def frames(self, index: int) -> list[Frame]:
+        return [self.codec.decode(message) for message in self.sockets[index].sent]
+
+    async def aclose(self) -> None:
+        for socket in self.sockets:
+            await socket.drop()
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
+            # A cancelled serve() is the expected end of a test; anything it raises on the way out is
+            # teardown noise, not a result.
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.fixture
+async def dialable_server() -> AsyncIterator[DialableServer]:
+    """A fake server every reconnect-driver test dials. Torn down at the end of the test."""
+    server = DialableServer()
+    yield server
+    await server.aclose()
