@@ -353,7 +353,8 @@ describe('maxPayloadBytes', () => {
 // --------------------------------------------------------------------------- concurrency
 
 describe('the concurrency limit', () => {
-  it('refuses an open beyond the receiver limit and the opener raises nothing locally - WSM-STM-036 (spec)', async () => {
+  // The Python name is `test_open_beyond_receiver_limit_is_refused_and_opener_raises_nothing_locally`.
+  it('refuses an open beyond the receiver limit, and open() raises nothing locally - WSM-STM-036 (spec)', async () => {
     // Refused without invoking the handler, and `open()` never fails for it.
     const pair = makePair({ maxConcurrentStreams: 3 });
     const handled: unknown[] = [];

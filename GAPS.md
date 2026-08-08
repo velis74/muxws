@@ -421,3 +421,58 @@ TypeScript array can be introduced as `const waiting = []` with its element type
 written down, and such an array would evade the count. The check is still worth having — it is the
 only witness a rule about what must *not* exist can have — but it is a tripwire, not a proof, and a
 reviewer should read the file rather than trust it alone.
+
+## muxws-m5a-fragmentation-and-writer.md — WSM-OBS-001/003, WSM-RCN-045, the TypeScript caps suite
+
+**What I needed:** a TypeScript home for `muxws/observability.py`, and a TypeScript spelling for the
+`conftest.py` fixtures `muxws/caps_test.py` is written against.
+
+**What the brief says:** §3 lists `ts/observability.ts` as a file to create and §7 names fourteen
+tests, several of them **(spec)**-marked and therefore required to match "character for character".
+It says nothing about what a TypeScript observability module contains, and nothing about `Lone` -
+which is a `conftest.py` fixture, not a milestone artefact, and so appears in no brief at all.
+
+**What I assumed:** four things.
+
+- **`ts/observability.ts` takes the level-filtered `console` shim as well as the frame line.**
+  Python's `observability.py` holds `CloseReason` and `log_frame` and gets its logger from the
+  standard library; TypeScript has no logging module it may depend on (WSM-PKG-003), so the shim that
+  stood in for one has always lived in `ts/peer.ts` - with a comment saying M5a's observability module
+  would take ownership of it. It now does, together with `CloseReason`, which mirrors Python's module
+  layout exactly. Both are re-exported from `ts/peer.ts` so no existing import site moved.
+- **`withinPayloadCap` is synchronous where Python's `_within_payload_cap` is a coroutine.** Python
+  awaits only because `_reset_stream` is `async`; the TypeScript `resetStream` is not, and there is
+  nothing else in the method to suspend on. Making it `async` would have made `continueOpen` and
+  `onData` async for no reason and put a suspension point between the cap decision and the reset.
+- **`Lone` is a class in `ts/caps.spec.ts`, not a shared fixture.** vitest has no `conftest.py`, and
+  the only other spec that injects raw frames (`ts/peer.spec.ts`) already carries its own `Pair` with
+  an `inject` on it rather than importing one. A second harness module for one consumer would be
+  indirection, not reuse; when M5b needs `Lone` it should move to a shared spec helper then.
+- **Spec-marked test names are prose `it(...)` descriptions carrying the rule id, not the Python
+  function name.** This is the convention every TypeScript spec in the repository already follows
+  (`ts/fragment.spec.ts` mirrors `test_slice_point_sweep_never_exceeds_cap` as "never exceeds the cap
+  - ..."), and a `snake_case` string inside `it()` would be unreadable in vitest's reporter for no
+  gain; the brief's "character for character" requirement is about the Python names, which do match.
+  Where the prose had to differ from a literal translation - vitest's `printWidth: 120` does not fit
+  `refuses an open beyond the receiver limit and the opener raises nothing locally` on one line - the
+  Python name is written out in a comment directly above the test, so the two suites can still be
+  diffed test for test.
+
+## muxws-m5a-fragmentation-and-writer.md — WSM-FRG-019, a gap in my own verification
+
+**What I needed:** to know that M5a was actually finished in TypeScript before saying so.
+
+**What the brief says:** the writer selects by round-robin, and a FIFO send queue MUST NOT be used.
+
+**What went wrong:** `ts/writer.ts` landed with thirteen passing tests, `npx vitest run` was green,
+and I committed M5a as complete in both languages. It was not. `ts/peer.ts` still sent through a
+private `AsyncQueue`, so the rotation - the entire point of the milestone - was not on the
+TypeScript send path at all. Every test passed because they all tested the writer *in isolation*,
+and nothing asserted that the peer used it.
+
+**What I assumed, and the correction:** that a green suite plus a component's own tests means the
+component is wired in. It does not. `ts/writer.spec.ts` now carries an end-to-end case - two streams
+through a real `Peer` pair, one fragmenting a 40 kB payload and one sending 200 bytes - and the small
+frame must reach the wire within four frames. Replacing the rotation with a genuine FIFO fails that
+test and two others; the earlier isolated tests alone did not notice the peer bypassing the writer
+entirely. The same shape of blind spot applies to any port: test the seam, not only the part.

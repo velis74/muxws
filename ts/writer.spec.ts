@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { JsonCodec } from './codec';
 import { encodedLength, splitFrame } from './fragment';
 import type { Frame } from './frames';
+import { Peer } from './peer';
+import { memoryPair } from './transports/memory';
 import { CONNECTION_LANE, StreamQueue, Writer } from './writer';
 
 const codec = new JsonCodec();
@@ -217,5 +219,45 @@ describe('a stream queue', () => {
     expect(queue.take()).not.toBeNull();
     expect(queue.preparedDepth).toBe(0);
     expect(queue.hasWork).toBe(true); // the tail is still there even with nothing prepared
+  });
+});
+
+describe('the peer actually uses the writer', () => {
+  /**
+   * The gap this closes: ts/writer.ts landed with 13 passing tests while ts/peer.ts still sent
+   * through a FIFO of its own, so the rotation - the entire point of M5a - was not on the send path
+   * at all. Testing the writer in isolation cannot notice that.
+   */
+  it('interleaves a small frame with a fragmenting one, end to end - WSM-INV-004', async () => {
+    const codec = new JsonCodec();
+    const [left, right] = memoryPair();
+    const dialer = new Peer(left, { codec, isDialer: true, maxFrameBytes: 512 });
+    const acceptor = new Peer(right, { codec, isDialer: false, maxFrameBytes: 512 });
+    acceptor.onStream(async (_payload: unknown, stream) => {
+      await stream.closed;
+    });
+
+    const served = [dialer.serve(), acceptor.serve()];
+    served.forEach((task) => void task.catch(() => undefined));
+
+    try {
+      // A megabyte-ish payload on one stream, then a 200-byte update on another.
+      dialer.open({ body: 'x'.repeat(40_000) });
+      dialer.open({ progress: 42 });
+
+      for (let turn = 0; turn < 60; turn += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      const streams = left.sent.map((message) => codec.decode(message).stream);
+      const small = streams.indexOf(3);
+      expect(small, 'the small frame never went out at all').toBeGreaterThan(-1);
+      expect(small, `the small frame waited ${small} frames behind the big one`).toBeLessThan(4);
+      expect(streams.filter((id) => id === 1).length, 'the big payload must still be fragmenting').toBeGreaterThan(10);
+    } finally {
+      left.drop();
+      for (let turn = 0; turn < 12; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.allSettled(served);
+    }
   });
 });

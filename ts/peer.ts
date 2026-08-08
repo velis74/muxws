@@ -24,6 +24,7 @@ import { GoawayState, MAX_STREAM_ID, newNonce, PingRegistry } from './lifecycle'
 import { type CloseReason, type FrameDirection, logFrame, logger } from './observability';
 import { Stream, StreamState } from './stream';
 import type { SocketAdapter } from './transports';
+import { CONNECTION_LANE, LaneEncodingError, Writer } from './writer';
 
 // The log seam moved to `ts/observability.ts` at M5a, where the frame line lives; it is re-exported
 // here because every call site that had one imported it from this module.
@@ -223,31 +224,6 @@ const DEADLINE_EXPIRED: unique symbol = Symbol('DEADLINE_EXPIRED');
  *
  * TypeScript has no `asyncio.Queue`, and the outbound queue is the one place the peer needs one.
  */
-class AsyncQueue<T> {
-  private items: T[] = [];
-
-  private waiters: ((item: T) => void)[] = [];
-
-  get size(): number {
-    return this.items.length;
-  }
-
-  put(item: T): void {
-    const waiter = this.waiters.shift();
-    if (waiter !== undefined) {
-      waiter(item);
-      return;
-    }
-    this.items.push(item);
-  }
-
-  get(): Promise<T> {
-    if (this.items.length > 0) return Promise.resolve(this.items.shift() as T);
-    return new Promise<T>((resolve) => {
-      this.waiters.push(resolve);
-    });
-  }
-}
 
 // --------------------------------------------------------------------------- the peer
 
@@ -310,7 +286,11 @@ export class Peer {
   /** What each side has said about stopping; the two directions mean different things. */
   private readonly goaway = new GoawayState();
 
-  private readonly outbound = new AsyncQueue<Frame | null>();
+  /**
+   * The send path. Round-robin across streams, never a FIFO of frames (WSM-FRG-019) - without this
+   * a 1 MB payload adds a full second of latency to a 200-byte update on another stream.
+   */
+  private writer: Writer;
 
   private writerTask: Promise<void> | null = null;
 
@@ -341,6 +321,7 @@ export class Peer {
     this.maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
     this.maxConcurrentStreams = options.maxConcurrentStreams ?? DEFAULT_MAX_CONCURRENT_STREAMS;
     this.nextId = options.isDialer ? 1 : 2;
+    this.writer = new Writer(options.codec, { maxFrameBytes: this.maxFrameBytes });
   }
 
   // ------------------------------------------------------------------ properties
@@ -557,13 +538,28 @@ export class Peer {
   /** @internal Stream -> Peer. Synchronous by contract: `open()` must not suspend mid-allocation. */
   enqueue(frame: Frame): void {
     this.pendingFrames += 1;
-    this.outbound.put(frame);
+    this.writer.enqueue(frame);
   }
 
   private async runWriter(): Promise<void> {
     for (;;) {
-      const frame = await this.outbound.get();
+      let frame: Frame | null;
+      try {
+        frame = await this.writer.nextFrame();
+      } catch (error) {
+        if (error instanceof LaneEncodingError) {
+          // The encode now happens inside the writer, so a codec that refuses a payload would
+          // otherwise take the write loop down with it - and a peer whose writer is dead while it
+          // still reports itself open is the worst possible state. The lane is carried so exactly
+          // one stream fails and the connection keeps working.
+          this.pendingFrames = Math.max(0, this.pendingFrames - 1);
+          this.failLane(error);
+          continue;
+        }
+        throw error;
+      }
       if (frame === null || this.writerStopped) return;
+
       try {
         const encoded = this.codec.encode(frame);
         this.reportFrame('tx', frame, encoded);
@@ -572,18 +568,31 @@ export class Peer {
         } else {
           await this.socket.sendText(encoded as string);
         }
+        // Only now: fragment n+1 is sliced once fragment n has reached the socket, never before
+        // (WSM-FRG-018).
+        this.writer.advance(frame.stream ?? CONNECTION_LANE);
       } catch (error) {
         // The socket is gone; `serve()`'s read loop is the one that declares the peer dead.
         if (error instanceof ConnectionClosed) return;
-        // A codec that cannot encode this frame - an ArrayBuffer payload under JSON, say - used to
-        // take the writer down with it. Nothing then drained the queue, every later send sat in it
-        // forever, and the peer went on reporting itself open.
         logger.error(`muxws conn=${this.id} could not send a ${frame.type} frame`, error);
         this.failUnsendable(frame, error);
       } finally {
         this.pendingFrames -= 1;
       }
     }
+  }
+
+  /** One lane's frame could not be encoded. Fail its stream; keep the connection working. */
+  private failLane(failure: LaneEncodingError): void {
+    const detail = errorMessage(failure.cause);
+    const stream = this.liveStreams.get(failure.lane);
+    if (stream === undefined) {
+      this.die(new ConnectionClosed(String(failure), { code: 1011 }));
+      return;
+    }
+    logger.error(`muxws conn=${this.id} could not encode a frame on stream ${failure.lane}`, failure.cause);
+    this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
+    stream.fail(exceptionForReset(ResetCode.INTERNAL_ERROR, detail, { streamId: stream.id }));
   }
 
   /** One frame could not be encoded. Fail its stream and keep the connection working. */
@@ -1178,7 +1187,7 @@ export class Peer {
   private async stopWriter(): Promise<void> {
     const task = this.writerTask;
     if (task === null) return;
-    this.outbound.put(null);
+    this.writer.stop();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<void>((resolve) => {
@@ -1202,6 +1211,7 @@ export class Peer {
 
     // Nobody is going to answer a ping now, so nobody should keep waiting for one.
     this.pings.failAll(cause);
+    this.writer.discardAll();
     this.pingStarted.clear();
 
     const detail = cause.reason || errorMessage(cause);

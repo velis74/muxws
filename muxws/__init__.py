@@ -25,6 +25,8 @@ from muxws.fragment import Assembler, encoded_length, MAX_FRAME_BYTES, split_fra
 from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
 from muxws.observability import CloseReason
 from muxws.peer import default_error_serializer, ErrorSerializer, Peer, StreamHandler
+from muxws.reconnect import backoff_delay, Hello, Reconnect
+from muxws.registry import PeerRegistry
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
 
@@ -46,11 +48,14 @@ __all__ = [
     "ConnectionLost",
     "ErrorSerializer",
     "Frame",
+    "Hello",
     "JsonCodec",
     "MAX_FRAME_BYTES",
     "MuxwsError",
     "Peer",
+    "PeerRegistry",
     "ProtocolError",
+    "Reconnect",
     "RemoteError",
     "ResetCode",
     "Settings",
@@ -65,6 +70,7 @@ __all__ = [
     "StreamTimeout",
     "__version__",
     "accept",
+    "backoff_delay",
     "connect",
     "default_error_serializer",
     "encoded_length",

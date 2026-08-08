@@ -88,6 +88,10 @@ class Peer:
 
         self._handler: StreamHandler | None = None
         self._close_handlers: list[Callable[[Any], None]] = []
+        self._reconnect_handlers: list[Callable[[int, Any], None]] = []
+        #: True while the reconnect helper intends to dial again. `CloseReason.will_retry` reads it,
+        #: and it is false whenever `max_attempts` is exhausted or `close()` was deliberate.
+        self._will_retry = False
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
 
         self._writer = Writer(codec, max_frame_bytes=self._max_frame_bytes)
@@ -127,6 +131,20 @@ class Peer:
     def on_close(self, handler: Callable[[Any], None]) -> Callable[[Any], None]:
         self._close_handlers.append(handler)
         return handler
+
+    def on_reconnect(self, handler: Callable[[int, Any], None]) -> Callable[[int, Any], None]:
+        """Fires once per **re-established** connection (WSM-RCN-030).
+
+        It guarantees exactly two things and nothing more: a live socket, and an identity the
+        acceptor has already accepted on it. No stream survives a reconnect, nothing is replayed, and
+        the new socket's id space starts empty (WSM-RCN-031/032).
+        """
+        self._reconnect_handlers.append(handler)
+        return handler
+
+    def _fire_reconnect(self, attempt: int) -> None:
+        for handler in self._reconnect_handlers:
+            handler(attempt, self)
 
     def on_frame(self, handler: Callable[[str, Frame, int], None]) -> Callable[[str, Frame, int], None]:
         """`(direction, frame, byte_length)`, before encode and after decode (WSM-OBS-003)."""
@@ -765,9 +783,33 @@ class Peer:
             )
         self._streams.clear()
 
-        reason = CloseReason(code=cause.code, reason=cause.reason, was_clean=cause.was_clean, will_retry=False)
+        reason = CloseReason(
+            code=cause.code, reason=cause.reason, was_clean=cause.was_clean, will_retry=self._will_retry
+        )
         for handler in self._close_handlers:
             handler(reason)
+
+    def _adopt_socket(self, socket: SocketAdapter) -> None:
+        """Take a freshly established socket, for a `Peer` that survived a reconnect.
+
+        `Peer` survives; `Stream` objects do not (WSM-RCN-032). The id space starts empty, the
+        high-water marks reset, and `tags` on the *acceptor* side belong to a new peer object
+        entirely (WSM-RCN-033) - nothing is carried forward here either.
+
+        The connection id advances, so a log shows the reconnect as a new `conn=` rather than as one
+        continuous connection (WSM-API-009).
+        """
+        self.id = f"{_PROCESS_PREFIX}-{next(_CONNECTION_COUNTER)}"
+        self._socket = socket
+        self._streams.clear()
+        self._next_id = 1 if self._is_dialer else 2
+        self._highest_local_open = 0
+        self._highest_remote_open = 0
+        self._goaway = GoawayState()
+        self._writer = Writer(self._codec, max_frame_bytes=self._max_frame_bytes)
+        self._writer_task = None
+        self._is_open = True
+        self._death = None
 
     def _forget(self, stream: Stream) -> None:
         """Drop a closed stream. Nothing is retained per closed stream (WSM-STM-001)."""
