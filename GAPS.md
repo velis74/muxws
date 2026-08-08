@@ -595,3 +595,104 @@ injected clock and an injected sleep. The pong deadline itself is `asyncio.wait_
 injection reaches without reimplementing it, so the end-to-end bound is asserted against the real clock
 with interval and timeout in the tens of milliseconds. That waits on nothing TCP-shaped, which is what
 the rule is protecting; a fake clock wrapped around `wait_for` would test the wrapper.
+
+## muxws-m3-transports.md — WSM-CDC-022, a rule the test rig could not see
+
+**What I needed:** to know whether the acceptor really answers HTTP 400 when the offered codec does
+not match.
+
+**What the brief says:** D1, verbatim — "Under `websockets`, `select_subprotocol` returns `None` and
+the library answers the upgrade with 400."
+
+**What is actually true:** returning `None` means *"no subprotocol selected"* and `websockets`
+completes the handshake with **HTTP 101**. Only an `InvalidHandshake` subclass out of that hook
+produces a 400; anything else renders 500. `ws` behaves the same way — `handleProtocols` returning
+`false` answers 101 with no subprotocol, and cannot refuse at all. Both ports therefore violated
+WSM-CDC-022 from M3 until M6, and the docstring in `muxws/transports/websockets_.py` asserted the
+behaviour that was missing.
+
+**Why it survived three milestones:** every test dialled with the **same language's** dialer, which
+recovers through WSM-CDC-028's post-handshake check and raises `CodecMismatch` anyway. The outcome was
+right in the only configuration ever tested. A **cross-language** dial is where it shows: `ws`'s client
+rejects with `Server sent no subprotocol`, a message containing no `400`, so the dialer's `/\b400\b/`
+heuristic missed and a bare error propagated — taking WSM-CDC-024 down with it.
+
+**The lesson, which is the same one WSM-RCN-011 taught with close code 1006:** a witness for a rule
+about an HTTP status has to be an HTTP request. No peer-level test can see a status code, and the
+in-memory and same-language rigs structurally could not fail. When a rule is about something the test
+transport discards, the rule is untested no matter how many tests mention it.
+
+**What I assumed:** `NegotiationError` in Python (verified: status 400) and a second exported hook in
+TypeScript, `refuseMismatchedUpgrade`, wrapping `shouldHandle` (verified: status 400; `verifyClient`
+also works but is deprecated in `ws` 8). WSM-CDC-027 names `select_subprotocol` for Python and nothing
+for `ws`; one hook cannot both select and refuse, so the second export is forced and the rule should
+say so.
+
+## muxws-m6-conformance.md — WSM-TST-001, why `json_wire` must be authored by hand
+
+**What I needed:** to know whether the "authored by hand, not generated from our own encoder" rule
+buys anything, or is ceremony.
+
+**What the brief says:** it does not say this at all. The rule was written into
+`conformance/README.md` while pinning the schema, and then tested.
+
+**What it buys, concretely:** a mutation that makes `from_mapping` clamp every reset code outside
+{0,1,2,3,4} to `PROTOCOL_ERROR` survives both `decode(json_wire) == frame` and
+`decode(encode(frame)) == frame` — the fixture's `frame` is itself built through the mutated
+`from_mapping`, so both sides of each comparison are clamped together and agree. Only the pinned wire
+disagrees. Had `json_wire` been generated as `encode(from_mapping(frame))`, a peer silently rewriting
+TIMEOUT, PAYLOAD_TOO_LARGE and INTERNAL_ERROR as PROTOCOL_ERROR would have passed the entire corpus
+green. The hand-authored wire is the only information in the corpus that the code does not already
+contain.
+
+## muxws-m6-conformance.md — the corpus was destroyed mid-milestone, by the same command as in M5a
+
+**What went wrong:** an auditor's mutation-probe script reverted files with `git checkout -- <path>`.
+That is safe for files nobody has edited, and destructive for a tracked file with uncommitted changes —
+which `conformance/frames/v1-frames.json` was. The M6 extension from 19 triples to 44 was lost and was
+unrecoverable: no editor backup, no dangling git blob.
+
+**What made it worse:** `test_json_wire_is_frozen` then failed, correctly, because the corpus had
+changed. I read that as "the digest is stale after the extension" and re-pinned it — to the **damaged**
+corpus. A correct red signal became a false green, and the suite passed because I had made it pass.
+
+**What I assumed, and the correction:** that a failing freeze test means the digest needs updating. It
+means the corpus changed, and the first question is *which way*. The digest was re-pinned only after the
+25 triples were rebuilt and each one was shown to catch the mutation it existed for. `git checkout` and
+`git restore` are now forbidden in every agent instruction in this project; a mutation probe copies to
+a scratch directory and copies back.
+
+## muxws-m6-conformance.md — WSM-CDC-007, what "running the sequence corpus" can mean cross-language
+
+**What I needed:** to know what a live cross-language corpus run *is*, given that a sequence fixture
+scripts **both** peers and a cross-language run puts each peer in a different process and language.
+
+**What the brief says:** every codec that ships MUST have a live cross-language pair in CI, "running
+the sequence corpus". It does not say how a two-sided script is driven from two processes.
+
+**What I assumed:** a conductor that drives both processes through the corpus, emitting the fixture
+names it exercised and asserting that count against the number the in-process runners pin — so a
+regression to "it ran nothing" fails the job rather than reporting success. The four legs run 12, 12,
+13 and 13 fixtures (the JSON legs skip the bytes fixture with a recorded reason). Proven to have teeth:
+making a raising handler answer `INTERNAL_ERROR` instead of `APPLICATION_ERROR` in either port fails
+the leg driven by the other.
+
+## muxws-m6-conformance.md — a hollow assertion and a hollow comparison
+
+**What I needed:** confidence that the conformance tests can fail.
+
+**Two that could not, both found by audit rather than by the suite:**
+
+`muxws/conformance_schema_test.py` asserted `parsed == frame or parsed["type"] == frame["type"]`. The
+right disjunct is true for every well-formed triple, so the comparison beside it could never fail the
+test. It read as proof of round-tripping and proved only that the wire parses. Narrowed to what it
+honestly checks — shape — with the semantic check left where the codec is.
+
+`ts/conformance.spec.ts` compared payloads with vitest's `toEqual`, which reports two `ArrayBuffer`s of
+equal length as **equal regardless of contents**. The bytes fixture would have shipped unable to detect
+a peer delivering the right number of entirely wrong bytes. Both now use a structural comparison with an
+`ArrayBuffer` branch.
+
+**The pattern:** in a conformance milestone the dangerous failure is not a test that fails, it is a
+test that cannot. A corpus that passes against anything is worse than no corpus, because it is read as
+proof.

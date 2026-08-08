@@ -1,0 +1,16 @@
+{
+  "name": "unknown-frame-type-is-ignored",
+  "description": "WSM-FRM-002 and half of the forward-compatibility story: a frame type this generation does not know is ignored, logged once, and is never an error of any kind. Nothing goes out for it and the connection keeps working, which the request afterwards proves by completing on it. This is what makes an additive revision safe to deploy against an older peer without announcing anything (WSM-CON-009) - and it is why there is no settings frame and no capability negotiation to get wrong.",
+  "steps": [
+    { "peer": "acceptor", "inject": { "type": "widget", "spin": "clockwise" } },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset" } },
+
+    { "peer": "dialer", "call": "request", "payload": { "action": "still here" }, "as": "after" },
+    { "settle": 24 },
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "ok": true } },
+    { "settle": 24 },
+    { "expect_result": { "ref": "after", "value": { "ok": true } } }
+  ]
+}

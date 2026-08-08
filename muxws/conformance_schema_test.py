@@ -97,12 +97,17 @@ def test_frame_fixtures_are_name_frame_wire_triples(path: Path):
     for case in corpus:
         assert set(case) == {"name", "frame", "json_wire"}
         assert "type" in case["frame"]
-        # The pinned wire must parse, and must describe the same frame.
-        assert (
-            json.loads(case["json_wire"])
-            == {key: value for key, value in case["frame"].items() if value is not None or key == "payload"}
-            or json.loads(case["json_wire"])["type"] == case["frame"]["type"]
-        )
+        # Shape only: the pinned wire parses to an object carrying the same frame type. This used to
+        # attempt `parsed == frame` as well, with the type check as an `or` fallback - and the
+        # fallback is true for every well-formed triple, so the comparison beside it could never fail
+        # the test. It read as proof of round-tripping while proving nothing.
+        #
+        # The semantic check is `decode(json_wire) == frame`, and it belongs where the codec is: this
+        # module asserts that a fixture is *well-formed*, `conformance_test.py` asserts that it is
+        # *true* (WSM-TST-001, WSM-CDC-005).
+        wire = json.loads(case["json_wire"])
+        assert isinstance(wire, dict)
+        assert wire["type"] == case["frame"]["type"]
 
 
 def test_no_fixture_anywhere_mentions_a_settings_frame():

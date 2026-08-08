@@ -1,0 +1,26 @@
+{
+  "name": "small-frame-overtakes-a-fragmented-payload",
+  "description": "WSM-FRG-019 and the reason the whole send path exists (WSM-INV-004): a small frame on one stream must not wait behind a large payload on another. Two opens are enqueued in the same turn, the first of which fragments ten times at a 128-byte cap; the second is one frame. The three matchers assert relative order on one wire - a fragment, then the whole small open, then another fragment - so a writer that drained the first stream to completion before starting the second fails on the third of them and only there. The written order is the same in both role assignments because the cursor never crosses to the other peer's wire.",
+  "max_frame_bytes": 128,
+  "steps": [
+    {
+      "peer": "dialer",
+      "call": "open",
+      "payload": {
+        "export": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij"
+      },
+      "as": "big"
+    },
+    { "peer": "dialer", "call": "open", "payload": { "progress": 42 } },
+    { "settle": 60 },
+
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "more": true } },
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 2, "payload": { "progress": 42 } } },
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "more": true } },
+
+    { "settle": 60 },
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "received": true } },
+    { "settle": 24 },
+    { "expect_result": { "ref": "big", "value": { "received": true } } }
+  ]
+}

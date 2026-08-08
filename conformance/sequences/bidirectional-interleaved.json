@@ -1,0 +1,31 @@
+{
+  "name": "bidirectional-interleaved",
+  "description": "One stream, both directions live at once, and each side ending when it has nothing more to say. The acceptor ends first and the dialer keeps sending afterwards, which is the half-closed-remote state of §5.3 and the reason end is per-direction rather than per-stream: a peer that treated the first end as the end of the stream would drop the second payload and close early. Both iterators see exactly what the other side sent after the open, and neither sees the opening payload - that one is delivered to the handler as its argument.",
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "hello": "from the dialer" } },
+    { "settle": 12 },
+    { "peer": "dialer", "call": "iterate", "stream_ref": 1, "as": "dialer-saw" },
+    { "peer": "acceptor", "call": "iterate", "stream_ref": 1, "as": "acceptor-saw" },
+
+    { "peer": "acceptor", "call": "send", "stream_ref": 1, "payload": { "tick": 1 } },
+    { "peer": "dialer", "call": "send", "stream_ref": 1, "payload": { "tock": 1 } },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "payload": { "tick": 1 } } },
+    { "peer": "dialer", "expect_frame": { "type": "data", "stream_ref": 1, "payload": { "tock": 1 } } },
+
+    { "peer": "acceptor", "call": "end", "stream_ref": 1 },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "end": true } },
+    { "expect_result": { "ref": "dialer-saw", "value": [{ "tick": 1 }] } },
+
+    { "peer": "dialer", "call": "send", "stream_ref": 1, "payload": { "tock": 2 } },
+    { "peer": "dialer", "call": "end", "stream_ref": 1 },
+    { "settle": 24 },
+    { "peer": "dialer", "expect_frame": { "type": "data", "stream_ref": 1, "payload": { "tock": 2 } } },
+    { "peer": "dialer", "expect_frame": { "type": "data", "stream_ref": 1, "end": true } },
+    { "expect_result": { "ref": "acceptor-saw", "value": [{ "tock": 1 }, { "tock": 2 }] } },
+
+    { "peer": "dialer", "expect_no_frame": { "type": "reset" } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset" } }
+  ]
+}

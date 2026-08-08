@@ -1,0 +1,124 @@
+name: Cross-language
+
+# The live Python<->TypeScript matrix (WSM-TST-004/005, WSM-CDC-007). `ci.yml` runs each language
+# against itself; this file is the only place the two ports ever speak to one another over a real
+# socket, in both role assignments, for every codec that ships.
+on:
+  push:
+  pull_request:
+
+env:
+  # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and the interop scenario carries
+  # non-ASCII payloads, so the runner's locale is load-bearing rather than incidental.
+  LANG: C.UTF-8
+
+jobs:
+  # {Python acceptor, TS dialer} x {json, msgpack} and {TS acceptor, Python dialer} x {json,
+  # msgpack} - four jobs, because a codec that ships without a live cross-language pair MUST NOT
+  # ship (WSM-CDC-007), and a scenario run in one role assignment proves only that one side's
+  # parity, ids and close semantics agree with themselves (WSM-TST-004).
+  scenario:
+    name: cross-language (${{ matrix.acceptor }}-acceptor, ${{ matrix.dialer }}-dialer, ${{ matrix.codec }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # `fixtures` is how many of `conformance/sequences/` that leg must exercise: the whole corpus
+        # under msgpack, and one fewer under json, because `bytes-payload-under-binary-codec` is a
+        # payload type JSON does not have (WSM-CDC-008). It is pinned **here** rather than computed
+        # by the conductor for the same reason `codec` is: a driver that counts its own fixtures is a
+        # driver that can report three of them as thirteen, and this number arrives from somewhere
+        # that bug cannot reach. Adding a sequence fixture means raising it alongside
+        # EXPECTED_SEQUENCE_FIXTURES in both conformance runners.
+        include:
+          - acceptor: python
+            dialer: ts
+            codec: json
+            fixtures: 12
+          - acceptor: ts
+            dialer: python
+            codec: json
+            fixtures: 12
+          - acceptor: python
+            dialer: ts
+            codec: msgpack
+            fixtures: 13
+          - acceptor: ts
+            dialer: python
+            codec: msgpack
+            fixtures: 13
+    env:
+      # One codec name, spelled the way each language reads it (WSM-CDC-010). Both are exported for
+      # both processes: the Python half reads MUXWS_CODEC, and the TypeScript half reads
+      # VITE_MUXWS_CODEC - which Vite substitutes at build time and which does not exist under node,
+      # so `interop/runner.ts` reads it from the environment itself.
+      MUXWS_CODEC: ${{ matrix.codec }}
+      VITE_MUXWS_CODEC: ${{ matrix.codec }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # `[dev]` already carries `msgpack`, so the Python side needs nothing conditional.
+      - run: pip install -e .[dev]
+      # `npm install`, not `npm ci`: package-lock.json is deliberately not committed, so that CI
+      # resolves dependencies afresh and tests against current upstream rather than a frozen tree.
+      - run: npm install
+      # `@msgpack/msgpack` is an *optional* peer dependency (WSM-PKG-003), so npm would not install
+      # it for a consumer. It is also a devDependency, so `npm install` above has already pulled it
+      # in here and this step is a no-op belt to that braces - kept for the day the devDependency
+      # goes, and explicitly **not** evidence that the json jobs never reach msgpack. That evidence
+      # is `ts/packaging.spec.ts`, which bundles `ts/index.ts` and greps the output, and which
+      # carries its own controls proving the grep would have found the import had there been one.
+      - if: matrix.codec == 'msgpack'
+        run: npm install --no-save @msgpack/msgpack
+      # The codec is passed a second time, as an argument, and not because the runners read it there:
+      # they read the environment. It is the one copy that does not come from the two variables under
+      # test, so a job whose `MUXWS_CODEC` never reached a process fails here instead of running
+      # `json` under a msgpack job's name and reporting a cross-language pair that does not exist
+      # (WSM-CDC-007).
+      - name: WSM-TST-004
+        run: |
+          MUXWS_VENV=$(dirname $(which python)) \
+            interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} main '${{ matrix.codec }}'
+      # WSM-CDC-007 asks for more than a live pair: the pair must run the **sequence corpus**. The
+      # step above runs one hand-written scenario, which proves the two ports interoperate on that
+      # script and says nothing about the twelve fixtures the two in-process runners replay - and
+      # those runners have a peer at each end of one process, so each proves only that its own port
+      # agrees with itself. This step is where a Python peer and a TypeScript peer replay the corpus
+      # to each other over a real socket, which is the sentence the rule actually contains.
+      - name: WSM-CDC-007 (the sequence corpus, cross-language)
+        run: |
+          MUXWS_VENV=$(dirname $(which python)) \
+            interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} corpus \
+            '${{ matrix.codec }}' '${{ matrix.fixtures }}'
+
+  # WSM-TST-005, and the one job that owns a process rather than a socket: the acceptor is SIGKILLed
+  # with streams open and a second one is started on the same port. Both role assignments run here
+  # rather than in two jobs, because the rule is one scenario and the interesting half of it - "the
+  # replayed hello the OTHER language's acceptor accepts" - has two directions.
+  reconnect:
+    name: cross-language-reconnect
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MUXWS_CODEC: json
+      VITE_MUXWS_CODEC: json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -e .[dev]
+      - run: npm install
+      - name: WSM-TST-005 (python acceptor, ts dialer)
+        run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts reconnect json
+      - name: WSM-TST-005 (ts acceptor, python dialer)
+        run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python reconnect json

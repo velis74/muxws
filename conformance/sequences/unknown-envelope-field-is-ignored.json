@@ -1,0 +1,17 @@
+{
+  "name": "unknown-envelope-field-is-ignored",
+  "description": "WSM-FRM-001, the other half of forward compatibility: an envelope field this generation does not know changes nothing. The data frame carrying it is delivered as if it were not there, the end that follows still ends the stream, and no reset goes out. The two frames are injected rather than sent through the API on purpose - from_mapping drops unknown keys, so a frame built by this runner's own encoder could never carry the field whose toleration is the thing being asserted.",
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "q": "stream me" }, "end": true },
+    { "settle": 12 },
+    { "peer": "dialer", "call": "iterate", "stream_ref": 1, "as": "rows" },
+
+    { "peer": "dialer", "inject": { "type": "data", "stream_ref": 1, "payload": { "row": 1 }, "colour": "red" } },
+    { "peer": "dialer", "inject": { "type": "data", "stream_ref": 1, "end": true, "colour": "red" } },
+    { "settle": 24 },
+
+    { "expect_result": { "ref": "rows", "value": [{ "row": 1 }] } },
+    { "peer": "dialer", "expect_no_frame": { "type": "reset", "stream_ref": 1 } },
+    { "peer": "dialer", "expect_no_frame": { "type": "goaway" } }
+  ]
+}

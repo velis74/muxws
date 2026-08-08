@@ -5,7 +5,9 @@
  * (WSM-API-022). `ws` is an optional peer dependency and is reached only from here.
  */
 
-import type { WebSocket as NodeWebSocket } from 'ws';
+import type { ClientRequest, IncomingMessage } from 'node:http';
+
+import type { WebSocket as NodeWebSocket, WebSocketServer } from 'ws';
 
 import { type Codec, getCodec } from './codec';
 import { settings } from './conf';
@@ -13,6 +15,12 @@ import { type ErrorSerializer, Peer, type StreamHandler } from './peer';
 import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
 import { mismatchError, offer, PREFIX, select } from './subprotocol';
 import { WsSocket } from './transports/ws-socket';
+
+/**
+ * What an acceptor answers a codec it does not speak (WSM-CDC-022), and the only status either half
+ * of this module reads as a refused muxws handshake.
+ */
+const REFUSED = 400;
 
 // The same surface the browser entry point offers, for the same reason: see `ts/index.ts`.
 export {
@@ -55,25 +63,69 @@ async function dialWs(url: string, codecName: string, options: NodeConnectOption
   const { WebSocket } = await import('ws');
   const socket = new WebSocket(url, offer(codecName, options.subprotocols), { headers: options.headers });
 
+  const wanted = `${PREFIX}${codecName}`;
   const adapter = await new Promise<WsSocket>((resolve, reject) => {
+    // What the acceptor selected, read off the 101 itself. `ws` emits `upgrade` with the response
+    // and only then checks the subprotocol, aborting with prose and never opening a socket - so this
+    // is the one moment the negotiated value exists as data rather than as an error message.
+    let upgraded = false;
+    let negotiated: string | undefined;
+    const onUpgrade = (response: IncomingMessage) => {
+      upgraded = true;
+      const header = response.headers['sec-websocket-protocol'];
+      negotiated = Array.isArray(header) ? header.join(',') : header;
+    };
+    const onUnexpectedResponse = (request: ClientRequest, response: IncomingMessage) => {
+      socket.off('open', onOpen);
+      // `ws` emits this instead of `error` as soon as a listener exists, so this branch owns the
+      // cleanup as well: without it the aborted upgrade's socket is never released.
+      request.destroy();
+      response.destroy();
+      // `res.statusCode` is the only place `ws` hands the refusal over as a number. The message the
+      // `error` path carries is prose, and reading a status out of prose is what let a
+      // cross-language dial - where the wording differs, and once did not contain "400" at all -
+      // miss a real refusal and surface a bare connection failure (WSM-CDC-024).
+      reject(
+        response.statusCode === REFUSED
+          ? mismatchError(codecName)
+          : new Error(`unexpected server response: ${response.statusCode ?? 'none'}`),
+      );
+    };
     const onError = (error: Error) => {
       socket.off('open', onOpen);
-      // A 400 on the upgrade is what an acceptor answers a codec it does not speak (WSM-CDC-022);
-      // `ws` surfaces it as an ordinary error carrying the status in its message.
-      reject(/\b400\b/.test(error.message) ? mismatchError(codecName) : error);
+      socket.off('upgrade', onUpgrade);
+      socket.off('unexpected-response', onUnexpectedResponse);
+      // An acceptor that answered 101 without echoing our entry is the same refusal one step later,
+      // and it is the shape a **cross-language** dial actually meets: `ws` aborts it as `Server sent
+      // no subprotocol`, a message with no status in it at all, so the fallback below cannot see it
+      // and the WSM-CDC-028 check after this promise never runs because no socket ever opens. This
+      // is the only place it can be caught, and leaving it uncaught is a bare connection failure
+      // where WSM-CDC-024 requires `CodecMismatch`.
+      const refusedAtUpgrade = upgraded && negotiated !== wanted;
+      // The fallback only: a `ws` release that reports the status without emitting the event above.
+      // Matched against `ws`'s whole sentence and not against the number, because a bare `400` also
+      // appears in `connect ECONNREFUSED 127.0.0.1:400` - a port nothing is listening on, reported
+      // as a codec mismatch, which is the same "read a status out of prose" defect one address over.
+      const refusedByStatus = new RegExp(`unexpected server response: ${REFUSED}\\b`, 'i').test(error.message);
+      reject(refusedAtUpgrade || refusedByStatus ? mismatchError(codecName) : error);
     };
     const onOpen = () => {
       socket.off('error', onError);
+      socket.off('upgrade', onUpgrade);
+      socket.off('unexpected-response', onUnexpectedResponse);
       // Constructed inside the handler rather than after the await: `WsSocket`'s constructor is what
       // attaches the lasting `error` listener, and a gap between the two would let a socket failing
       // in that microtask reach node as an unhandled `error` event.
       resolve(new WsSocket(socket));
     };
     socket.once('open', onOpen);
+    socket.once('upgrade', onUpgrade);
+    // Left attached after `onUnexpectedResponse` has already rejected: destroying the request makes
+    // `ws` emit one more `error`, and with no listener node would take the process down for it.
     socket.once('error', onError);
+    socket.once('unexpected-response', onUnexpectedResponse);
   });
 
-  const wanted = `${PREFIX}${codecName}`;
   if (socket.protocol !== wanted) {
     // A server that completed the handshake having negotiated something else - or nothing - is the
     // same failure one step later, and the socket is closed with the policy-violation code
@@ -93,15 +145,46 @@ export interface AcceptOptions {
 }
 
 /**
- * The handshake hook for a `ws` server.
+ * The **selection** hook for a `ws` server: which subprotocol to echo back (WSM-CDC-022/027).
  *
  * `ws` decides the subprotocol from `handleProtocols(protocols, request)`, where `protocols` is a
- * `Set`. Returning `false` refuses the subprotocol; the assertion itself lives in `select`, so this
- * is only the shape adaptation (WSM-CDC-022/027).
+ * `Set`. Returning `false` selects nothing - it does **not** refuse: `ws` still answers 101, just
+ * without a `Sec-WebSocket-Protocol` header. Refusing is `refuseMismatchedUpgrade`'s job, and a
+ * server that installs only this hook violates WSM-CDC-022.
  */
 export function handleProtocols(protocols: Set<string>): string | false {
   const selected = select([...protocols], settings.codec);
   return selected ?? false;
+}
+
+/** The `Sec-WebSocket-Protocol` request header as the list `select` reads (WSM-CDC-020/021). */
+function offeredProtocols(request: IncomingMessage): string[] {
+  const header = request.headers['sec-websocket-protocol'];
+  if (header === undefined) return [];
+  return (Array.isArray(header) ? header.join(',') : header).split(',').map((entry) => entry.trim());
+}
+
+/**
+ * Install the **refusal** on a `ws` server, so a codec it does not speak gets HTTP 400.
+ *
+ * This exists because `handleProtocols` cannot do it. That hook only picks a value; whatever it
+ * returns, `ws` completes the handshake with 101, leaving the mismatch to be found on an open socket
+ * - the "complete the handshake and close afterwards" WSM-CDC-022 forbids wherever the transport
+ * gives a choice. `shouldHandle` is the hook that aborts an upgrade with a status, and `ws` 8
+ * deprecated the only other one (`verifyClient`), so the acceptor needs both hooks and this one is
+ * not redundant with the line above it:
+ *
+ * ```ts
+ * const server = refuseMismatchedUpgrade(new WebSocketServer({ port, handleProtocols }));
+ * ```
+ *
+ * The inherited `shouldHandle` runs first, so a server constructed with `path` keeps that check.
+ */
+export function refuseMismatchedUpgrade(server: WebSocketServer): WebSocketServer {
+  const inherited = server.shouldHandle.bind(server);
+  server.shouldHandle = (request: IncomingMessage): boolean =>
+    inherited(request) === true && select(offeredProtocols(request), settings.codec) !== null;
+  return server;
 }
 
 /**

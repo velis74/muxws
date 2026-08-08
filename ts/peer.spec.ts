@@ -196,6 +196,46 @@ async function replyNow(payload: unknown, stream: Stream): Promise<void> {
 }
 
 /**
+ * Python's `Lone` fixture: one peer, fed a raw message by hand, with no counterpart at all.
+ *
+ * A live pair cannot be asked what a receiver does with a frame no correct sender would produce -
+ * the counterpart sees the answer to a stream it never opened and kills the connection, correctly
+ * and entirely beside the point.
+ *
+ * Reports the three things a "changes nothing" assertion needs: everything the peer put on the wire,
+ * what its handler was handed, and whether it survived.
+ */
+async function replayIntoLonePeer(
+  message: string,
+): Promise<{ wire: string[]; received: Frame[]; seen: unknown[]; alive: boolean }> {
+  const [, acceptorSide] = memoryPair();
+  const peer = new Peer(acceptorSide, { codec: new JsonCodec(), isDialer: false });
+  const seen: unknown[] = [];
+  const received: Frame[] = [];
+  peer.onStream(async (payload: unknown, stream: Stream) => {
+    seen.push(payload);
+    await stream.reply({ ok: true });
+  });
+  peer.onFrame((direction, frame) => {
+    if (direction === 'rx') received.push(frame);
+  });
+  const served = peer.serve();
+  void served.catch(() => undefined);
+  try {
+    acceptorSide.inject(message);
+    for (let turn = 0; turn < 12; turn += 1) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    }
+    return { wire: acceptorSide.sent.map((sent) => String(sent)), received, seen, alive: peer.isOpen };
+  } finally {
+    acceptorSide.drop();
+    await served.catch(() => undefined);
+  }
+}
+
+/**
  * The handler failure the tests raise.
  *
  * Python raises `ValueError`, whose class name reaches the wire through the default serializer. The
@@ -458,6 +498,9 @@ describe('retention', () => {
 
 describe('dispatch', () => {
   it('ignores an unknown frame type, staying quiet and alive - WSM-FRM-002', async () => {
+    // All three halves of the rule in one test, because each alone passes for the wrong reason: a
+    // peer that never received the frame is also alive and also quiet, and one that answered it with
+    // a `reset` also logged something.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     // Non-vacuity. Without a witness that the frame *arrived*, every assertion below would hold just
@@ -468,20 +511,60 @@ describe('dispatch', () => {
     });
     pair.start();
 
+    // Python raises `muxws.frames` to INFO with `caplog.at_level`; M5a gave the TypeScript shim the
+    // same seam, so the "logged once" half is assertable here rather than only in Python. Below
+    // 'info' the single `logger.info` call in `dispatch` reaches no console at all and the count
+    // would be zero for a reason that has nothing to do with the peer.
+    const level = logger.level;
+    logger.level = 'info';
     const before = pair.sentBy('acceptor').length;
-    pair.injectRaw('acceptor', '{"type":"widget","stream":1}');
-    await pair.settle();
+    try {
+      // `stream=1` is above this acceptor's high-water mark, so an implementation that let an
+      // unrecognised type fall through to the stream-frame path kills the connection (WSM-STM-003)
+      // rather than failing some subtler assertion.
+      pair.injectRaw('acceptor', '{"type":"widget","stream":1}');
+      await pair.settle();
+    } finally {
+      logger.level = level;
+    }
 
     expect(arrived.filter((frame) => frame.type === 'widget')).toHaveLength(1);
     expect(pair.acceptor.isOpen).toBe(true);
     expect(pair.sentBy('acceptor'), 'an unknown type is never answered').toHaveLength(before);
-    // Python asserts the one log line by raising `muxws.frames` to INFO with `caplog.at_level`. The
-    // TypeScript shim has no such seam: its `level` is module-private and starts at 'warn', so the
-    // single `logger.info` call in `dispatch` cannot reach `console.info` from any test or any
-    // application. What is assertable here is the other half - an unknown frame is not an error and
-    // must not spill onto the console by default. The "logged once" half waits on M5a's seam.
-    LEVELS.forEach((level) => {
-      expect(logged[level], `an ignored frame wrote to console.${level}`).toEqual([]);
+    expect(
+      logged.info.filter((line) => line.includes('widget')),
+      'logged exactly once',
+    ).toHaveLength(1);
+    // An unknown frame is not an error, so nothing may reach the levels an operator watches.
+    (['debug', 'warn', 'error'] as const).forEach((quiet) => {
+      expect(logged[quiet], `an ignored frame wrote to console.${quiet}`).toEqual([]);
+    });
+  });
+
+  it('ignores an unknown envelope field - WSM-FRM-001', async () => {
+    // `frames.spec.ts` proves the decoder drops the key. That is not the rule: a receiver could drop
+    // it and still behave differently - refuse the frame, warn, take a slower path. So the same
+    // exchange is replayed twice, once with `"colour": "red"` on the `open` and once without, and
+    // the two peers' *whole wires* are compared. Equality across the two runs is the only
+    // formulation that cannot pass while the extra field is quietly acted on downstream, and it is
+    // what WSM-CON-009 rests on: additive revisions are safe to receive precisely because of this.
+    const tainted = await replayIntoLonePeer('{"type":"open","stream":1,"payload":{"q":1},"end":true,"colour":"red"}');
+    const clean = await replayIntoLonePeer('{"type":"open","stream":1,"payload":{"q":1},"end":true}');
+
+    // Non-vacuity: two silent peers also have equal wires. The handler must have run and answered.
+    expect(clean.seen).toEqual([{ q: 1 }]);
+    expect(clean.wire.length, 'the control exchange produced no frames at all').toBeGreaterThan(0);
+    expect(tainted.alive).toBe(true);
+    expect(clean.alive).toBe(true);
+    expect(tainted.seen, 'the payload the handler saw').toEqual(clean.seen);
+    expect(tainted.wire, 'an unknown envelope field changed what went out').toEqual(clean.wire);
+    // The wire is the loudest witness but not the finest: a decoder that let the extra key disturb a
+    // *quiet* field - `end`, `more`, `code` - can answer this one exchange identically and the next
+    // one differently. `onFrame` fires after decode and before dispatch (WSM-OBS-003), so this
+    // compares the frames the peer actually acted on, field for field.
+    expect(tainted.received).toHaveLength(clean.received.length);
+    tainted.received.forEach((frame, index) => {
+      expect(framesEqual(frame, clean.received[index]), 'the frame the peer dispatched').toBe(true);
     });
   });
 

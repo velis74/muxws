@@ -37,7 +37,10 @@ jobs:
       # resolves dependencies afresh and tests against current upstream rather than a frozen tree.
       # See GAPS.md.
       - run: npm install
-      - run: npm run lint
+      # `lint:ci`, not `lint`: the developer script carries `--fix`, which rewrites the violation and
+      # exits 0. In CI that rewrite is discarded with the runner, so an auto-fixable violation would
+      # be reported by nothing and reach main unnoticed.
+      - run: npm run lint:ci
       - run: npm test
       - run: npm run build
       - run: npm run docs:build
@@ -56,5 +59,8 @@ jobs:
       - run: npm install
       # Both role assignments over one scenario (WSM-TST-004's first half). A codec, a call shape or
       # a fragment boundary that disagrees between the ports fails here rather than in production.
-      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts
-      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python
+      # The trailing `json` pins the codec independently of `MUXWS_CODEC` / `VITE_MUXWS_CODEC`, which
+      # this job never sets: unpinned, a run that silently defaulted and a run that was configured
+      # look identical (see `interop/drive.sh`).
+      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts main json
+      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python main json

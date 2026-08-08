@@ -64,17 +64,31 @@ def _was_clean(exc: Any) -> bool:
     return _code_of(exc) == 1000
 
 
-def select_subprotocol(connection: Any, subprotocols: list[str]) -> str | None:
+def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
     """Installable as `websockets.serve(..., select_subprotocol=muxws.select_subprotocol)`.
 
     The `websockets` library completes the handshake before calling the handler, so the decision is
-    handed to it up front (WSM-CDC-027). Returning None refuses the upgrade, which the library
-    answers with a 400.
+    handed to it up front (WSM-CDC-027).
+
+    The refusal is **raised, not returned**. Returning None here answers 101 with no
+    `Sec-WebSocket-Protocol` header and leaves the mismatch to be found on an already-open socket -
+    precisely the "complete the handshake and close afterwards" that WSM-CDC-022 forbids wherever
+    the transport offers a choice. `ServerProtocol.accept` turns an `InvalidHandshake` out of this
+    hook into HTTP 400 and anything else into 500, so `NegotiationError` is the one exception that
+    produces the status the rule names.
     """
     _ = connection
+    from websockets.exceptions import NegotiationError
+
     from muxws.conf import settings
 
-    return select(list(subprotocols), settings.codec)
+    selected = select(list(subprotocols), settings.codec)
+    if selected is None:
+        # `select` has already logged which codec was offered against which is configured
+        # (WSM-CDC-029); this message is only what fits in the 400's body, and it deliberately
+        # reflects nothing the dialer sent.
+        raise NegotiationError(f"muxws requires the {PREFIX}{settings.codec} subprotocol")
+    return selected
 
 
 def verify_negotiated(negotiated: str | None, configured: str) -> None:

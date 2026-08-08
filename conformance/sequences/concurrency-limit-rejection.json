@@ -1,0 +1,20 @@
+{
+  "name": "concurrency-limit-rejection",
+  "description": "The concurrency limit is the *receiver's*, it is never announced, and the opener learns of it only from the reset it provokes (WSM-STM-036, WSM-INV-007). Three things are asserted together and all three are the rule: the open beyond the limit is answered reset(REFUSED), the opener's own open() raised nothing locally - the step would have failed if it had - and the connection survives, which the reply on the first stream proves by using it. REFUSED is the right code because the handler was never invoked, so the opener may safely take that stream elsewhere. max_concurrent_streams is an instruction to the runner, exactly like max_frame_bytes, and never a wire value (WSM-CON-031).",
+  "max_concurrent_streams": 1,
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "q": "the first" }, "as": "first" },
+    { "settle": 24 },
+    { "peer": "dialer", "call": "open", "payload": { "q": "one too many" }, "as": "beyond" },
+    { "settle": 24 },
+
+    { "peer": "acceptor", "expect_frame": { "type": "reset", "stream_ref": 2, "code": 4 } },
+    { "expect_error": { "ref": "beyond", "error": "StreamRefused", "code": 4 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset", "stream_ref": 1 } },
+
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "still": "working" } },
+    { "settle": 24 },
+    { "expect_result": { "ref": "first", "value": { "still": "working" } } }
+  ]
+}

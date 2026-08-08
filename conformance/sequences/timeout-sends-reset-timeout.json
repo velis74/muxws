@@ -1,0 +1,11 @@
+{
+  "name": "timeout-sends-reset-timeout",
+  "description": "A local deadline is not a cancellation. The remote is told a deadline expired - reset code 6, TIMEOUT - and only then is the caller told, so the two ends agree about why the stream ended (WSM-ERR-011). A peer that let the consumer's teardown send the reset would put CANCELLED on the wire instead, which says the caller changed its mind. The handler on the other side never answers; the deadline is the only thing that ends this stream.",
+  "steps": [
+    { "peer": "dialer", "call": "request", "payload": { "action": "slow" }, "timeout_ms": 50, "as": "slow" },
+    { "expect_error": { "ref": "slow", "error": "StreamTimeout", "code": 6 } },
+    { "settle": 24 },
+    { "peer": "dialer", "expect_frame": { "type": "reset", "stream_ref": 1, "code": 6 } },
+    { "peer": "dialer", "expect_no_frame": { "type": "reset", "stream_ref": 1, "code": 1 } }
+  ]
+}

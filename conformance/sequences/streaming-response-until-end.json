@@ -1,0 +1,20 @@
+{
+  "name": "streaming-response-until-end",
+  "description": "One open, n data frames, then a data frame carrying end - and an async iterator on the opener's side that yields exactly the n payloads and then stops. The opener half-closes immediately (end on the open), so this is the shape a streaming export takes: the request is complete, the response is not. The last payload rides the frame that ends the stream rather than being followed by an empty one, which is why the iteration yields three values and not four.",
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "q": "export" }, "end": true },
+    { "settle": 12 },
+    { "peer": "dialer", "call": "iterate", "stream_ref": 1, "as": "rows" },
+
+    { "peer": "acceptor", "call": "send", "stream_ref": 1, "payload": { "row": 1 } },
+    { "peer": "acceptor", "call": "send", "stream_ref": 1, "payload": { "row": 2 } },
+    { "peer": "acceptor", "call": "end", "stream_ref": 1, "payload": { "row": 3 } },
+    { "settle": 24 },
+
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "payload": { "row": 1 }, "end": false } },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "payload": { "row": 2 }, "end": false } },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "payload": { "row": 3 }, "end": true } },
+
+    { "expect_result": { "ref": "rows", "value": [{ "row": 1 }, { "row": 2 }, { "row": 3 }] } }
+  ]
+}

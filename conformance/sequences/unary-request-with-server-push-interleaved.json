@@ -1,0 +1,22 @@
+{
+  "name": "unary-request-with-server-push-interleaved",
+  "description": "The example of WSM-TST-002, with the two corrections the rule in the same paragraph demands: streams are named by ordinal and every matcher names the peer whose wire it searches. A server push crosses an unanswered unary request in the other direction and neither disturbs the other - the symmetry of WSM-INV-002, which is the property that makes a push an ordinary open with the roles swapped. max_frame_bytes is a runner instruction (WSM-FRG-005): at 64 the request's own open does not fit and is fragmented, so this also proves a unary request survives fragmentation of its opening payload (WSM-FRG-021).",
+  "max_frame_bytes": 64,
+  "steps": [
+    { "peer": "dialer", "call": "request", "payload": { "action": "list" }, "as": "r1" },
+    { "settle": 24 },
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "end": true } },
+
+    { "peer": "acceptor", "call": "open", "payload": { "event": "tick" } },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_frame": { "type": "open", "stream_ref": 2 } },
+
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "items": [] } },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "end": true } },
+    { "expect_result": { "ref": "r1", "value": { "items": [] } } },
+
+    { "peer": "dialer", "expect_no_frame": { "type": "reset" } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset" } }
+  ]
+}

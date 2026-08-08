@@ -1,0 +1,33 @@
+{
+  "name": "handler-raises-produces-application-error",
+  "description": "A handler that raises produces reset(APPLICATION_ERROR) carrying the serialized error, and never reset(REFUSED) (WSM-STM-034, WSM-INV-008): REFUSED promises the operation definitively did not happen, so a handler that debited an account and then raised would, under REFUSED, be inviting the client to retry the debit. The opening payload {\"handler\": \"raise\"} is how a script of ordinary API calls reaches the handler-failure path at all - stream.reset(APPLICATION_ERROR) sends the same code but carries no serialized error object, which is the half this pins. The class is spelled Error in both ports so that the serialized type is one value and not two.",
+  "steps": [
+    {
+      "peer": "dialer",
+      "call": "request",
+      "payload": { "handler": "raise", "message": "the handler blew up" },
+      "as": "r1"
+    },
+    { "settle": 24 },
+    {
+      "peer": "acceptor",
+      "expect_frame": {
+        "type": "reset",
+        "stream_ref": 1,
+        "code": 2,
+        "reason": "the handler blew up",
+        "payload": { "type": "Error", "message": "the handler blew up" }
+      }
+    },
+    {
+      "expect_error": {
+        "ref": "r1",
+        "error": "RemoteError",
+        "code": 2,
+        "payload": { "type": "Error", "message": "the handler blew up" }
+      }
+    },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset", "stream_ref": 1, "code": 4 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } }
+  ]
+}

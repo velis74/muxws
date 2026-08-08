@@ -229,21 +229,93 @@ async def test_no_bookkeeping_survives_a_closed_stream(make_pair):
 
 
 async def test_unknown_frame_type_is_ignored(make_pair, caplog):
-    """WSM-FRM-002: dropped, logged once, connection alive, nothing goes out."""
+    """WSM-FRM-002: dropped, logged once, connection alive, nothing goes out.
+
+    All three halves in one test, because any one of them alone passes for the wrong reason: a peer
+    that never received the frame is also alive and also quiet, and a peer that answered it with a
+    `reset` also logged something. The arrival witness is what rules the first out - `on_frame` fires
+    after decode and before dispatch (WSM-OBS-003), so it sees exactly the frame dispatch is about to
+    be asked to ignore.
+
+    `stream=1` is deliberate. It is above this acceptor's high-water mark, so an implementation that
+    let an unrecognised type fall through to the stream-frame path would kill the connection
+    (WSM-STM-003) rather than fail some subtler assertion.
+    """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
+    arrived: list[Frame] = []
+    pair.acceptor.on_frame(lambda direction, frame, _length: arrived.append(frame) if direction == "rx" else None)
     pair.start()
     try:
-        before = len(pair.sent_by("acceptor"))
+        before = pair.sent_by("acceptor")
         with caplog.at_level(logging.INFO, logger="muxws.frames"):
             pair.acceptor_socket.inject('{"type":"widget","stream":1}')
             await pair.settle()
 
+        assert [frame.type for frame in arrived] == ["widget"], "the frame must actually have arrived"
         assert pair.acceptor.is_open
-        assert len(pair.sent_by("acceptor")) == before
-        assert sum("widget" in record.getMessage() for record in caplog.records) == 1
+        assert pair.sent_by("acceptor") == before, "an unknown type is never answered"
+        assert pair.acceptor.streams == {}, "nor does it open anything"
+
+        lines = [record for record in caplog.records if "widget" in record.getMessage()]
+        assert len(lines) == 1, [record.getMessage() for record in lines]
+        # WSM-OBS-001 puts every frame line under one named logger; a line nobody can filter on is
+        # not the "logging once" the rule asks for.
+        assert lines[0].name == "muxws.frames"
+        assert lines[0].levelno == logging.INFO
     finally:
         await pair.stop()
+
+
+async def test_unknown_envelope_field_is_ignored(make_lone):
+    """WSM-FRM-001: a field this generation has never heard of changes nothing whatever.
+
+    `frames_test.py` proves the decoder drops the key. That is not the rule: a receiver could drop it
+    and still behave differently - refuse the frame, log a warning, take a slower path. So this
+    replays the same exchange twice, once with `"colour": "red"` on the `open` and once without, and
+    compares the two peers' **whole wires**. Equality across the two runs is the only formulation
+    that cannot pass while the extra field is quietly acted on somewhere downstream, and it is what
+    WSM-CON-009 rests on - additive revisions are safe to receive precisely because of this.
+
+    A `Lone` peer rather than a pair: a real counterpart would see the reply to a stream it never
+    opened and kill the connection, correctly and entirely beside the point.
+    """
+    with_field = '{"type":"open","stream":1,"payload":{"q":1},"end":true,"colour":"red"}'
+    without = '{"type":"open","stream":1,"payload":{"q":1},"end":true}'
+
+    async def replay(message: str) -> tuple[list[str | bytes], list[Frame], list[Any], bool]:
+        lone = make_lone()
+        seen: list[Any] = []
+        arrived: list[Frame] = []
+
+        async def handler(payload: Any, stream: Stream) -> None:
+            seen.append(payload)
+            await stream.reply({"ok": True})
+
+        lone.peer.on_stream(handler)
+        lone.peer.on_frame(lambda direction, frame, _length: arrived.append(frame) if direction == "rx" else None)
+        lone.start()
+        try:
+            lone.inject(message)
+            await lone.settle()
+            return list(lone.socket.sent), arrived, seen, lone.peer.is_open
+        finally:
+            await lone.stop()
+
+    tainted_wire, tainted_rx, tainted_seen, tainted_alive = await replay(with_field)
+    clean_wire, clean_rx, clean_seen, clean_alive = await replay(without)
+
+    # Non-vacuity: two silent peers also have equal wires. The handler must have run and answered.
+    assert clean_seen == [{"q": 1}]
+    assert clean_wire, "the control exchange produced no frames at all"
+    assert tainted_alive is clean_alive is True
+    assert tainted_seen == clean_seen, "the payload the handler saw"
+    assert tainted_wire == clean_wire, "an unknown envelope field changed what went out"
+    # The wire is the loudest witness but not the finest: a decoder that let the extra key disturb a
+    # *quiet* field - `end`, `more`, `code` - can produce an identical answer to this one exchange and
+    # a different one to the next. `on_frame` fires after decode and before dispatch (WSM-OBS-003),
+    # so this compares the frames the peer actually acted on, field for field.
+    assert tainted_rx == clean_rx, "an unknown envelope field changed the frame the peer dispatched"
 
 
 async def test_no_handler_refuses_with_refused(make_pair):

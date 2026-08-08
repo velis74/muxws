@@ -1,0 +1,29 @@
+{
+  "name": "cancel-mid-stream-stops-the-producer",
+  "description": "A consumer that walks away sends reset(CANCELLED) and closes locally at once, without waiting for acknowledgement (WSM-ERR-013). What the fixture pins is the effect on the *producer*: the remote handle is dead the moment the reset lands, so its next send raises rather than reaching the wire, and no further data frame for that stream is ever sent. Asserting only the outgoing reset would leave a peer that reset the stream and went on producing indistinguishable from a correct one.",
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "subscribe": "ticks" }, "as": "ticks" },
+    { "settle": 12 },
+    { "peer": "acceptor", "call": "send", "stream_ref": 1, "payload": { "tick": 1 } },
+    { "settle": 24 },
+
+    { "peer": "dialer", "call": "cancel", "stream_ref": 1, "reason": "the consumer went away" },
+    { "settle": 24 },
+    {
+      "peer": "dialer",
+      "expect_frame": { "type": "reset", "stream_ref": 1, "code": 1, "reason": "the consumer went away" }
+    },
+    { "expect_error": { "ref": "ticks", "error": "StreamReset", "code": 1 } },
+
+    {
+      "peer": "acceptor",
+      "call": "send",
+      "stream_ref": 1,
+      "payload": { "tick": 2 },
+      "raises": "StreamReset"
+    },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_no_frame": { "type": "data", "stream_ref": 1, "payload": { "tick": 2 } } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } }
+  ]
+}

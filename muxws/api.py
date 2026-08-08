@@ -149,10 +149,25 @@ def _websocket_dialer(
     return dial
 
 
+#: What an acceptor answers a codec it does not speak (WSM-CDC-022), and the only status this reads
+#: as a refusal. Anything else is a server that failed for its own reasons and must surface as itself.
+_REFUSED = 400
+
+
 def _looks_like_a_refused_handshake(exc: BaseException) -> bool:
-    """A 400 on the upgrade is what an acceptor answers a codec it does not speak (WSM-CDC-022)."""
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    return status == 400 or "400" in str(exc)
+    """A 400 on the upgrade is a refused muxws handshake, to be reported as `CodecMismatch`.
+
+    The status comes from `InvalidStatus.response`, never from the message. `"400" in str(exc)` also
+    matches the `OSError` for a connection refused on **port** 400, and matching a status code out of
+    prose is what let a cross-language dial - where the message wording differs - miss a real refusal
+    entirely (WSM-CDC-024). The string branch survives only as a fallback for a `websockets` release
+    that reports the status without attaching the response, and is narrowed to the phrase it uses.
+    """
+    from websockets.exceptions import InvalidStatus
+
+    if isinstance(exc, InvalidStatus):
+        return exc.response.status_code == _REFUSED
+    return f"HTTP {_REFUSED}" in str(exc)
 
 
 async def accept(
@@ -238,8 +253,12 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
         return
 
 
-def select_subprotocol(connection: Any, subprotocols: list[str]) -> str | None:
-    """Re-exported handshake hook for the `websockets` library (WSM-CDC-027)."""
+def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
+    """Re-exported handshake hook for the `websockets` library (WSM-CDC-027).
+
+    Raises `NegotiationError` rather than returning None on a mismatch; see the hook itself for why
+    that is the only shape `websockets` turns into the 400 WSM-CDC-022 requires.
+    """
     from muxws.transports.websockets_ import select_subprotocol as hook
 
     return hook(connection, subprotocols)

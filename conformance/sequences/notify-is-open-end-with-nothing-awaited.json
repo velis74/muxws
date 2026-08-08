@@ -1,0 +1,13 @@
+{
+  "name": "notify-is-open-end-with-nothing-awaited",
+  "description": "A notify is exactly one open carrying end and nothing else: no handle, no awaited result, no second frame in either direction (WSM-API-005). The two expect_no_frame steps are the assertion that matters. A notify implemented as a request whose result is discarded would look identical on the opener's first frame and differ on everything after it - and the receiver must not answer it either, which is what makes the third matcher worth writing.",
+  "steps": [
+    { "peer": "dialer", "call": "notify", "payload": { "event": "cache-invalidated" } },
+    { "settle": 24 },
+
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "end": true } },
+    { "peer": "dialer", "expect_no_frame": { "type": "data", "stream_ref": 1 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset", "stream_ref": 1 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } }
+  ]
+}

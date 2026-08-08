@@ -110,5 +110,182 @@
     "name": "payload-that-is-a-bare-string",
     "frame": { "type": "data", "stream": 23, "payload": "plain" },
     "json_wire": "{\"type\":\"data\",\"stream\":23,\"payload\":\"plain\"}"
+  },
+  {
+    "name": "payload-that-is-false",
+    "frame": { "type": "data", "stream": 25, "payload": false },
+    "json_wire": "{\"type\":\"data\",\"stream\":25,\"payload\":false}"
+  },
+  {
+    "name": "payload-that-is-zero",
+    "frame": { "type": "data", "stream": 27, "payload": 0 },
+    "json_wire": "{\"type\":\"data\",\"stream\":27,\"payload\":0}"
+  },
+  {
+    "name": "payload-that-is-an-empty-string",
+    "frame": { "type": "data", "stream": 29, "payload": "" },
+    "json_wire": "{\"type\":\"data\",\"stream\":29,\"payload\":\"\"}"
+  },
+  {
+    "name": "payload-that-is-an-empty-object",
+    "frame": { "type": "data", "stream": 31, "payload": {} },
+    "json_wire": "{\"type\":\"data\",\"stream\":31,\"payload\":{}}"
+  },
+  {
+    "name": "payload-that-is-an-empty-list",
+    "frame": { "type": "data", "stream": 33, "payload": [] },
+    "json_wire": "{\"type\":\"data\",\"stream\":33,\"payload\":[]}"
+  },
+  {
+    "name": "payload-with-integers-at-the-safe-range-edges",
+    "frame": {
+      "type": "data",
+      "stream": 35,
+      "payload": { "largest": 9007199254740991, "smallest": -9007199254740991, "zero": 0 }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":35,\"payload\":{\"largest\":9007199254740991,\"smallest\":-9007199254740991,\"zero\":0}}"
+  },
+  {
+    "name": "payload-with-nested-containers",
+    "frame": {
+      "type": "data",
+      "stream": 37,
+      "payload": {
+        "rows": [
+          { "id": 1, "tags": ["a", "b"], "meta": { "nested": { "deep": [1, [2, [3]]] } } },
+          { "id": 2, "tags": [], "meta": {} }
+        ],
+        "total": 2
+      }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":37,\"payload\":{\"rows\":[{\"id\":1,\"tags\":[\"a\",\"b\"],\"meta\":{\"nested\":{\"deep\":[1,[2,[3]]]}}},{\"id\":2,\"tags\":[],\"meta\":{}}],\"total\":2}}"
+  },
+  {
+    "name": "payload-with-a-solidus-and-backslashes",
+    "frame": {
+      "type": "data",
+      "stream": 39,
+      "payload": { "path": "C:\\Temp\\new", "route": "/v1/reports/2026" }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":39,\"payload\":{\"path\":\"C:\\\\Temp\\\\new\",\"route\":\"\\/v1\\/reports\\/2026\"}}"
+  },
+  {
+    "name": "payload-with-line-and-paragraph-separators",
+    "frame": {
+      "type": "data",
+      "stream": 41,
+      "payload": { "text": "line\u2028paragraph\u2029end" }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":41,\"payload\":{\"text\":\"line\\u2028paragraph\\u2029end\"}}"
+  },
+  {
+    "name": "open-with-headers-payload-and-end",
+    "frame": {
+      "type": "open",
+      "stream": 43,
+      "payload": { "action": "export", "format": "csv" },
+      "headers": { "trace": "9f2c1d", "attempt": 1 },
+      "end": true
+    },
+    "json_wire": "{\"type\":\"open\",\"stream\":43,\"end\":true,\"headers\":{\"trace\":\"9f2c1d\",\"attempt\":1},\"payload\":{\"action\":\"export\",\"format\":\"csv\"}}"
+  },
+  {
+    "name": "open-with-empty-headers",
+    "frame": { "type": "open", "stream": 45, "headers": {} },
+    "json_wire": "{\"type\":\"open\",\"stream\":45,\"headers\":{}}"
+  },
+  {
+    "name": "data-end-with-trailers-and-no-payload",
+    "frame": {
+      "type": "data",
+      "stream": 47,
+      "end": true,
+      "trailers": { "checksum": "0f1e2d3c", "rows": 0 }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":47,\"end\":true,\"trailers\":{\"checksum\":\"0f1e2d3c\",\"rows\":0}}"
+  },
+  {
+    "name": "fragmented-data-middle",
+    "frame": { "type": "data", "stream": 49, "fragment": "aaaa\",\"tail\":\"bb", "more": true },
+    "json_wire": "{\"type\":\"data\",\"stream\":49,\"fragment\":\"aaaa\\\",\\\"tail\\\":\\\"bb\",\"more\":true}"
+  },
+  {
+    "name": "fragmented-data-last-without-end",
+    "frame": { "type": "data", "stream": 51, "fragment": "bb\"}" },
+    "json_wire": "{\"type\":\"data\",\"stream\":51,\"fragment\":\"bb\\\"}\"}"
+  },
+  {
+    "name": "fragmented-open-with-headers-on-the-first-fragment",
+    "frame": {
+      "type": "open",
+      "stream": 53,
+      "fragment": "{\"action\":\"exp",
+      "more": true,
+      "headers": { "trace": "7c4b" }
+    },
+    "json_wire": "{\"type\":\"open\",\"stream\":53,\"fragment\":\"{\\\"action\\\":\\\"exp\",\"headers\":{\"trace\":\"7c4b\"},\"more\":true}"
+  },
+  {
+    "name": "fragmented-data-last-with-trailers",
+    "frame": {
+      "type": "data",
+      "stream": 55,
+      "fragment": "ort\"}",
+      "end": true,
+      "trailers": { "checksum": "deadbeef" }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":55,\"end\":true,\"fragment\":\"ort\\\"}\",\"trailers\":{\"checksum\":\"deadbeef\"}}"
+  },
+  {
+    "name": "fragmented-reset-repeats-code-and-reason-on-every-fragment",
+    "frame": {
+      "type": "reset",
+      "stream": 57,
+      "code": 2,
+      "fragment": "{\"type\":\"ValueErr",
+      "more": true,
+      "reason": "handler raised"
+    },
+    "json_wire": "{\"type\":\"reset\",\"stream\":57,\"code\":2,\"fragment\":\"{\\\"type\\\":\\\"ValueErr\",\"more\":true,\"reason\":\"handler raised\"}"
+  },
+  {
+    "name": "reset-protocol-error-with-no-reason",
+    "frame": { "type": "reset", "stream": 59, "code": 3 },
+    "json_wire": "{\"type\":\"reset\",\"stream\":59,\"code\":3}"
+  },
+  {
+    "name": "reset-refused",
+    "frame": { "type": "reset", "stream": 61, "code": 4, "reason": "too many streams in flight" },
+    "json_wire": "{\"type\":\"reset\",\"stream\":61,\"code\":4,\"reason\":\"too many streams in flight\"}"
+  },
+  {
+    "name": "reset-timeout",
+    "frame": { "type": "reset", "stream": 63, "code": 6, "reason": "deadline exceeded" },
+    "json_wire": "{\"type\":\"reset\",\"stream\":63,\"code\":6,\"reason\":\"deadline exceeded\"}"
+  },
+  {
+    "name": "reset-payload-too-large",
+    "frame": { "type": "reset", "stream": 65, "code": 7, "reason": "payload above the receiver's limit" },
+    "json_wire": "{\"type\":\"reset\",\"stream\":65,\"code\":7,\"reason\":\"payload above the receiver's limit\"}"
+  },
+  {
+    "name": "reset-internal-error",
+    "frame": { "type": "reset", "stream": 67, "code": 8, "reason": "unexpected failure in the handler" },
+    "json_wire": "{\"type\":\"reset\",\"stream\":67,\"code\":8,\"reason\":\"unexpected failure in the handler\"}"
+  },
+  {
+    "name": "ping-without-a-nonce",
+    "frame": { "type": "ping" },
+    "json_wire": "{\"type\":\"ping\"}"
+  },
+  {
+    "name": "pong-without-a-nonce",
+    "frame": { "type": "pong" },
+    "json_wire": "{\"type\":\"pong\"}"
+  },
+  {
+    "name": "goaway-with-no-reason",
+    "frame": { "type": "goaway", "code": 0, "last_stream": 13 },
+    "json_wire": "{\"type\":\"goaway\",\"code\":0,\"last_stream\":13}"
   }
 ]

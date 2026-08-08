@@ -167,7 +167,7 @@ async def connect(url: str, *, headers: dict[str, str] | None = None, hello: Any
                   codec: Codec | None = None) -> Peer: ...   # raises if the FIRST attempt fails
 async def accept(socket: SocketAdapter, *, codec: Codec | None = None) -> Peer: ...
 async def serve(socket: SocketAdapter, *, handler: StreamHandler) -> None: ...
-def select_subprotocol(connection: Any, subprotocols: list[str]) -> str | None: ...
+def select_subprotocol(connection: Any, subprotocols: list[str]) -> str: ...  # raises to refuse
 ```
 
 ```ts
@@ -199,7 +199,11 @@ when the **first** attempt fails regardless of the reconnect configuration (WSM-
 remains is one transport-level detail:
 
 - **D1 - the refusal is an HTTP 400 upgrade denial in both Python transports.** Under `websockets`,
-  `select_subprotocol` returns `None` and the library answers the upgrade with 400. Under Starlette,
+  `select_subprotocol` **raises `NegotiationError`** and the library answers the upgrade with 400.
+  Returning `None` does **not** refuse: `websockets` reads it as "no subprotocol selected" and
+  completes the handshake with 101, which is what this rule forbids. Only an `InvalidHandshake`
+  subclass produces the 400 (any other exception renders 500). This sentence said the opposite until
+  M6 checked it against a running server. Under Starlette,
   the endpoint must **deny** the upgrade rather than accept-then-close: send the ASGI denial response
   (`{"type": "websocket.http.response.start", "status": 400}` plus an empty body) before any
   `websocket.accept()`. `websocket.close()` before accept renders 403 and is **not** what
@@ -271,7 +275,7 @@ The `websockets` library completes the handshake before calling the handler, so 
 to it up front:
 
 ```python
-def select_subprotocol(connection: Any, subprotocols: list[str]) -> str | None:
+def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:  # raises to refuse
     """Installable as websockets.serve(..., select_subprotocol=muxws.select_subprotocol).
     Returns the matching muxws.v1.<codec> value, or None to refuse the handshake (WSM-CDC-027)."""
 ```

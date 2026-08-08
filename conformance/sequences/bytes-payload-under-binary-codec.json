@@ -1,0 +1,13 @@
+{
+  "name": "bytes-payload-under-binary-codec",
+  "description": "WSM-CDC-008: under a binary codec raw bytes are a first-class payload type, and they survive a round trip in both directions unchanged. Under JSON they are not a payload type at all and muxws must not base64-encode them on the application's behalf, so this fixture declares requires_codec and every runner configured with another codec skips it with a recorded reason rather than passing it silently. {\"$bytes\": [...]} is a placeholder the runner replaces with the byte string those values spell - it is not a payload shape and never reaches the wire; a runner that leaves it as a mapping would pass this fixture while testing nothing, so the msgpack runner must assert the substitution happened.",
+  "requires_codec": "msgpack",
+  "steps": [
+    { "peer": "dialer", "call": "request", "payload": { "$bytes": [0, 255, 16] }, "as": "echo" },
+    { "settle": 24 },
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "$bytes": [0, 255, 16] } },
+    { "settle": 24 },
+    { "peer": "acceptor", "expect_frame": { "type": "data", "stream_ref": 1, "end": true } },
+    { "expect_result": { "ref": "echo", "value": { "$bytes": [0, 255, 16] } } }
+  ]
+}
