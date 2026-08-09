@@ -1,0 +1,74 @@
+name: Docs
+
+# The documentation site is the only deliverable read by humans rather than executed, which is
+# exactly why it needs a workflow: prose rots silently. Three jobs, and each one fails on a
+# different kind of rot.
+#
+#   site            a symbol added without a page entry, an entry missing a section, a duration
+#                   without a unit, a dead link, a second copy of SPEC.md - and then the build.
+#   python-examples every `### Example` block on an API page, plus the quick start started for real
+#                   on an ephemeral port and its stdout compared to the block printed in the guide.
+#   ts-examples     the same for TypeScript, against the Python acceptor - so this job is also the
+#                   cheapest cross-language check in the repository.
+on:
+  push:
+  pull_request:
+
+env:
+  # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and the examples carry non-BMP
+  # characters, so the runner's locale is load-bearing rather than incidental.
+  LANG: C.UTF-8
+
+jobs:
+  site:
+    name: check and build the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # `npm install`, not `npm ci`: package-lock.json is deliberately not committed. See GAPS.md.
+      - run: npm install
+      # docs:check imports ts/index.ts, ts/node.ts and ts/msgpack.ts through tsx to enumerate the
+      # exported surface, so it runs before the build and needs no built dist.
+      - run: npm run docs:check
+      - run: npm run docs:build
+
+  python-examples:
+    name: python examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # `.[dev]` carries fastapi and uvicorn: the quick-start server is a FastAPI app, and without
+      # them the three end-to-end tests skip, which reads exactly like passing.
+      - run: pip install -e .[dev]
+      # The explicit paths matter: `testpaths` is `["muxws"]`, so a bare `pytest` would run the
+      # documentation mirror tests and none of the example runners.
+      - run: pytest muxws docs -q
+
+  ts-examples:
+    name: typescript examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Both halves: the TypeScript clients in the quick start dial the Python acceptor, so this job
+      # needs the Python package installed as well as the node dependencies.
+      - run: pip install -e .[dev]
+      - run: npm install
+      # `examples.spec.ts` shells out to this interpreter to start the acceptor. Without
+      # MUXWS_PYTHON it probes `python3`, and a probe that fails turns the two client tests into
+      # skips rather than failures.
+      - run: MUXWS_PYTHON="$(which python)" npx vitest run docs/examples/examples.spec.ts

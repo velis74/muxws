@@ -6,6 +6,10 @@
     "types": ["vitest/globals", "node"],
     "skipLibCheck": true
   },
+  // `interop/` is checked too, but by `interop/tsconfig.json`: it is Node ESM and uses
+  // `import.meta.url`, which this config's inherited `"module": "commonjs"` forbids. Two configs
+  // rather than one loosened one, so the library keeps being checked as the dual-target package it
+  // ships as. `npm run lint:ci` runs both.
   "include": ["ts/**/*"],
   "exclude": ["dist", "coverage", "node_modules", "docs", "muxws"]
 }

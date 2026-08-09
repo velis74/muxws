@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from muxws.errors import ConnectionLost, ResetCode
+from muxws.errors import ConnectionClosed, ConnectionLost, ResetCode
 from muxws.lifecycle import MAX_STREAM_ID
 from muxws.observability import CloseReason
 from muxws.stream import Stream
@@ -293,3 +293,30 @@ async def test_the_writer_queues_are_discarded_on_death(make_pair):
 async def _hold(payload: Any, stream: Stream) -> None:
     _ = payload
     await stream.closed.wait()
+
+
+async def test_a_new_socket_may_report_its_own_final_close(make_pair):
+    """WSM-RCN-044 is per connection, not per `Peer` object.
+
+    The latch that stops one loss being reported twice must not outlive the connection it was set on.
+    A `Peer` handed a fresh socket after a `will_retry=False` close is a new connection, and its next
+    loss is a loss nobody has heard about - left unreset, it is reported to nobody at all.
+    """
+    pair = make_pair()
+    closes: list[CloseReason] = []
+    pair.dialer.on_close(closes.append)
+    pair.start()
+
+    pair.dialer._will_retry = False
+    await pair.dialer_socket.drop()
+    await pair.settle()
+    assert [reason.will_retry for reason in closes] == [False], "the first loss reports, once"
+
+    replacement, _ = memory_pair()
+    pair.dialer._adopt_socket(replacement)
+    pair.dialer._will_retry = False
+    pair.dialer._die(ConnectionClosed("the second socket died too", code=1006))
+
+    assert [reason.will_retry for reason in closes] == [False, False], (
+        "the second connection's loss was swallowed by a latch left over from the first"
+    )

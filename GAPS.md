@@ -696,3 +696,77 @@ a peer delivering the right number of entirely wrong bytes. Both now use a struc
 **The pattern:** in a conformance milestone the dangerous failure is not a test that fails, it is a
 test that cannot. A corpus that passes against anything is worse than no corpus, because it is read as
 proof.
+
+## Decisions taken alone, and what became of them
+
+I first wrote this section as eleven open questions for the author. That was the wrong instinct, and
+the author said so: these are internal implementation choices, not decisions a consumer of the library
+has any stake in, and surfacing them as dilemmas made ordinary engineering judgement look like
+paralysis. The standing instruction is now: **where I know the right answer, take it; where a decision
+changes what a user of the library must know, write the consequence into the documentation rather than
+into a question.**
+
+Applying that filter to the eleven below leaves **exactly one** that a consumer can be bitten by, and
+it is item 2 — a Node acceptor that does not install `refuseMismatchedUpgrade` still completes the
+handshake where the rule requires a refusal. That one belongs on `docs/guide/transports.md` next to the
+`ws` snippet, stated as a consequence rather than as a rule id. The rest are recorded here for the
+record and resolved by me.
+
+Items 3-9 are decided and implemented as described. Items 1, 10 and 11 are cost, not doubt: they are
+work someone has to do, and the entry says how much.
+
+**1. `SPEC.md` cites 39 rule ids that no test resolves to.** Out of 216. Appendix B names exactly those
+39 and no more, so the document is honest about it — but a rule with no witness that could fail is a
+wish, not a rule. The choice is: write the missing 39 witnesses, or retire the ids that turn out to
+describe nothing checkable. My instinct is that some of them are genuinely untestable in-process
+(browser behaviour, cross-process deployment shape) and should say so in the rule text itself rather
+than sit in an appendix.
+
+**2. `refuseMismatchedUpgrade` is public API that no brief names.** WSM-CDC-027 names
+`select_subprotocol` for Python and nothing for `ws`. One hook cannot both select and refuse, so the
+second export was forced by the platform. It is **opt-in**: every existing
+`new WebSocketServer({ handleProtocols })` in the wild still answers 101 and still violates
+WSM-CDC-022. Either the rule should name it, or `accept()` should refuse to serve a socket whose
+server never installed it.
+
+**3. `serve()` behaves differently in the two ports on a refused handshake** — Python swallows
+`CodecMismatch` and returns, TypeScript rejects. Unreachable now that the 400 is in place, so no test
+can see it. One API, two behaviours, is still a defect in a library whose whole premise is one protocol
+from one repository.
+
+**4. `peer.ping()` guards on the raw socket flag, not on `is_open`.** Both ports agree, so there is no
+divergence — but a public call succeeds on a peer that reports `is_open is False` during the hello
+window. Deliberate (the heartbeat must be able to ping) or an oversight, depending on whether a ping
+counts as "starting something".
+
+**5. `_give_up()` in the cap-exhausted branch is unreachable-with-effect in both ports.** Proven by
+mutation: deleting it leaves every test green, because at `max_attempts=0` the loss itself already
+latched the `will_retry=False` report. Kept for structural parity between the ports. A future reader
+will believe it is load-bearing.
+
+**6. `_final_close_reported` is never reset, including by `_adopt_socket`.** Literal reading of "at most
+one `will_retry=False` close per peer, ever". For a helper-driven peer the two rules cannot conflict;
+for a bare `Peer` handed a new socket after such a close, the second loss is silent. Only tests do that
+today.
+
+**7. `interop/*.ts` is neither linted nor type-checked** — `tsconfig.json` includes `ts/**/*` only and
+`lint:ci` runs `eslint ts`. `runner.ts` is now ~1700 lines of load-bearing WSM-CDC-007 machinery whose
+type errors would surface only as runtime failures in CI.
+
+**8. The interop interleaving assertion overstates what it proves.** Removing round-robin entirely does
+not fail it — the assertion is satisfied by the handler's sleeps, not by the writer's rotation.
+WSM-FRG-019's real witnesses (`writer_test.py` and the `small-frame-overtakes-a-fragmented-payload`
+fixture) do catch it, so the rule is covered; the comment claims more than the code delivers. The sharp
+version is timing-dependent, and a flaky cross-language assertion would be worse than a weak one.
+
+**9. `ci.yml`'s `interop` job duplicates two of `cross-language.yml`'s scenario jobs.** Harmless, but it
+is the same work twice on every push and the two now have to be kept in step.
+
+**10. 80 of 201 public functions and classes carry no docstring.** The ones that matter to a consumer
+are covered by the M7 site, and the internals are heavily commented — but the number is worth knowing
+before anyone calls the source self-documenting.
+
+**11. The rule count itself.** 1028 rule ids across the spec and briefs is, on the evidence of this
+build, roughly twice what the protocol needs. The ones that earned their keep are the ones with a
+witness that can fail; the rest mostly restate each other. Worth deciding whether a 1.1 spec prunes
+them, because every id is a promise that someone will one day check.

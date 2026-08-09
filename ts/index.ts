@@ -49,8 +49,13 @@ export {
 } from './errors';
 export { ABSENT, type Absent, type Frame, V1_FRAME_TYPES, framesEqual, fromMapping, toMapping } from './frames';
 export { Assembler, MAX_FRAME_BYTES, encodedLength, splitFrame } from './fragment';
-export { GoawayState, MAX_STREAM_ID, PingRegistry, newNonce } from './lifecycle';
-export { type CloseReason, type FrameDirection, type LogLevel, logFrame, logger } from './observability';
+// `GoawayState`, `MAX_STREAM_ID`, `PingRegistry` and `newNonce` are deliberately NOT re-exported:
+// they are the connection's own bookkeeping, Python keeps every one of them out of `muxws.__all__`,
+// and a consumer who reaches for them is reimplementing the peer. `logFrame` goes with them - the
+// peer calls it, an application does not. `logger` stays, because it is this port's stand-in for the
+// logging module Python gets from its standard library, and setting its level is the only way to
+// turn frame logging on (WSM-OBS-001).
+export { type CloseReason, type FrameDirection, type LogLevel, logger } from './observability';
 export {
   type CloseOptions,
   DEFAULT_DRAIN_MS,
@@ -90,7 +95,10 @@ export {
   Stream,
   StreamState,
 } from './stream';
-export { PREFIX, findOffer, generationOf, mismatchError, offer, select } from './subprotocol';
+// `PREFIX` and `select` only. `offer`, `findOffer`, `generationOf` and `mismatchError` are how the
+// dialer and the acceptor build and read the handshake between themselves; Python exports none of
+// them either, and an application that needs the prefix needs the constant, not the machinery.
+export { PREFIX, select } from './subprotocol';
 export { BrowserSocket, type BrowserSocketOptions } from './transports/browser-socket';
 export { type SocketAdapter } from './transports/index';
 export { MemorySocket, memoryPair } from './transports/memory';

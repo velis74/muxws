@@ -1,0 +1,22 @@
+{
+  // Only the examples need this file. A reader who ran `npm install muxws ws` resolves `muxws` and
+  // `muxws/node` through the package's own exports map; inside this repository there is no installed
+  // copy, so the two specifiers are pointed at the sources the package is built from. Nothing else
+  // here differs from an ordinary Node ESM project.
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "muxws": ["../../ts/index.ts"],
+      "muxws/node": ["../../ts/node.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}

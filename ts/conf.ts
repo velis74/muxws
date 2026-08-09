@@ -19,9 +19,14 @@ const DEFAULT_CODEC = 'json';
 function envCodec(): string | undefined {
   let env: Record<string, unknown> | undefined;
   try {
-    // @ts-expect-error - the repository's tsconfig compiles to CommonJS, where tsc rejects
-    // `import.meta` outright (TS1343). Vite and vitest both process this file as ESM, where the
-    // expression is legal and is the one WSM-CDC-010 names.
+    // `@ts-ignore` and not `@ts-expect-error`: the root tsconfig compiles to CommonJS, where tsc
+    // rejects `import.meta` outright (TS1343), but `interop/tsconfig.json` overrides the module to
+    // ESM - and there the expression is legal, so an *expected* error becomes an unused directive
+    // (TS2578) and the file fails to check under exactly one of the two configs whichever way it is
+    // written. Vite and vitest both process this file as ESM, where this is the expression
+    // WSM-CDC-010 names.
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore
     env = (import.meta as { env?: Record<string, unknown> }).env;
   } catch {
     return undefined;

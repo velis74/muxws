@@ -11,6 +11,7 @@ import type { WebSocket as NodeWebSocket, WebSocketServer } from 'ws';
 
 import { type Codec, getCodec } from './codec';
 import { settings } from './conf';
+import { CodecMismatch } from './errors';
 import { type ErrorSerializer, Peer, type StreamHandler } from './peer';
 import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
 import { mismatchError, offer, PREFIX, select } from './subprotocol';
@@ -215,10 +216,25 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
   });
 }
 
-/** Accept, register `handler`, and run the read loop until the socket closes. */
+/**
+ * Accept, register `handler`, and run the read loop until the socket closes.
+ *
+ * A `CodecMismatch` returns quietly rather than rejecting, which is what `muxws.serve()` does in
+ * Python and the reason the two ports agree here. By the time it is raised the refusal has already
+ * been answered on the wire with HTTP 400 (WSM-CDC-022) and already logged with both codec names
+ * (WSM-CDC-029), so rejecting again reports nothing new - and in Node it reports it as an unhandled
+ * rejection out of a `ws` connection handler, which takes the whole process down. That is not
+ * hypothetical: it is how `interop/runner.ts`'s acceptor died during M6.
+ */
 export async function serve(socket: NodeWebSocket, options: AcceptOptions & { handler: StreamHandler }): Promise<void> {
   const { handler, ...rest } = options;
-  const peer = await accept(socket, rest);
+  let peer;
+  try {
+    peer = await accept(socket, rest);
+  } catch (error) {
+    if (error instanceof CodecMismatch) return;
+    throw error;
+  }
   peer.onStream(handler);
   await peer.serve();
 }

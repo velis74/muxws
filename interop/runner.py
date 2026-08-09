@@ -290,11 +290,21 @@ async def run_tst_004(peer: muxws.Peer, journal: Journal, pushes: list[Any], *, 
         f"{label}: the server pushed {pushes!r}",
     )
 
-    # The interleaving itself, asserted on the wire and not on the API: between the export's first
-    # and last **inbound** frame there must be an inbound frame belonging to some other stream. Only
-    # inbound frames count - the six opens leave together whatever the acceptor does with them, so
-    # counting those would make this pass against a port that answered each stream to completion
-    # before starting the next, which is exactly the implementation it exists to catch.
+    # Interleaving on the wire, and what that is worth: between the export's first and last
+    # **inbound** frame there must be an inbound frame belonging to some other stream. Only inbound
+    # frames count - the six opens leave together whatever the acceptor does with them, so counting
+    # those would pass against a port that answered each stream to completion before starting the
+    # next.
+    #
+    # What this does NOT catch, said plainly because the comment used to claim otherwise: removing
+    # the round-robin writer entirely leaves this assertion passing. It is satisfied by the export
+    # handler's own pauses, not by the writer's rotation. WSM-FRG-019's real witnesses are
+    # `writer_test.py::test_round_robin_selects_across_streams_not_fifo` and the
+    # `small-frame-overtakes-a-fragmented-payload` fixture, both of which do fail; this one proves
+    # the weaker and still-useful thing that the two ports do not serialise streams end to end. The
+    # sharp version - asserting the fragmented reply's own fragments are non-contiguous inbound -
+    # depends on another lane having work at that instant, and a flaky cross-language assertion
+    # would be worse than an honest weak one.
     inbound = [entry for entry in journal.entries if entry[0] == "rx"]
     export_positions = [index for index, entry in enumerate(inbound) if entry[2] == export_id]
     check(bool(export_positions), f"{label}: no inbound frame for the export stream {export_id}")

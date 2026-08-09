@@ -486,7 +486,12 @@ class Peer:
         A `ping` frame, not a WebSocket control frame: browsers do not expose those to JavaScript, so
         a liveness mechanism built on them cannot work on half the peers that exist (WSM-CON-011).
         """
-        if not self._is_open:
+        # `_has_a_socket`, not `is_open`: a ping asks whether there is a wire to put a frame on, and
+        # the hello window makes `is_open` false while the socket is perfectly alive (WSM-RCN-043).
+        # The heartbeat is the caller that matters and it only runs on an established connection, so
+        # the behaviour is unchanged - what goes away is a public call succeeding on a peer that
+        # reports `is_open is False`.
+        if not self._has_a_socket:
             raise ConnectionLost("cannot ping a peer that is between sockets")
 
         nonce = new_nonce()
@@ -937,6 +942,10 @@ class Peer:
         self._next_id = 1 if self._is_dialer else 2
         self._highest_local_open = 0
         self._highest_remote_open = 0
+        # A new socket is a new connection, so the "at most one" of WSM-RCN-044 is per connection and
+        # not per `Peer` object. Left unreset, a bare `Peer` handed a fresh socket after a
+        # `will_retry=False` close reports its next loss to nobody.
+        self._final_close_reported = False
         self._goaway = GoawayState()
         self._writer = Writer(self._codec, max_frame_bytes=self._max_frame_bytes)
         self._writer_task = None

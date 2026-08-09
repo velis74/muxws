@@ -219,6 +219,31 @@ function realSleep(ms: number): Promise<void> {
   });
 }
 
+/**
+ * The heartbeat's sleep: the same timer, released from Node's event loop.
+ *
+ * JavaScript cannot cancel a pending `await`, so when `peer.close()` opens the stop gate the
+ * heartbeat's loop exits while its `setTimeout` keeps running - and in Node a pending timer holds the
+ * whole process open. A program that closed its peer and had nothing else to do therefore sat for the
+ * rest of the ping interval before exiting: measured at 20.4 s wall against 0.4 s of CPU on the
+ * default 20 000 ms, where the Python twin returns in 0.09 s.
+ *
+ * Only the heartbeat unrefs, never the backoff sleep. While a socket is open the socket's own handle
+ * keeps the loop alive, so releasing this timer costs nothing; while the peer is *between* sockets
+ * there is no socket handle and the backoff timer is the only thing keeping the program running -
+ * which is correct, because the program is waiting to reconnect (WSM-RCN-006). Unref'ing that one
+ * would make a client exit silently on its first outage.
+ *
+ * `unref` is Node's, and a browser's `setTimeout` returns a number that has no such method - hence
+ * the optional call rather than a cast.
+ */
+function heartbeatSleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms) as unknown as { unref?: () => void };
+    timer.unref?.();
+  });
+}
+
 interface Gate {
   readonly promise: Promise<void>;
   open(): void;
@@ -283,7 +308,7 @@ export class Heartbeat {
     this.peer = peer;
     this.intervalMs = options.intervalMs;
     this.timeoutMs = options.timeoutMs;
-    this.sleep = options.sleep ?? realSleep;
+    this.sleep = options.sleep ?? heartbeatSleep;
   }
 
   async run(): Promise<void> {
@@ -384,6 +409,16 @@ export class ConnectionLoop {
 
   private readonly sleep: Sleep;
 
+  /**
+   * The injected sleep, or `undefined` when none was given.
+   *
+   * Kept separately from `sleep` so `startHeartbeat` can hand the `Heartbeat` what the caller
+   * actually passed rather than this loop's resolved default. A test that injects a fake clock
+   * still gets it in both places; a caller that injected nothing lets the heartbeat pick its own
+   * default, which unrefs its timer where this loop's must not.
+   */
+  private readonly injectedSleep: Sleep | undefined;
+
   private readonly draw: RandomDraw;
 
   private readonly counter = new AttemptCounter();
@@ -415,6 +450,7 @@ export class ConnectionLoop {
     this.pingIntervalMs = options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
     this.pingTimeoutMs = options.pingTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
     this.sleep = options.sleep ?? realSleep;
+    this.injectedSleep = options.sleep;
     this.draw = options.draw ?? uniform;
   }
 
@@ -547,6 +583,11 @@ export class ConnectionLoop {
       //    does a helper whose attempt cap is already spent.
       if (this.stopped) return;
       if (!shouldRetry(this.counter.value, this.options)) {
+        // Unreachable with effect, and kept anyway. This branch is only entered at
+        // `maxAttempts: 0`, where `establish()` has already set `willRetry` false and the loss
+        // itself latched WSM-RCN-044's single report - so deleting `giveUp()` here leaves every
+        // test green. It stays because `muxws/reconnect.py` has the same branch and a reader
+        // diffing the two ports should find them the same shape.
         this.giveUp();
         return;
       }
@@ -704,7 +745,7 @@ export class ConnectionLoop {
     this.heartbeat = new Heartbeat(this.peer, {
       intervalMs: this.pingIntervalMs,
       timeoutMs: this.pingTimeoutMs,
-      sleep: this.sleep,
+      sleep: this.injectedSleep,
     });
     void this.heartbeat.run().catch((error: unknown) => {
       logger.error(`muxws conn=${this.peer.id} the heartbeat failed`, error);

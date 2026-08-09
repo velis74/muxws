@@ -1,0 +1,14 @@
+{
+  // `interop/runner.ts` is not a script, it is ~1700 lines of load-bearing WSM-CDC-007 machinery -
+  // the only place the two ports ever speak to one another over a real socket. Until M7 it was
+  // neither linted nor type-checked, so a type error there surfaced as a runtime failure in a CI job
+  // rather than at the keyboard. It is Node ESM, hence the module override the root config cannot
+  // carry without changing how the shipped library is checked.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  "include": ["./**/*.ts"]
+}

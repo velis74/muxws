@@ -45,22 +45,7 @@ jobs:
       - run: npm run build
       - run: npm run docs:build
 
-  interop:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: pip install -e .[dev]
-      - run: npm install
-      # Both role assignments over one scenario (WSM-TST-004's first half). A codec, a call shape or
-      # a fragment boundary that disagrees between the ports fails here rather than in production.
-      # The trailing `json` pins the codec independently of `MUXWS_CODEC` / `VITE_MUXWS_CODEC`, which
-      # this job never sets: unpinned, a run that silently defaulted and a run that was configured
-      # look identical (see `interop/drive.sh`).
-      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts main json
-      - run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python main json
+  # The interop job that used to live here is gone: it ran `drive.sh python ts main json` and its
+  # mirror, which is a strict subset of `cross-language.yml`'s `scenario` matrix - same triggers,
+  # same two role assignments, and that file also covers msgpack. Two copies of one job is two
+  # things to keep in step, and the one that ships fewer codecs is the one that rots.

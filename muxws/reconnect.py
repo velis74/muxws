@@ -386,6 +386,12 @@ class ConnectionLoop:
             # nothing else. Asking the helper here is also what makes `max_attempts=0` fire
             # WSM-RCN-044's single `will_retry=False` close rather than returning in silence.
             if not should_retry(self._counter.value, self._options):
+                # Unreachable with effect, and kept anyway. This branch is only entered at
+                # `max_attempts=0`, where `establish()` has already set `will_retry` false and the
+                # loss itself latched WSM-RCN-044's single report - so deleting `_give_up()` here
+                # leaves every test green. It stays because `ts/reconnect.ts` has the same branch and
+                # a reader diffing the two ports should find them the same shape; a future change to
+                # the latch could also make it load-bearing again without anyone noticing it had gone.
                 self._give_up()
                 return
             if await self._redial():

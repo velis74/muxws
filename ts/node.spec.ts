@@ -44,9 +44,9 @@ async function startAcceptor(refuse = true): Promise<Acceptor> {
   const server = refuse ? refuseMismatchedUpgrade(built) : built;
   server.on('connection', (socket) => {
     handshakes += 1;
-    // `.catch` matters only for `refuse = false`: with the upgrade unrefused a mismatched dialer
-    // does reach here, and `serve()` rejects with `CodecMismatch` from the WSM-CDC-028 check with
-    // nobody awaiting it. That path is the violation this file pins, not one the library takes.
+    // `.catch` is a belt on top of braces: `serve()` swallows a `CodecMismatch` and returns, the way
+    // `muxws.serve()` does in Python, precisely so an unrefused mismatch cannot surface here as an
+    // unhandled rejection out of a `ws` connection handler and take the process with it.
     void serve(socket, { handler: (payload, stream) => stream.reply({ echo: payload }) }).catch(() => undefined);
   });
   await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -326,5 +326,31 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(CodecMismatch);
     expect((caught as Error).message).toContain('ECONNREFUSED');
+  });
+});
+
+describe('serve() reports a refused handshake by returning, not by rejecting', () => {
+  it('matches Python, whose serve() swallows CodecMismatch for the same reason', async () => {
+    // By the time `CodecMismatch` is raised the refusal has already gone out as HTTP 400
+    // (WSM-CDC-022) and already been logged with both codec names (WSM-CDC-029). Rejecting again
+    // adds no diagnostic - and in Node it adds an unhandled rejection inside a `ws` connection
+    // handler, which is how `interop/runner.ts`'s acceptor died during M6.
+    //
+    // A stand-in rather than a live server: `accept()` reads exactly two things off the socket on
+    // this path, and standing up a `ws` server that negotiates the wrong subprotocol on purpose
+    // would test the double more than the branch.
+    let closedWith: [number, string] | null = null;
+    const negotiatedSomethingElse = {
+      protocol: 'muxws.v1.msgpack',
+      close: (code: number, reason: string) => {
+        closedWith = [code, reason];
+      },
+    } as unknown as Parameters<typeof serve>[0];
+
+    await expect(serve(negotiatedSomethingElse, { handler: () => undefined })).resolves.toBeUndefined();
+    expect(closedWith, 'the socket is still closed - returning quietly is not ignoring it').toEqual([
+      1008,
+      'codec mismatch',
+    ]);
   });
 });

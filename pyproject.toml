@@ -41,6 +41,11 @@ dev = [
     "websockets",
     "msgpack",
     "httpx",
+    # The quick start in `docs/guide/getting-started.md` is a FastAPI app served by uvicorn, and
+    # `docs/examples/run_examples_test.py` starts it for real. Without these two the three
+    # end-to-end example tests skip, which is indistinguishable from passing.
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.urls]
@@ -72,7 +77,15 @@ python_files = ["*_test.py"]
 asyncio_mode = "auto"
 
 [tool.ruff]
-exclude = ['ts', 'docs', 'dist', 'build', 'node_modules', '.git', '.idea', '.vscode',
+# `docs` is deliberately absent: `docs/examples/*.py` is shipped source that a reader copies, so it
+# is linted exactly like the library - which is what makes S101 (no bare `assert` outside a test)
+# apply to the examples.
+#
+# `*.md` is excluded because this ruff formats fenced Python inside Markdown, and `docs/` is full of
+# it: the guide's illustrative fragments, and the design briefs and the specification under
+# `docs/design/`, which are a historical record and must not be rewritten by a formatter. The
+# Python that is *executed* lives in `docs/examples/*.py`, which this exclusion does not touch.
+exclude = ['ts', '*.md', 'dist', 'build', 'node_modules', '.git', '.idea', '.vscode',
     '.pytest_cache', '.ruff_cache']
 line-length = 120
 
@@ -118,4 +131,7 @@ combine-as-imports = true
 order-by-type = false
 
 [tool.coverage.run]
-omit = ["*_test.py", "demo/*", "demo.py"]
+# The documentation examples are executed by `docs/examples/run_examples_test.py`, but they are
+# teaching material rather than library code: counting them would inflate the library's coverage
+# with lines nobody ships.
+omit = ["*_test.py", "demo/*", "demo.py", "docs/examples/*"]

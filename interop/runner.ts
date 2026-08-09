@@ -24,6 +24,15 @@ import { WebSocket, WebSocketServer } from 'ws';
 // (WSM-CDC-014); reaching past it into `ts/codec` gives an empty registry - which is the correct
 // behaviour, and was the first thing this script got wrong. The dialer comes from `ts/node`, so the
 // reconnect driver under test here is the one a node application actually gets.
+// `offer` builds the subprotocol list and is the library's own business, so it is not exported
+// from the package root (a consumer needs `PREFIX`, not the machinery). The interop driver is
+// in-repo and reaches for the module directly.
+// `deepEqual` and not `assert.deepStrictEqual` or a hand-rolled comparison: a payload under a binary
+// codec is an `ArrayBuffer` (WSM-CDC-008), and the comparison `conformance/README.md` names for that
+// case is this one. Anything that compares two buffers by byte *length* calls buffers of equal
+// length equal whatever they contain, and the one fixture that carries bytes would then be a fixture
+// that cannot fail.
+import { deepEqual } from '../ts/frames';
 import {
   ABSENT,
   ConnectionGoingAway,
@@ -31,7 +40,6 @@ import {
   type Codec,
   type Frame,
   getCodec,
-  offer,
   Peer,
   PREFIX,
   registerCodec,
@@ -46,14 +54,9 @@ import {
   type StreamHandler,
   unjitteredDelay,
 } from '../ts/index';
-// `deepEqual` and not `assert.deepStrictEqual` or a hand-rolled comparison: a payload under a binary
-// codec is an `ArrayBuffer` (WSM-CDC-008), and the comparison `conformance/README.md` names for that
-// case is this one. Anything that compares two buffers by byte *length* calls buffers of equal
-// length equal whatever they contain, and the one fixture that carries bytes would then be a fixture
-// that cannot fail.
-import { deepEqual } from '../ts/frames';
 import { accept, connect, handleProtocols, refuseMismatchedUpgrade, Reconnect, WsSocket } from '../ts/node';
 import type { ConnectionLoop } from '../ts/reconnect';
+import { offer } from '../ts/subprotocol';
 
 /** How many streams the acceptor pushes back when asked (WSM-TST-004's "server push"). */
 const PUSH_COUNT = 3;
@@ -352,7 +355,10 @@ async function runTst004(peer: Peer, journal: Journal, pushes: any[], label: str
   ]);
 
   const echoes = JSON.stringify([echoed1, echoed2, echoed3]);
-  check(echoes === JSON.stringify([{ echo: 1 }, { echo: 2 }, { echo: 3 }]), `${label}: unary answers crossed: ${echoes}`);
+  check(
+    echoes === JSON.stringify([{ echo: 1 }, { echo: 2 }, { echo: 3 }]),
+    `${label}: unary answers crossed: ${echoes}`,
+  );
   check(big.blob.length === 40_000, `${label}: fragmented payload came back as ${big.blob.length} chars`);
   check(big.blob[0] === 'š', `${label}: fragmented payload lost its non-ASCII content`);
   const wantedRows = JSON.stringify([0, 1, 2, 3, 4].map((row) => ({ row })));
@@ -431,7 +437,10 @@ async function runCancelMidFlight(peer: Peer, label: string): Promise<void> {
     await sleep(DRIP_GAP_MS);
   }
   check(report.stopped === true, `${label}: reset(CANCELLED) did not stop the producer: ${JSON.stringify(report)}`);
-  check((report.sent ?? 0) >= seen, `${label}: the producer reports fewer rows than arrived: ${JSON.stringify(report)}`);
+  check(
+    (report.sent ?? 0) >= seen,
+    `${label}: the producer reports fewer rows than arrived: ${JSON.stringify(report)}`,
+  );
 }
 
 /** A `goaway` shutdown: streams at or below `last_stream` drain, later opens are refused. */

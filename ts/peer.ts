@@ -892,7 +892,12 @@ export class Peer {
    * liveness mechanism built on them cannot work on half the peers that exist (WSM-CON-011).
    */
   async ping(timeoutMs: number = DEFAULT_PING_TIMEOUT_MS): Promise<number> {
-    if (!this.open_) throw new ConnectionLost('cannot ping a peer that is between sockets');
+    // `hasASocket`, not `isOpen`: a ping asks whether there is a wire to put a frame on, and the
+    // hello window makes `isOpen` false while the socket is perfectly alive (WSM-RCN-043). The
+    // heartbeat is the caller that matters and it only runs on an established connection, so the
+    // behaviour is unchanged - what goes away is a public call succeeding on a peer that reports
+    // `isOpen === false`.
+    if (!this.hasASocket) throw new ConnectionLost('cannot ping a peer that is between sockets');
 
     const nonce = newNonce();
     const waiting = this.pings.open(nonce);
@@ -1433,6 +1438,10 @@ export class Peer {
     this.nextId = this.dialer ? 1 : 2;
     this.highestLocalOpen = 0;
     this.highestRemoteOpen = 0;
+    // A new socket is a new connection, so the "at most one" of WSM-RCN-044 is per connection and
+    // not per `Peer` object. Left unreset, a bare `Peer` handed a fresh socket after a
+    // `willRetry: false` close reports its next loss to nobody.
+    this.finalCloseReported = false;
     this.goaway = new GoawayState();
     this.writer = new Writer(this.codec, { maxFrameBytes: this.maxFrameBytes });
     // `writerTask` has a Python twin (`_writer_task = None`); the two below do not, because Python

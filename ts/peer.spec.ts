@@ -33,6 +33,7 @@ import {
   logger,
 } from './peer';
 import { type Stream, StreamState } from './stream';
+import type { SocketAdapter } from './transports';
 import { MemorySocket, memoryPair } from './transports/memory';
 
 // --------------------------------------------------------------------------- the harness
@@ -150,6 +151,10 @@ interface PeerInternals {
   /** M5a's writer, so a test can see what the peer is still holding for a socket that is gone. */
   writer: { depth: number; lanes: number };
   dispatch(frame: Frame): Promise<boolean>;
+  /** M5b's socket-death fan-out and the socket a reconnected `Peer` takes next. */
+  adoptSocket(socket: SocketAdapter): void;
+  die(cause: ConnectionClosed): void;
+  willRetry: boolean;
 }
 
 function internals(peer: Peer): PeerInternals {
@@ -1747,5 +1752,34 @@ describe('the frame logger', () => {
       spies.forEach((spy) => spy.mockRestore());
       await pair.stop();
     }
+  });
+});
+
+describe('WSM-RCN-044 is per connection, not per Peer object', () => {
+  it('lets a new socket report its own final close', async () => {
+    // The latch that stops one loss being reported twice must not outlive the connection it was set
+    // on. A `Peer` handed a fresh socket is a new connection, and its next loss is a loss nobody has
+    // heard about - left unreset, it is reported to nobody at all.
+    const [dialerSide] = memoryPair();
+    const peer = new Peer(dialerSide, { codec: new JsonCodec(), isDialer: true });
+    const closes: CloseReason[] = [];
+    peer.onClose((reason) => closes.push(reason));
+
+    internals(peer).willRetry = false;
+    internals(peer).die(new ConnectionClosed('the first socket died', { code: 1006 }));
+    expect(
+      closes.map((reason) => reason.willRetry),
+      'the first loss reports, once',
+    ).toEqual([false]);
+
+    const [replacement] = memoryPair();
+    internals(peer).adoptSocket(replacement);
+    internals(peer).willRetry = false;
+    internals(peer).die(new ConnectionClosed('the second socket died too', { code: 1006 }));
+
+    expect(
+      closes.map((reason) => reason.willRetry),
+      "the second connection's loss was swallowed by a latch left over from the first",
+    ).toEqual([false, false]);
   });
 });
