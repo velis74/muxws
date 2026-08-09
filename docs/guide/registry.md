@@ -132,6 +132,33 @@ await registry.registered(peer, async () => {
 
 `deregister(peer)` is public and idempotent if you want the two halves separately.
 
+## Reaching the peer from a handler
+
+`on_stream` is handed `(payload, stream)` and there is no public route from a `Stream` back to its
+`Peer` in either language. That is deliberate — a handler's business is its stream — but tagging,
+registering and pushing all need the peer, so the pattern is to **bind the handler to the peer when
+you accept the connection**:
+
+```python
+# fragment
+async def endpoint(websocket):
+    peer = await muxws.accept(websocket)
+
+    async def handle(payload, stream):
+        # `peer` is in scope because this closure was built for this connection, and it is the only
+        # way the handler can reach it.
+        if payload.get("action") == "subscribe":
+            peer.tags.update(payload["tags"])
+            registry.register(peer)
+
+    peer.on_stream(handle)
+    await peer.serve()
+```
+
+One handler per connection rather than one per process, which is what makes `peer.tags` usable at all.
+If you find yourself wanting a module-level handler, you will find yourself wanting a way back to the
+peer, and there is not one.
+
 ## The usage rule
 
 **Look up on keys you do not mutate, and mutate keys you do not look up.**

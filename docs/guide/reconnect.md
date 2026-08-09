@@ -186,6 +186,17 @@ ends it implicitly, and that implicit end *is* the acknowledgement. No applicati
 send one. An acceptor that wants to refuse the identity resets the stream instead, and the dialer
 treats that as a failed attempt and backs off.
 
+::: warning The hello cannot carry an answer back
+The reconnect helper owns the hello stream and waits only for it to close, so **a payload the
+acceptor replies with is discarded**. Nobody is reading it and nothing reports that.
+
+This surprises people, because using the hello as a subscription — tag the peer, register it, and
+answer with the list of things it is now subscribed to — is the obvious design, and the reply just
+vanishes. Send that list on a stream the acceptor opens itself instead. That is better anyway: it is
+the same mechanism the acceptor uses for every later update, so the client has one code path rather
+than two, and the initial state arrives by the route the updates will arrive by.
+:::
+
 Until the hello is acknowledged, `peer.is_open` / `peer.isOpen` is **false** and `peer.open()` refuses
 with `ConnectionLost`. That window is not an oversight: it is what guarantees no application frame can
 precede the hello on a new socket and reach an acceptor that has not yet been told who is speaking.
