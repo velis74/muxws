@@ -46,6 +46,12 @@ class StarletteSocket:
         raise ProtocolError(f"unexpected websocket message {message['type']!r}")
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
+        """The one place this adapter does more than forward, hence the only override worth a note.
+
+        Starlette raises on a second close, so the state is checked first: the protocol requires
+        `close` to be idempotent, and the peer legitimately closes a socket the client has already
+        walked away from.
+        """
         from starlette.websockets import WebSocketState
 
         if self._websocket.client_state is not WebSocketState.DISCONNECTED:

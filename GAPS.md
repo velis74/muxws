@@ -762,9 +762,19 @@ version is timing-dependent, and a flaky cross-language assertion would be worse
 **9. `ci.yml`'s `interop` job duplicates two of `cross-language.yml`'s scenario jobs.** Harmless, but it
 is the same work twice on every push and the two now have to be kept in step.
 
-**10. 80 of 201 public functions and classes carry no docstring.** The ones that matter to a consumer
-are covered by the M7 site, and the internals are heavily commented — but the number is worth knowing
-before anyone calls the source self-documenting.
+**10. Docstring coverage — measured, and mostly closed.** *Resolved.* The original count (80 of 201)
+was over-broad: it included `__init__`, `__repr__` and other dunders, which carry no docstring by
+convention. Narrowed to non-dunder members reachable from the public surface it was **31**, and those
+turned out to cluster almost entirely into the two documented extension points — the `Codec` protocol
+and the `SocketAdapter` protocol. Both now document every member, including the two things a reader
+implementing one of them most needs and could not have known: that `receive` **raises**
+`ConnectionClosed` and that this is the peer's only signal that the socket died, and that `close`
+must never be given code 1006.
+
+The **19** left are implementations of those two protocols — `JsonCodec.encode`, `MemorySocket.receive`
+and so on. They are deliberately left bare: the contract lives on the protocol, and repeating it on
+five implementations produces five copies to drift apart. The single implementation that does more
+than forward, `StarletteSocket.close`, says so and says why.
 
 **11. The rule count itself.** 1028 rule ids across the spec and briefs is, on the evidence of this
 build, roughly twice what the protocol needs. The ones that earned their keep are the ones with a

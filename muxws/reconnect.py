@@ -177,6 +177,11 @@ class Hello:
 
     @property
     def headers_for_wire(self) -> dict[str, Any] | None:
+        """A **fresh** deep copy on every read, which is what makes WSM-RCN-027 true.
+
+        The copy one connection handed to the codec must not be the object the next connection
+        sends, or a replay could differ from the hello it is replaying.
+        """
         return deepcopy(self._captured_headers)
 
 

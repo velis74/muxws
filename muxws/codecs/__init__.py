@@ -26,13 +26,39 @@ class Codec(Protocol):
     name: str
     binary: bool
 
-    def encode(self, frame: Frame) -> str | bytes: ...
+    def encode(self, frame: Frame) -> str | bytes:
+        """One whole frame - envelope and payload - as it goes on the wire.
 
-    def decode(self, message: str | bytes) -> Frame: ...
+        `str` under a text codec, `bytes` under a binary one; the peer picks the socket method from
+        `binary` and never from this return type. An absent field MUST NOT be emitted at all: an
+        omitted `payload` key and `"payload": null` are different frames.
+        """
+        ...
 
-    def encode_payload(self, payload: Any) -> str | bytes: ...
+    def decode(self, message: str | bytes) -> Frame:
+        """The inverse. Unknown envelope fields MUST be dropped rather than rejected (WSM-FRM-001).
 
-    def decode_payload(self, data: str | bytes) -> Any: ...
+        Raises `ProtocolError` when the message is not something this codec can read - that is a
+        connection-level failure, and the peer answers it with `goaway`.
+        """
+        ...
+
+    def encode_payload(self, payload: Any) -> str | bytes:
+        """A payload on its own, with no envelope around it.
+
+        This is what fragmentation slices (WSM-FRG-011), so its output has to be exactly the bytes
+        that would appear inside a frame's payload position - a codec whose two encoders disagree
+        cuts fragments at boundaries the receiver cannot rejoin.
+        """
+        ...
+
+    def decode_payload(self, data: str | bytes) -> Any:
+        """What the receiver hands back once the fragments are concatenated (WSM-FRG-030).
+
+        The inverse of `encode_payload`, and the reason the port carries four members rather than
+        the two WSM-CDC-001 names.
+        """
+        ...
 
 
 _REGISTRY: dict[str, Codec] = {}

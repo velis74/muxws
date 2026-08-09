@@ -14,10 +14,31 @@ from typing import Protocol, runtime_checkable
 class SocketAdapter(Protocol):
     """One WebSocket, seen the only way the peer is allowed to see it."""
 
-    async def send_text(self, text: str) -> None: ...
+    async def send_text(self, text: str) -> None:
+        """Put one text message on the wire. Called only under a text codec (WSM-CDC-002)."""
+        ...
 
-    async def send_bytes(self, data: bytes) -> None: ...
+    async def send_bytes(self, data: bytes) -> None:
+        """Put one binary message on the wire. Called only under a binary codec."""
+        ...
 
-    async def receive(self) -> str | bytes: ...
+    async def receive(self) -> str | bytes:
+        """The next inbound message, waiting for one.
 
-    async def close(self, code: int = 1000, reason: str = "") -> None: ...
+        **Raises `ConnectionClosed` when the socket ends**, and that is how the peer learns the
+        connection died - it is the only signal. An adapter that returned a sentinel, or that blocked
+        forever after the socket closed, would leave the read loop parked and every pending await
+        hanging with no error anywhere (WSM-INV-011).
+        """
+        ...
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        """Close this side.
+
+        `code` defaults to 1000 and MUST NOT be 1006: that code means "closed abnormally" and a peer
+        may never send it - `websockets` rejects it outright, and an adapter that swallowed the
+        rejection would leave the socket open while the peer believed it closed. That is not
+        hypothetical; it cost this library its reconnect on every fast link until M8. Idempotent:
+        closing an already-closed socket is not an error.
+        """
+        ...

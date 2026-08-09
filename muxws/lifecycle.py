@@ -49,6 +49,12 @@ class PingRegistry:
         return len(self._pending)
 
     def open(self, nonce: str) -> asyncio.Future[float]:
+        """Start waiting for the pong carrying `nonce`; the future resolves with the round trip.
+
+        Keyed by nonce and not by arrival order, so two pings in flight cannot settle each
+        other's future - and a pong for a nonce nobody is waiting for is dropped rather than
+        matched to whatever happens to be pending.
+        """
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
         self._pending[nonce] = future
         return future

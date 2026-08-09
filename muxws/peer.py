@@ -168,6 +168,11 @@ class Peer:
 
     @property
     def is_dialer(self) -> bool:
+        """Which parity this peer allocates: odd for the dialer, even for the acceptor.
+
+        The only asymmetry between the two ends of a muxws connection. Everything else - who may
+        open, who may push, what a stream can do - is identical on both sides (WSM-INV-002).
+        """
         return self._is_dialer
 
     # ------------------------------------------------------------------ registration
@@ -180,6 +185,14 @@ class Peer:
         return handler
 
     def on_close(self, handler: Callable[[Any], None]) -> Callable[[Any], None]:
+        """Register a handler for **every** socket loss, not only the last one (WSM-RCN-040).
+
+        It is handed a `CloseReason`, whose `will_retry` says whether the reconnect helper
+        intends to dial again - false only when the attempt cap is spent or `close()` was
+        deliberate. Returns the handler, so it works as a decorator. A handler that raises is
+        logged and the next one still runs: an application callback must not be able to stop the
+        driver.
+        """
         self._close_handlers.append(handler)
         return handler
 
