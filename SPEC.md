@@ -426,8 +426,19 @@ one-shot push is `open(end)` with nothing awaited. Durations are **seconds as fl
 - **WSM-CDC-026** `accept()` MUST perform the WebSocket accept itself — it is the only party that
   knows which subprotocol to select. An application MUST NOT accept the socket before calling it.
 - **WSM-CDC-027** For transports that complete the handshake before invoking the handler, the library
-  MUST expose `select_subprotocol`, a plain callable installable in that transport's handshake hook,
-  implementing WSM-CDC-021/022.
+  MUST expose a plain callable installable in that transport's handshake hook, implementing
+  WSM-CDC-021/022. **Where one hook cannot both select and refuse, the library MUST expose one for
+  each**, and both MUST be named in the transport's documentation as required rather than optional.
+  Python's `websockets` needs a single `select_subprotocol`, which refuses by raising. Node's `ws`
+  needs two: `handleProtocols` selects and cannot refuse — whatever it returns, `ws` answers 101 — so
+  `refuseMismatchedUpgrade` wraps `shouldHandle`, which is the hook that can abort an upgrade with a
+  status.
+
+  This clause is here because its absence caused the failure. The rule named only Python's hook, so
+  both ports shipped an acceptor that answered HTTP 101 where WSM-CDC-022 requires 400, and did so for
+  three milestones. Nothing caught it: every test dialled with the same language's dialer, which
+  recovers through WSM-CDC-028 and raises `CodecMismatch` anyway, so the *outcome* was right in the
+  only configuration ever exercised. A cross-language dial is where it showed.
 - **WSM-CDC-028** Where a transport offers neither hook, the peer MUST verify the negotiated
   subprotocol on the already-open socket and close it with the WebSocket policy-violation close code.
 - **WSM-CDC-029** The acceptor MUST log the same failure at refusal time, naming the offered codec,

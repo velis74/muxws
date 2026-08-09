@@ -841,3 +841,48 @@ case for the registry pattern this demo exists to show — `close()` burned ten 
 and starved the very tasks that would have ended those streams. Now a 5 ms pause, which costs a close
 at most 5 ms of extra latency. TypeScript's `drain` was already event-driven and needed no change;
 the two ports had quietly diverged on this and only the Python side was wrong.
+
+## muxws-m8-demo.md — the published artefacts had never been installed
+
+**What I needed:** to know that a consumer who follows the documented install can run the documented
+quick start.
+
+**What every check did instead:** ran from the source tree. The Python suite imports `muxws` from the
+repository; the documentation examples resolve `muxws` and `muxws/node` through a tsconfig path
+mapping to `ts/index.ts`; and the two audits that inspected the wheel looked at its **top level**,
+which was correctly `{muxws, dist-info}`.
+
+**What was actually shipped:** inside `muxws/` were every `*_test.py`, `conftest.py`, and `__pycache__`
+full of bytecode compiled on this machine. The exclude list sat under
+`[tool.hatch.build.targets.sdist]` and not under the wheel target, and `python -m build` hid it
+completely by building the wheel *from* the sdist. The only route that could see it was installing the
+wheel and looking inside the installed package.
+
+**What I did:** the exclude on the wheel target, plus
+`packaging_test.py::test_the_published_wheel_ships_the_library_and_nothing_else`, asserted against the
+archive rather than an install because `pip` compiles to `__pycache__` at install time and that is its
+business. Then both artefacts verified from clean installs off the source tree, and the documented
+quick start run as a reader would run it — a fresh directory, the documented `pip install` and
+`npm install` lines, the three documented files — with the output compared to the block printed in the
+guide. It matches character for character in both languages.
+
+**The lesson, which is the fourth instance of one shape:** 1006 was hidden by the memory transport,
+HTTP 400 by same-language dialling, WSM-INV-004 by a socket that never made the writer wait, and this
+by running from source. Every time, the rig could not see the thing — never the code. The question
+worth asking at the end of any milestone is not "do the tests pass" but **"what has never been
+exercised at all?"**
+
+## muxws-m3-transports.md — WSM-CDC-027 named one hook where two were needed
+
+**What the rule said:** the library MUST expose `select_subprotocol`, a callable installable in the
+transport's handshake hook.
+
+**Why that was not enough:** it is true of `websockets` and false of `ws`. `handleProtocols` selects
+and *cannot refuse* — whatever it returns, `ws` answers 101 — so a second hook is structurally
+required. The rule named only the Python shape, so both ports shipped an acceptor that violated
+WSM-CDC-022 for three milestones, and the second hook, when it finally had to exist, was public API no
+brief named.
+
+**What I did:** the rule now requires one callable per job where one cannot do both, requires both to
+be documented as required rather than optional, and carries the failure its own absence caused. The id
+is unchanged.
