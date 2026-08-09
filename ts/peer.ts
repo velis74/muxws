@@ -123,6 +123,40 @@ export function defaultErrorSerializer(error: unknown): unknown {
 // --------------------------------------------------------------------------- small helpers
 
 /** Python's `str(exc)`. */
+/**
+ * One macrotask turn, so tasks that are not promises get to run.
+ *
+ * `WSM-INV-004` depends entirely on this. Nothing in `runWriter` is guaranteed to let anything else
+ * run: `nextFrame()` resolves immediately when there is work, and a socket whose buffer has room
+ * resolves its send immediately too, so awaiting them only drains the **microtask** queue. A producer
+ * driven by a timer or by an inbound socket message is a **macrotask** and gets no turn at all - so
+ * the loop sends every fragment of a megabyte in one run, nothing else can enqueue, and the
+ * round-robin has exactly one lane to rotate between. Measured before this existed: seven fragments
+ * with zero frames of any other stream between the first and the last.
+ *
+ * `MessageChannel` rather than `setTimeout(0)`: browsers clamp nested timers to 4 ms after a few
+ * levels, which on a per-frame yield would cap this peer at a few hundred frames a second. Node's
+ * `setImmediate` is the cheapest where it exists; the channel is the portable equivalent and costs
+ * microseconds.
+ */
+const yieldToOtherTasks: () => Promise<void> = (() => {
+  const immediate = (globalThis as { setImmediate?: (callback: () => void) => unknown }).setImmediate;
+  if (typeof immediate === 'function') {
+    return () => new Promise<void>((resolve) => immediate(resolve));
+  }
+  if (typeof MessageChannel === 'function') {
+    const channel = new MessageChannel();
+    const waiting: (() => void)[] = [];
+    channel.port1.onmessage = () => waiting.shift()?.();
+    return () =>
+      new Promise<void>((resolve) => {
+        waiting.push(resolve);
+        channel.port2.postMessage(undefined);
+      });
+  }
+  return () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+})();
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -714,6 +748,9 @@ export class Peer {
         // Only now: fragment n+1 is sliced once fragment n has reached the socket, never before
         // (WSM-FRG-018).
         this.writer.advance(frame.stream ?? CONNECTION_LANE);
+        // And one macrotask turn, without which the rotation has nothing to rotate between - see
+        // `yieldToOtherTasks` (WSM-INV-004).
+        await yieldToOtherTasks();
       } catch (error) {
         // The socket is gone; `serve()`'s read loop is the one that declares the peer dead.
         if (error instanceof ConnectionClosed) return;

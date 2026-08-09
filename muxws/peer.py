@@ -337,6 +337,22 @@ class Peer:
                 # Only now: fragment n+1 is sliced once fragment n has reached the socket, never
                 # before (WSM-FRG-018).
                 self._writer.advance(frame.stream if frame.stream is not None else CONNECTION_LANE)
+                # One event-loop turn per frame, and WSM-INV-004 depends on it entirely.
+                #
+                # Nothing else in this loop is guaranteed to suspend. `next_frame()` returns without
+                # awaiting when there is work, and `send_text` on a socket whose buffer has room -
+                # uvicorn on loopback, and `MemorySocket` always - completes without yielding either.
+                # So the loop drains every queued frame, and every fragment of a megabyte, in one
+                # uninterrupted run of this task. No other task runs; nothing else can enqueue; and
+                # the round-robin has exactly one lane to rotate between. The writer is correct and
+                # it is simply never asked.
+                #
+                # Measured before this line existed: a 400 kB export produced seven fragments with
+                # **zero** frames of any other stream between the first and the last, against a
+                # ticker enqueueing on every turn. The guarantee held only on links slow enough that
+                # backpressure supplied the missing suspension - which is why it survived to 1.0:
+                # every test transport and localhost are the fastest links there are.
+                await asyncio.sleep(0)
             except ConnectionClosed:
                 return
             except asyncio.CancelledError:
@@ -573,9 +589,16 @@ class Peer:
         A deadline, not a poll loop: a peer that waited for quiet would never close against a remote
         that keeps one stream open.
         """
-        deadline = asyncio.get_running_loop().time() + timeout
-        while self._streams and asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._streams and loop.time() < deadline:
+            # A real pause, not `sleep(0)`. Every stream open here belongs to the application and
+            # ends when the application ends it, so a zero-delay poll spins the CPU flat out for the
+            # whole window - ten seconds of it at the default. That is not theoretical: a peer that
+            # *pushes* holds streams it opened itself, so a server closing a connection with a live
+            # subscription burned the window at 100% and starved the very tasks that would have
+            # ended those streams (WSM-CON-024). 5 ms costs a close at most 5 ms of extra latency.
+            await asyncio.sleep(0.005)
         # Whatever is still live at the deadline takes the socket-death path: it fails locally and
         # nothing is sent for it, because the socket is about to be gone.
         await self._drain_outbound()

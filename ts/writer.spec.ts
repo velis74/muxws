@@ -261,3 +261,54 @@ describe('the peer actually uses the writer', () => {
     }
   });
 });
+
+describe('WSM-INV-004 on a fast socket', () => {
+  it('yields per frame, so the rotation has something to rotate between', async () => {
+    // The round-robin is only worth having if another stream can get a frame into the writer while a
+    // large payload is going out. `await` on a promise that is already resolved drains the microtask
+    // queue but never lets a timer run, and a memory socket resolves immediately - so a producer
+    // driven by setTimeout, which is what a real ticking backend looks like, gets no turn at all
+    // until the export is finished. The Python port had exactly this defect and was measured at
+    // seven fragments with zero other frames between them.
+    const [left, right] = memoryPair();
+    const dialer = new Peer(left, { codec, isDialer: true });
+    const acceptor = new Peer(right, { codec, isDialer: false });
+    acceptor.onStream(() => undefined);
+    const order: (number | null | undefined)[] = [];
+    dialer.onFrame((direction, frame) => {
+      if (direction === 'tx') order.push(frame.stream);
+    });
+    const served = [dialer.serve(), acceptor.serve()];
+    served.forEach((task) => void task.catch(() => undefined));
+
+    let ticking = true;
+    const tick = (): void => {
+      if (!ticking) return;
+      try {
+        dialer.open({ tick: 1 }, { end: true });
+      } catch {
+        return;
+      }
+      setTimeout(tick, 0);
+    };
+    setTimeout(tick, 0);
+
+    const exported = dialer.open({ export: 'x'.repeat(400_000) }, { end: true });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    ticking = false;
+
+    const positions = order.map((stream, index) => (stream === exported.id ? index : -1)).filter((i) => i >= 0);
+    expect(positions.length, 'the export must actually fragment for this to mean anything').toBeGreaterThan(3);
+    const between = order
+      .slice(positions[0], positions[positions.length - 1])
+      .filter((stream) => stream !== exported.id);
+    expect(
+      between.length,
+      `${positions.length} export fragments reached the wire with nothing else between them: the export ` +
+        'monopolised the socket and WSM-INV-004 does not hold on this link',
+    ).toBeGreaterThan(0);
+
+    await dialer.close();
+    await acceptor.close();
+  });
+});

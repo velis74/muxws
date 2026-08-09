@@ -770,3 +770,74 @@ before anyone calls the source self-documenting.
 build, roughly twice what the protocol needs. The ones that earned their keep are the ones with a
 witness that can fail; the rest mostly restate each other. Worth deciding whether a 1.1 spec prunes
 them, because every id is a promise that someone will one day check.
+
+## muxws-m8-demo.md — WSM-INV-004 was not true on a fast socket, and only the demo could find it
+
+**What I needed:** a demo panel showing a 1 MB export fragmenting while ticks keep arriving, with the
+tick-latency readout staying flat. The brief calls it the headline and says plainly that without the
+round-robin writer "the headline demonstration is a lie".
+
+**What the brief and the spec say:** WSM-INV-004 — at most one unsent fragment per stream and
+round-robin writer selection, "or a 1 MB payload adds a full second of latency to a 200-byte progress
+update on another stream". M5a built the writer and proved it: thirteen tests, a conformance fixture,
+and a mutation to a FIFO that fails three of them.
+
+**What was actually true:** the guarantee did not hold. Nothing in `Peer._write_loop` is guaranteed to
+suspend — `next_frame()` returns without awaiting when there is work, and a socket whose buffer has
+room completes its send without yielding — so the loop drained every fragment of a megabyte in one
+uninterrupted run of the task. No other task ran, nothing else could enqueue, and the round-robin had
+exactly one lane to rotate between. **The writer was correct and was simply never asked.** Measured on
+a memory transport: seven fragments, zero frames of any other stream between the first and the last.
+Measured through the demo's real Vite proxy to real uvicorn: eighteen fragments, zero ticks between.
+
+**Why every test missed it:** the writer's own tests drive the writer directly, so the rotation is
+observed with the queues already full. The one end-to-end test in `ts/writer.spec.ts` and the demo's
+own headline test both interleaved because *their* transport happened to yield — the demo's fixture
+even wrapped both ends in a `PacedSocket` that slept in proportion to frame size, with an honest
+docstring saying the real transport did not behave that way. The guarantee held only on links slow
+enough that backpressure supplied the missing suspension, and every test transport and localhost are
+the fastest links there are. This is the same shape as the 1006 close code in M5b and the missing
+HTTP 400 in M6: **the rig could not see the thing the rule is about.**
+
+**What I did:** one event-loop turn per frame in both ports — `await asyncio.sleep(0)` in Python, a
+`MessageChannel`-based macrotask in TypeScript, because a microtask does not let a timer-driven
+producer run and `setTimeout(0)` is clamped to 4 ms by browsers under nesting. Both ports now carry a
+test over a *plain* transport that fails without the yield. The demo's `PacedSocket` is gone with the
+defect it was compensating for.
+
+**The lesson, which is the whole argument for building the demo:** M8 was the first consumer of muxws
+that was not a test, and it invalidated the project's central performance claim within hours. A
+library's own suite tests it against the transports the suite owns. Something has to run it against a
+real one.
+
+## muxws-m8-demo.md — the splitter renders 20x the payload it is fragmenting
+
+**What I needed:** a 1 MB export that does not stall the sender.
+
+**What is true:** `iter_fragments` asked the codec "does the whole remainder fit as the closing
+fragment?" on every pass, rendering the entire remaining payload each time. Measured: 395 encodes and
+**42 MB rendered** for a 1.2 MB payload. That cost is synchronous, so it blocks the event loop — the
+same latency WSM-INV-004 exists to prevent, arriving by another road.
+
+**What I did:** the probe now skips when the remainder alone exceeds the cap, because an encoded frame
+carries the remainder *plus* an envelope *plus* escaping and can never be shorter than it — so the
+answer is already known. 42 MB down to 25 MB, and boundary-preserving by construction, which the
+frozen corpus confirms in both ports.
+
+**What I deliberately did not do:** the rest is the binary search in `_largest_fitting_count`, which
+runs on nearly every fragment because the reservation `min(512, cap // 2)` is far short of what
+JSON-inside-JSON escaping costs — 64 KiB of JSON text carries thousands of quotes, each becoming two
+bytes. A better reservation would fix it, and **must not be applied**: the reservation decides the
+boundary whenever its first guess fits, so changing it cuts in different places. Fragment boundaries
+are frozen (WSM-FRG-016, `conformance/frames/`), which makes this a generation concern rather than an
+optimisation. `fragment_test.py::test_how_much_encoding_one_megabyte_costs` records the cost as a
+ceiling so it cannot quietly get worse.
+
+## muxws-m8-demo.md — `close()` spun at 100% for its whole drain window
+
+**What is true:** `Peer._drain` polled with `await asyncio.sleep(0)`, which is not a pause. Every
+stream open at close time belongs to the application, so against a peer that *pushes* — the normal
+case for the registry pattern this demo exists to show — `close()` burned ten seconds of CPU flat out
+and starved the very tasks that would have ended those streams. Now a 5 ms pause, which costs a close
+at most 5 ms of extra latency. TypeScript's `drain` was already event-driven and needed no change;
+the two ports had quietly diverged on this and only the Python side was wrong.

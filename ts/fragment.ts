@@ -212,10 +212,19 @@ export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, code
     // on every pass, including the one where the payload is already spent: the sequence MUST end
     // with a fragment carrying `more: false`, even if that fragment carries no bytes.
     const first = emitted === 0;
-    const tail = fragmentFrame(frame, sliceUnits(units, position, total - position), { first, last: true });
-    if (encodedLength(codec.encode(tail)) <= cap) {
-      yield tail;
-      return;
+    // Skipped when the answer is already known: the encoded frame carries the remaining payload plus
+    // an envelope plus whatever the codec's escaping adds, so it is never *shorter* than the
+    // remainder itself. If the remainder alone is over the cap, encoding it only to be told so
+    // renders the whole rest of the payload for nothing - and does it again on every pass, which is
+    // quadratic in payload size. This changes no boundary: it declines to ask a question whose answer
+    // cannot be yes. Measured in Python, where the twin of this line took a 1.2 MB payload from 42 MB
+    // of rendering down to 25 MB.
+    if (total - position <= cap) {
+      const tail = fragmentFrame(frame, sliceUnits(units, position, total - position), { first, last: true });
+      if (encodedLength(codec.encode(tail)) <= cap) {
+        yield tail;
+        return;
+      }
     }
 
     if (position >= total) throw closingFloorError(cap);

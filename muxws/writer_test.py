@@ -183,3 +183,56 @@ async def test_a_stream_queue_holds_one_prepared_fragment(codec: JsonCodec):
     assert queue.take() is not None
     assert queue.prepared_depth == 0
     assert queue.has_work, "the tail is still there even with nothing prepared"
+
+
+async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(make_pair):
+    """WSM-INV-004 on a **fast** socket, which is where it was not true.
+
+    The round-robin is only worth having if another stream can get a frame into the writer while a
+    large payload is going out. Nothing in `_write_loop` is guaranteed to suspend: `next_frame()`
+    returns without awaiting when there is work, and a socket whose buffer has room - uvicorn on
+    loopback, and `MemorySocket` always - completes its send without yielding either. Without a
+    deliberate turn per frame the loop drains a whole megabyte in one uninterrupted run, no other
+    task runs, nothing else can enqueue, and the rotation has exactly one lane to choose from.
+
+    Measured before the fix: seven fragments, **zero** frames of any other stream between the first
+    and the last, against a producer enqueueing on every turn. The guarantee held only on links slow
+    enough that backpressure supplied the missing suspension - which is why it survived to 1.0, since
+    every test transport and localhost are the fastest links there are.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(lambda _payload, _stream: None)
+    order: list[int | None] = []
+    pair.dialer.on_frame(lambda direction, frame, _n: order.append(frame.stream) if direction == "tx" else None)
+    pair.start()
+
+    ticking = True
+
+    async def keep_ticking() -> None:
+        while ticking:
+            try:
+                pair.dialer.open({"tick": 1}, end=True)
+            except Exception:  # noqa: BLE001 - the connection ending is how this task retires
+                return
+            await asyncio.sleep(0)
+
+    ticker = asyncio.create_task(keep_ticking())
+    try:
+        await asyncio.sleep(0)
+        export = pair.dialer.open({"export": "x" * 400_000}, end=True)
+        for _ in range(400):
+            await asyncio.sleep(0)
+        ticking = False
+
+        positions = [index for index, stream in enumerate(order) if stream == export.id]
+        assert len(positions) > 3, f"the export must actually fragment for this to mean anything: {len(positions)}"
+        between = [stream for stream in order[positions[0] : positions[-1]] if stream != export.id]
+        assert between, (
+            f"{len(positions)} export fragments reached the wire with nothing else between them: the "
+            f"export monopolised the socket and WSM-INV-004 does not hold on this link"
+        )
+    finally:
+        ticking = False
+        ticker.cancel()
+        await asyncio.gather(ticker, return_exceptions=True)
+        await pair.stop()

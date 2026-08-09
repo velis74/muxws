@@ -26,7 +26,8 @@
     }
   },
   "workspaces": [
-    "docs"
+    "docs",
+    "demo/frontend"
   ],
   "scripts": {
     "build": "vite build",
@@ -36,7 +37,8 @@
     "docs:dev": "npm run docs:dev -w docs",
     "docs:build": "npm run docs:build -w docs",
     "docs:preview": "npm run docs:preview -w docs",
-    "docs:check": "node docs/check-docs.mjs"
+    "docs:check": "node docs/check-docs.mjs",
+    "demo:dev": "npm run dev -w demo-frontend"
   },
   "keywords": [
     "websocket",

@@ -15,7 +15,9 @@ import json
 import re
 import subprocess
 import sys
+import tarfile
 import textwrap
+import zipfile
 
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 PACKAGE_JSON = ROOT / "package.json"
+DEMO_ENTRY_POINT = ROOT / "demo.py"
+DEMO_FRONTEND_JSON = ROOT / "demo" / "frontend" / "package.json"
 
 # --------------------------------------------------------------------------- a very small TOML reader
 
@@ -107,6 +111,11 @@ def _literal(text: str) -> Any:
 @pytest.fixture(scope="module")
 def pyproject() -> dict[str, dict[str, Any]]:
     return _tables(PYPROJECT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def npm_manifest() -> dict[str, Any]:
+    return json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- one version stream
@@ -280,3 +289,137 @@ def test_the_toml_reader_agrees_with_tomllib(pyproject: dict[str, dict[str, Any]
     assert sorted(pyproject.get("project.optional-dependencies", {})) == sorted(extras)
     for name, requirements in extras.items():
         assert pyproject["project.optional-dependencies"][name] == requirements
+
+
+# --------------------------------------------------------------------------- the demo is a consumer
+
+
+def test_the_demo_adds_no_runtime_dependency(pyproject: dict[str, dict[str, Any]], npm_manifest: dict[str, Any]):
+    """WSM-PKG-002 and WSM-PKG-003, restated against the one change most likely to break them.
+
+    The demo is the first consumer of muxws in this repository that is not a test, and it needs a web
+    framework, a server and a UI toolkit that the library itself has always refused to need. The
+    failure this guards is not exotic: it is somebody moving `fastapi` up one table so `python
+    demo.py` stops complaining, or declaring `vue` as a peer dependency so the workspace resolves -
+    either of which makes `pip install muxws` and `npm install muxws` pull in the demo's world.
+
+    The npm half is a manifest reading, deliberately: `ts/packaging.spec.ts` proves the *bundle*
+    imports nothing optional by running a real Vite build, which is the stronger witness and the one
+    that cannot be written from here. What this adds is the half a bundle cannot see - a declaration
+    that would install for every consumer whether the bundle reaches for it or not.
+    """
+    assert pyproject["project"]["dependencies"] == [], "the demo is not a reason to grow this list"
+
+    extras = pyproject["project.optional-dependencies"]
+    assert "demo" in extras, "the demo's Python needs live behind an extra or they live nowhere"
+    for name in ("fastapi", "uvicorn"):
+        assert any(name in requirement for requirement in extras["demo"]), extras["demo"]
+
+    assert npm_manifest.get("dependencies", {}) == {}, "the published npm package installs nothing"
+    # A peer dependency is a required install for every consumer, spelled politely. The demo's
+    # frontend packages (vue, vuetify, @vitejs/plugin-vue) must be declared by the demo's own
+    # workspace manifest, so this set stays exactly the two WSM-PKG-003 names.
+    assert set(npm_manifest.get("peerDependencies", {})) == {"ws", "@msgpack/msgpack"}
+    for name in ("ws", "@msgpack/msgpack"):
+        assert npm_manifest["peerDependenciesMeta"][name]["optional"] is True, name
+
+    # `demo/frontend` is a workspace of this repository but not a file of this package: `files`
+    # decides what npm puts in the tarball, and `dist/*` cannot reach it.
+    assert npm_manifest["files"] == ["dist/*"]
+    assert "demo/frontend" in npm_manifest["workspaces"], "demo.py runs the dev server through it"
+
+    # Read while it exists rather than required to: this test's job is the root manifest, and it
+    # must not start failing because the frontend has not landed yet. Once it has, every package it
+    # names is checked against the root, which is where a stray `npm install --save` would put it.
+    frontend: dict[str, Any] = {}
+    if DEMO_FRONTEND_JSON.is_file():
+        frontend = json.loads(DEMO_FRONTEND_JSON.read_text(encoding="utf-8"))
+    demo_packages = set(frontend.get("dependencies", {})) | set(frontend.get("devDependencies", {}))
+    published = set(npm_manifest.get("dependencies", {})) | set(npm_manifest.get("peerDependencies", {}))
+    leaked = demo_packages & published
+    assert leaked == set(), f"the demo's packages reached the published manifest: {sorted(leaked)}"
+
+
+# --------------------------------------------------------------------------- what actually ships
+
+
+def _demo_members(names: list[str], *, strip_leading_directory: bool) -> list[str]:
+    """The members of an archive that came from the demo.
+
+    An sdist puts everything under one `<name>-<version>/` directory and a wheel does not, so the
+    same question is asked of two different shapes.
+    """
+    found = []
+    for name in names:
+        path = name.split("/", 1)[1] if strip_leading_directory and "/" in name else name
+        if path == "demo.py" or path.startswith("demo/"):
+            found.append(name)
+    return found
+
+
+@pytest.fixture(scope="module")
+def built_artefacts(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """A real sdist and a real wheel, built from this working tree into a temporary directory.
+
+    `--outdir` is not a nicety: the default is `dist/`, which in this repository is the *Vite*
+    bundle, and a test that overwrites the artefact `npm test` measures would be a fine way to lose
+    an afternoon.
+
+    `python -m build` with neither flag builds the sdist and then builds the wheel *from it*, which
+    is the path a release actually takes - so a file that the sdist include-list lets through would
+    be visible in both.
+    """
+    pytest.importorskip("build", reason="`pip install -e .[dev]` provides it; without it nothing is built")
+    outdir = tmp_path_factory.mktemp("artefacts")
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "build", "--outdir", str(outdir)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=600,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    wheels = sorted(outdir.glob("*.whl"))
+    sdists = sorted(outdir.glob("*.tar.gz"))
+    assert len(wheels) == 1, wheels
+    assert len(sdists) == 1, sdists
+    return wheels[0], sdists[0]
+
+
+def test_the_published_artefacts_contain_no_demo_files(built_artefacts: tuple[Path, Path]):
+    """The demo ships with the repository and not with the package.
+
+    Read from the artefacts rather than from `pyproject.toml`, because the manifest is the thing
+    that would be wrong. `[tool.hatch.build.targets.wheel] packages = ["muxws"]` and the sdist's
+    include-list both say the demo is out; a build says whether hatch agreed.
+
+    The first assertion is what makes the rest mean anything. `demo.py` is a top-level module beside
+    `muxws/`, and a wheel built without that `packages` line would sweep it in - so this test only
+    proves an exclusion for as long as there is something on disk to exclude.
+    """
+    wheel, sdist = built_artefacts
+    assert DEMO_ENTRY_POINT.is_file(), "nothing to exclude: this test would pass against any manifest"
+
+    with zipfile.ZipFile(wheel) as archive:
+        wheel_names = archive.namelist()
+    with tarfile.open(sdist) as archive:
+        sdist_names = archive.getnames()
+
+    # A build that emitted an empty archive would satisfy every "no demo" assertion below.
+    assert "muxws/__init__.py" in wheel_names
+    assert any(name.endswith("/muxws/__init__.py") for name in sdist_names), sdist_names[:5]
+
+    assert _demo_members(wheel_names, strip_leading_directory=False) == []
+    assert _demo_members(sdist_names, strip_leading_directory=True) == []
+
+    # Stronger than the two lines above and the reason they are cheap to keep: the wheel's whole
+    # member list is `muxws/` plus its own metadata. Anything new at the top level - the demo, a
+    # scratch script, a stray notebook - fails here rather than waiting for someone to name it.
+    tops = {name.split("/", 1)[0] for name in wheel_names}
+    assert tops <= {"muxws", f"muxws-{_wheel_version(wheel)}.dist-info"}, tops
+
+
+def _wheel_version(wheel: Path) -> str:
+    """`muxws-1.0.0-py3-none-any.whl` -> `1.0.0`; the `.dist-info` directory is named from it."""
+    return wheel.name.split("-")[1]

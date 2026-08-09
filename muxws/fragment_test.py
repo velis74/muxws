@@ -8,7 +8,7 @@ import pytest
 
 from muxws.codecs.json_ import JsonCodec
 from muxws.errors import ProtocolError
-from muxws.fragment import Assembler, encoded_length, MAX_FRAME_BYTES, split_frame
+from muxws.fragment import Assembler, encoded_length, iter_fragments, MAX_FRAME_BYTES, split_frame
 from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
 
 _CONFORMANCE = Path(__file__).parent.parent / "conformance" / "frames"
@@ -317,3 +317,63 @@ def test_the_closing_fragment_may_be_empty(codec: JsonCodec):
     parts = split_frame(frame, 256, codec)
     rejoined = "".join(str(part.fragment) for part in parts)
     assert codec.decode_payload(rejoined) == frame.payload
+
+
+def test_how_much_encoding_one_megabyte_costs():
+    """A measurement kept as a test, because the number is the finding.
+
+    `iter_fragments` asks the codec "does the rest fit?" on every pass, and the reservation
+    `min(512, cap // 2)` is short of what JSON escaping needs often enough that the binary search in
+    `_largest_fitting_count` runs on nearly every fragment rather than as the exceptional path its
+    comment describes. Nothing here is incorrect - the cuts are right and the function stays pure -
+    but a large payload costs the sender far more encoding than it should, and that cost is
+    synchronous: it blocks the event loop, which is the same latency WSM-INV-004 exists to prevent
+    arriving by another road.
+
+    Measured here: 373 encodes for 23 fragments, rendering 25 MB for a 1.2 MB payload. It was 42 MB
+    until the tail probe learned to skip the question it already knows the answer to - the encoded
+    frame is never shorter than the remainder it carries, so a remainder over the cap cannot fit and
+    need not be rendered to prove it. That change is boundary-preserving by construction and the
+    frozen corpus confirms it.
+
+    What is left is the binary search, and it may **not** be fixed the obvious way. It runs on nearly
+    every fragment because the reservation `min(512, cap // 2)` is far short of what JSON-inside-JSON
+    escaping costs: 64 KiB of JSON text carries thousands of quotes, each becoming two bytes. But the
+    reservation decides the boundary whenever its first guess *fits* - the search only runs when it
+    does not - so a better guess would cut in different places. Fragment boundaries are frozen
+    (WSM-FRG-016 requires both ports to cut identically, and `conformance/frames/` pins where), which
+    makes this a generation concern and not an optimisation.
+
+    The ceiling is a ceiling, not the value, so this records the cost without tripping on every
+    unrelated change.
+    """
+    codec = JsonCodec()
+    calls = 0
+    encoded_bytes = 0
+    original = codec.encode
+
+    def counted(frame: Frame) -> str:
+        nonlocal calls, encoded_bytes
+        calls += 1
+        rendered = original(frame)
+        encoded_bytes += len(rendered)
+        return rendered
+
+    # `encode`, the frame-level call: that is what the splitter asks "does this fit?" with, and each
+    # of those questions renders the whole candidate.
+    codec.encode = counted  # type: ignore[method-assign]
+    payload = {"rows": [{"i": index, "name": f"row-{index}"} for index in range(40_000)]}
+    frame = Frame("data", stream=1, payload=payload, end=True)
+    fragments = list(iter_fragments(frame, MAX_FRAME_BYTES, codec))
+
+    assert len(fragments) > 8, "the payload must actually fragment for this to measure anything"
+    per_fragment = calls / len(fragments)
+    ratio = encoded_bytes / max(1, len(codec.encode_payload(payload)))
+    report = (
+        f"{calls} encodes for {len(fragments)} fragments ({per_fragment:.1f} each), rendering "
+        f"{encoded_bytes:,} bytes for a {len(codec.encode_payload(payload)):,}-byte payload "
+        f"({ratio:.1f}x). The splitter is re-encoding the remaining payload on every pass; see this "
+        f"test's docstring."
+    )
+    assert per_fragment < 40, report
+    assert ratio < 40, report

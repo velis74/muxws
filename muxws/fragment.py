@@ -195,10 +195,17 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
         # a different size from a middle fragment and has to be measured as itself. This is checked
         # first on every pass, including the one where the payload is already spent: the sequence
         # MUST end with a fragment carrying `more: false`, even if that fragment carries no bytes.
-        tail = _fragment_frame(frame, encoded[position:], first=emitted == 0, last=True)
-        if encoded_length(codec.encode(tail)) <= cap:
-            yield tail
-            return
+        # Skipped when the answer is already known: the encoded frame carries the remaining payload
+        # plus an envelope plus whatever the codec's escaping adds, so it is never *shorter* than the
+        # remainder itself. If the remainder alone is over the cap, encoding it only to be told so
+        # renders the whole rest of the payload for nothing - and does it again on every pass, which
+        # is quadratic in payload size. This changes no boundary: it declines to ask a question whose
+        # answer cannot be yes.
+        if total - position <= cap:
+            tail = _fragment_frame(frame, encoded[position:], first=emitted == 0, last=True)
+            if encoded_length(codec.encode(tail)) <= cap:
+                yield tail
+                return
 
         if position >= total:
             raise _closing_floor_error(cap)

@@ -32,11 +32,20 @@ dependencies = []
 starlette = ["starlette>=0.37"]
 websockets = ["websockets>=12"]
 msgpack = ["msgpack>=1.0"]
+# The demo (`demo.py`, `demo/backend/`) is a consumer of the shipped package, not part of it: it is
+# excluded from both artefacts and nothing in the library imports it. These two are here so that
+# `pip install -e ".[demo,starlette]"` is the whole story for running it, and so that they stay out
+# of `[project] dependencies`, which WSM-PKG-002 requires to be empty.
+demo = ["fastapi", "uvicorn"]
 dev = [
     "coverage",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    # `muxws/packaging_test.py` builds a real wheel and reads its member list, because a test that
+    # checks the manifest cannot see what hatch actually put in the artefact. Without this the test
+    # skips, and a skip is indistinguishable from a pass.
+    "build",
     "starlette",
     "websockets",
     "msgpack",

@@ -1,0 +1,15 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "types": ["vite/client"],
+    "paths": {
+      "@/*": ["src/*"],
+      // The type-checker's half of `vite.config.ts`'s alias, and it exists for the same reason: the
+      // demo lives inside the package it consumes. Outside this repository `muxws` resolves from
+      // `node_modules` and neither entry is written at all.
+      "muxws": ["../../ts/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}
