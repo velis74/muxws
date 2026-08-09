@@ -562,3 +562,34 @@ def test_the_import_walker_sees_what_it_is_trusted_to_see():
     # `TYPE_CHECKING`. Both are read from the real source, so this cannot drift out of date.
     assert "websockets" in _imported_top_level_names(ROOT / "muxws" / "api.py")
     assert "muxws" in _imported_top_level_names(ROOT / "muxws" / "stream.py")
+
+
+def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts: tuple[Path, Path]):
+    """A consumer installs the wheel, so the wheel is what has to be right.
+
+    This was found by installing the artefact rather than by reading a manifest, and it was wrong:
+    the wheel carried every `*_test.py`, `conftest.py`, and `__pycache__` full of bytecode compiled
+    on a developer's machine. `[tool.hatch.build.targets.sdist]` had the exclude list and the wheel
+    target did not, and `python -m build` hid it completely by building the wheel *from* the sdist -
+    so the only way to see it was to install the wheel and look inside the installed package.
+
+    Tests are not part of the library. A consumer downloading them is the small half; a package-level
+    `conftest.py` sitting on the import path is the half that can change how someone else's pytest
+    run behaves.
+
+    Asserted against the archive rather than an install: `pip` compiles `.py` to `__pycache__` at
+    install time, which is its business and not ours.
+    """
+    wheel, _sdist = built_artefacts
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+
+    # Non-vacuity first: an empty archive satisfies every exclusion below.
+    assert "muxws/__init__.py" in names
+    assert (ROOT / "muxws" / "peer_test.py").is_file(), "nothing to exclude: this test proves nothing"
+
+    shipped_tests = [name for name in names if name.endswith("_test.py") or name.endswith("conftest.py")]
+    assert shipped_tests == [], f"the wheel ships the test suite: {shipped_tests[:5]}"
+
+    compiled = [name for name in names if "__pycache__" in name or name.endswith(".pyc")]
+    assert compiled == [], f"the wheel ships bytecode built on whoever ran the release: {compiled[:5]}"

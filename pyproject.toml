@@ -68,6 +68,13 @@ path = "muxws/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["muxws"]
+# The wheel is the artefact a consumer actually installs, and until this existed it carried the whole
+# test suite, `conftest.py`, and `__pycache__` full of bytecode from a developer's machine. `python -m
+# build` hid it by building the wheel *from* the sdist, whose own exclude list is below - so the
+# defect was invisible to every check that did not install the wheel and look inside the package.
+# Tests are not part of the library: shipping them means a consumer downloads them, and a
+# package-level `conftest.py` is a file pytest can be made to notice.
+exclude = ["**/*_test.py", "**/conftest.py", "**/__pycache__"]
 
 [tool.hatch.build.targets.sdist]
 include = [
