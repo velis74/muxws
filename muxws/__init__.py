@@ -35,7 +35,7 @@ from muxws.registry import PeerRegistry
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 # The library registers JSON itself (WSM-CDC-004); the codec module must not (WSM-CDC-014).
 register_codec("json", JsonCodec())
