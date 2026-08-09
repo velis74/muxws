@@ -13,8 +13,8 @@
  * Node's environment is required rather than jsdom's: this file runs a real Vite build.
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 import { VERSION } from './version';
 
@@ -227,4 +227,95 @@ describe('the browser entry point (WSM-PKG-003)', () => {
       expect(facts.offenders).toEqual(['ws']);
     },
   );
+});
+
+
+describe('the library imports nothing above it in the stack - WSM-INV-001', () => {
+  // Read from the SOURCE, deliberately, and this is the whole point of the test. The bundle
+  // assertions above prove what a build *emits*, and `import type` is erased before anything is
+  // emitted - exactly as Python's `if TYPE_CHECKING:` is invisible to a test that watches a
+  // subprocess import. A type-only dependency on a web framework is still a dependency: it lands in
+  // the published .d.ts, it makes the package uninstallable without that framework's types, and no
+  // runtime witness can see it. The Python twin walks the AST for the same reason
+  // (`packaging_test.py::test_no_library_module_imports_anything_above_it_in_the_stack`).
+  const ALLOWED_BARE_IMPORTS = new Set(['ws', '@msgpack/msgpack']);
+
+  /** Source with block and line comments removed, so prose cannot be mistaken for code. */
+  function withoutComments(source: string): string {
+    return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  }
+
+  /**
+   * Every module specifier a file imports, type-only imports included.
+   *
+   * Comments are stripped first. The first draft of this walker did not strip them and reported
+   * three offenders that were sentences - a doc-comment containing the words "from 'gone'" reads
+   * exactly like an import to a regex that spans lines. The control below now carries that case.
+   */
+  function importsOf(source: string): string[] {
+    const code = withoutComments(source);
+    const found: string[] = [];
+    const fromClause = /(?:^|\n)\s*(?:import|export)\b[^;'"]*?\bfrom\s+['"]([^'"]+)['"]/g;
+    let match = fromClause.exec(code);
+    while (match !== null) {
+      found.push(match[1]);
+      match = fromClause.exec(code);
+    }
+    const sideEffect = /(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g;
+    let side = sideEffect.exec(code);
+    while (side !== null) {
+      found.push(side[1]);
+      side = sideEffect.exec(code);
+    }
+    return found;
+  }
+
+  it('reaches for nothing but the standard library, itself and its declared optional peers', () => {
+    const offenders: string[] = [];
+    for (const file of readdirSync(join(ROOT, 'ts'), { recursive: true, encoding: 'utf8' })) {
+      if (!file.endsWith('.ts') || file.endsWith('.spec.ts')) continue;
+      const source = readFileSync(join(ROOT, 'ts', file), 'utf8');
+      for (const specifier of importsOf(source)) {
+        const isRelative = specifier.startsWith('.');
+        const isNode = specifier.startsWith('node:');
+        if (isRelative || isNode || ALLOWED_BARE_IMPORTS.has(specifier)) continue;
+        offenders.push(`${file} imports ${specifier}`);
+      }
+    }
+    expect(offenders, 'a library module reached above itself in the stack (WSM-INV-001)').toEqual([]);
+  });
+
+  it('confines each optional peer to the entry point its extra is named for', () => {
+    const misplaced: string[] = [];
+    for (const file of readdirSync(join(ROOT, 'ts'), { recursive: true, encoding: 'utf8' })) {
+      if (!file.endsWith('.ts') || file.endsWith('.spec.ts')) continue;
+      const source = readFileSync(join(ROOT, 'ts', file), 'utf8');
+      for (const specifier of importsOf(source)) {
+        if (specifier === 'ws' && !['node.ts', 'transports/ws-socket.ts'].includes(file)) {
+          misplaced.push(`${file} imports ws`);
+        }
+        if (specifier === '@msgpack/msgpack' && file !== 'msgpack.ts') {
+          misplaced.push(`${file} imports @msgpack/msgpack`);
+        }
+      }
+    }
+    expect(misplaced, 'an optional peer leaked out of the subpath its extra exists for').toEqual([]);
+  });
+
+  it('sees a type-only import, which is what a runtime witness cannot', () => {
+    // The control. Without it the two assertions above pass equally well against a walker that reads
+    // nothing at all, and a test that cannot fail is the failure this project has paid for four times.
+    const source = [
+      "/** A doc comment that says the stream is gone, from 'nowhere', and mentions import too. */",
+      "import type { WebSocket } from 'ws';",
+      "// import { NotReal } from 'not-real';",
+      "import { Peer } from './peer';",
+      "import './side-effect';",
+      '',
+    ].join('\n');
+    // Both halves matter: the type-only import must be SEEN, and neither the doc comment nor the
+    // commented-out import may be. The first draft of this walker failed the second half and
+    // reported three sentences as dependencies.
+    expect(importsOf(source)).toEqual(['ws', './peer', './side-effect']);
+  });
 });

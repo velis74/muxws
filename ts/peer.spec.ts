@@ -21,7 +21,7 @@ import {
   StreamReset,
   StreamTimeout,
 } from './errors';
-import { ABSENT, type Frame, framesEqual } from './frames';
+import { ABSENT, type Frame, V1_FRAME_TYPES, framesEqual, toMapping } from './frames';
 import { MAX_STREAM_ID } from './lifecycle';
 import {
   type CloseReason,
@@ -1654,6 +1654,287 @@ describe("open()'s overloads", () => {
     pair.dialer.open({ timeoutMs: 5 } as unknown as OpenOptions);
     await pair.settle();
     expect(pair.lastFrameOfType('dialer', 'open').payload).toEqual({ timeoutMs: 5 });
+  });
+
+  it('takes zero mandatory arguments and defaults payload to null - WSM-API-003', async () => {
+    // A promise made to every caller and, until this test, checked by nothing. `open()` on its own is
+    // the one-line push shape from section 5.1's call-shapes note; a required argument would break it
+    // at the call site, and a payload defaulting to *absent* rather than `null` would put a
+    // different frame on the wire from Python's `payload=None` - the two ports must agree.
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    const stream = pair.dialer.open();
+    expect(stream.id).toBe(1);
+    await pair.settle();
+
+    const open = pair.lastFrameOfType('dialer', 'open');
+    // `"payload": null` is on the wire, not an absent key: an absent `payload` is a different frame
+    // (section 2.2), and Python's `open()` sends the null.
+    expect('payload' in toMapping(open), 'open() sent no payload key at all').toBe(true);
+    expect(open.payload).toBeNull();
+    expect(open.headers ?? null).toBeNull();
+    expect(open.end ?? false).toBe(false);
+    expect(stream.payload).toBeNull();
+
+    // The remote sees an open, so nothing about the empty call is a local-only shortcut.
+    expect(pair.acceptor.streams.size).toBe(1);
+  });
+
+  it('accepts no stream id at any public entry point - WSM-SID-001', async () => {
+    // The parity test covers *which* id the library picks. This covers the other half: a caller
+    // cannot pick one. Every spelling an application might reach for is checked, because the rule is
+    // about the whole API surface rather than about one keyword - and in TypeScript an options object
+    // is structural, so an unexpected key is silently ignored rather than rejected by the compiler.
+    const idKeys = ['stream', 'streamId', 'stream_id', 'id'];
+
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    idKeys.forEach((key) => {
+      // As the lone argument the object is not one of `open()`'s option keys, so it is a *payload*
+      // (WSM-API-020) - the id lands in application data, where it means nothing.
+      pair.dialer.open({ [key]: 9999 });
+      // As the options argument it is an unknown key and is dropped by `resolveCall`.
+      pair.dialer.open({ q: 1 }, { [key]: 9999 } as unknown as OpenOptions);
+    });
+    await pair.settle();
+
+    const opens = pair.framesOfType('dialer', 'open');
+    expect(opens).toHaveLength(idKeys.length * 2);
+    // Ids stayed the library's own: odd, monotonic, allocated in call order, and never 9999.
+    expect(opens.map((frame) => frame.stream)).toEqual([1, 3, 5, 7, 9, 11, 13, 15]);
+
+    // And the caller's number is visible only where it belongs, as opaque payload on the odd ones.
+    idKeys.forEach((key, index) => {
+      expect(opens[index * 2].payload).toEqual({ [key]: 9999 });
+      expect(opens[index * 2 + 1].payload).toEqual({ q: 1 });
+    });
+  });
+
+  it('accepts no stream id on request, notify or the stream sends - WSM-SID-001', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(replyNow);
+    pair.start();
+
+    await pair.dialer.request({ q: 1 }, { stream: 9999 } as unknown as RequestOptions);
+    await pair.dialer.notify({ q: 2 }, { stream: 9999 } as unknown as { headers?: Record<string, unknown> });
+    const stream = pair.dialer.open({ q: 3 });
+    await stream.send({ q: 4 }, { stream: 9999 } as unknown as { end?: boolean });
+    await stream.end({ stream: 9999 } as unknown as { trailers?: Record<string, unknown> });
+    await pair.settle();
+
+    // Every stream-level frame this peer sent names an id it allocated itself: odd, and one of the
+    // three it opened. Nothing anywhere carried the caller's 9999.
+    const sent = pair.sentBy('dialer').filter((frame) => frame.stream !== null && frame.stream !== undefined);
+    expect(sent.length).toBeGreaterThan(0);
+    sent.forEach((frame) => {
+      expect([1, 3, 5]).toContain(frame.stream);
+    });
+  });
+
+  it('has no default request timeout - WSM-ERR-010', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    // A default deadline can only be a timer, and `request()` schedules its timer synchronously
+    // before it returns (see `collectUnary`). Counting scheduled timers is therefore an exact
+    // witness that does not need a test to wait out whatever the default would have been.
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const forever = pair.dialer.request({ q: 1 });
+    void forever.catch(() => undefined);
+    expect(timers, 'request() with no timeout scheduled a deadline').not.toHaveBeenCalled();
+
+    const explicit = pair.dialer.request({ q: 2 }, {});
+    void explicit.catch(() => undefined);
+    expect(timers, 'an empty options object supplied a deadline from somewhere').not.toHaveBeenCalled();
+
+    // The counter can see a deadline when there is one, so its silence above means something.
+    const deadlined = pair.dialer.request({ q: 3 }, { timeoutMs: 20 });
+    expect(timers).toHaveBeenCalledTimes(1);
+    timers.mockRestore();
+
+    await expect(deadlined).rejects.toThrow(StreamTimeout);
+    await pair.settle();
+
+    // Only the deadlined stream was reset, and only that one; the other two are still live and
+    // waiting, which is what "a stream lives until it ends, is reset, or the connection dies" means.
+    expect(pair.framesOfType('dialer', 'reset').map((frame) => frame.stream)).toEqual([5]);
+    expect(pair.framesOfType('dialer', 'reset')[0].code).toBe(ResetCode.TIMEOUT);
+    expect(pair.dialer.streams.size).toBe(2);
+    let settled = false;
+    void Promise.race([forever, explicit]).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await pair.settle();
+    expect(settled, 'a request nobody answered resolved on its own').toBe(false);
+  });
+
+  it('never interprets per-stream headers - WSM-AUT-002', async () => {
+    // Headers exist for the application. The rule is a *negative*: whatever an opener puts there must
+    // arrive unchanged and must change nothing the library does - including keys that look like
+    // authentication, which is exactly where a library is tempted to grow a re-auth hook (WSM-AUT-001
+    // puts authentication at the upgrade, before `accept()` is ever called).
+    const headers = {
+      authorization: 'Bearer expired.and.invalid',
+      cookie: 'session=deleted',
+      'x-api-key': '',
+      'sec-websocket-protocol': 'muxws.v1.msgpack',
+      // Envelope field names as header keys: still just keys.
+      stream: 9999,
+      end: true,
+      code: 3,
+      type: 'reset',
+      nested: { deep: [1, null, 'two'] },
+    };
+
+    // Snapshotted before the send for the same reason the payload test snapshots: a library that
+    // consumed a header by deleting it from the caller's object would pass a comparison against the
+    // object it mutilated.
+    const expected = JSON.parse(JSON.stringify(headers)) as typeof headers;
+
+    const seen: Record<string, unknown>[] = [];
+    const pair = makePair();
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      seen.push(stream.headers);
+      await stream.reply({ ok: true });
+    });
+    pair.start();
+
+    const withHeaders = await pair.dialer.request({ q: 1 }, { headers });
+    const without = await pair.dialer.request({ q: 1 });
+    await pair.settle();
+
+    // Unchanged on the wire, and unchanged again by the time the opener's counterpart reads them.
+    expect(pair.framesOfType('dialer', 'open')[0].headers).toEqual(expected);
+    expect(seen[0]).toEqual(expected);
+    expect(headers, "the caller's own headers object was modified in flight").toEqual(expected);
+
+    // And they changed nothing: the same answer, the same frames, the same peer state as the open
+    // that carried none. Comparing the two exchanges is the assertion - a library that had reacted
+    // to `authorization` would differ here even if it left the object itself alone.
+    expect(withHeaders).toEqual(without);
+    const opens = pair.framesOfType('dialer', 'open');
+    expect(framesEqual({ ...opens[0], stream: 0, headers: null }, { ...opens[1], stream: 0 })).toBe(true);
+
+    // The whole exchange, both directions, with the ids normalised away: the two requests produced
+    // the same frames in the same order, so nothing branched on a header. `authorization` was the
+    // most tempting branch and there is no branch at all.
+    const trace = (who: Who, id: number): unknown[] =>
+      pair
+        .sentBy(who)
+        .filter((frame) => frame.stream === id)
+        .map((frame) => ({ ...toMapping(frame), stream: 0, headers: undefined }));
+    expect(trace('dialer', 1)).toEqual(trace('dialer', 3));
+    expect(trace('acceptor', 1)).toEqual(trace('acceptor', 3));
+
+    expect(pair.framesOfType('dialer', 'reset')).toHaveLength(0);
+    expect(pair.framesOfType('acceptor', 'reset')).toHaveLength(0);
+    expect(pair.framesOfType('acceptor', 'goaway')).toHaveLength(0);
+    expect(pair.acceptor.isOpen).toBe(true);
+  });
+
+  it('defines no vocabulary inside payload - WSM-FRM-006/WSM-INV-016', async () => {
+    // Every envelope field name, used as a payload key, plus the discriminators a library of this
+    // shape is usually tempted to reserve. If any of these meant anything to muxws, two consumers
+    // sharing one socket would have to nest their own vocabulary inside an imposed one.
+    const payload = {
+      type: 'reset',
+      stream: 9999,
+      end: true,
+      more: true,
+      code: ResetCode.PROTOCOL_ERROR,
+      reason: 'not a reason',
+      nonce: 'not a nonce',
+      last_stream: 4242,
+      fragment: 'not a fragment',
+      headers: { authorization: 'nope' },
+      trailers: { checksum: 'nope' },
+      payload: { kind: 'nested', $type: 'Envelope', _muxws: true },
+      kind: 'command',
+    };
+
+    // The comparison is against a snapshot taken before the send, never against `payload` itself: a
+    // library that consumed a reserved key by deleting it from the caller's own object would leave
+    // both sides of `toEqual(payload)` equally mutilated and the assertion would pass.
+    const expected = JSON.parse(JSON.stringify(payload)) as typeof payload;
+
+    const seen: unknown[] = [];
+    const pair = makePair();
+    pair.acceptor.onStream(async (received: unknown, stream: Stream) => {
+      seen.push(received);
+      // Echoed back, so the round trip is asserted in both directions rather than only outbound.
+      await stream.reply(received);
+    });
+    pair.start();
+
+    const echoed = await pair.dialer.request(payload);
+    await pair.settle();
+
+    expect(seen[0]).toEqual(expected);
+    expect(echoed).toEqual(expected);
+    expect(payload, "the caller's own object was modified in flight").toEqual(expected);
+
+    // The envelope is untouched by what the payload says. `end` is true because `request()` set it,
+    // `stream` is the library's own 1 rather than the payload's 9999, and no `code` field appeared.
+    const open = pair.lastFrameOfType('dialer', 'open');
+    expect(open.type).toBe('open');
+    expect(open.stream).toBe(1);
+    expect(open.payload).toEqual(expected);
+    expect('code' in toMapping(open)).toBe(false);
+    expect('trailers' in toMapping(open)).toBe(false);
+    expect('nonce' in toMapping(open)).toBe(false);
+
+    // Nothing acted on it either: no stream 9999, no reset carrying the payload's PROTOCOL_ERROR, no
+    // ping answered for its "nonce", and the connection is still up on both sides.
+    const streams = new Set(pair.sentBy('dialer').map((frame) => frame.stream));
+    expect(streams.has(9999)).toBe(false);
+    expect(pair.framesOfType('dialer', 'reset')).toHaveLength(0);
+    expect(pair.framesOfType('acceptor', 'reset')).toHaveLength(0);
+    expect(pair.framesOfType('acceptor', 'pong')).toHaveLength(0);
+    expect(pair.framesOfType('acceptor', 'goaway')).toHaveLength(0);
+    expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
+  });
+
+  it('puts only the six v1 frame types on the wire - WSM-FRM-012/WSM-FRM-013', async () => {
+    // The constant is asserted by set equality in `frames.spec.ts`; this is the behavioural half.
+    // Ending a stream and attaching trailers must produce a `data` frame with flags on it, never a
+    // seventh frame type - which is the only way the absence of an `end` type is visible on a wire.
+    const pair = makePair();
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      await stream.send({ chunk: 1 });
+      await stream.end({ trailers: { checksum: 'deadbeef' } });
+    });
+    pair.start();
+
+    // `end: true` on the open: the dialer has nothing to say, so `close()` below has nothing to
+    // drain and the test is not waiting out a drain window.
+    const stream = pair.dialer.open({ q: 1 }, { end: true });
+    const received: unknown[] = [];
+    for await (const item of stream) received.push(item);
+    await pair.dialer.ping();
+    await pair.dialer.close({ reason: 'done' });
+    await pair.settle();
+
+    const emitted = [...pair.sentBy('dialer'), ...pair.sentBy('acceptor')];
+    expect(emitted.length).toBeGreaterThan(5);
+    emitted.forEach((frame) => {
+      expect(V1_FRAME_TYPES.has(frame.type), `${frame.type} is not one of the six v1 frame types`).toBe(true);
+    });
+
+    // The stream ended, and it ended as a flagged `data` frame carrying its trailers.
+    const closing = pair.lastFrameOfType('acceptor', 'data');
+    expect(closing.end).toBe(true);
+    expect(closing.trailers).toEqual({ checksum: 'deadbeef' });
+    expect(received).toEqual([{ chunk: 1 }]);
   });
 });
 

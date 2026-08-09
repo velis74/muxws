@@ -1342,3 +1342,40 @@ async def test_a_stream_reset_inside_the_hello_window_still_reaches_the_wire(dia
     finally:
         release.set()
         await loop.stop()
+
+
+async def test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade():
+    """WSM-AUT-003, the library half: re-authentication is re-dialling, and nothing else.
+
+    The rule's other half binds the deploying application and cannot be tested - muxws does not know
+    what a credential is. What *is* testable, and until now was not, is the claim the rule makes about
+    this library: the dial callable closes over the headers it was given, so every attempt presents
+    the same credential at a **fresh HTTP upgrade**, and there is no second, in-band path by which a
+    reconnecting peer could re-authenticate.
+
+    Asserted at the upgrade rather than through a peer, because that is where a credential travels: a
+    test that watched frames could not tell a header that was sent from one that was dropped.
+    """
+    seen: list[str | None] = []
+
+    async def handler(connection: Any) -> None:
+        seen.append(connection.request.headers.get("Authorization"))
+        await connection.wait_closed()
+
+    async with websockets.serve(handler, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol) as server:
+        port = server.sockets[0].getsockname()[1]
+        dial = muxws.api._websocket_dialer(
+            f"ws://127.0.0.1:{port}",
+            muxws.resolve_codec(),
+            headers={"Authorization": "Bearer the-one-token"},
+            subprotocols=None,
+        )
+        sockets = [await dial() for _ in range(3)]
+        await _until(lambda: len(seen) == 3)
+        for socket in sockets:
+            await socket.close()
+
+    assert seen == ["Bearer the-one-token"] * 3, (
+        f"a reconnect presented a different credential, or none: {seen}. The dial closure is the only "
+        f"place a credential enters, and every attempt must go through it (WSM-AUT-003)"
+    )

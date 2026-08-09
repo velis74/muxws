@@ -2,7 +2,7 @@ import corpus from '../conformance/frames/v1-frames.json';
 
 import { JsonCodec } from './codec';
 import { ProtocolError } from './errors';
-import { ABSENT, type Frame, framesEqual, fromMapping, toMapping } from './frames';
+import { ABSENT, type Frame, V1_FRAME_TYPES, framesEqual, fromMapping, toMapping } from './frames';
 
 const codec = new JsonCodec();
 
@@ -33,6 +33,60 @@ describe('the frame corpus', () => {
   it('is the same corpus the Python suite reads', () => {
     expect(corpus.length).toBeGreaterThan(10);
     expect(corpus.every((entry) => 'name' in entry && 'frame' in entry && 'json_wire' in entry)).toBe(true);
+  });
+});
+
+describe('the v1 frame set', () => {
+  /**
+   * Section 2.3 verbatim, written out here so the assertion below is a **set equality** rather than
+   * a membership check.
+   *
+   * A membership check cannot fail for a type that should not be there, and the two facts most worth
+   * policing are absences: there is no `end` frame type (WSM-FRM-012) and no trailers frame type
+   * (WSM-FRM-013). Both are flags on `data`, and both were deliberate - a `V1_FRAME_TYPES` that grew
+   * an `end` entry would satisfy every membership assertion in this file and still be a different
+   * protocol.
+   */
+  const SECTION_2_3 = ['open', 'data', 'reset', 'ping', 'pong', 'goaway'];
+
+  it('is exactly the six of section 2.3 - WSM-FRM-012/WSM-FRM-013', () => {
+    expect([...V1_FRAME_TYPES].sort()).toEqual([...SECTION_2_3].sort());
+    expect(V1_FRAME_TYPES.size).toBe(6);
+  });
+
+  it('has no end frame type and no trailers frame type - WSM-FRM-012/WSM-FRM-013', () => {
+    // Named individually as well as by the equality above, so a failure says which absence broke.
+    // `window_update` is reserved and unimplemented (WSM-BPR-001) and `settings` was deleted rather
+    // than deferred (WSM-CON-031); neither may appear in the set a v1 peer sends from.
+    ['end', 'trailers', 'window_update', 'settings', 'headers', 'ack'].forEach((absent) => {
+      expect(V1_FRAME_TYPES.has(absent), `${absent} must not be a v1 frame type`).toBe(false);
+    });
+  });
+
+  it('spells end and trailers as flags on data - WSM-FRM-012/WSM-FRM-013', () => {
+    // The positive half of the same pair of rules: what a peer with nothing left to say actually
+    // sends is a `data` frame, and trailers ride on the frame carrying `end: true`.
+    const closing: Frame = { type: 'data', stream: 7, end: true, trailers: { checksum: 'deadbeef' } };
+    expect(V1_FRAME_TYPES.has(closing.type)).toBe(true);
+    expect(codec.encode(closing)).toBe('{"type":"data","stream":7,"end":true,"trailers":{"checksum":"deadbeef"}}');
+    expect(framesEqual(codec.decode(codec.encode(closing)), closing)).toBe(true);
+    // And `end` carries no payload of its own: the key is absent, not null (D1).
+    expect('payload' in toMapping(closing)).toBe(false);
+  });
+
+  it('is the only vocabulary the shared corpus uses - WSM-FRM-012/WSM-FRM-013', () => {
+    // The corpus is the fixture both ports read, so this is the one place a divergence between the
+    // two `V1_FRAME_TYPES` constants would show up as a wire fact rather than as a local opinion.
+    // Every pinned frame must be one of the six, and the corpus must actually exercise the flags -
+    // otherwise "no end frame type" would be trivially true of a corpus that never ends a stream.
+    const types = new Set(corpus.map((entry) => (entry as { frame: { type: string } }).frame.type));
+    types.forEach((type) => expect(V1_FRAME_TYPES.has(type), `${type} is pinned but is not a v1 type`).toBe(true));
+
+    const flagged = corpus.filter((entry) => 'end' in (entry as { frame: Record<string, unknown> }).frame);
+    expect(flagged.length, 'no pinned frame ends a stream, so the flag is untested').toBeGreaterThan(0);
+    flagged.forEach((entry) => {
+      expect(['open', 'data']).toContain((entry as { frame: { type: string } }).frame.type);
+    });
   });
 });
 

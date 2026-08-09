@@ -423,3 +423,142 @@ def test_the_published_artefacts_contain_no_demo_files(built_artefacts: tuple[Pa
 def _wheel_version(wheel: Path) -> str:
     """`muxws-1.0.0-py3-none-any.whl` -> `1.0.0`; the `.dist-info` directory is named from it."""
     return wheel.name.split("-")[1]
+
+
+# --------------------------------------------------------------------------- which way the arrows point
+
+#: Packages that sit **above** muxws: a web framework, an application server, an ORM, a task queue,
+#: an HTTP client, a validation layer. An import of any of them turns "anyone wanting multiplexed
+#: streams can install this" into "anyone already running that stack can". `starlette` is on the
+#: list on purpose even though an extra exists for it: the extra exists for exactly one adapter
+#: module, and what this asserts is that nothing *else* reaches for it.
+_ABOVE_MUXWS_IN_THE_STACK = frozenset(
+    {
+        "aiohttp",
+        "asgiref",
+        "bottle",
+        "celery",
+        "channels",
+        "daphne",
+        "django",
+        "fastapi",
+        "flask",
+        "graphene",
+        "gunicorn",
+        "httpx",
+        "hypercorn",
+        "kombu",
+        "litestar",
+        "pydantic",
+        "pyramid",
+        "quart",
+        "redis",
+        "requests",
+        "sanic",
+        "socketio",
+        "sqlalchemy",
+        "starlette",
+        "starlite",
+        "strawberry",
+        "tornado",
+        "uvicorn",
+    }
+)
+
+#: The three third-party packages the extras exist for, and the library module each may be reached
+#: from. `api.py` is on the `websockets` line because `connect()`'s dialer closure imports it inside
+#: the function that dials - a transport is *below* muxws, and the import happens only for a caller
+#: who asked for a real socket.
+_OPTIONAL_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "starlette": frozenset({"muxws/transports/starlette.py"}),
+    "websockets": frozenset({"muxws/transports/websockets_.py", "muxws/api.py"}),
+    "msgpack": frozenset({"muxws/codecs/msgpack_.py"}),
+}
+
+#: The modules whose whole purpose is to bind muxws to one of those three. WSM-INV-001 is not about
+#: them; the adapter that speaks Starlette is how a Starlette application reaches muxws, which is
+#: the arrow pointing the right way.
+_ADAPTERS = frozenset({"muxws/transports/starlette.py", "muxws/transports/websockets_.py", "muxws/codecs/msgpack_.py"})
+
+
+def _library_modules() -> list[Path]:
+    """Every shipped `.py` under `muxws/`. Tests and their fixtures are not shipped."""
+    return sorted(
+        path
+        for path in (ROOT / "muxws").rglob("*.py")
+        if not path.name.endswith("_test.py") and path.name != "conftest.py"
+    )
+
+
+def _imported_top_level_names(path: Path) -> set[str]:
+    """Every top-level package name `path` imports, from anywhere in the file.
+
+    `ast.walk`, not a scan of the module body, and that is the point of writing this at all: a
+    lazily imported name inside a function and a name imported under `if TYPE_CHECKING:` are both
+    invisible to `test_importing_muxws_and_serving_a_stream_needs_no_third_party_module`, which can
+    only see what an actual run touches. WSM-INV-001 names the type-checking-only annotation
+    explicitly, so the witness has to be the source.
+    """
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.add(node.module.split(".")[0])
+    return found
+
+
+def test_no_library_module_imports_anything_above_it_in_the_stack():
+    """WSM-INV-001: muxws depends on nothing above it, including for type checking only."""
+    offences = {
+        path.relative_to(ROOT).as_posix(): sorted(_imported_top_level_names(path) & _ABOVE_MUXWS_IN_THE_STACK)
+        for path in _library_modules()
+        if path.relative_to(ROOT).as_posix() not in _ADAPTERS
+    }
+    assert {name: found for name, found in offences.items() if found} == {}
+
+
+def test_every_third_party_import_is_an_extra_and_lives_only_in_its_own_module():
+    """WSM-INV-001's other half: the denylist above can only catch a package somebody thought of.
+
+    This one needs no list. Every name any shipped module imports is either the standard library,
+    muxws itself, or one of the three packages an extra exists for - and each of those three is
+    confined to the module its extra is named after. A dependency nobody anticipated fails here
+    with its own name in the message rather than passing because it was not on a list.
+    """
+    allowed = set(sys.stdlib_module_names) | {"muxws"}
+    stray: dict[str, list[str]] = {}
+    misplaced: dict[str, list[str]] = {}
+    for path in _library_modules():
+        name = path.relative_to(ROOT).as_posix()
+        for imported in sorted(_imported_top_level_names(path) - allowed):
+            if imported not in _OPTIONAL_DEPENDENCIES:
+                stray.setdefault(name, []).append(imported)
+            elif name not in _OPTIONAL_DEPENDENCIES[imported]:
+                misplaced.setdefault(name, []).append(imported)
+    assert stray == {}, "a third-party import that no extra covers"
+    assert misplaced == {}, "an optional dependency reached from outside the module its extra is for"
+
+
+def test_the_import_walker_sees_what_it_is_trusted_to_see():
+    """The control for both tests above, and the reason they are not a pair of empty dictionaries.
+
+    Three ways a walker can be silently blind, each of which would make every assertion above pass
+    against any library at all: finding no modules to read, missing an import that is really there,
+    and missing one written in a shape the source uses on purpose - a lazy import inside a function
+    body, and an import under `if TYPE_CHECKING:`.
+    """
+    modules = {path.relative_to(ROOT).as_posix() for path in _library_modules()}
+    assert len(modules) > 15, modules
+    assert _ADAPTERS <= modules, "the excluded adapters must exist, or the exclusion excuses nothing"
+    assert not any(name.endswith("_test.py") for name in modules)
+
+    # Each adapter really does import the package its extra is named for.
+    for package, homes in _OPTIONAL_DEPENDENCIES.items():
+        found = {home for home in homes if package in _imported_top_level_names(ROOT / home)}
+        assert found, f"{package} is imported by none of {sorted(homes)}"
+
+    # `api.py` imports `websockets` inside a nested function; `stream.py` imports `Peer` under
+    # `TYPE_CHECKING`. Both are read from the real source, so this cannot drift out of date.
+    assert "websockets" in _imported_top_level_names(ROOT / "muxws" / "api.py")
+    assert "muxws" in _imported_top_level_names(ROOT / "muxws" / "stream.py")

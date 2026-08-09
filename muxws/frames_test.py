@@ -7,7 +7,7 @@ import pytest
 
 from muxws.codecs.json_ import JsonCodec
 from muxws.errors import ProtocolError
-from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
+from muxws.frames import ABSENT, Frame, from_mapping, to_mapping, V1_FRAME_TYPES
 
 CORPUS_PATH = Path(__file__).parent.parent / "conformance" / "frames" / "v1-frames.json"
 CORPUS: list[dict[str, Any]] = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
@@ -86,6 +86,45 @@ def test_absent_payload_is_not_null(codec: JsonCodec):
     assert to_mapping(Frame("data", stream=1, payload=None))["payload"] is None
     assert codec.decode('{"type":"data","stream":1}').payload is ABSENT
     assert codec.decode('{"type":"data","stream":1,"payload":null}').payload is None
+
+
+def test_v1_frame_types_is_exactly_the_six_of_the_specification():
+    """WSM-FRM-012/013: the set is closed, and what it leaves out is the point.
+
+    Asserted by **equality**, never by membership. Every other reference to this set in the suite
+    asks whether a type it already has is in it, which a seventh member satisfies just as well - so
+    an `end` type, a `trailers` type, a `settings` type or an implemented `window_update` could be
+    added and nothing anywhere would fail. Each of those absences is a deliberate design decision
+    (end and trailers are flags; there is no negotiation frame), and a decision no test can lose is
+    the only kind that survives a wire freeze.
+    """
+    assert V1_FRAME_TYPES == {"open", "data", "reset", "ping", "pong", "goaway"}
+
+
+def test_end_and_trailers_are_flags_and_not_frame_types(codec: JsonCodec):
+    """WSM-FRM-012/013: the positive half - a flag exists, so a frame type was never needed.
+
+    The negative alone would also be satisfied by a peer that simply cannot say "I am done". These
+    two shapes are what an `end` frame type and a trailers frame type would otherwise be for, and
+    both are ordinary `data`.
+    """
+    from dataclasses import fields
+
+    names = {f.name for f in fields(Frame)}
+    assert {"end", "trailers"} <= names, "both are envelope flags on a frame that already exists"
+    assert V1_FRAME_TYPES.isdisjoint({"end", "trailers", "settings", "window_update"})
+
+    # WSM-FRM-012's own sentence: a peer with nothing left to say sends this and no other frame.
+    finished = codec.decode('{"type":"data","stream":7,"end":true}')
+    assert finished == Frame("data", stream=7, end=True)
+    assert finished.payload is ABSENT
+
+    # WSM-FRM-013: trailers ride on the frame carrying `end: true`, never on one of their own.
+    trailing = codec.decode('{"type":"data","stream":7,"end":true,"payload":{"rows":4},"trailers":{"checksum":"d"}}')
+    assert (trailing.type, trailing.end, trailing.trailers) == ("data", True, {"checksum": "d"})
+
+    # And the corpus - the thing a third port is built against - contains neither type either.
+    assert {case["frame"]["type"] for case in CORPUS} <= V1_FRAME_TYPES
 
 
 def test_no_settings_frame_exists(codec: JsonCodec):

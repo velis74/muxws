@@ -254,8 +254,21 @@ The discriminator, when a new case arises: **if the peers can still agree about 
 - **WSM-API-007** `await stream` MUST resolve on the **first** payload and MUST NOT police a second
   one — that check belongs to `request()` alone.
   Test: `stream_test.py::test_open_resolves_first_payload_while_request_raises`.
-- **WSM-API-008** `connect()`, `accept()`, `serve()`, `notify()`, `request()`, `ping()`, `close()`
-  and every `Stream` send method MUST be async. Everything else MUST NOT be.
+- **WSM-API-008** The async surface is closed, and it is exactly this: `connect()`, `accept()`,
+  `serve()`; `peer.notify()`, `peer.request()`, `peer.ping()`, `peer.close()`; every `Stream` method
+  that sends or waits — `send()`, `end()`, `reply()`, `reset()`, `cancel()` (WSM-ERR-012) and
+  `result()` (WSM-API-012); and the four members of the socket adapter protocol (WSM-API-021), which
+  are the transport seam rather than a call an application makes. **Everything else MUST NOT be
+  async**, and the two that matter are `peer.open()` (WSM-API-001 — a synchronous open is what makes
+  allocation and enqueue one indivisible step, WSM-INV-005/WSM-SID-006) and the four hook
+  registrations `on_stream`/`on_frame`/`on_close`/`on_reconnect`, since a registration that suspends
+  is one an acceptor can race a pushed stream against (WSM-STM-033).
+  Test: `peer_test.py::test_the_public_api_is_async_exactly_where_the_rule_says`, which compares the
+  partition by equality in **both** directions — the enumeration above is the whole rule, so a list
+  that only checked the named members would leave the "everything else" half unasserted. The
+  enumeration was completed in the M8 audit: it previously named seven calls and "every `Stream` send
+  method", which read literally made the shipped `result()`, `cancel()` and `reset()` violations of a
+  rule they were required by. No behaviour changed; the rule now says what 1.0 does.
 - **WSM-API-009** `peer.id` MUST be a short random prefix minted **once per process** plus a
   monotonic **per-connection** counter, rendered `<prefix>-<counter>` (e.g. `a3f-17`). An id MUST NOT
   be reused or duplicated within a process; across processes only the prefix may coincide. Reuse is
@@ -306,12 +319,29 @@ one-shot push is `open(end)` with nothing awaited. Durations are **seconds as fl
 
 ### 5.2 `WSM-AUT-` — authentication, headers, routing
 
-- **WSM-AUT-001** Authentication MUST happen at the WebSocket upgrade, before `accept()` is called.
-  muxws MUST NOT interpret credentials anywhere.
+- **WSM-AUT-001** Two obligations with two different subjects, and they are separated here because
+  only one of them is the library's.
+  **On the deploying application:** authentication MUST happen at the WebSocket upgrade, before
+  `accept()` is called. muxws cannot enforce this and no test of muxws can witness it; what muxws
+  does is leave no other place to put it, and that part is witnessed — `accept()` takes no credential
+  argument, `connect()` passes `headers=` to the upgrade and to nowhere else, and there is no
+  post-upgrade authentication hook on `Peer` at all.
+  **On the library:** muxws MUST NOT interpret credentials anywhere. Witnessed by
+  `peer.spec.ts` *"never interprets per-stream headers"* and
+  `peer_test.py::test_per_stream_headers_arrive_unchanged_and_change_nothing` (WSM-AUT-002), and by
+  the upgrade tests in `transports/websockets_test.py` and `ts/node.spec.ts`.
 - **WSM-AUT-002** muxws MUST NOT interpret per-stream `headers`. They exist for the application and
   MUST NOT be used for re-authentication by the library.
-- **WSM-AUT-003** A connection whose credential expires mid-life SHOULD be closed with `goaway`; the
-  dialer's reconnect helper re-authenticates by dialling again.
+- **WSM-AUT-003** **On the deploying application** (a SHOULD, and its call): a connection whose
+  credential expires mid-life SHOULD be closed with `goaway`. muxws neither knows what a credential
+  is nor when one expires (WSM-AUT-001), so it cannot do this and cannot be tested for it.
+  **On the library** (a statement of fact about the reconnect helper, and testable): re-authentication
+  is re-dialling. The dial callable `connect()` hands to the reconnect loop closes over the `headers`
+  it was given, so every attempt presents the same credential at a fresh upgrade and there is no
+  second, in-band path.
+  Test: `reconnect_test.py::test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade`,
+  which reads the `Authorization` header at the **upgrade** across three dials — a test that watched
+  frames could not tell a header that was sent from one that was dropped.
 - **WSM-AUT-004** muxws MUST NOT look at the opening payload for routing: no path matching, no method
   dispatch, no handler table (WSM-STM-030).
 
@@ -774,8 +804,15 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   `on_reconnect` fires.
 - **WSM-RCN-024** `hello` MUST be optional. A peer given none sends none and is established as soon
   as WSM-CON-030 is satisfied.
-- **WSM-RCN-025** A credential MUST NOT be carried in the hello — authentication is a handshake
-  concern (§5.2).
+- **WSM-RCN-025** **On the deploying application:** a credential MUST NOT be carried in the hello —
+  authentication is a handshake concern (§5.2), and the hello is application payload that is
+  *replayed verbatim on every reconnect*, so a credential put there is a credential that outlives its
+  own expiry. muxws cannot enforce this: it never mints hello content and cannot tell a credential
+  from any other value in an opaque payload. Discharged by documentation, which must state it
+  plainly — `docs/guide/reconnect.md` does, as a `danger` admonition.
+  **On the library:** muxws MUST add nothing of its own to the hello and MUST NOT rewrite what it was
+  handed. Witnessed by `reconnect_test.py::test_three_drops_replay_byte_identical_hellos` — byte
+  identity across three drops means no field muxws contributed and no field it touched.
 - **WSM-RCN-026** A failed hello MUST be a failed connection attempt: if the hello stream is reset,
   or does not complete within `hello_timeout`, the peer MUST close the socket, MUST NOT fire
   `on_reconnect`, MUST increment the attempt counter and MUST back off. The error `connect()` reports
@@ -786,9 +823,23 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   drops produce three byte-identical hellos, `on_reconnect` fires after each acknowledgement and
   never before, and an application registering no `on_reconnect` handler still ends up with a peer
   the server can find in its registry.
-- **WSM-RCN-028** muxws MUST NOT mint or store a tab identity. The recommended (documented, not
-  implemented) client lifetime is `sessionStorage`; `localStorage` is wrong — shared across tabs of
-  the origin — and module scope is wrong, because it dies on reload.
+- **WSM-RCN-028** This id carried one MUST and one recommendation in a single breath, and the
+  recommendation was being read as an unmet obligation on the library. They are separated here. The
+  id is not renumbered and neither clause is weakened; only the subject of each is now stated.
+  **On the library (a MUST, and witnessable):** muxws MUST NOT mint or store a tab identity. It has
+  no notion of a tab id, a session id or a client id; it touches no browser storage API; and the
+  `hello` that would carry one is opaque payload it never inspects and replays byte-for-byte
+  (WSM-RCN-025, WSM-RCN-027). The nonce of a `ping` and the `peer.id` of WSM-API-009 are
+  per-connection and per-process respectively, and neither survives a reconnect — that is the
+  distinction being protected.
+  **On the deploying application (a RECOMMENDATION, discharged by documentation):** an application
+  that wants a stable identity across reconnects should mint one itself and put it in the hello. In a
+  browser the recommended lifetime is `sessionStorage` — one value per tab, surviving a reload of
+  that tab and nothing more, which is exactly the lifetime of the thing being identified.
+  `localStorage` is wrong, because it is shared across every tab of the origin and three tabs then
+  claim to be one client; module scope is wrong, because it dies on reload. This is guidance, not an
+  obligation muxws can fail to meet, and it lives in `docs/guide/reconnect.md`. muxws MUST NOT
+  implement it, which is the library-side MUST above.
 - **WSM-RCN-030** `on_reconnect(attempt, peer)` MUST guarantee exactly two things and nothing more: a
   live socket, and an identity the acceptor has already accepted on it. It MUST fire once per
   re-established connection, after WSM-CON-030 **and** after the hello acknowledgement.
@@ -1063,33 +1114,105 @@ deliberately editing that digest. Adding a triple changes it; that is the point.
 Every rule id here is meant to resolve to at least one test. The check is a grep, not a promise:
 
 ```bash
-grep -rl "WSM-STM-036" --include='*_test.py' --include='*.spec.ts' muxws ts
+grep -rl "WSM-STM-036" --include='*_test.py' --include='*.spec.ts' \
+  muxws ts demo docs interop
 ```
 
-Two things a naive grep gets wrong. Tests cite combined ids (`WSM-API-006/007`,
-`WSM-RCN-041/WSM-STM-014`), so `WSM-API-007` must be searched for as a bare number after a family
-prefix too; and some rules are witnessed by a fixture rather than by a citation, in which case the
-fixture file name is the thing to search for under `conformance/`.
+Three things a naive grep gets wrong, and the third of them made the previous edition of Appendix B
+wrong in two places.
 
-## Appendix B — rules with no citation in any test
+1. Tests cite combined ids (`WSM-API-006/007`, `WSM-RCN-041/WSM-STM-014`), so `WSM-API-007` must be
+   searched for as a bare number after a family prefix too.
+2. Some rules are witnessed by a fixture rather than by a citation, in which case the fixture file
+   name is the thing to search for under `conformance/`.
+3. **Test files are not only under `muxws/` and `ts/`.** They are also under `demo/backend/` and
+   `docs/examples/`. The grep in the previous edition named `muxws ts` and nothing else, and so
+   reported `WSM-FRG-010` as uncited when `demo/backend/handlers_test.py` names it twice. Search the
+   repository, not two directories of it.
 
-These ids appear in no `*_test.py` or `*.spec.ts` file, even after resolving the combined-id
-shorthand. It is a **snapshot**, and the way to refresh it is to run the grep of Appendix A over
-every id in this document. The list is part of the specification's honesty, not a licence to ignore
-the rules; several of them *are* exercised by a test that simply does not name them, and that test is
-given where it exists.
+## Appendix B — the honesty list
 
-**Retired — no test is owed** (§6): `WSM-CON-001` (standing for `-001`…`-008`) and `WSM-STM-022`.
-Their consequences are asserted by the absence tests listed in §6.
+**What this list is.** Every rule in §5 is meant to be held by something that can fail. This appendix
+records, for each rule that is *not* held by an ordinary citing test, what does hold it and how
+strongly — because "no test" and "unenforced" are different claims, and the previous edition
+conflated them. It is a snapshot; refresh it by running Appendix A's grep over every id.
 
-**Exercised by a differently-named test:**
+**Why it is worth maintaining.** Three times in this project a rule was written, cited, believed and
+silently false, and each was found by an audit or by a consumer rather than by the suite:
+`WSM-RCN-011` (a close code no in-memory transport can carry), `WSM-CDC-022` (a status code invisible
+to every peer-level test), `WSM-INV-004` (a writer that was correct and was never asked). The shape
+is always the same — **the rig could not see the thing the rule is about** — so an entry here that
+says "witnessed" is worth only as much as the mutation that was shown to kill the witness. Where a
+witness was added in the M8 audit, the mutation that proves it can fail is given with it.
+
+### The count
+
+Of the **215** individually numbered rules in §5:
+
+| | rules with no citing test |
+|---|---|
+| before the M8 audit | **36** |
+| after it | **20** |
+| after `WSM-AUT-003` was witnessed | **19** |
+
+Of those 19: **fourteen** are exercised by a test that simply does not name them; **one**
+(`WSM-PKG-004`) is enforced by the linters; **two** (`WSM-TST-004`, `WSM-TST-005`) by a CI job; and
+**two** (`WSM-RCN-025`, `WSM-RCN-028`) are rules whose library half is held by a differently-named
+test and whose other half binds the deploying application rather than muxws.
+
+**Every rule in this document now has a witness of some kind**, and the kind is named for each. That
+is a weaker claim than "everything is tested" and it is the one worth making: fourteen of the
+nineteen would survive a rename of the test that holds them without anyone noticing, and the two CI
+jobs are falsifiable only for the codecs their matrix enumerates.
+
+Narrowed further: the previous edition's *"no witness at all"* table held **19** ids and now holds
+**none**. Fifteen gained a citing test in the M8 audit (`WSM-CDC-007` among them, which had one all
+along); `WSM-PKG-004` is held by the linters; `WSM-RCN-025` and `WSM-RCN-028` are split rules whose
+library half an existing test holds; and `WSM-AUT-003` was the last, closed by reading the
+`Authorization` header at the upgrade across three dials rather than by watching frames.
+
+Two corrections to the previous snapshot, both of which made this document overstate its own
+ignorance: `WSM-CDC-007` was cited all along in `muxws/conformance_test.py` and
+`ts/conformance.spec.ts`, and `WSM-FRG-010` in `demo/backend/handlers_test.py`. The second was missed
+because of Appendix A's under-scoped grep; the first was simply an error.
+
+### Retired — no test is owed
+
+§6: `WSM-CON-001` (standing for `-001`…`-008`) and `WSM-STM-022`. Their consequences are asserted by
+the absence tests listed in §6.
+
+### Witnessed by a test written for this rule (added in the M8 audit)
+
+Each row names the rule, the test, and **the mutation that was applied to the frozen library to prove
+the test can fail.** Every mutation below was run; every one produced a failure; the library was
+restored after each. A row without a demonstrated mutation does not belong in this table.
+
+| Rule | Test | Mutation that makes it fail |
+|---|---|---|
+| `WSM-API-003` | `peer_test.py::test_open_takes_zero_mandatory_arguments_and_defaults_payload_to_null`; `ts/peer.spec.ts` *"takes zero mandatory arguments and defaults payload to null"* | (a) `open(payload: Any, …)` — payload made mandatory; (b) the `open` frame built with `payload if payload is not None else ABSENT`, so the wire carries no `payload` key. Each fails a different assertion, so both halves are separately live. In TypeScript (b) is `?? ABSENT` in `resolveCall`; the "zero mandatory" half is caught by `tsc` rather than by vitest — see *non-test witnesses*. |
+| `WSM-API-008` | `peer_test.py::test_the_public_api_is_async_exactly_where_the_rule_says` | `async def open`. Set equality in both directions over 167 public callables, so the rule's second sentence is asserted rather than assumed. |
+| `WSM-AUT-002` | `peer_test.py::test_per_stream_headers_arrive_unchanged_and_change_nothing`; `ts/peer.spec.ts` *"never interprets per-stream headers"* | Four, all caught in Python: the receiver folds header keys to lower case; the sender strips `authorization`; the acceptor refuses a stream whose `expires_at` has passed; **and the acceptor branches on `authorization` to emit one extra frame that changes no outcome** — the last is caught only by the frame-for-frame comparison of the with-headers and without-headers exchanges, which is the assertion that makes this a witness for "interprets" rather than for "delivers". |
+| `WSM-AUT-004` | `peer_test.py::test_the_opening_payload_is_never_looked_at_for_routing` | (a) `on_stream(handler, path=None)`; (b) `_start_handler` refuses any open whose payload names no `path`. Four payloads that ask to be routed — two path/method pairs, a bare string, a `null` — all reach one handler in order. |
+| `WSM-ERR-003` | `peer_test.py::test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site` | a `Peer.on_error` hook added — fails on the exhaustive hook-name set. The rule's force is that there is nowhere to divert an error *to*; see *bounded witnesses* for what this test does not prove. |
+| `WSM-ERR-007` | `errors_test.py::test_nothing_in_the_error_hierarchy_carries_a_status_code` | (a) `RemoteError.status_code = 500`; (b) `default_error_serializer` grows a `"status": 500` key. Both caught. |
+| `WSM-ERR-010` | `peer_test.py::test_request_arms_no_deadline_unless_it_is_given_one`; `ts/peer.spec.ts` *"has no default request timeout"* | (a) `timeout: float \| None = 30.0` on `Peer.request` — caught by the signature half; (b) `_collect_unary` substituting `30.0` for `None` with the signature left alone — caught by the `asyncio.wait_for` spy, with `timeout=0.02` as the control that proves the spy fires at all. The two halves are independently live. TypeScript counts `setTimeout` calls and is killed by a default in either `collectUnary` or `resolveCall`. |
+| `WSM-FRM-006`, `WSM-INV-016` | `peer_test.py::test_a_payload_spelled_like_an_envelope_is_carried_and_never_read`, `::test_an_envelope_lookalike_payload_survives_being_fragmented`; `ts/peer.spec.ts` *"defines no vocabulary inside payload"* | (a) the sender lifts `end` out of the payload — caught twice over, by the subscript recorder and by the envelope assertions; (b) a *discarded* read `_ = payload["kind"]` — caught by the recorder alone; (c) on the fragmented path, the receiver peeks inside a fragment for `"type":"reset"` and resets; (d) the reassembler merges a nested `payload` key into the envelope. In TypeScript, `toMapping` deleting `payload.kind` in place, and the receiver acting on `payload.type`. |
+| `WSM-FRM-012`, `-013` | `frames_test.py::test_v1_frame_types_is_exactly_the_six_of_the_specification`, `::test_end_and_trailers_are_flags_and_not_frame_types`; `ts/frames.spec.ts` `describe('the v1 frame set')`; `ts/peer.spec.ts` *"puts only the six v1 frame types on the wire"* | adding `end` and `trailers` to `V1_FRAME_TYPES`; removing `goaway` from it; and `toMapping` spelling a trailer-bearing frame as `{"type":"trailers"}`. All three caught. Asserted by **set equality**, never by membership — every prior reference to this constant asked whether a type it already had was in it, which a seventh member satisfies just as well. |
+| `WSM-INV-001` | `packaging_test.py::test_no_library_module_imports_anything_above_it_in_the_stack`, `::test_every_third_party_import_is_an_extra_and_lives_only_in_its_own_module`, `::test_the_import_walker_sees_what_it_is_trusted_to_see` | (a) a `TYPE_CHECKING`-only `from fastapi import WebSocket` in `stream.py`; (b) a lazy `import httpx` inside a `Peer` method; (c) `import msgpack` in `writer.py`. All three caught. An AST walk, not a subprocess import-blocker, because the rule names the type-checking-only annotation explicitly and a runtime blocker structurally cannot see one. The third test is the control: a walker that found no modules would make the other two vacuously green. |
+| `WSM-SID-001` | `peer_test.py::test_no_public_entry_point_lets_a_caller_supply_a_stream_id`; `ts/peer.spec.ts` *"accepts no stream id at any public entry point"*, *"… on request, notify or the stream sends"* | `stream_id: int \| None = None` added to `Peer.open`. In TypeScript, `'stream'` added to `OPEN_OPTION_KEYS`/`REQUEST_OPTION_KEYS` and read in `allocateAndEnqueue`. **See the known deviation below: this rule is not fully satisfied by 1.0.** |
+| `WSM-AUT-001` (library clause) | `ts/peer.spec.ts` *"never interprets per-stream headers"* plus the signatures named in the rule | the mutations listed for `WSM-AUT-002`. The rule's other clause has a different subject; see *genuinely unwitnessable*. |
+
+### Exercised by a differently-named test
+
+These have no citation, but a test does hold them. Left uncited deliberately in some cases and by
+oversight in others; either way the witness exists and is named here.
 
 | Rule | The test that actually holds it |
 |---|---|
 | `WSM-API-013` | `stream_test.py::test_await_then_iterate_raises_and_first_consumer_got_everything`, `test_result_timeout_uses_the_same_future` |
 | `WSM-BPR-002` | `caps_test.py::test_window_update_is_never_sent` with `test_the_limit_is_never_announced_and_never_checked_by_the_sender` |
 | `WSM-CDC-003` | `codec_test.py::test_no_codec_branching_exists_in_the_peer` |
-| `WSM-FRG-010`, `-011`, `-013` | `fragment_test.py::test_slice_point_sweep_never_exceeds_cap`, `codecs/json_test.py::test_payload_round_trip_is_independent_of_the_envelope`, `writer_test.py::test_the_writer_cuts_where_the_splitter_cuts` |
+| `WSM-FRG-013` | `codecs/json_test.py::test_payload_round_trip_is_independent_of_the_envelope`, `writer_test.py::test_the_writer_cuts_where_the_splitter_cuts` |
 | `WSM-FRG-033` | `conformance/invalid/fragment-interrupted-by-non-fragment.json` via `conformance_test.py::test_invalid_corpus_produces_the_declared_frame_and_survival` |
 | `WSM-FRM-010`, `-011`, `-014` | the frame corpus (`frames_test.py::test_conformance_wire_decodes_to_frame`) plus `stream_test.py::test_every_state_table_cell` |
 | `WSM-INV-003` | `fragment_test.py::test_binary_codec_slices_at_byte_boundaries` |
@@ -1097,29 +1220,165 @@ Their consequences are asserted by the absence tests listed in §6.
 | `WSM-SID-003` | `lifecycle_test.py::test_connection_level_frames_omit_stream` |
 | `WSM-STM-012`, `-013` | `stream_test.py::test_every_state_table_cell`, `test_send_with_end_half_closes_in_one_call` |
 | `WSM-STM-015` | `peer_test.py::test_frame_for_closed_id_is_ignored` |
-| `WSM-TST-004` | the `cross-language` workflow's `scenario` jobs (`interop/drive.sh <acceptor> <dialer>`, both role assignments × both codecs) — a job, not a test |
-| `WSM-TST-005` | the `cross-language` workflow's `reconnect` job (`interop/drive.sh <acceptor> <dialer> reconnect`, both role assignments) — a job, not a test |
 
-**No witness at all.** These are the ones to write next, or to accept knowingly:
+### Non-test witnesses
 
-| Rule | Why it is unwitnessed |
-|---|---|
-| `WSM-API-003` | nothing asserts that `open()` is callable with no arguments |
-| `WSM-API-008` | which calls are async is asserted nowhere; it is visible only in the signatures |
-| `WSM-AUT-001`…`-004` | negative rules about what muxws must not interpret; `peer_test.py::test_second_on_stream_replaces_and_logs` is the closest thing, for `-004` |
-| `WSM-CDC-007` | the live cross-language pair is a CI job, and a job is not a test; nothing in either suite can fail when it is missing |
-| `WSM-ERR-003`, `-007`, `-010` | negative and structural: nothing swallowed into a callback, no status-code mapping, no default request timeout |
-| `WSM-FRM-006`, `WSM-INV-016` | "muxws defines no vocabulary inside `payload`" has no positive assertion |
-| `WSM-FRM-012`, `-013` | nothing asserts that `V1_FRAME_TYPES` is exactly the six of §2.3, so the absence of an `end` or trailers frame type is unpoliced |
-| `WSM-INV-001` | no test proves muxws imports nothing above it in the stack |
-| `WSM-PKG-004` | enforced by `ruff` and `eslint` (`unicorn/filename-case`), not by a test |
-| `WSM-RCN-025`, `-028` | documentation rules: no credential in the hello, no tab identity minted |
-| `WSM-SID-001` | the parity test covers allocation, nothing covers "a caller can never supply an id" |
+Real enforcement, by something other than a test. Each was run against a deliberate violation and
+each rejected it; none of them is a promise.
 
-Two further holes, none of which a grep for an id would have found.
+| Rule | What enforces it | Verified by |
+|---|---|---|
+| `WSM-PKG-004` | `eslint` and `ruff`, via `npm run lint:ci` and `ruff check .` | In a scratch tree using this repository's own `eslint.config.js` and `pyproject.toml`: `ts/streamState.ts` → `Filename is not in kebab case. Rename it to 'stream-state.ts'` (`unicorn/filename-case`); a double-quoted TypeScript string → `prettier/prettier`; a 153-column line → `vue/max-len`. On the Python side a single-quoted string → `Q000` and a 136-column line → `E501`. Renaming the file to `stream-state.ts` passes. **All three clauses of the rule are enforced** — it is a witness, but a lint job rather than a test, and a lint job does not run in `pytest`. |
+| `WSM-API-003` (the "zero mandatory arguments" half) | `tsc --noEmit`, via `npm run lint:ci` | `?` is erased at runtime and `Function.length` is 2 either way, so vitest cannot see this half in TypeScript. Changing the overload to `open<T>(payload: unknown, …)` produces `ts/peer.spec.ts(1668,32): error TS2554: Expected 1-2 arguments, but got 0` — the type-checker fails at the new test's own bare `pair.dialer.open()`. The witness is the call site; the checker is the thing that reads it. |
+| `WSM-TST-004` | the `cross-language` workflow's `scenario` jobs (`interop/drive.sh <acceptor> <dialer>`, both role assignments × both codecs) | a job, not a test |
+| `WSM-TST-005` | the `cross-language` workflow's `reconnect` job (`interop/drive.sh <acceptor> <dialer> reconnect`, both role assignments) | a job, not a test |
+| `WSM-CDC-007` (for the codecs it names) | the same workflow, plus `conformance_test.py::test_sequence_corpus_replays_under_msgpack` and `::test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere` | `interop/drive.sh python ts corpus json 12` passes locally and fails on each of three deliberate breaks: `PREFIX = "muxws.v9."` in `subprotocol.py` (`Unexpected server response: 400` — the pair genuinely cannot form and the job says so), a wrong pinned fixture count, and a codec pinned to `msgpack` for a JSON-configured run. **But see the gap below: this witnesses two codecs, not the rule's quantifier.** |
 
-**The splitter may drop a fragmented `reset`'s `reason` and nothing fails.** Making `reason` ride only the
-first fragment leaves the closing fragment — the one the receiver acts on — with no reason at all,
+### Genuinely unwitnessable, and what would change that
+
+A negative rule is not automatically untestable — this repository already witnesses absences by
+reading its own source (`test_no_codec_branching_exists_in_the_peer`,
+`test_window_update_is_never_sent`, and now the AST import walk of `WSM-INV-001`). The entries below
+survive that objection: each names a subject the test rig genuinely cannot reach, and says what would
+have to exist for it to.
+
+| Rule / clause | Why no test can hold it | What would change that |
+|---|---|---|
+| `WSM-AUT-001`, application clause — *authentication happens at the upgrade, before `accept()`* | The subject is the deploying application's server, which muxws does not contain. A test of muxws can only show that muxws offers nowhere else to put authentication, which it does. | Nothing, in this repository. It is an obligation on a deployment, and the rule now says so in its own text. |
+| `WSM-AUT-003`, application clause — *a connection whose credential expires SHOULD be closed with `goaway`* | Same subject, and a SHOULD. muxws does not know what a credential is or when one expires; that is `WSM-AUT-001`. | Nothing. |
+| `WSM-RCN-025`, application clause — *no credential in the hello* | muxws never mints hello content and cannot distinguish a credential from any other value in an opaque payload. | Nothing behavioural. A prose assertion in `docs_test.py` — which already parses the documentation — would be a real, falsifiable witness that the `danger` admonition at `docs/guide/reconnect.md` still exists. That is a witness for the *documentation*, not for the rule, and it is the honest most that is available. |
+| `WSM-RCN-028`, application clause — *`sessionStorage` is the recommended client lifetime* | It is a recommendation to an application about code muxws does not ship. It was never an unmet obligation; the rule text now says which half is which. | Nothing, and nothing should. |
+
+**No rule is left without a witness of some kind.** `WSM-AUT-003`'s *library* clause — the reconnect
+helper re-authenticates by dialling again — was the last, and it is now
+`reconnect_test.py::test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade`. It asserts
+at the **upgrade** and not on the wire, deliberately: `api._websocket_dialer` closes over `headers`
+once and `ConnectionLoop` re-invokes that same closure, so what has to be observed is the HTTP
+request, three times over. A test that watched frames could not tell a header that was sent from one
+that was dropped, which is why every existing reconnect test — all of which drive
+`DialableServer.dial` rather than that closure — left the clause uncovered. Proven by mutation:
+dropping `additional_headers` from the dial fails it.
+
+**`WSM-RCN-028`'s library clause is witnessable in TypeScript and is not yet witnessed.**
+`grep -rn "localStorage\|sessionStorage" ts/` returns nothing, and the recommended pattern appears
+only in `docs/guide/reconnect.md` as a fragment the application writes. An absence test over the
+shipped bundle — it references neither storage API — is falsifiable and belongs in `ts/*.spec.ts`. In
+Python the clause is held indirectly by
+`reconnect_test.py::test_three_drops_replay_byte_identical_hellos`: an identity minted by muxws would
+have to appear in the hello, and byte identity across three drops says none did.
+
+**`WSM-CDC-007`'s quantifier is unwitnessed, and the missing witness is one assertion.** The rule is
+"***Every*** codec that ships MUST have a live cross-language pair… A codec without that pair MUST NOT
+ship." The workflow's matrix is a literal `include:` list of four legs naming `json` and `msgpack`,
+and `conformance_test.py` pins the configured set as the literal `{JsonCodec.name,
+MsgpackCodec.name}`. Register a third codec in both ports tomorrow and everything stays green: no
+matrix leg exists for it, and nothing in either suite asserts the *set* of shipped codecs —
+`registered_codecs()` is only ever asked `in` / `not in` (`codecs/registry_test.py:34`,
+`codecs/msgpack__test.py:240,250`, `ts/codec.spec.ts`). The missing witness is a test asserting
+`registered_codecs()` equals the set the CI matrix covers. It is writable in either language and it
+must agree with a YAML file under `.github/`, which is why it is recorded here rather than guessed
+at.
+
+### Bounded witnesses — what the new tests still cannot see
+
+A witness that is believed to prove more than it does is the failure mode this appendix exists for,
+so the limits found while verifying the M8 additions are recorded rather than left to be
+rediscovered.
+
+- **`peer_test.py::test_an_envelope_lookalike_payload_survives_being_fragmented` compares against the
+  object it handed to the library.** A library that consumed a reserved key by deleting it from the
+  caller's own dict mutilates both sides of the comparison equally and the test passes — verified:
+  popping `"kind"` from the caller's payload in `_allocate_and_enqueue` fails the sibling test and
+  leaves this one green. The fix is the one its TypeScript counterpart already uses, snapshotting the
+  payload before the send. The test remains a real witness for the merge and peek mutations listed
+  above; it is not a witness for in-place consumption.
+- **`ts/peer.spec.ts` *"never interprets per-stream headers"* compares stream-level frames only.** Its
+  trace filters on `frame.stream === id`, so an acceptor that branches on `authorization` to emit a
+  connection-level `ping` passes — verified. The Python twin compares the whole outbound frame list
+  and catches it. The TypeScript claim is "no stream-level behaviour changed", not "nothing changed".
+- **`WSM-ERR-010`'s Python witness sees deadlines armed through `asyncio.wait_for`.** That is what
+  `_collect_unary` uses, and a default introduced there or in the signature is caught. A default built
+  from `asyncio.timeout()` or `loop.call_later` would evade the spy. The TypeScript counterpart has
+  the mirror-image limit: it counts `setTimeout`, so a deadline expressed some other way is invisible
+  to it, and "still pending after the settle window" only rules out defaults shorter than that window.
+  An airtight version needs a controllable clock in both ports.
+- **`WSM-ERR-003`'s witness is the exhaustive hook-name set, not the delivery path.** That the
+  exception reaches the `await` is asserted, and that only four hooks exist is asserted; that an
+  observer *could not* consume a frame if one tried is not, because this implementation gives an
+  observer no way to. The rule is held by there being nowhere to divert an error to, which is exactly
+  what the hook-name set pins.
+
+### One-port citations
+
+A grep that finds a citation says nothing about *which* port it was found in, and for a handful of
+rules that turns out to matter. **Twenty-five rules are now cited in one language only** — eighteen in
+Python, seven in TypeScript. That is up from seventeen before the M8 audit, and the increase is the
+audit's own doing: five of the rules it newly witnessed were witnessed in Python alone. They are
+listed below rather than left for the next grep to rediscover.
+
+*One-port by nature — no gap.* `WSM-API-017`, `WSM-PKG-002` are Python-language rules;
+`WSM-API-015`, `WSM-API-020`, `WSM-API-022`, `WSM-CDC-015` are TypeScript-shaped. `WSM-STM-022` is
+retired and owes nothing.
+
+*Citation gap only — an equivalent test exists in the other port and does not name the rule.*
+`WSM-API-012`, `WSM-FRG-010`, `WSM-FRG-011`, `WSM-INV-002`, `WSM-SID-008`, `WSM-STM-010`,
+`WSM-STM-023`, `WSM-TST-001` (Python-cited; twins in `ts/peer.spec.ts`, `ts/stream.spec.ts`,
+`ts/frames.spec.ts`); `WSM-API-002`, `WSM-API-023`, `WSM-AUT-001` (TypeScript-cited; twins in
+`stream_test.py` and, for `WSM-AUT-001`, in
+`peer_test.py::test_per_stream_headers_arrive_unchanged_and_change_nothing`).
+
+*Real one-port gaps — no equivalent exists in the other port.*
+
+- **`WSM-API-016` is a TypeScript-only rule whose only citation in the repository is in Python.** The
+  sharpest one in the list. `stream_test.py` names it, in a docstring that opens *"The Python side of
+  WSM-API-016"*. The rule is about attaching a no-op rejection handler at construction, which only
+  TypeScript can get wrong. The TypeScript twin exists — `ts/stream.spec.ts` *"reports no unhandled
+  rejection and does reach the error hook"* — and does not name it. A grep says witnessed; the
+  language that can violate the rule never mentions it. The citation belongs in `ts/stream.spec.ts`.
+- **`WSM-CDC-026` has no TypeScript witness at all.** `transports/starlette_test.py` holds it in
+  Python, including the negative case where the application accepted first. Nothing in TypeScript
+  asserts that `accept()` performs the upgrade or that the application must not accept first. It is
+  partly structural — `ws` completes the handshake before the handler runs, which is why
+  `WSM-CDC-027` exists and is tested — but `ts/node.ts` still exports `accept(socket)` and has no
+  equivalent assertion.
+- **`WSM-API-008`, `WSM-AUT-004`, `WSM-ERR-003`, `WSM-ERR-007`, `WSM-INV-001` were witnessed in Python
+  in the M8 audit and nowhere else.** Four of them are writable in TypeScript essentially as written.
+  `WSM-INV-001` is the one worth a note: `ts/packaging.spec.ts` already asserts that the entry point
+  imports nothing optional, with controls, but it does so by *running* the import — and an
+  `import type` is erased before it runs, exactly as a Python `if TYPE_CHECKING:` block is invisible
+  to a subprocess blocker. The rule names the type-checking-only annotation explicitly, so the
+  TypeScript witness has to read the source, as the Python one now does.
+
+### A known deviation: `WSM-SID-001` is not fully satisfied by 1.0
+
+`Stream` is a value export from `ts/index.ts` and a member of `muxws.__all__`, and its constructor
+takes a stream id as its second positional argument in both ports. This puts a forged id on the wire,
+with no cast in TypeScript and no private access in Python:
+
+```python
+forged = Stream(peer, 999, local=True)
+await forged.send({"forged": True})
+# tx {"type":"data","stream":999} -> rx goaway: data on stream 999, above the high-water mark 0
+```
+
+Verified in Python against a live pair: the frame goes out, and the remote correctly kills the
+connection over an id its counterpart never allocated. The TypeScript constructor has the same shape
+and the same export.
+
+`WSM-SID-001` says a caller MUST NOT be able to supply an id **anywhere in the API**, and on a strict
+reading this is a violation. The rule is not weakened here and the id is not retired: the wording is
+right and the surface is wrong. What 1.0 actually guarantees is that no *stream-originating call* —
+`open`, `request`, `notify`, `send`, `end` — takes one, and that is what the tests assert. The
+constructor is pinned by set equality in
+`peer_test.py::_ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION`, with the gap named in the comment, so a
+sibling cannot appear silently. Closing it properly means marking `Stream`'s constructor internal and
+allocating through a factory the peer owns, which is a public API change and therefore work for the
+next generation (WSM-PKG-005), not a patch to a frozen 1.0.
+
+### Three holes no grep for an id would have found
+
+**The splitter may drop a fragmented `reset`'s `reason` and nothing fails.** Making `reason` ride only
+the first fragment leaves the closing fragment — the one the receiver acts on — with no reason at all,
 and the whole Python suite still passes. The corpus triple named
 `fragmented-reset-repeats-code-and-reason-on-every-fragment` pins how such a frame *decodes*; no
 fixture asserts that the splitter *produces* it, because the boundary corpus splits a `data` frame
@@ -1145,3 +1404,11 @@ hook for it.
 them — `repr()` against `JSON.stringify` — and each port's own test asserts its own spelling, so the
 divergence is invisible to both. A line format is a text interface an operator greps; one shape or
 the other is right, and no test is in a position to say which.
+
+**And one divergence in a published constant.** `V1_FRAME_TYPES` is a genuine `frozenset` in Python
+and a mutable `Set` cast to `ReadonlySet` in TypeScript, so `(V1_FRAME_TYPES as Set<string>).add(…)`
+succeeds at runtime in one port and not the other. No rule requires immutability and the constant is
+read by neither implementation — it is published for consumers — so no test asserts either shape. If
+§2.3's "six, and no others" is meant to be enforceable by a consumer rather than only by this suite,
+the TypeScript constant should be frozen to match; that is a rule this document does not currently
+have.

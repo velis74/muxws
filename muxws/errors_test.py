@@ -114,3 +114,34 @@ def test_codec_error_carries_configured_and_available():
 def test_connection_closed_carries_the_socket_close_details():
     err = ConnectionClosed(code=1001, reason="going away", was_clean=True)
     assert (err.code, err.reason, err.was_clean) == (1001, "going away", True)
+
+
+def test_nothing_in_the_error_hierarchy_carries_a_status_code():
+    """WSM-ERR-007: muxws maps exceptions to nothing. Reset codes are not status codes.
+
+    The rule reads like a truism until you notice what it is aimed at: a library sitting under a web
+    framework is one convenience away from `RemoteError.status_code = 500`, and once one exists every
+    caller writes against it and the reset table becomes a second, worse HTTP. The three numbers
+    below are the ones anybody would reach for first, and none of them is a `ResetCode` - the
+    numbering was chosen so that the two vocabularies cannot be confused, and 5 being a hole in it
+    (WSM-STM-022) is the only gap there is.
+
+    The serializer is the other place a mapping would appear, because it is the one thing that turns
+    a local exception into something structured for the wire. WSM-ERR-006 fixes its two keys.
+    """
+    import muxws
+
+    from muxws.peer import default_error_serializer
+
+    carriers = {
+        name: sorted(attribute for attribute in dir(cls) if "status" in attribute.lower())
+        for name in muxws.__all__
+        if isinstance(cls := getattr(muxws, name), type) and issubclass(cls, BaseException)
+    }
+    assert len(carriers) >= 10, "the walker found almost no exception classes"
+    assert {name: found for name, found in carriers.items() if found} == {}
+
+    assert default_error_serializer(ValueError("nope")) == {"type": "ValueError", "message": "nope"}
+
+    http_statuses = {400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504}
+    assert http_statuses.isdisjoint({code.value for code in ResetCode})
