@@ -27,6 +27,70 @@ import subprocess
 import sys
 import time
 
+#: What `pip install -e ".[demo,starlette]"` provides, as `(import name, why it is needed)`.
+#:
+#: Checked before anything starts, because every one of these fails *late* and in a way that points
+#: somewhere else. A missing `fastapi` is an ImportError from inside a child process nobody is
+#: watching; a missing `starlette` surfaces as the route never being reached.
+DIRECT_IMPORTS = (
+    ("fastapi", "the demo backend is a FastAPI app"),
+    ("uvicorn", "which serves it"),
+    ("starlette", "muxws.accept() upgrades a Starlette WebSocket"),
+    ("muxws", "the library this demo exists to show; install the repository itself with -e"),
+)
+
+#: uvicorn implements no WebSocket protocol itself and needs one of these.
+#:
+#: This is the check that matters, and an import test of the demo's *own* imports would never have
+#: found it: nothing in this repository imports `websockets` on the demo path. Without one of these
+#: uvicorn serves the page perfectly and answers **404 to every upgrade**, logging its complaint into
+#: a server log nobody is reading - so the browser shows a muxws handshake error and every part of
+#: the diagnosis points away from the cause. That is exactly how the first reader of this demo lost
+#: an hour.
+WEBSOCKET_IMPLEMENTATIONS = ("websockets", "wsproto")
+
+
+def missing_dependencies():
+    """Everything the demo needs and does not have, as human-readable lines."""
+    import importlib.util
+
+    problems = []
+    for module, why in DIRECT_IMPORTS:
+        if importlib.util.find_spec(module) is None:
+            problems.append(f"{module:12} - {why}")
+
+    if not any(importlib.util.find_spec(name) for name in WEBSOCKET_IMPLEMENTATIONS):
+        problems.append(
+            f"{'websockets':12} - uvicorn has no WebSocket implementation of its own. Without this "
+            "it serves the page and answers 404 to every upgrade, which surfaces in the browser as a "
+            "muxws handshake error rather than as a missing package."
+        )
+    return problems
+
+
+def check_before_starting():
+    """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
+    problems = missing_dependencies()
+
+    # The frontend half. `npm run demo:dev` failing is loud, but it fails *inside the child process*
+    # underneath a backend that started fine, which reads as the demo being broken rather than as one
+    # command not having been run.
+    root = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isdir(os.path.join(root, "node_modules", "vue")):
+        problems.append(f"{'npm install':12} - the frontend's dependencies are not installed")
+
+    if not problems:
+        return
+
+    print("This demo cannot start. Missing:\n", file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+    print(
+        '\nFrom the repository root:\n\n    pip install -e ".[demo,starlette]"\n    npm install\n',
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 
 def run_fe():
     # `npm run demo:dev` is a tree - npm, a shell, and vite under it - and `fe_proc.terminate()`
@@ -80,6 +144,8 @@ def run_fastapi():
 
 
 if __name__ == "__main__":
+    check_before_starting()
+
     print("Starting the muxws demo...")
     from demo.backend.main import PORT
 
