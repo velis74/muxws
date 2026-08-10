@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "vue": "^3.5.35",
-    "vue-cached-icon": "^3.0.5",
+    "vue-cached-icon": "^3.1.0",
     "vuetify": "^3.12.7"
   },
   "devDependencies": {
@@ -18,6 +18,6 @@
     "@vue/tsconfig": "^0.7.0",
     "typescript": "^5",
     "vite": "^8",
-    "vue-tsc": "^2"
+    "vue-tsc": "^3"
   }
 }
