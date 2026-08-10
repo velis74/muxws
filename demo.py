@@ -89,7 +89,7 @@ def node_package_installed(name):
     return os.path.isdir(os.path.join(root, "node_modules", name))
 
 
-def missing_dependencies(backend=DEFAULT_BACKEND):
+def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True):
     """Everything the chosen backend needs and does not have, as human-readable lines.
 
     Backend-aware, because the two need almost disjoint things and demanding the other's is a lie:
@@ -119,14 +119,18 @@ def missing_dependencies(backend=DEFAULT_BACKEND):
     # `npm run demo:dev` failing is loud, but it fails *inside the child process* underneath a backend
     # that started fine, which reads as the demo being broken rather than as one command not having
     # been run.
-    if not node_package_installed("vue"):
+    #
+    # Skipped under `--no-fe` for the same reason the check is backend-aware at all: refusing to start
+    # over a dependency this run will never load is a lie, and it is the kind that sends a reader to
+    # install several hundred megabytes of `node_modules` to run a backend that does not use them.
+    if frontend and not node_package_installed("vue"):
         problems.append(f"{'npm install':12} - the frontend's dependencies are not installed")
     return problems
 
 
-def check_before_starting(backend=DEFAULT_BACKEND):
+def check_before_starting(backend=DEFAULT_BACKEND, frontend=True):
     """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
-    problems = missing_dependencies(backend)
+    problems = missing_dependencies(backend, frontend)
     if not problems:
         return
 
@@ -140,7 +144,10 @@ def check_before_starting(backend=DEFAULT_BACKEND):
     print("\nFrom the repository root:\n", file=sys.stderr)
     if backend != "node":
         print('    pip install -e ".[demo,starlette]"', file=sys.stderr)
-    print("    npm install\n", file=sys.stderr)
+    # `--no-fe` on the node backend needs `npm install` anyway - that is where `tsx`, `ws` and the
+    # library's own TypeScript live - so the line is suppressed only where it would be noise.
+    if frontend or backend == "node":
+        print("    npm install\n", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -164,6 +171,7 @@ def build_parser():
             "examples:\n"
             "  python demo.py            the Python backend (demo/backend_python), under uvicorn\n"
             "  python demo.py node       the TypeScript backend (demo/backend_node), under tsx\n"
+            "  python demo.py --no-fe    either backend alone, for a client of your own\n"
             "\n"
             "Ctrl-C stops the backend and the dev server together. MUXWS_DEMO_PORT moves the\n"
             "backend off 8020; the Vite proxy in demo/frontend/vite.config.ts has to be told too."
@@ -182,6 +190,12 @@ def build_parser():
     # spellings already written down anywhere is wrong; `--help` documents one, so there is still
     # exactly one way to learn this.
     parser.add_argument("--backend", dest="backend_option", choices=BACKENDS, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-fe",
+        dest="frontend",
+        action="store_false",
+        help="start the backend alone, without the Vite dev server",
+    )
     return parser
 
 
@@ -293,8 +307,9 @@ def run_backend(backend):
 
 
 if __name__ == "__main__":
-    chosen_backend = parse_arguments().backend
-    check_before_starting(chosen_backend)
+    options = parse_arguments()
+    chosen_backend = options.backend
+    check_before_starting(chosen_backend, options.frontend)
 
     if chosen_backend == "node":
         # A reader who typed it wants to see that it took - the frontend will look identical either
@@ -318,10 +333,27 @@ if __name__ == "__main__":
         from demo.backend_python.main import PORT
 
         print(f"  backend:  http://127.0.0.1:{PORT}")
-    print("  frontend: http://127.0.0.1:5173")
+    if options.frontend:
+        print("  frontend: http://127.0.0.1:5173")
+    else:
+        # Said plainly, because the demo's whole point is on the page: a reader who passed `--no-fe`
+        # by habit and then found nothing at :5173 would have every reason to think the demo broke.
+        print("  frontend: not started (--no-fe); nothing is serving :5173")
 
-    fe_proc = multiprocessing.Process(target=run_fe, daemon=True)
-    fe_proc.start()
+    # Flushed before anything long-running starts. Python line-buffers stdout to a terminal and
+    # block-buffers it to a pipe, and `uvicorn.run` below does not return - so under
+    # `python demo.py > log` every line above sat in a buffer that SIGTERM then discarded. The lost
+    # lines include the one telling the reader the other backend exists, which is the only reason it
+    # is printed at all. Measured, not guessed: the banner was absent from a redirected run and
+    # present under `-u`.
+    sys.stdout.flush()
+
+    # None under `--no-fe`, and the teardown below reads that rather than a second flag: one thing to
+    # get wrong instead of two.
+    fe_proc = None
+    if options.frontend:
+        fe_proc = multiprocessing.Process(target=run_fe, daemon=True)
+        fe_proc.start()
     try:
         run_backend(chosen_backend)
     except KeyboardInterrupt:
@@ -331,6 +363,7 @@ if __name__ == "__main__":
         # join, "Stopped." prints while the dev server is still up. It is also the only teardown
         # there is when the backend exits for a reason of its own - a taken port, say - rather than by
         # the Ctrl-C that would have reached the whole process group.
-        fe_proc.terminate()
-        fe_proc.join()
+        if fe_proc is not None:
+            fe_proc.terminate()
+            fe_proc.join()
         print("Stopped.")

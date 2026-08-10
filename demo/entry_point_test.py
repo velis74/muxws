@@ -234,3 +234,42 @@ def test_help_names_both_backends_and_reads_as_prose(entry_point: Any):
     # The hidden alias stays hidden: one documented spelling, or the help becomes the parameter dump
     # it was written not to be.
     assert "--backend" not in text
+
+
+def test_the_frontend_runs_unless_no_fe_says_otherwise(entry_point: Any):
+    """`--no-fe` starts the backend alone, for a reader driving it with a client of their own."""
+    assert entry_point.parse_arguments([]).frontend is True
+    assert entry_point.parse_arguments(["node"]).frontend is True
+    assert entry_point.parse_arguments(["--no-fe"]).frontend is False
+    assert entry_point.parse_arguments(["node", "--no-fe"]).frontend is False
+
+
+def test_no_fe_does_not_demand_the_frontend_dependencies(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
+    """Refusing to start over something this run will never load is the lie the check exists to avoid.
+
+    It is the same reasoning that makes the check backend-aware: `python demo.py node` is not told to
+    install uvicorn, and `--no-fe` is not told to install several hundred megabytes of `node_modules`
+    for a dev server it was explicitly asked not to start.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda name: name != "vue")
+
+    with_frontend = entry_point.missing_dependencies("python", True)
+    assert [problem.split(" - ")[0].strip() for problem in with_frontend] == ["npm install"]
+
+    assert entry_point.missing_dependencies("python", False) == [], (
+        "--no-fe was refused over a dev server it was told not to start"
+    )
+
+
+def test_the_node_backend_still_needs_npm_install_under_no_fe(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
+    """`--no-fe` skips the *frontend's* dependencies, not the backend's.
+
+    The Node backend is run by `tsx` out of the same `node_modules`, so an absent one is fatal however
+    the frontend was asked for - and reporting it as "the frontend's dependencies" would send the
+    reader looking in the wrong place.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
+
+    problems = entry_point.missing_dependencies("node", False)
+    assert problems, "the node backend cannot run without node_modules and the check said nothing"
+    assert not any("frontend" in problem for problem in problems), problems
