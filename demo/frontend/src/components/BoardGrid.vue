@@ -15,7 +15,17 @@
         {{ store.boardLive }} live streams
       </v-chip>
       <v-spacer />
-      <span class="text-caption text-medium-emphasis">server push &middot; click a row</span>
+      <!-- The caption names the mechanism; the tooltip says why it is worth noticing. A reader who
+           has never met this library reads "server push" as a feature name rather than as a claim. -->
+      <v-tooltip location="bottom" max-width="360">
+        <template #activator="{ props: hint }">
+          <span v-bind="hint" class="text-caption text-medium-emphasis" style="cursor: help">
+            server push &middot; click a row &middot; <span class="text-decoration-underline">?</span>
+          </span>
+        </template>
+        Nobody asked for these rows. The backend opened a stream per symbol towards this browser, using
+        the same call a client uses to ask a question - one mechanism, both directions.
+      </v-tooltip>
     </v-card-title>
     <v-card-text class="pa-0">
       <div v-if="rows.length === 0" class="pa-6 text-center text-medium-emphasis">

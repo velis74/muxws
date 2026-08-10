@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import pytest
+
 from demo.backend.handlers import MarketService
 from demo.backend.market import EXPORT_ROWS, HISTORY_POINTS, Market, SYMBOLS
 from muxws import Frame, MAX_FRAME_BYTES, Peer, PeerRegistry, RemoteError, StreamReset
@@ -252,6 +254,30 @@ async def test_every_action_answers() -> None:
             print(f"unknown action answered with: {refused}")
         else:
             raise AssertionError("an unknown action was not reported as an application error")
+
+
+async def test_the_rate_action_changes_how_often_the_board_pushes() -> None:
+    """The pacing is the demo's and not the library's, and a reader has to be able to prove that.
+
+    `TICK_INTERVAL` is a `sleep` in the generator. Measured over the same transport this test uses,
+    a peer pair moves ~25,000 frames a second across twenty streams (`muxws/throughput_test.py`),
+    while the board's default asks for eighty - so the number on the screen was being read as a
+    ceiling when it is a choice. This asserts the choice is reachable, and that it is bounded: zero
+    would turn the generator into a busy loop that starves the loop it sends on.
+    """
+    async with market_wire() as wire:
+        answer = await wire.dialer.request({"action": "rate", "interval_ms": 10})
+        assert answer["ok"] is True
+        assert answer["interval_ms"] == 10
+        assert wire.service._tick_interval == 0.01
+
+        stats = await wire.dialer.request({"action": "stats"})
+        assert stats["tick_interval"] == 0.01, "the change is not visible to the panel that displays it"
+
+        for refused in (0, -5, 10_000):
+            with pytest.raises(RemoteError):
+                await wire.dialer.request({"action": "rate", "interval_ms": refused})
+        assert wire.service._tick_interval == 0.01, "a refused rate must not have been applied"
 
 
 async def test_cancelling_history_stops_the_generator() -> None:

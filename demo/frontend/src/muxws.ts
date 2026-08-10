@@ -256,7 +256,13 @@ export async function start(): Promise<void> {
       // Replayed verbatim on every socket this peer ever gets (WSM-RCN-020), which is what makes the
       // subscription survive a reconnection without a line of code on the accepting side (D3).
       hello: { action: 'hello', tags: { app: 'muxws-demo', tab: tabId() } },
-      reconnect: new Reconnect(),
+      // A demo cap, not the library's. The default is 30 s, which is right for production - it is
+      // what stops N clients hammering a server the moment it comes back - but it makes this demo
+      // look broken: stop the backend, wait half a minute, restart it, and the schedule has already
+      // grown to 0.25, 0.5, 1, 2, 4, 8, 16, 30 s, so the client can sit for another half minute
+      // before it tries again. That is the backoff doing its job and it reads as a hang. Reported by
+      // the first person to restart the backend under a running page.
+      reconnect: new Reconnect({ maxDelayMs: 2_000 }),
       onStream: onPushedStream,
       onClose: onConnectionClose,
       onReconnect: onReconnected,
@@ -469,6 +475,26 @@ export async function refreshStats(): Promise<void> {
     store.tickInterval = store.stats.tick_interval;
   } catch (error) {
     if (!(error instanceof ConnectionLost)) say(`stats failed: ${describe(error)}`);
+  }
+}
+
+/**
+ * Ask the backend to push faster or slower.
+ *
+ * The board's four-a-second default is a `sleep` in the backend's generator and says nothing about
+ * what the socket can carry - but nothing on the screen said so, and the first reader took the
+ * pacing for the library's speed. Turn it to 10 ms and the frames/second readout climbs by two
+ * orders of magnitude while the tick-lateness line stays where it was; that is the honest answer,
+ * and it is more convincing than this comment.
+ */
+export async function setTickInterval(intervalMs: number): Promise<void> {
+  if (peer === null || !peer.isOpen) return;
+  try {
+    await peer.request({ action: 'rate', interval_ms: intervalMs });
+    store.tickInterval = intervalMs / 1000;
+    say(`the backend now pushes every ${intervalMs} ms per symbol`);
+  } catch (error) {
+    if (!(error instanceof ConnectionLost)) say(`rate failed: ${describe(error)}`);
   }
 }
 

@@ -12,7 +12,16 @@
     <v-card-title class="d-flex align-center ga-2">
       <span>{{ store.selected ?? 'no symbol selected' }}</span>
       <v-spacer />
-      <span class="text-caption text-medium-emphasis">unary &middot; streaming &middot; fragmented</span>
+      <v-tooltip location="bottom" max-width="360">
+        <template #activator="{ props: hint }">
+          <span v-bind="hint" class="text-caption text-medium-emphasis" style="cursor: help">
+            unary &middot; streaming &middot; fragmented &middot; <span class="text-decoration-underline">?</span>
+          </span>
+        </template>
+        Three shapes at once, over the socket still carrying every price on the left: the quote is one
+        answer to one question, the history is many answers filling in as they arrive, and full depth is
+        a payload larger than a single frame, reassembled for you.
+      </v-tooltip>
     </v-card-title>
 
     <v-card-text v-if="store.selected === null" class="text-medium-emphasis">

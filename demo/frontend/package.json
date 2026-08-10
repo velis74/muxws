@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "vue": "^3.5.35",
+    "vue-cached-icon": "^3.0.5",
     "vuetify": "^3.12.7"
   },
   "devDependencies": {

@@ -46,6 +46,27 @@
 
       <v-divider class="my-3" />
 
+      <!-- The pacing control, and the reason it is on the screen at all: the board's default rate is
+           a sleep in the backend's generator, and without a way to change it a reader reasonably
+           reads four-a-second as what muxws can do. Turn it up and watch frames/second, not the
+           board - the rows blur long before the socket notices. -->
+      <div class="d-flex flex-wrap align-center ga-3 mb-3">
+        <span class="text-caption text-medium-emphasis">push every</span>
+        <v-btn-toggle
+          :model-value="intervalMs"
+          density="compact"
+          variant="outlined"
+          divided
+          mandatory
+          @update:model-value="onRate"
+        >
+          <v-btn v-for="choice in intervals" :key="choice" :value="choice" size="small">{{ choice }} ms</v-btn>
+        </v-btn-toggle>
+        <span class="text-caption text-medium-emphasis">
+          per symbol &times; {{ store.stats?.symbols ?? '?' }} symbols
+        </span>
+      </div>
+
       <div class="d-flex flex-wrap align-center ga-3">
         <v-btn size="small" color="primary" variant="flat" :loading="store.exportState === 'running'" @click="onExport">
           1 MB export
@@ -87,7 +108,12 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
-import { killBackend, resetLatencyWorst, runExport, store } from '../muxws';
+import { killBackend, resetLatencyWorst, runExport, setTickInterval, store } from '../muxws';
+
+/** Two orders of magnitude apart on purpose: the point is the range, not fine control. */
+const intervals = [250, 50, 10] as const;
+
+const intervalMs = computed(() => Math.round(store.tickInterval * 1000));
 
 const metrics = computed(() => [
   { label: 'state', value: store.connection },
@@ -121,6 +147,10 @@ const spark = computed(() => {
 
 function kb(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
+function onRate(value: unknown): void {
+  if (typeof value === 'number') void setTickInterval(value);
 }
 
 function onExport(): void {

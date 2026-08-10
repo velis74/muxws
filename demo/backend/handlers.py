@@ -102,6 +102,7 @@ class MarketService:
             "depth": self._depth,
             "export": self._export,
             "stats": self._stats,
+            "rate": self._rate,
             "kill": self._kill,
         }
 
@@ -170,6 +171,25 @@ class MarketService:
         self.registry.register(peer)
         self._start_board(peer)
         await stream.reply({"ok": True, "symbols": len(self.market.symbols), "tick_interval": self._tick_interval})
+
+    async def _rate(self, peer: Peer, payload: dict[str, Any], stream: Stream) -> None:
+        """Change how often each pushed stream carries a price.
+
+        This exists because the demo's pacing was read as the library's speed - reasonably, since
+        nothing on the screen said otherwise. `TICK_INTERVAL` is a `sleep` in the generator below and
+        has nothing to do with what the transport can carry: measured over the in-memory transport,
+        one peer pair moves ~25,000 frames a second across twenty concurrent streams
+        (`muxws/throughput_test.py`), and the board's default asks for eighty.
+
+        The floor is 1 ms rather than zero. At zero the generator becomes a busy loop that starves
+        the very event loop it needs to send on, which would demonstrate the opposite of the point.
+        """
+        _ = peer
+        requested = payload.get("interval_ms") if isinstance(payload, dict) else None
+        if not isinstance(requested, (int, float)) or not 1 <= requested <= 5_000:
+            raise ValueError(f"interval_ms must be between 1 and 5000; got {requested!r}")
+        self._tick_interval = float(requested) / 1000.0
+        await stream.reply({"ok": True, "interval_ms": requested, "symbols": len(self.market.symbols)})
 
     # ------------------------------------------------------------------ server push
 
