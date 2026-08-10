@@ -955,3 +955,38 @@ sequence never did. The sequence now occasionally asks, and the mutation fails f
 version caught `StreamReset`, `ConnectionLost` and `ProtocolError`, and then asserted that nothing
 non-muxws escaped — an assertion the `except` clause had made true by construction. It now records
 whatever comes out and judges afterwards, which is the same test with teeth.
+
+## `BrowserSocket` had only ever been tested against a double
+
+**What I needed:** to know that the browser half of the transport seam works against a WebSocket
+somebody else wrote.
+
+**What existed:** `ts/transports/browser-socket.spec.ts`, which drives a `MockWebSocket` declared in
+the same file as the assertions. A double that agrees with the code under test is a restatement, not
+evidence — and until now this adapter had never touched a real WebSocket at all: not the `readyState`
+transitions, not the event ordering, not a subprotocol a server actually echoed back.
+
+**What I did:** `ts/browser-socket-live.spec.ts`, against Node's global `WebSocket` — a WHATWG
+implementation written by other people, exposing the same API a browser does — connected to a real
+`ws` acceptor. It covers negotiation, a request and response, a real HTTP 400 refusal reaching
+`CodecMismatch`, and a real close event rejecting a pending `receive`.
+
+**What it is worth, and I would rather say this than imply otherwise:** three mutations were tried
+against both files — a malformed subprotocol offer, a dropped `close` listener, a bare `Error` where
+WSM-CDC-024 requires `CodecMismatch`. The mock spec caught all three, and one of them the live spec
+did not. **No mutation was found that only the live spec catches.** It earns its place on a different
+argument: it is the only test in which the WebSocket, the server, the handshake and the 400 are all
+somebody else's code, so it would fail if the mock's assumptions were wrong — and no mutation of *our*
+source can demonstrate that, because the mock and the library agree by construction. Categorical
+assurance, not sharper assurance.
+
+**What I dropped rather than shipped:** a fourth test exchanging raw bytes under msgpack, which is the
+one claim a mock genuinely cannot make — `browser-socket.spec.ts` asserts that `binaryType` is
+*assigned* `'arraybuffer'` and cannot assert that assigning it is *sufficient*. The acceptor kept
+answering `goaway` and I did not get it working; shipping it broken, or with the deadline nudged until
+it passed, would have been worse than not having it. It is the obvious next test for whoever picks
+this up.
+
+**Still not closed:** a real browser. Node's WebSocket is not Chrome, and the demo frontend has never
+been rendered. Neither is reachable from a terminal, and both stay recorded rather than quietly
+counted as covered.
