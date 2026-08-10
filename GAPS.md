@@ -1063,3 +1063,41 @@ registered under its own name. The codec name is in the subprotocol, so `muxws.v
 `muxws.v1.json` are distinguishable at the handshake and a mismatched peer is refused rather than
 silently misreading a date (WSM-CDC-022). It costs what every codec costs - a live cross-language pair
 in CI (WSM-CDC-007) - and it is the seam working as designed rather than an extension to it.
+
+## muxws-m1-frames-and-codec.md — WSM-CDC-001, the extension seam is at the wrong granularity
+
+Established while answering the reader's follow-up, and sharper than the entry above it. Three
+questions, three honest answers: **no, partly, no.**
+
+**Are unsupported types handled?** No - they raise `TypeError`. `json` refuses `bytes`, `datetime`
+and any custom class; `msgpack` refuses `datetime` and any custom class.
+
+**Can an application add its own encoder or decoder?** Only a whole codec. `register_codec(name,
+codec)` takes something implementing all four of `encode`, `decode`, `encode_payload`,
+`decode_payload`. There is no hook of the form *"for this type, use this function"*. Subclassing
+`JsonCodec` and overriding its module-private default would work and is not a designed extension
+point, so nothing protects it.
+
+**Is the guard prefix taken care of?** No. An application writing its own codec invents its own
+convention - sentinel, prefix, wrapper - and the library offers nothing.
+
+**The irony, and the reason this is worth recording rather than shrugging at.** msgpack already has
+exactly the mechanism: its **ext types are numbered type tags**, which is the guard an application
+would otherwise be inventing, and both libraries implement the standard timestamp (ext −1) so
+compatibly that a Python-encoded datetime and a TypeScript-encoded `Date` are **byte-identical** -
+`81a47768656ed6ff695661c0` from both, verified in both directions. muxws exposes no way to register
+an ext type, so someone who wants `Decimal` over msgpack must write a whole codec around a library
+that would do it in three lines.
+
+**What that suggests, for whoever picks this up.** The seam accepts a whole codec where an
+application needs one type. A per-type registry - `codec.register_type(cls, tag, encode, decode)`,
+delegating to msgpack's ext types where the codec is msgpack and to a codec-owned sentinel where it
+is not - would be additive, would need no wire change for existing traffic, and would put the guard
+where the library can guarantee it rather than where every application reinvents it. It is not free:
+the tag numbering becomes part of the wire contract between the two ports, so it needs its own
+conformance fixtures (WSM-CDC-006) and its own cross-language pair (WSM-CDC-007).
+
+Turning on `datetime=True` / `timestamp=3` in `MsgpackCodec` is the small, separate half of this and
+would fix `datetime` under msgpack alone. Deliberately not done here: the wire is frozen at 1.0, and
+`muxws.v1.msgpack` meaning two different things across releases is the shape of change WSM-CON-009
+exists to prevent.
