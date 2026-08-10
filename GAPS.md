@@ -776,10 +776,27 @@ and so on. They are deliberately left bare: the contract lives on the protocol, 
 five implementations produces five copies to drift apart. The single implementation that does more
 than forward, `StarletteSocket.close`, says so and says why.
 
-**11. The rule count itself.** 1028 rule ids across the spec and briefs is, on the evidence of this
-build, roughly twice what the protocol needs. The ones that earned their keep are the ones with a
-witness that can fail; the rest mostly restate each other. Worth deciding whether a 1.1 spec prunes
-them, because every id is a promise that someone will one day check.
+**11. The rule count — I had the number wrong, and the correction changes the conclusion.**
+*Resolved, by measuring.*
+
+I said repeatedly that the design material carries "1028 rules" and that this is roughly twice what
+the protocol needs. **1039 is the number of *occurrences* of a rule id across `docs/design/`, not the
+number of rules.** There are **216 distinct ids**, and the repetition is deliberate and documented:
+`docs/design/CLAUDE.md` says a brief reproduces the normative text it needs so an implementer never
+has to hold three documents open at once. Counting mentions and calling them rules was my error, and
+the "twice what it needs" conclusion was built on it.
+
+216 rules for a protocol with six frame types, a five-state stream machine, mandatory fragmentation
+with a round-robin writer, a reconnect helper with a hello, a codec seam and a peer registry is not
+obviously bloated. The distribution is not lopsided either — `RCN` 27, `CDC` 25, `FRG` 23, `API` 22,
+`STM` 22, `INV` 18, and a long tail — which is roughly what the subsystems' complexity would predict.
+
+What the measurement does support is a narrower claim, and it is the one worth keeping: **189 of the
+216 are cited by at least one test** (a crude grep that does not resolve combined-id shorthand, so the
+true figure is better; `SPEC.md`'s own appendix, which does resolve it, says 19 uncited). The useful
+question was never "are there too many rules" but "which rules have a witness that can fail" — and
+that question is now answered per id in Appendix B, which is a better artefact than a smaller
+specification would have been.
 
 ## muxws-m8-demo.md — WSM-INV-004 was not true on a fast socket, and only the demo could find it
 
