@@ -521,21 +521,22 @@ TypeScript spells it `VERSION`, and exports the same string from all three entry
 `muxws/node` and `muxws/msgpack`.
 
 The two packages ship one version stream: the number here and the `version` field of `package.json`
-are asserted equal by the test suite, so a Python `1.0.0` and an npm `1.0.0` are the same release.
+are asserted equal by the test suite, so a Python `0.1.0` and an npm `0.1.0` are the same release.
 
 It is **not** the protocol version, and nothing about it reaches the wire. The only version on the
 wire is the `v1` inside the `muxws.v1.<codec>` subprotocol, which changes only for a breaking wire
-change. A 1.7.0 peer and a 1.0.0 peer speak `muxws.v1.json` to each other without either one knowing
-what the other's package version is.
+change - so the wire is already at its first generation while the package is still below 1.0. A 1.7.0
+peer and a 0.1.0 peer speak `muxws.v1.json` to each other without either one knowing what the other's
+package version is.
 
 ### Signature
 
 ```python
-__version__ = "1.0.0"
+__version__ = "0.1.0"
 ```
 
 ```ts
-export const VERSION = '1.0.0';
+export const VERSION = '0.1.0';
 ```
 
 ### Parameters
