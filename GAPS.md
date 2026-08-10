@@ -1021,3 +1021,45 @@ first, and includes the address.
 reads the manifest rather than the environment — precisely because the environment running it has
 `websockets` for other reasons — and `ts/browser-socket-live.spec.ts` dials a port nothing serves and
 asserts the message names the reachable cause.
+
+## muxws-m6-conformance.md — WSM-CDC-008, the bytes rule was documented as a virtue
+
+**What the reader said,** on reaching `guide/codecs.md`: *"this is bullshit: bytes are a first-class
+citizen. How else do I send a PDF to the frontend?"* Then, reading further and finding the reasoning:
+*"ok, there is no way to tell a string from bytes - but a control field, or a unique prefix, would
+handle it easily. We probably have the same problem with datetime?"*
+
+Both halves were right, and the second half found something nobody had noticed.
+
+**What was wrong with the documentation.** It led with *"muxws will not base64-encode them on your
+behalf"* and called the refusal "the point". That is a limitation written as a boast. The reader's
+actual question - *I have a PDF, what do I do* - has a good answer that the page buried: **use
+msgpack**, which carries bytes natively and is one environment variable on each side. That is what the
+codec seam is for. The page now says that first and explains the refusal second.
+
+**Why a sentinel is not the answer here, which the page now also says.** `{"$bytes": "..."}` would fix
+round-tripping, and muxws deliberately does not do it - but the reason is about the *payload* rather
+than about bytes. WSM-FRM-006: muxws defines no vocabulary inside `payload`. The moment a key means
+something to the transport, two independent consumers sharing one socket must nest their own
+vocabularies inside an imposed one, and a payload that legitimately contains that key is corrupted.
+It is also why `conformance/` may use `{"$bytes": [...]}` and the library may not: a fixture is read by
+a runner that agreed to the convention; a payload is read by an application that did not.
+
+**What the reader found that nobody had:** `datetime` fails on **both** shipped codecs, and it was
+documented nowhere.
+
+```
+json    datetime -> TypeError: the json codec cannot encode datetime
+msgpack datetime -> TypeError: can not serialize 'datetime.datetime' object
+```
+
+msgpack *has* a timestamp type and `msgpack-python` writes it under `datetime=True`; `MsgpackCodec`
+does not enable it, because the TypeScript port would then have to agree on the same mapping and the
+two libraries' defaults do not (WSM-CDC-006). That is a defensible decision and it was undocumented,
+which is the defect. `guide/codecs.md` now has a section on it.
+
+**The clean path for anyone who wants either, and it needs no wire change.** A codec of your own,
+registered under its own name. The codec name is in the subprotocol, so `muxws.v1.jsonx` and
+`muxws.v1.json` are distinguishable at the handshake and a mismatched peer is refused rather than
+silently misreading a date (WSM-CDC-022). It costs what every codec costs - a live cross-language pair
+in CI (WSM-CDC-007) - and it is the seam working as designed rather than an extension to it.

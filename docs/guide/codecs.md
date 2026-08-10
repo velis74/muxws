@@ -156,7 +156,7 @@ The `muxws/msgpack` subpath is the whole of the selection in the browser: the ma
 imports it, so a bundle that does not ask for msgpack never carries it, and `@msgpack/msgpack` stays
 an optional peer dependency.
 
-## Bytes, and what JSON will not do for you
+## Bytes, and what a codec will not do for you
 
 **Bytes are a first-class payload type under a binary codec.** Under msgpack you send `bytes` (Python)
 or an `ArrayBuffer` (TypeScript) as a payload, or nested anywhere inside one, and get the same thing
@@ -167,8 +167,11 @@ back.
 await peer.request({"name": "logo.png", "body": open("logo.png", "rb").read()})
 ```
 
-**Under JSON they are not, and muxws will not base64-encode them on your behalf.** The JSON codec
-raises `TypeError` instead:
+**Under JSON they are not.** If you are sending a PDF, an image or anything else binary, **use
+msgpack** - that is what the codec seam is for, and it is one environment variable on each side. The
+rest of this section is for when that is not available to you.
+
+The JSON codec raises `TypeError` rather than encoding for you:
 
 ```
 TypeError: the json codec cannot carry bytes: bytes are a payload type only under a binary codec,
@@ -176,10 +179,24 @@ and muxws does not base64-encode them for you … Either encode them in the appl
 the msgpack codec.
 ```
 
-The refusal is the point. Silently base64-encoding would make the same application code mean different
-things on the two codecs — the remote would receive a `str` under JSON and `bytes` under msgpack — and
-the sender would have no way to know which. Worse is what the languages do left to themselves:
-`JSON.stringify` turns an `ArrayBuffer` into `{}`, which is not an encoding error but silent data loss.
+The reason is round-tripping, not purity. Base64 is a `str` on the way back, and nothing in a decoded
+JSON document distinguishes one from a `str` the application meant. So `send(b"...")` would return a
+`str` under JSON and `bytes` under msgpack, from identical application code, with no way for the
+sender to know which it got. An error you cannot miss beats a value that is quietly the wrong type.
+
+A sentinel would fix that — `{"$bytes": "..."}` on the wire, unwrapped on decode — and muxws
+deliberately does not do it, for a reason that is about *your* payload rather than about bytes:
+**muxws defines no vocabulary inside `payload`** (WSM-FRM-006). No `kind`, no reserved key, no
+discriminator. The moment a key means something to the transport, two independent consumers sharing
+one socket have to nest their own vocabularies inside an imposed one, and a payload that legitimately
+contains that key is corrupted. That rule buys more than binary-over-JSON costs.
+
+It is also why `conformance/` can use `{"$bytes": [...]}` in its fixtures and the library cannot: a
+fixture is read by a test runner that agreed to the convention, and a payload is read by an
+application that did not.
+
+Worse than either is what the languages do left to themselves: `JSON.stringify` turns an
+`ArrayBuffer` into `{}`, which is not an encoding error but silent data loss.
 
 If you need bytes over JSON, encode them in the application, where the decision and the decoding are
 both visible:
@@ -194,6 +211,37 @@ await peer.request({"name": "logo.png", "body": base64.b64encode(blob).decode("a
 Two smaller refusals from the JSON codec, for the same reason: `NaN` and `Infinity` are not JSON and
 are rejected rather than emitted as bare tokens no other parser accepts, and a circular structure is
 reported as one.
+
+## Dates, and everything else with no JSON spelling
+
+`datetime` is the one that surprises people, because unlike bytes it fails on **both** shipped codecs:
+
+```python
+await peer.request({"when": datetime.now()})
+# TypeError: the json codec cannot encode datetime
+# TypeError: can not serialize 'datetime.datetime' object   (msgpack)
+```
+
+msgpack *has* a timestamp type, and `msgpack-python` writes it when constructed with
+`datetime=True` - but `MsgpackCodec` does not turn it on, because the TypeScript port would then have
+to agree on the same mapping and the two libraries' defaults do not (WSM-CDC-006). A codec is only
+worth its name if both ports produce the same thing.
+
+So the answer for dates is the answer for every other type muxws does not know: **decide the spelling
+in your application**, once, where both ends can see it. ISO 8601 strings and epoch milliseconds are
+both fine; what is not fine is one end sending one and the other expecting the other, which is a bug
+the transport cannot help you find.
+
+```python
+# fragment
+await peer.request({"when": moment.isoformat()})            # "2026-08-10T12:00:00+00:00"
+await peer.request({"when": int(moment.timestamp() * 1000)})  # 1775822400000
+```
+
+If you would rather the transport did it, the codec seam is where that belongs - a codec of your own
+that understands your types, registered under its own name, so the subprotocol says which one is in
+use and a peer configured for plain `json` refuses the handshake rather than silently misreading a
+date. See below.
 
 ## Writing your own
 
