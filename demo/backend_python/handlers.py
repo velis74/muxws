@@ -25,7 +25,7 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from demo.backend.market import HISTORY_POINTS, Market
+from demo.backend_python.market import HISTORY_POINTS, Market
 from muxws import (
     ConnectionGoingAway,
     ConnectionLost,

@@ -61,4 +61,24 @@ export default [
     files: ['interop/**/*.ts'],
     languageOptions: { parserOptions: { project: './interop/tsconfig.json' } },
   },
+  {
+    // The Node demo backend, for the same reason as the two blocks above and as the fourth instance
+    // of the gap the frontend block names: the root tsconfig `include`s `ts/**/*` alone, so without
+    // this entry the typed rules cannot parse these files and `eslint demo/backend_node` fails with a
+    // parsing error rather than a style report. This block and `demo/backend_node` in `lint:ci`'s
+    // eslint globs have to arrive together - either alone leaves the directory unlinted, one of them
+    // silently and one of them loudly.
+    files: ['demo/backend_node/**/*.ts'],
+    languageOptions: {
+      parserOptions: { project: './demo/backend_node/tsconfig.json' },
+      // Server code, so Node's globals rather than the browser's. Without these `no-undef` fires on
+      // `console` and `process`, which would be a lint config declaring that Node has no Node in it.
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+      },
+    },
+  },
 ];

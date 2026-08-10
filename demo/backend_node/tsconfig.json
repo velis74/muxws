@@ -1,0 +1,19 @@
+{
+  // The node backend is Node ESM - `demo.py --backend node` spawns it under tsx - and the root config
+  // compiles to CommonJS because that is one of the two targets the library ships. `interop/` needed
+  // the same override for the same reason, and the same conclusion applies here: two configs rather
+  // than one loosened one, so the library keeps being checked as the dual-target package it is.
+  //
+  // The root `tsc --noEmit` does not reach this directory at all (`"include": ["ts/**/*"]`), so
+  // without this file the second backend would be the third directory in this repository whose type
+  // safety was aspirational. `npm run lint:ci` runs `tsc -p` against this config, and
+  // `eslint.config.js` points the typed lint rules at it too - the two have to name the same config
+  // or the directory is linted by one tool and parsed by neither.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  "include": ["./**/*.ts"]
+}

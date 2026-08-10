@@ -14,8 +14,8 @@ import os
 
 from fastapi import FastAPI, WebSocket
 
-from demo.backend.handlers import MarketService
-from demo.backend.market import Market
+from demo.backend_python.handlers import MarketService
+from demo.backend_python.market import Market
 from muxws import accept, PeerRegistry
 
 HOST = "127.0.0.1"

@@ -32,7 +32,7 @@ dependencies = []
 starlette = ["starlette>=0.37"]
 websockets = ["websockets>=12"]
 msgpack = ["msgpack>=1.0"]
-# The demo (`demo.py`, `demo/backend/`) is a consumer of the shipped package, not part of it: it is
+# The demo (`demo.py`, `demo/backend_python/`) is a consumer of the shipped package, not part of it: it is
 # excluded from both artefacts and nothing in the library imports it. These two are here so that
 # `pip install -e ".[demo,starlette]"` is the whole story for running it, and so that they stay out
 # of `[project] dependencies`, which WSM-PKG-002 requires to be empty.
@@ -41,6 +41,9 @@ msgpack = ["msgpack>=1.0"]
 # while serving ordinary HTTP perfectly - so the demo loads in the browser and only the socket fails,
 # which reads as a muxws defect and is not one. Reported by the first person to run the demo, whose
 # environment had this extra and nothing else.
+# All three belong to the *Python* backend. `python demo.py node` serves the same frontend from
+# `demo/backend_node/` under Node and imports none of them, which is why `missing_dependencies()` in
+# `demo.py` asks which backend before it asks what is missing.
 demo = ["fastapi", "uvicorn", "websockets"]
 dev = [
     "coverage",

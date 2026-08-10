@@ -1145,9 +1145,9 @@ wrong in two places.
    searched for as a bare number after a family prefix too.
 2. Some rules are witnessed by a fixture rather than by a citation, in which case the fixture file
    name is the thing to search for under `conformance/`.
-3. **Test files are not only under `muxws/` and `ts/`.** They are also under `demo/backend/` and
+3. **Test files are not only under `muxws/` and `ts/`.** They are also under `demo/backend_python/` and
    `docs/examples/`. The grep in the previous edition named `muxws ts` and nothing else, and so
-   reported `WSM-FRG-010` as uncited when `demo/backend/handlers_test.py` names it twice. Search the
+   reported `WSM-FRG-010` as uncited when `demo/backend_python/handlers_test.py` names it twice. Search the
    repository, not two directories of it.
 
 ## Appendix B — the honesty list
@@ -1193,7 +1193,7 @@ library half an existing test holds; and `WSM-AUT-003` was the last, closed by r
 
 Two corrections to the previous snapshot, both of which made this document overstate its own
 ignorance: `WSM-CDC-007` was cited all along in `muxws/conformance_test.py` and
-`ts/conformance.spec.ts`, and `WSM-FRG-010` in `demo/backend/handlers_test.py`. The second was missed
+`ts/conformance.spec.ts`, and `WSM-FRG-010` in `demo/backend_python/handlers_test.py`. The second was missed
 because of Appendix A's under-scoped grep; the first was simply an error.
 
 ### Retired — no test is owed

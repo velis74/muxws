@@ -1,4 +1,4 @@
-"""`python demo.py` refuses to start with a list of what to install.
+"""`python demo.py` picks a backend and refuses to start with a list of what to install.
 
 Every dependency the demo needs fails *late* and somewhere other than where the cause is. A missing
 `fastapi` is an ImportError inside a child process nobody is watching. A missing `websockets` is the
@@ -10,6 +10,12 @@ Declaring `websockets` in the `[demo]` extra is the primary fix and is asserted 
 `muxws/packaging_test.py::test_the_demo_extra_can_actually_serve_a_websocket`. This is the second
 half: a declared dependency is not an installed one, and the reader who installed the wrong extra, or
 `muxws` from PyPI rather than the repository, gets told which rather than debugging a handshake.
+
+Since there are two backends there is a second way for that check to be wrong, and it is the friendly
+direction: demanding what the *other* backend needs. `python demo.py node` imports no fastapi, no
+uvicorn and no `websockets` at all, so a check that still asked for them would stop a run that was
+about to work and send the reader to install three packages nothing would load. Half the tests below
+exist to pin that, and the rest pin the command line that chooses between the two.
 """
 
 from __future__ import annotations
@@ -38,12 +44,16 @@ def entry_point() -> Any:
     return module
 
 
-def test_a_complete_environment_reports_nothing_missing(entry_point: Any):
-    """The environment running this test has the demo extra, so the check must be silent in it.
+@pytest.mark.parametrize("backend", ["python", "node", None])
+def test_a_complete_environment_reports_nothing_missing(entry_point: Any, backend: str | None):
+    """The environment running this test has both backends' dependencies, so the check is silent.
 
-    Without this the two tests below would pass equally well against a check that always complains.
+    Without this the tests below would pass equally well against a check that always complains. The
+    `None` case is the no-argument call the older tests make, pinning that the default parameter is
+    the Python backend rather than "check everything".
     """
-    assert entry_point.missing_dependencies() == []
+    problems = entry_point.missing_dependencies() if backend is None else entry_point.missing_dependencies(backend)
+    assert problems == []
 
 
 def test_a_missing_websocket_implementation_is_named(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
@@ -98,3 +108,129 @@ def test_a_missing_direct_import_is_named_with_the_reason(entry_point: Any, monk
     problems = entry_point.missing_dependencies()
     assert [problem.split(" - ")[0].strip() for problem in problems] == ["fastapi"]
     assert "FastAPI" in problems[0], "a bare package name leaves the reader to guess what it is for"
+
+
+def test_the_node_backend_is_not_asked_for_the_python_backends_packages(
+    entry_point: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """An environment with no fastapi, no uvicorn, no starlette and no `websockets` runs `node` fine.
+
+    This is the whole reason the check takes a backend. `demo/backend_node/` builds its own
+    `WebSocketServer` over `ws` and imports nothing from Python at all, so every line the Python check
+    would print is a package that run would never load - and a refusal to start over one of them is a
+    working demo stopped by its own launcher.
+    """
+    absent = {"fastapi", "uvicorn", "starlette", "muxws", "websockets", "wsproto"}
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name in absent else real(name, *a, **k),
+    )
+
+    assert entry_point.missing_dependencies("node") == []
+    # And the same environment on the other backend is the check still working, rather than a check
+    # that has quietly stopped looking at anything.
+    assert len(entry_point.missing_dependencies("python")) == 5
+
+
+def test_the_websocket_implementation_check_does_not_fire_for_the_node_backend(
+    entry_point: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """It is uvicorn's gap, not the protocol's, and it is the one most likely to be over-applied.
+
+    `websockets` exists in this demo for exactly one reason: uvicorn has no WebSocket implementation.
+    Node's server has its own, so a reader who chose that backend and does not have `websockets` is
+    not looking at the 404-to-every-upgrade failure this check was written for.
+    """
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None if name in {"websockets", "wsproto"} else real(name, *a, **k),
+    )
+
+    assert entry_point.missing_dependencies("node") == []
+    assert len(entry_point.missing_dependencies("python")) == 1
+
+
+def test_the_node_backends_own_packages_are_named(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
+    """`tsx` and `ws` fail the way `fastapi` does: inside a child process, under a frontend that ran.
+
+    Faked rather than uninstalled, because `node_package_installed` is a directory probe and the
+    repository running these tests has both.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda name: name not in {"tsx", "ws"})
+
+    problems = entry_point.missing_dependencies("node")
+    assert [problem.split(" - ")[0].strip() for problem in problems] == ["tsx", "ws"]
+    # A bare package name leaves the reader to guess; `tsx` in particular is not a name they will
+    # have met, because nothing in this repository imports it - `package.json` invokes it.
+    assert "build step" in problems[0]
+    assert entry_point.missing_dependencies("python") == [], "these are not the Python backend's"
+
+
+def test_the_frontend_is_demanded_by_both_backends(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
+    """There is one frontend and it is the thing being demonstrated, so neither backend is exempt."""
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda name: name != "vue")
+
+    for backend in ("python", "node"):
+        problems = entry_point.missing_dependencies(backend)
+        assert any("npm install" in problem for problem in problems), backend
+
+
+def test_the_default_backend_is_python(entry_point: Any):
+    """The backend that has always been here, so `python demo.py` keeps meaning what it meant."""
+    assert entry_point.parse_arguments([]).backend == "python"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], "python"),
+        (["python"], "python"),
+        (["node"], "node"),
+        # The spelling `demo/backend_node/main.ts` tells the reader to type, kept working on purpose.
+        (["--backend", "node"], "node"),
+        (["--backend", "python"], "python"),
+        # Both, agreeing, is not a mistake worth refusing.
+        (["node", "--backend", "node"], "node"),
+    ],
+)
+def test_the_backend_argument_accepts_what_it_should(entry_point: Any, argv: list[str], expected: str):
+    assert entry_point.parse_arguments(argv).backend == expected
+
+
+@pytest.mark.parametrize("argv", [["ruby"], ["--backend", "ruby"], ["Node"], ["node", "python"]])
+def test_an_unknown_backend_is_refused_rather_than_defaulted(entry_point: Any, argv: list[str]):
+    """Silently falling back to python would start a backend the reader did not ask for.
+
+    Everything downstream would then look right - the frontend URL works, the sockets connect, the
+    board fills - which is the failure this demo is least able to survive: it exists to show that the
+    two backends are indistinguishable, so a launcher that runs the wrong one is unfalsifiable.
+    """
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.parse_arguments(argv)
+    assert refusal.value.code == 2
+
+
+def test_asking_for_both_backends_at_once_is_refused(entry_point: Any, capsys: pytest.CaptureFixture[str]):
+    """Two spellings of one choice are accepted; two *different* choices are not."""
+    with pytest.raises(SystemExit):
+        entry_point.parse_arguments(["node", "--backend", "python"])
+    assert "pick one" in capsys.readouterr().err
+
+
+def test_help_names_both_backends_and_reads_as_prose(entry_point: Any):
+    """`--help` is where a reader learns there are two, so it has to say so in words.
+
+    Asserted loosely - this is not a golden file - but it does pin that the two directory names and
+    both runners are named, because "python or node" alone tells a reader nothing about what either
+    one is or where to look at it.
+    """
+    text = entry_point.build_parser().format_help()
+    for expected in ("demo/backend_python", "demo/backend_node", "uvicorn", "tsx", "python demo.py node"):
+        assert expected in text, expected
+    # The hidden alias stays hidden: one documented spelling, or the help becomes the parameter dump
+    # it was written not to be.
+    assert "--backend" not in text

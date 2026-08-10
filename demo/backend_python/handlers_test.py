@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from demo.backend.handlers import MarketService
-from demo.backend.market import EXPORT_ROWS, HISTORY_POINTS, Market, SYMBOLS
+from demo.backend_python.handlers import MarketService
+from demo.backend_python.market import EXPORT_ROWS, HISTORY_POINTS, Market, SYMBOLS
 from muxws import Frame, MAX_FRAME_BYTES, Peer, PeerRegistry, RemoteError, StreamReset
 from muxws.codecs.json_ import JsonCodec
 from muxws.transports.memory import memory_pair, MemorySocket

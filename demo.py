@@ -1,24 +1,31 @@
 """One entry point for the demo: `python demo.py` starts both halves.
 
-The Vite dev server runs in a daemon child process and uvicorn runs in this one, so a single Ctrl-C
-stops the pair. The backend listens on 127.0.0.1:8020 (override with `MUXWS_DEMO_PORT`) and
-the dev server proxies `/ws` to it
-(`demo/frontend/vite.config.ts`), which is why neither half needs a CORS story or a second origin.
+There are two backends and one frontend. `python demo.py` serves the sockets from Python and
+`python demo.py node` serves them from TypeScript on Node, and **the frontend does not change by a
+single line between them** - that is the whole reason the second one exists. If a Vue application
+cannot tell which language answered, the wire really is the contract.
+
+The Vite dev server runs in a daemon child process; the backend runs in this process when it is
+uvicorn and in a child process group of its own when it is Node - so a single Ctrl-C stops the set
+either way. The backend listens on 127.0.0.1:8020 (override with `MUXWS_DEMO_PORT`) and the dev
+server proxies `/ws` to it (`demo/frontend/vite.config.ts`), which is why neither half needs a CORS
+story or a second origin.
 
 This file is a *consumer* of muxws, not part of it. Nothing under `muxws/` imports it, no test
 depends on it, and it is absent from both published artefacts - `[tool.hatch.build.targets.wheel]`
 ships `muxws` alone and the npm package ships `dist/*` alone. `muxws/packaging_test.py` builds a
 wheel and looks inside it rather than taking that on trust.
 
-    pip install -e ".[demo,starlette]"
-    npm install
-    python demo.py
+    pip install -e ".[demo,starlette]"    # the Python backend only
+    npm install                           # both backends and the frontend
+    python demo.py                        # or: python demo.py node
 
 `[demo]` carries `websockets` deliberately: uvicorn has no WebSocket protocol implementation of its
 own and answers 404 to every upgrade without one, while serving the page perfectly - so the demo
 would load and only the socket would fail.
 """
 
+import argparse
 import contextlib
 import multiprocessing
 import os
@@ -27,13 +34,21 @@ import subprocess
 import sys
 import time
 
+#: The two backends, in the order `--help` should list them.
+BACKENDS = ("python", "node")
+
+#: Python, because it is the one that has always been here and the one every reader already has.
+DEFAULT_BACKEND = "python"
+
 #: What `pip install -e ".[demo,starlette]"` provides, as `(import name, why it is needed)`.
+#:
+#: The **Python backend's** list and nobody else's: `python demo.py node` loads not one of these.
 #:
 #: Checked before anything starts, because every one of these fails *late* and in a way that points
 #: somewhere else. A missing `fastapi` is an ImportError from inside a child process nobody is
 #: watching; a missing `starlette` surfaces as the route never being reached.
-DIRECT_IMPORTS = (
-    ("fastapi", "the demo backend is a FastAPI app"),
+PYTHON_BACKEND_IMPORTS = (
+    ("fastapi", "the Python demo backend is a FastAPI app"),
     ("uvicorn", "which serves it"),
     ("starlette", "muxws.accept() upgrades a Starlette WebSocket"),
     ("muxws", "the library this demo exists to show; install the repository itself with -e"),
@@ -47,49 +62,139 @@ DIRECT_IMPORTS = (
 #: a server log nobody is reading - so the browser shows a muxws handshake error and every part of
 #: the diagnosis points away from the cause. That is exactly how the first reader of this demo lost
 #: an hour.
+#:
+#: It is *uvicorn's* gap, not the protocol's: `demo/backend_node/main.ts` builds its own
+#: `WebSocketServer`, so this check must not fire for the Node backend and send a reader to install a
+#: Python package that backend will never import.
 WEBSOCKET_IMPLEMENTATIONS = ("websockets", "wsproto")
 
+#: What `npm install` provides for the **Node backend**, as `(package, why it is needed)`.
+#:
+#: Both fail inside `npm run`, in a child process, underneath a frontend that started fine - the same
+#: shape of failure the Python list above exists to pre-empt, in the other language.
+NODE_BACKEND_PACKAGES = (
+    ("tsx", "which runs demo/backend_node/*.ts with no build step"),
+    ("ws", "the WebSocket server muxws's Node acceptor upgrades"),
+)
 
-def missing_dependencies():
-    """Everything the demo needs and does not have, as human-readable lines."""
+
+def node_package_installed(name):
+    """Whether `npm install` put `name` in this repository's `node_modules`.
+
+    A named function rather than an inline `os.path.isdir`, because it is the only seam the tests
+    have: the environment that runs them has every package installed, so the *missing* case can be
+    witnessed only by replacing this.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    return os.path.isdir(os.path.join(root, "node_modules", name))
+
+
+def missing_dependencies(backend=DEFAULT_BACKEND):
+    """Everything the chosen backend needs and does not have, as human-readable lines.
+
+    Backend-aware, because the two need almost disjoint things and demanding the other's is a lie:
+    `python demo.py node` imports no Python beyond this file, and refusing to start it over an absent
+    uvicorn would send the reader to install a package that would never be loaded.
+    """
     import importlib.util
 
     problems = []
-    for module, why in DIRECT_IMPORTS:
-        if importlib.util.find_spec(module) is None:
-            problems.append(f"{module:12} - {why}")
+    if backend == "node":
+        for package, why in NODE_BACKEND_PACKAGES:
+            if not node_package_installed(package):
+                problems.append(f"{package:12} - {why}")
+    else:
+        for module, why in PYTHON_BACKEND_IMPORTS:
+            if importlib.util.find_spec(module) is None:
+                problems.append(f"{module:12} - {why}")
 
-    if not any(importlib.util.find_spec(name) for name in WEBSOCKET_IMPLEMENTATIONS):
-        problems.append(
-            f"{'websockets':12} - uvicorn has no WebSocket implementation of its own. Without this "
-            "it serves the page and answers 404 to every upgrade, which surfaces in the browser as a "
-            "muxws handshake error rather than as a missing package."
-        )
+        if not any(importlib.util.find_spec(name) for name in WEBSOCKET_IMPLEMENTATIONS):
+            problems.append(
+                f"{'websockets':12} - uvicorn has no WebSocket implementation of its own. Without this "
+                "it serves the page and answers 404 to every upgrade, which surfaces in the browser as a "
+                "muxws handshake error rather than as a missing package."
+            )
+
+    # The frontend half, which is the same one for both backends - it is the claim being demonstrated.
+    # `npm run demo:dev` failing is loud, but it fails *inside the child process* underneath a backend
+    # that started fine, which reads as the demo being broken rather than as one command not having
+    # been run.
+    if not node_package_installed("vue"):
+        problems.append(f"{'npm install':12} - the frontend's dependencies are not installed")
     return problems
 
 
-def check_before_starting():
+def check_before_starting(backend=DEFAULT_BACKEND):
     """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
-    problems = missing_dependencies()
-
-    # The frontend half. `npm run demo:dev` failing is loud, but it fails *inside the child process*
-    # underneath a backend that started fine, which reads as the demo being broken rather than as one
-    # command not having been run.
-    root = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isdir(os.path.join(root, "node_modules", "vue")):
-        problems.append(f"{'npm install':12} - the frontend's dependencies are not installed")
-
+    problems = missing_dependencies(backend)
     if not problems:
         return
 
     print("This demo cannot start. Missing:\n", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
-    print(
-        '\nFrom the repository root:\n\n    pip install -e ".[demo,starlette]"\n    npm install\n',
-        file=sys.stderr,
-    )
+
+    # Only the commands that would fix *this* run. Printing `pip install` at a reader who chose the
+    # Node backend tells them to install four Python packages none of which their backend imports,
+    # and the one thing they actually need is then the second line of advice rather than the only one.
+    print("\nFrom the repository root:\n", file=sys.stderr)
+    if backend != "node":
+        print('    pip install -e ".[demo,starlette]"', file=sys.stderr)
+    print("    npm install\n", file=sys.stderr)
     raise SystemExit(1)
+
+
+def build_parser():
+    """The command line, written to be read as prose: two words, one of which is optional."""
+    parser = argparse.ArgumentParser(
+        prog="python demo.py",
+        # Raw, so these paragraphs survive as paragraphs. argparse's default formatter reflows
+        # everything into one block, which is how a description becomes a parameter dump.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Start the muxws demo: a Vue application on http://127.0.0.1:5173 and, behind it, a\n"
+            "backend on :8020 pushing twenty live tick streams, a 1500-level depth book and a\n"
+            "million-byte export down one WebSocket, all at once and all cancellable.\n"
+            "\n"
+            "The backend can be either of two: the Python one under uvicorn, or the TypeScript one\n"
+            "under Node. They are ports of each other, and the frontend is byte-for-byte the same\n"
+            "against both - which is the most interesting thing this demo has to show."
+        ),
+        epilog=(
+            "examples:\n"
+            "  python demo.py            the Python backend (demo/backend_python), under uvicorn\n"
+            "  python demo.py node       the TypeScript backend (demo/backend_node), under tsx\n"
+            "\n"
+            "Ctrl-C stops the backend and the dev server together. MUXWS_DEMO_PORT moves the\n"
+            "backend off 8020; the Vite proxy in demo/frontend/vite.config.ts has to be told too."
+        ),
+    )
+    parser.add_argument(
+        "backend",
+        nargs="?",
+        choices=BACKENDS,
+        default=None,
+        help="which language serves the sockets; omit it and you get python",
+    )
+    # `--backend node` is the spelling this file was first specified with, and it is what the header
+    # comment of `demo/backend_node/main.ts` still tells the reader to type. The positional above is
+    # the one settled on afterwards. Accepting both costs one line and means neither of the two
+    # spellings already written down anywhere is wrong; `--help` documents one, so there is still
+    # exactly one way to learn this.
+    parser.add_argument("--backend", dest="backend_option", choices=BACKENDS, help=argparse.SUPPRESS)
+    return parser
+
+
+def parse_arguments(argv=None):
+    """`argv` parsed, with `backend` resolved to one of `BACKENDS` and never to None."""
+    parser = build_parser()
+    arguments = parser.parse_args(argv)
+    if arguments.backend and arguments.backend_option and arguments.backend != arguments.backend_option:
+        # Silently preferring one would start a backend the reader did not ask for and then print a
+        # frontend URL that works, so nothing about the run would look wrong.
+        parser.error(f"asked for both '{arguments.backend}' and '--backend {arguments.backend_option}'; pick one")
+    arguments.backend = arguments.backend or arguments.backend_option or DEFAULT_BACKEND
+    return arguments
 
 
 def run_fe():
@@ -131,6 +236,7 @@ def run_fastapi():
     # extra. WSM-PKG-002 says `pip install muxws` pulls in nothing at all, and this file is shipped
     # source that ruff lints beside the library - a module-scope import here is the shape of the
     # mistake that rule exists to prevent, even though hatch never puts this file in a wheel.
+    # It is also what makes `python demo.py node` runnable with no uvicorn installed at all.
     import uvicorn
 
     # `reload=False`: the reloader replaces this process with a supervisor and a fresh worker, and
@@ -138,29 +244,92 @@ def run_fastapi():
     # would find port 5173 taken.
     # The port comes from the app rather than from a second literal here: two copies of a port
     # number drift, and the one that drifts is whichever the reader is not looking at.
-    from demo.backend.main import HOST, PORT
+    from demo.backend_python.main import HOST, PORT
 
-    uvicorn.run("demo.backend.main:app", host=HOST, port=PORT, reload=False)
+    uvicorn.run("demo.backend_python.main:app", host=HOST, port=PORT, reload=False)
+
+
+def run_node():
+    """The TypeScript backend, spawned and torn down exactly the way `run_fe` spawns the dev server.
+
+    Read `run_fe`'s comments before changing anything here; they record a measured failure. `npm run`
+    is a tree - npm, a shell, tsx, node - and signalling only the process we spawned left the leaf
+    orphaned and still holding its port, so the *next* run met a server from the previous one. That
+    was vite on 5173. This one would be the backend on 8020, where the symptom is worse: the demo
+    comes up, the sockets connect, and the reader is watching a backend they did not start - possibly
+    the other language's.
+
+    So: its own process group, and whatever ends this function kills the group.
+    """
+    process = subprocess.Popen(["npm", "run", "demo:backend:node"], start_new_session=True)  # noqa: S603, S607
+    # SIGTERM's default action kills this process outright and the `finally` below never runs - which
+    # is precisely how the group gets orphaned. `run_fastapi` needs no such handler because uvicorn
+    # installs its own and returns; on this path there is nobody but us, and an IDE's stop button, a
+    # `kill` or a supervisor all arrive as this signal.
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
+    try:
+        # No `check=True` and no `run()`: npm exits non-zero for every ordinary end of this process,
+        # and a `CalledProcessError` traceback out of a backend the reader has just Ctrl-C'd reads as
+        # a crash in the thing being demonstrated.
+        process.wait()
+    finally:
+        # The group, not the process. See `run_fe`.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGTERM)
+        # And then wait for it, so "Stopped." is not printed over a backend still holding 8020 - the
+        # next run would find the port taken and fail for a reason belonging to the previous one.
+        # `fe_proc.join()` below is the same guarantee for the dev server. Bounded, because a
+        # backend that ignores SIGTERM must not turn Ctrl-C into a hang.
+        with contextlib.suppress(subprocess.TimeoutExpired, KeyboardInterrupt):
+            process.wait(timeout=5)
+
+
+def run_backend(backend):
+    """Whichever backend was asked for: uvicorn in this process, or Node in a group under it."""
+    if backend == "node":
+        run_node()
+    else:
+        run_fastapi()
 
 
 if __name__ == "__main__":
-    check_before_starting()
+    chosen_backend = parse_arguments().backend
+    check_before_starting(chosen_backend)
+
+    if chosen_backend == "node":
+        # A reader who typed it wants to see that it took - the frontend will look identical either
+        # way, so this line is the only confirmation there is.
+        print("Using the Node/TypeScript backend.")
+    else:
+        # Printed rather than left to `--help`, because a reader who never learns there are two never
+        # tests the claim this demo exists to make: that the frontend cannot tell them apart. It is
+        # the most interesting thing here and it is invisible until someone runs the other one.
+        print("Using the Python backend (the default).")
+        print("Run `python demo.py node` for the equivalent backend in TypeScript on Node.")
 
     print("Starting the muxws demo...")
-    from demo.backend.main import PORT
+    if chosen_backend == "node":
+        # No port printed on this path, and `MUXWS_DEMO_PORT` deliberately not read here: importing
+        # the Python backend for its `PORT` would demand fastapi on a run that needs none of it, and
+        # a second literal 8020 in this file is the copy that drifts. `demo/backend_node/main.ts`
+        # prints its own address the moment the socket is listening, and that one cannot be wrong.
+        print("  backend:  node, which prints its own address as soon as it is listening")
+    else:
+        from demo.backend_python.main import PORT
 
-    print(f"  backend:  http://127.0.0.1:{PORT}")
+        print(f"  backend:  http://127.0.0.1:{PORT}")
     print("  frontend: http://127.0.0.1:5173")
+
     fe_proc = multiprocessing.Process(target=run_fe, daemon=True)
     fe_proc.start()
     try:
-        run_fastapi()
+        run_backend(chosen_backend)
     except KeyboardInterrupt:
         pass
     finally:
         # A daemon child is killed at interpreter shutdown, which is after this block: without the
         # join, "Stopped." prints while the dev server is still up. It is also the only teardown
-        # there is when uvicorn exits for a reason of its own - a taken port, say - rather than by
+        # there is when the backend exits for a reason of its own - a taken port, say - rather than by
         # the Ctrl-C that would have reached the whole process group.
         fe_proc.terminate()
         fe_proc.join()
