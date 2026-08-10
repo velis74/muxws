@@ -23,8 +23,8 @@
             server push &middot; click a row &middot; <span class="text-decoration-underline">?</span>
           </span>
         </template>
-        Nobody asked for these rows. The backend opened a stream per symbol towards this browser, using
-        the same call a client uses to ask a question - one mechanism, both directions.
+        Nobody asked for these rows. The backend opened a stream per symbol towards this browser, using the same call a
+        client uses to ask a question - one mechanism, both directions.
       </v-tooltip>
     </v-card-title>
     <v-card-text class="pa-0">

@@ -18,9 +18,9 @@
             unary &middot; streaming &middot; fragmented &middot; <span class="text-decoration-underline">?</span>
           </span>
         </template>
-        Three shapes at once, over the socket still carrying every price on the left: the quote is one
-        answer to one question, the history is many answers filling in as they arrive, and full depth is
-        a payload larger than a single frame, reassembled for you.
+        Three shapes at once, over the socket still carrying every price on the left: the quote is one answer to one
+        question, the history is many answers filling in as they arrive, and full depth is a payload larger than a
+        single frame, reassembled for you.
       </v-tooltip>
     </v-card-title>
 

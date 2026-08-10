@@ -20,8 +20,6 @@
  * transport (D1).
  */
 
-import { reactive } from 'vue';
-
 import {
   connect,
   ConnectionLost,
@@ -33,6 +31,7 @@ import {
   type Stream,
   StreamReset,
 } from 'muxws';
+import { reactive } from 'vue';
 
 // --------------------------------------------------------------------------- what the wire carries
 
@@ -145,6 +144,14 @@ export const store = reactive({
   lastStreamEnd: null as string | null,
   /** True between a socket loss and the first tick of the next connection; the rows are stale. */
   stale: false,
+  /**
+   * Renders avoided, not frames lost.
+   *
+   * Every tick is received, counted and timed; this counts the ones whose row was superseded before
+   * a paint could happen. It climbs as soon as the push rate passes what a display can show, which
+   * is the honest way to say "the socket is faster than your monitor".
+   */
+  coalesced: 0,
 
   rows: {} as Record<string, BoardRow>,
   events: [] as string[],
@@ -363,16 +370,56 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
   }
 }
 
+/**
+ * Rows that have arrived and are not on the screen yet. **Not reactive**, deliberately.
+ *
+ * Writing every tick straight into `store.rows` is what froze this page at 10 ms: twenty symbols at
+ * a hundred a second is two thousand reactive writes a second, each one scheduling a re-render of a
+ * grid that a display can repaint sixty times a second at best. The work is unbounded, the observable
+ * output is not, and the main thread loses - to the point where the control that would have turned
+ * the rate back down could not be clicked.
+ *
+ * Nothing is dropped on the wire: every frame is received, counted, and its lateness measured, which
+ * is why the diagnostics keep climbing while the board is quiet. What is coalesced is the *painting*.
+ */
+const pending = new Map<string, BoardRow>();
+
+/** Renders avoided by coalescing - a second tick for a symbol that had not been painted yet. */
+let coalesced = 0;
+
+let flushScheduled = false;
+
 function applyTick(row: BoardRow): void {
-  store.rows[row.symbol] = row;
-  store.stale = false;
+  // Ingest at full rate, and measure here: lateness is a property of when the frame *arrived*, and
+  // measuring it after a paint would report this demo's own render budget as the socket's latency.
   const now = performance.now();
   const previous = lastTickAt.get(row.symbol);
   lastTickAt.set(row.symbol, now);
-  // The first row of a stream is the snapshot, not a tick: there is no previous arrival to be late
-  // relative to, and counting it would report the whole page load as latency.
-  if (previous === undefined) return;
-  noteLateness(now - previous - store.tickInterval * 1000);
+  if (previous !== undefined) noteLateness(now - previous - store.tickInterval * 1000);
+
+  if (pending.has(row.symbol)) coalesced += 1;
+  pending.set(row.symbol, row);
+  scheduleFlush();
+}
+
+/**
+ * One paint per frame of animation, however many ticks arrived in between.
+ *
+ * `requestAnimationFrame` rather than a timer: it is the rate the screen actually updates at, and it
+ * stops entirely when the tab is hidden - so a backgrounded demo costs nothing and does not build a
+ * backlog to render on return, because `pending` holds the newest row per symbol and nothing else.
+ */
+function scheduleFlush(): void {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  requestAnimationFrame(() => {
+    flushScheduled = false;
+    if (pending.size === 0) return;
+    for (const [symbol, row] of pending) store.rows[symbol] = row;
+    pending.clear();
+    store.stale = false;
+    store.coalesced = coalesced;
+  });
 }
 
 function noteLateness(lateness: number): void {

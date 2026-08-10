@@ -73,9 +73,8 @@
         </v-btn>
         <span v-if="store.exportReport" class="text-caption">
           {{ kb(store.exportReport.bytes) }} in <strong>{{ store.exportReport.fragments }}</strong> fragments over
-          {{ store.exportReport.ms }} ms &middot;
-          <strong>{{ store.exportReport.interleaved }}</strong> tick frames interleaved between the first and last
-          fragment &middot; worst tick lateness while it ran
+          {{ store.exportReport.ms }} ms &middot; <strong>{{ store.exportReport.interleaved }}</strong> tick frames
+          interleaved between the first and last fragment &middot; worst tick lateness while it ran
           <strong>{{ store.exportReport.worstLatencyMs }} ms</strong>
         </span>
         <span v-else class="text-caption text-medium-emphasis">
@@ -99,7 +98,9 @@
 
       <div class="log">
         <div v-for="(line, index) in store.events" :key="`${index}-${line}`" class="log-line">{{ line }}</div>
-        <div v-if="store.events.length === 0" class="text-medium-emphasis">nothing has happened to the connection yet</div>
+        <div v-if="store.events.length === 0" class="text-medium-emphasis">
+          nothing has happened to the connection yet
+        </div>
       </div>
     </v-card-text>
   </v-card>
@@ -127,6 +128,10 @@ const metrics = computed(() => [
   { label: 'streams ended by a failure', value: store.streamsLost },
   { label: 'frames/s', value: `${store.framesInPerSecond} in / ${store.framesOutPerSecond} out` },
   { label: 'bytes/s', value: `${kb(store.bytesInPerSecond)} in / ${kb(store.bytesOutPerSecond)} out` },
+  // Not "dropped": every tick arrived, was counted and was timed. This is the count whose row was
+  // superseded before the browser could paint it, and it starts climbing the moment the push rate
+  // passes what a display can show.
+  { label: 'renders coalesced', value: store.coalesced },
 ]);
 
 /** Fixed at four tick periods so the line does not silently rescale under a stall it is measuring. */

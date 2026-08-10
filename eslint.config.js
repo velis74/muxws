@@ -18,6 +18,42 @@ export default [
     ignores: ['dist/*', 'coverage/*', 'node_modules/*', 'docs/*', 'vite.config.ts'],
   },
   {
+    // The demo frontend, which had never been linted at all: `lint:ci` ran `eslint ts interop`, and
+    // the demo was type-checked by `vue-tsc` at build time and by nothing else. Third instance of
+    // this gap in one repository - a directory outside the lint globs is a directory whose style
+    // rules are aspirational.
+    files: ['demo/frontend/**/*.ts', 'demo/frontend/**/*.vue'],
+    languageOptions: {
+      parserOptions: { project: './demo/frontend/tsconfig.json' },
+      // Browser code, so the browser's globals are defined. Without these `no-undef` fires on
+      // `window`, `performance` and `requestAnimationFrame` - which would be a lint config declaring
+      // that a browser has no browser in it.
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        performance: 'readonly',
+        requestAnimationFrame: 'readonly',
+        sessionStorage: 'readonly',
+        WebSocket: 'readonly',
+        setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        clearTimeout: 'readonly',
+        console: 'readonly',
+      },
+    },
+    rules: {
+      // Vue single-file components are PascalCase by convention - it is how the framework's own
+      // documentation writes them, how `<BoardGrid />` reads in a template, and what the author's
+      // other Vue projects do. `unicorn/filename-case` is right for `ts/` and wrong here, and the
+      // repository already accepts this asymmetry between its Python and TypeScript halves.
+      'unicorn/filename-case': 'off',
+      // `Diagnostics` is a page section, not a component published for reuse; the rule exists to stop
+      // a name colliding with a future HTML element, which this one cannot.
+      'vue/multi-word-component-names': 'off',
+    },
+  },
+  {
     // `interop/` is Node ESM and has its own tsconfig, because the root one compiles to CommonJS and
     // rejects `import.meta` (TS1343). The typed rules need to be told where its programme lives, or
     // they refuse to parse the file at all - which is how ~1700 lines of load-bearing WSM-CDC-007
