@@ -913,3 +913,45 @@ brief named.
 **What I did:** the rule now requires one callable per job where one cannot do both, requires both to
 be documented as required rather than optional, and carries the failure its own absence caused. The id
 is unchanged.
+
+## A gap in my own mutation method, found while closing the last one
+
+**What I was doing:** proving a new test can fail, by editing a library file, running the test, and
+copying the file back from a scratch copy.
+
+**What went wrong:** after one restore the suite kept failing against a file `git diff` reported as
+identical to HEAD. The source *was* restored; Python was running the **cached bytecode** compiled from
+the mutated version. I spent a cycle reading the failure as a real defect before checking
+`__pycache__`.
+
+**What it means for everything before it:** a mutation whose restore left stale bytecode would leave
+the *next* run red, which is loud and gets noticed. The dangerous direction is the other one — a
+mutation that appeared not to be caught because the test ran against pre-mutation bytecode, reported
+as "this test has no teeth" when it does. I re-ran the one mutation in this round that had looked like
+a survivor with the cache cleared, and it was a genuine survivor for a different reason (below); but
+earlier rounds in this project used the same method, so any single "mutation survived" finding from
+them is worth one re-check before being believed.
+
+**The method now:** clear `__pycache__` after every restore, and never read a post-restore failure as
+a finding without checking `git diff` first.
+
+## `sequences_property_test.py` — what the enumerated tests structurally could not reach
+
+Every other test in this suite enumerates: `stream_test.py` walks the forty-five state-table cells one
+at a time, `conformance/sequences/` scripts thirteen exchanges someone thought of. Both are necessary
+and neither can find the ordering nobody wrote down — which, on this project's record, is where the
+defects were.
+
+Two things the property test taught while being written, both about invariants rather than about the
+library:
+
+**An invariant asserted against a sequence that cannot produce a violation is not an invariant.** The
+first version asserted that reset code 9 never reaches the wire, and a mutation removing that guard
+left it green. Socket death synthesises `CONNECTION_CLOSED` *locally* and never enqueues a frame, so
+the only path by which code 9 can reach the wire is an application asking for it explicitly — and the
+sequence never did. The sequence now occasionally asks, and the mutation fails four seeds.
+
+**Catching the documented failures narrowed the test to what it had already filtered for.** The first
+version caught `StreamReset`, `ConnectionLost` and `ProtocolError`, and then asserted that nothing
+non-muxws escaped — an assertion the `except` clause had made true by construction. It now records
+whatever comes out and judges afterwards, which is the same test with teeth.
