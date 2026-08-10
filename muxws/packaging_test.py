@@ -593,3 +593,29 @@ def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts:
 
     compiled = [name for name in names if "__pycache__" in name or name.endswith(".pyc")]
     assert compiled == [], f"the wheel ships bytecode built on whoever ran the release: {compiled[:5]}"
+
+
+def test_the_demo_extra_can_actually_serve_a_websocket(pyproject: dict[str, Any]):
+    """`pip install -e ".[demo,starlette]"` has to be the whole story, and it was not.
+
+    uvicorn ships no WebSocket protocol implementation of its own. Without `websockets` or `wsproto`
+    it serves ordinary HTTP perfectly and answers **404 to every upgrade**, logging
+    "No supported WebSocket library detected" where nobody is looking. So the demo loads in the
+    browser, the page renders, and only the socket fails - and because a browser is never shown the
+    HTTP status, the dialer reports the one thing it can name, which is a codec mismatch.
+
+    That is what the first person to run this demo saw, and every part of the diagnosis pointed away
+    from the cause: the codec was right, the proxy was right, the handshake code was right.
+
+    Asserted against the manifest and not against the environment, because the environment running
+    this test has `[dev]`, which carries `websockets` for other reasons entirely - which is exactly
+    why the gap survived being tested here.
+    """
+    demo = pyproject["project.optional-dependencies"]["demo"]
+
+    assert any("uvicorn" in requirement for requirement in demo), "the demo extra no longer installs a server"
+    implementations = ("websockets", "wsproto", "uvicorn[standard]")
+    assert any(any(name in requirement for name in implementations) for requirement in demo), (
+        f"the demo extra installs uvicorn with no WebSocket implementation: {demo}. uvicorn answers "
+        f"404 to every upgrade without one, and the failure surfaces in the browser as a codec mismatch"
+    )

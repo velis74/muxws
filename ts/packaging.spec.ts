@@ -229,7 +229,6 @@ describe('the browser entry point (WSM-PKG-003)', () => {
   );
 });
 
-
 describe('the library imports nothing above it in the stack - WSM-INV-001', () => {
   // Read from the SOURCE, deliberately, and this is the whole point of the test. The bundle
   // assertions above prove what a build *emits*, and `import type` is erased before anything is

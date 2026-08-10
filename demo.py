@@ -13,6 +13,10 @@ wheel and looks inside it rather than taking that on trust.
     pip install -e ".[demo,starlette]"
     npm install
     python demo.py
+
+`[demo]` carries `websockets` deliberately: uvicorn has no WebSocket protocol implementation of its
+own and answers 404 to every upgrade without one, while serving the page perfectly - so the demo
+would load and only the socket would fail.
 """
 
 import contextlib

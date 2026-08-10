@@ -9,7 +9,7 @@
  * which is how the peer learns the connection died.
  */
 
-import { ConnectionClosed, ProtocolError } from '../errors';
+import { CodecMismatch, ConnectionClosed, ProtocolError } from '../errors';
 import { PREFIX, mismatchError, offer } from '../subprotocol';
 
 import type { SocketAdapter } from './index';
@@ -40,6 +40,34 @@ export interface BrowserSocketOptions {
 interface Waiter {
   resolve: (message: Message) => void;
   reject: (error: unknown) => void;
+}
+
+/**
+ * The socket never opened, and a browser cannot say why.
+ *
+ * A refused handshake and an unreachable server are **the same events** here: `error` then `close`
+ * with code 1006 and no reason, because the HTTP status and body are not exposed to JavaScript. The
+ * previous message asserted the acceptor had refused the codec, which is one of the two possibilities
+ * and reads as a diagnosis. Against a dev-server proxy pointing at a port nothing serves - the demo's
+ * own failure mode when the backend is not up - it sent the reader looking at codec configuration
+ * that was never wrong.
+ *
+ * `CodecMismatch` is still the class: WSM-CDC-024 requires a refused handshake to surface it and
+ * forbids a bare connection failure, and this is exactly the case the rule was written for - the
+ * dialer composes the diagnostic itself *because* the browser cannot read the rejection. What changes
+ * is that the message now names both causes and puts the reachable one first, since that is the one a
+ * reader can check in a second.
+ */
+function unopenedError(configured: string, url: string): CodecMismatch {
+  return new CodecMismatch(
+    `the muxws socket to ${url} never opened. A browser is not shown the HTTP status, so this is ` +
+      'either of two things and muxws cannot tell them apart: nothing is listening at that address ' +
+      '(check the server is running, and that a dev-server proxy points at the port it is actually ' +
+      `on), or the acceptor refused the handshake because it speaks a codec other than '${configured}' ` +
+      '(VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on the server; muxws asserts the codec at the ' +
+      'handshake and never falls back, WSM-CDC-022/024).',
+    { configured },
+  );
 }
 
 /** One browser WebSocket, seen the only way the peer is allowed to see it. */
@@ -155,7 +183,7 @@ export class BrowserSocket implements SocketAdapter {
       };
       const onOpen = done(resolve);
       const onFail = done(() => {
-        reject(mismatchError(codecName));
+        reject(unopenedError(codecName, this.socket.url));
       });
       this.socket.addEventListener('open', onOpen);
       this.socket.addEventListener('error', onFail);

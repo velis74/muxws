@@ -36,7 +36,12 @@ msgpack = ["msgpack>=1.0"]
 # excluded from both artefacts and nothing in the library imports it. These two are here so that
 # `pip install -e ".[demo,starlette]"` is the whole story for running it, and so that they stay out
 # of `[project] dependencies`, which WSM-PKG-002 requires to be empty.
-demo = ["fastapi", "uvicorn"]
+# `websockets` is not optional here even though muxws itself does not import it: uvicorn ships no
+# WebSocket protocol implementation of its own, and without one it answers **404 to every upgrade**
+# while serving ordinary HTTP perfectly - so the demo loads in the browser and only the socket fails,
+# which reads as a muxws defect and is not one. Reported by the first person to run the demo, whose
+# environment had this extra and nothing else.
+demo = ["fastapi", "uvicorn", "websockets"]
 dev = [
     "coverage",
     "pytest",

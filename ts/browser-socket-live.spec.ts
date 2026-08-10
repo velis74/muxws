@@ -99,3 +99,31 @@ describe('BrowserSocket against a real WebSocket', () => {
     expect(adapter.isClosed).toBe(true);
   });
 });
+
+describe('an unreachable acceptor is not diagnosed as a codec mismatch', () => {
+  it('names both causes, and the reachable one first', async () => {
+    // The demo's own failure mode, reported by its first reader: a dev-server proxy pointing at a
+    // port nothing serves. In a browser this is indistinguishable from a refused handshake - `error`
+    // then `close` with 1006, no status, no body - and the old message asserted the acceptor had
+    // refused the codec, which sent the reader to check configuration that was never wrong.
+    //
+    // The class stays `CodecMismatch` (WSM-CDC-024 requires it for a refused handshake and forbids a
+    // bare connection failure, and this is the case that rule was written for). The message is what
+    // had to change.
+    const dead = 'ws://127.0.0.1:9/ws'; // discard port: reachable stack, nothing accepting
+    const failure = await BrowserSocket.connect(dead, 'json').then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(CodecMismatch);
+    const message = (failure as Error).message;
+    expect(message, 'the address a reader would check is not in the message').toContain('127.0.0.1:9');
+    expect(message, 'the reachable cause is not named').toMatch(/nothing is listening/);
+    expect(message, 'the codec cause is not named either - both must be').toMatch(/codec/);
+    // The overclaim that started this: a flat assertion that the acceptor refused the codec.
+    expect(message, 'the message still diagnoses a cause it cannot know').not.toMatch(
+      /^the acceptor refused the muxws handshake/,
+    );
+  });
+});

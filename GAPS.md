@@ -990,3 +990,34 @@ this up.
 **Still not closed:** a real browser. Node's WebSocket is not Chrome, and the demo frontend has never
 been rendered. Neither is reachable from a terminal, and both stay recorded rather than quietly
 counted as covered.
+
+## muxws-m8-demo.md — the demo's install could not serve a WebSocket, and the error blamed the codec
+
+**What happened:** the first person to run the demo got
+`CodecMismatch: the acceptor refused the muxws handshake for codec 'json'` in the browser. The page
+loaded, the socket did not.
+
+**What it actually was:** `uvicorn` ships **no WebSocket protocol implementation of its own**. Without
+`websockets` or `wsproto` it serves ordinary HTTP perfectly and answers **404 to every upgrade**,
+logging "No supported WebSocket library detected" into a server log nobody was reading. The `[demo]`
+extra was `["fastapi", "uvicorn"]` — so the documented install produced a backend that could not do
+the one thing the demo needs.
+
+**Why every check missed it:** my own environment has `[dev]`, which carries `websockets` for
+unrelated reasons — the `websockets` transport tests. Every run of the demo, of the quick start, and
+of `pytest` happened in an environment that had the missing piece by accident. The reader's did not.
+This is the *packaging* twin of the four rig failures already recorded here, and it took the same
+form: the environment could not see the gap.
+
+**The second half, which is a real library defect:** `BrowserSocket.waitOpen` rejected **every** failed
+open with `mismatchError(codecName)`, whose text asserts the acceptor refused *the codec*. In a browser
+a refused handshake and an unreachable server are the same two events — `error` then `close` with 1006,
+no status, no body — so that message diagnoses a cause it cannot know, and it sent the reader to check
+configuration that was never wrong. The class stays `CodecMismatch` (WSM-CDC-024 requires it and the
+browser genuinely cannot distinguish), but the message now names both causes, puts the reachable one
+first, and includes the address.
+
+**Both are now witnessed:** `packaging_test.py::test_the_demo_extra_can_actually_serve_a_websocket`
+reads the manifest rather than the environment — precisely because the environment running it has
+`websockets` for other reasons — and `ts/browser-socket-live.spec.ts` dials a port nothing serves and
+asserts the message names the reachable cause.
