@@ -4,6 +4,15 @@ This document specifies **muxws**: framing, multiplexing, stream lifecycle, canc
 connection lifecycle over one WebSocket. It is written to be implemented from — a third port should
 need nothing else to interoperate with the Python and TypeScript ports in this repository.
 
+The stream model is deliberately that of **HTTP/2 and HTTP/3**: many independent streams over one
+connection, either peer able to open one, headers then body then optional trailers, per-stream
+cancellation, and `goaway` for graceful shutdown. An implementer who knows those protocols will find
+this one familiar, and that is the intent. Two differences are load-bearing and are *not* accidents
+of an unfinished design. A WebSocket is a single TCP connection, so there is **one global message
+order** and no per-stream loss recovery — which is why the frame cap is a protocol constant
+(WSM-FRG-004) rather than a negotiated limit. And there is **no `SETTINGS` exchange at all**
+(WSM-CON-031): every limit here is either a constant or one peer's private defence.
+
 Requirement levels are RFC 2119: **MUST**, **MUST NOT**, **SHOULD**, **MAY**. Every rule carries a
 stable id and is cross-referenced by id only. Rules appear in **id order** (§5), after the wire form
 they talk about (§2–§4).

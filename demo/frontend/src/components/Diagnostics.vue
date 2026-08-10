@@ -51,7 +51,7 @@
            reads four-a-second as what muxws can do. Turn it up and watch frames/second, not the
            board - the rows blur long before the socket notices. -->
       <div class="d-flex flex-wrap align-center ga-3 mb-3">
-        <span class="text-caption text-medium-emphasis">push every</span>
+        <span class="text-caption text-medium-emphasis">push symbols every</span>
         <v-btn-toggle
           :model-value="intervalMs"
           density="compact"
@@ -62,9 +62,6 @@
         >
           <v-btn v-for="choice in intervals" :key="choice" :value="choice" size="small">{{ choice }} ms</v-btn>
         </v-btn-toggle>
-        <span class="text-caption text-medium-emphasis">
-          per symbol &times; {{ store.stats?.symbols ?? '?' }} symbols
-        </span>
       </div>
 
       <div class="d-flex flex-wrap align-center ga-3">

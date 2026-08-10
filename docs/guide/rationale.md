@@ -60,6 +60,44 @@ What you get instead, already written and already tested against a shared cross-
 - **A reconnect helper** with jittered backoff, an idle-only heartbeat, and an opening payload
   replayed verbatim on every connection. See [Reconnect](/guide/reconnect).
 
+## Where the model comes from
+
+muxws did not invent this. It is the stream model **HTTP/2 and HTTP/3 already settled on**, moved
+onto a WebSocket - and the reason it is worth copying is that every problem in the section above was
+solved there first, in public, under load, by people who had to live with the answer.
+
+What is deliberately mimicked:
+
+- many independent streams multiplexed over one connection;
+- either end able to open one, so a server push is not a special case;
+- headers, then a body, then optional trailers;
+- unary request/response and streaming responses built on the same primitive;
+- per-stream cancellation that leaves every other stream alone;
+- connection-level graceful shutdown with a `goaway` naming the last stream it processed.
+
+If you have written against gRPC or an HTTP/2 client, `open()`, `end`, trailers and `goaway` will
+already read the way you expect. That is on purpose.
+
+### What is not mimicked, and cannot be
+
+This is a claim about **semantics**, not about transport, and the difference is worth stating plainly
+rather than leaving you to discover it.
+
+A WebSocket runs over one TCP connection. Therefore:
+
+- **No independent per-stream loss recovery.** QUIC's headline feature is that a lost packet stalls
+  only the stream it belonged to. Under TCP one lost segment stalls *every* muxws stream until it is
+  retransmitted, and no framing choice above the transport can undo that.
+- **No 0-RTT, no connection migration, no per-stream congestion control.** Those live in QUIC, below
+  where muxws sits.
+- **One global message order.** A WebSocket delivers messages in the order they were sent, across all
+  streams, because there is exactly one send queue. This is why the frame cap is a constant rather
+  than something you tune: it bounds how long any one stream can hold that queue.
+
+And one thing that is deliberately *not* copied even though it could have been: HTTP/2 and HTTP/3
+open with a `SETTINGS` exchange, and muxws has none at all. No limit is ever negotiated - see
+[Connection lifecycle](./connection-lifecycle.md).
+
 ## The three things muxws is not
 
 **Not a router.** There is one incoming-stream handler per peer, registered with `on_stream`, and it

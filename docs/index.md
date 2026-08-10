@@ -4,7 +4,7 @@ layout: home
 hero:
   name: muxws
   text: Many streams, one WebSocket
-  tagline: A framing, multiplexing, stream-lifecycle and cancellation protocol, in Python and TypeScript.
+  tagline: HTTP/3 stream semantics over a WebSocket - one wire format, any number of ports.
   actions:
     - theme: brand
       text: Get Started
@@ -17,8 +17,8 @@ hero:
       link: https://github.com/velis74/muxws
 
 features:
-  - title: Many streams on one socket
-    details: Independently addressed, independently cancellable, bidirectional streams sharing a single connection.
+  - title: HTTP/3 semantics, on a WebSocket
+    details: The stream model HTTP/2 and HTTP/3 already settled - many independent streams, either end able to open one, cancellation per stream - without needing QUIC or an HTTP/3 stack.
   - title: Symmetric peers
     details: One Peer type per language. Server push is the same mechanism as a client request.
   - title: Automatic fragmentation
@@ -27,6 +27,6 @@ features:
     details: Jittered backoff, a heartbeat that bounds detection, and an opening payload replayed on every connection.
   - title: Pluggable codec
     details: JSON by default, msgpack optional, your own if you want one - asserted at the handshake.
-  - title: Two languages, one wire
-    details: Python and TypeScript ports proven against a shared conformance corpus in CI.
+  - title: Ports, not bindings
+    details: Python and TypeScript today, each a full implementation of the same frozen wire. A third is a normative spec and 65 shared fixtures away - the corpus exists so nobody has to read either port's source to write one.
 ---
