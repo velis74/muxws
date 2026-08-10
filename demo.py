@@ -1,7 +1,8 @@
 """One entry point for the demo: `python demo.py` starts both halves.
 
 The Vite dev server runs in a daemon child process and uvicorn runs in this one, so a single Ctrl-C
-stops the pair. The backend listens on 127.0.0.1:8000 and the dev server proxies `/ws` to it
+stops the pair. The backend listens on 127.0.0.1:8020 (override with `MUXWS_DEMO_PORT`) and
+the dev server proxies `/ws` to it
 (`demo/frontend/vite.config.ts`), which is why neither half needs a CORS story or a second origin.
 
 This file is a *consumer* of muxws, not part of it. Nothing under `muxws/` imports it, no test
@@ -67,12 +68,18 @@ def run_fastapi():
     # `reload=False`: the reloader replaces this process with a supervisor and a fresh worker, and
     # the frontend child below belongs to *this* process. A reload would orphan it and the next one
     # would find port 5173 taken.
-    uvicorn.run("demo.backend.main:app", host="127.0.0.1", port=8000, reload=False)
+    # The port comes from the app rather than from a second literal here: two copies of a port
+    # number drift, and the one that drifts is whichever the reader is not looking at.
+    from demo.backend.main import HOST, PORT
+
+    uvicorn.run("demo.backend.main:app", host=HOST, port=PORT, reload=False)
 
 
 if __name__ == "__main__":
     print("Starting the muxws demo...")
-    print("  backend:  http://127.0.0.1:8000")
+    from demo.backend.main import PORT
+
+    print(f"  backend:  http://127.0.0.1:{PORT}")
     print("  frontend: http://127.0.0.1:5173")
     fe_proc = multiprocessing.Process(target=run_fe, daemon=True)
     fe_proc.start()

@@ -4,7 +4,7 @@ One route, and nothing transport-specific after `accept()`. `accept()` performs 
 because it is the only party that knows which `muxws.v1.<codec>` subprotocol to select
 (WSM-CDC-026) - which is also why there is no `await websocket.accept()` anywhere in this file.
 
-`python demo.py` from the repository root starts this under uvicorn on :8000 and the Vite dev server
+`python demo.py` from the repository root starts this under uvicorn on :8020 and the Vite dev server
 on :5173. The frontend dials `/ws` through Vite's proxy.
 """
 
@@ -19,7 +19,7 @@ from demo.backend.market import Market
 from muxws import accept, PeerRegistry
 
 HOST = "127.0.0.1"
-PORT = int(os.environ.get("MUXWS_DEMO_PORT", "8000"))
+PORT = int(os.environ.get("MUXWS_DEMO_PORT", "8020"))
 
 app = FastAPI(title="muxws demo", docs_url=None, redoc_url=None)
 

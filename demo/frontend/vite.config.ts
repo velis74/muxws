@@ -27,7 +27,7 @@ export default defineConfig({
       // omitted. Without it Vite proxies the upgrade request as an ordinary GET, the response never
       // carries `Sec-WebSocket-Protocol`, and the dial fails as a subprotocol mismatch
       // (WSM-CDC-020/026) - which reads exactly like a muxws bug and is not one.
-      '/ws': { target: 'ws://127.0.0.1:8000', ws: true },
+      '/ws': { target: 'ws://127.0.0.1:8020', ws: true },
     },
   },
 });
