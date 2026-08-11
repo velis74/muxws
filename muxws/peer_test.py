@@ -136,8 +136,21 @@ _ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION = frozenset(
 )
 
 
+def _is_defined_here(cls: type, attr: str) -> bool:
+    """Is `attr` the library's own, rather than inherited from `str`, `int` or `Exception`?
+
+    Only what muxws writes is this rule's subject, and the inherited half is not even stable to walk:
+    `dir()` of a `str`-mixin enum grew every `str` method in 3.11, so counting it makes the surface a
+    function of the interpreter version.
+    """
+    for base in cls.__mro__:
+        if attr in vars(base):
+            return getattr(base, "__module__", "").split(".")[0] == "muxws"
+    return False
+
+
 def _public_callables() -> list[tuple[str, Any]]:
-    """`(qualified name, callable)` for everything reachable from `muxws.__all__`."""
+    """`(qualified name, callable)` for everything muxws itself defines under `muxws.__all__`."""
     import muxws
 
     found: list[tuple[str, Any]] = []
@@ -146,6 +159,8 @@ def _public_callables() -> list[tuple[str, Any]]:
         if inspect.isclass(obj):
             for attr in dir(obj):
                 if attr.startswith("_") and attr != "__init__":
+                    continue
+                if not _is_defined_here(obj, attr):
                     continue
                 member = inspect.getattr_static(obj, attr, None)
                 if isinstance(member, property) or not callable(member):
@@ -1604,7 +1619,7 @@ def test_the_public_api_is_async_exactly_where_the_rule_says():
     import muxws
 
     surface = _public_callables()
-    assert len(surface) > 100, "the walker found almost nothing to check"
+    assert len(surface) > 60, "the walker found almost nothing to check"
     asynchronous = {name for name, function in surface if inspect.iscoroutinefunction(function)}
     assert asynchronous == _MUST_BE_ASYNC
 

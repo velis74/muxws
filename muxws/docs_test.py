@@ -219,7 +219,10 @@ def test_every_public_python_symbol_is_documented() -> None:
         for member in vars(cls):
             if not (member.startswith("__") and member.endswith("__")):
                 continue
+            # `__firstlineno__` and `__static_attributes__` are written by the 3.13+ compiler.
             if member in {"__init__", "__module__", "__qualname__", "__doc__", "__dict__", "__weakref__"}:
+                continue
+            if member in {"__firstlineno__", "__static_attributes__"}:
                 continue
             if member in {"__slots__", "__annotations__", "__repr__"}:
                 continue
