@@ -1,6 +1,6 @@
 # muxws
 
-**HTTP/3 stream semantics over a WebSocket.** Many independent, cancellable, bidirectional streams on
+**HTTP/2 and HTTP/3 stream semantics over a WebSocket.** Many independent, cancellable, bidirectional streams on
 one socket, either end able to open one - the model HTTP/2 and HTTP/3 already settled, without needing
 QUIC or an HTTP/3 stack. The wire format is the product; Python and TypeScript are the two ports that
 exist today, and [`SPEC.md`](https://github.com/velis74/muxws/blob/main/SPEC.md) plus
@@ -9,8 +9,9 @@ written from.
 
 The mimicry is of *semantics*, not transport: one TCP connection means one global message order and no
 per-stream loss recovery - [the rationale](https://docs.velis.si/muxws/guide/rationale) says what is and
-is not copied. muxws is not a router, not a serializer of domain objects, not an authentication
-mechanism, not a durable store and not an RPC framework.
+is not copied, and [the comparison](https://docs.velis.si/muxws/guide/comparison) accounts for it frame
+by frame. muxws is not a router, not a serializer of domain objects, not an authentication mechanism,
+not a durable store and not an RPC framework.
 
 ## Install
 

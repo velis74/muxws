@@ -1101,3 +1101,91 @@ Turning on `datetime=True` / `timestamp=3` in `MsgpackCodec` is the small, separ
 would fix `datetime` under msgpack alone. Deliberately not done here: the wire is frozen at 1.0, and
 `muxws.v1.msgpack` meaning two different things across releases is the shape of change WSM-CON-009
 exists to prevent.
+
+## muxws-m3-transports.md — WSM-API-021, transports nobody has written an adapter for
+
+Raised by the author: the adapter seam is four methods and claims to be transport-agnostic, and every
+adapter that ships is a WebSocket. Worth deciding whether that is a statement about the protocol or
+only about who has needed one so far.
+
+**What the seam actually demands**, read off WSM-API-021 and the two obligations in
+`docs/guide/transports.md`: message boundaries (`receive()` returns one whole message, never a byte
+range), reliable and ordered delivery (SPEC.md §0 stands on "one global message order" and has no
+per-stream loss recovery, which is why the frame cap is a constant), full duplex on a long-lived
+session, a `close(code, reason)`, and a text/binary split the codec decides rather than the adapter
+sniffs. Nothing in that list says WebSocket.
+
+**Candidates that meet it.** Each is listed with what it buys rather than with what it is not; the
+order is not a ranking.
+
+- **Unix domain socket or named pipe**, with length-prefix framing — a daemon and its clients on one
+  machine, where local IPC is usually one request at a time and the concurrency muxws provides is
+  simply absent. It is also the only transport here that authenticates where §5.2 says it belongs and
+  with nothing on the wire: the socket's permissions gate the connection, and `SO_PEERCRED` /
+  `getpeereid` give the acceptor the peer's uid and gid at accept time.
+- **`postMessage` / `MessagePort`** — Web Worker, SharedWorker, iframe, extension port. Message
+  boundaries, ordering and duplex come free, structured clone means a codec could be close to a no-op,
+  and the layer being replaced is the same hand-rolled `{ id, type }` wrapper the rationale describes.
+  The shortest of these to write, so the cheapest demonstration that the seam is real.
+- **stdio between a parent and a child process**, with the same framing — the LSP and MCP shape,
+  where the envelope is hand-rolled once per tool and the cancellation story is usually missing.
+- **Plain TCP or TLS**, same framing — server-to-server links that terminate no HTTP and gain nothing
+  from an upgrade handshake.
+- **WebRTC `RTCDataChannel`** in `ordered: true` reliable mode — peer to peer with no server in the
+  path at all. The unreliable mode is disqualified by the paragraph above, not by taste.
+
+**Redundant rather than impossible:** WebTransport, HTTP/3 and raw QUIC already carry streams, and
+carry them better — they have the per-stream loss recovery this protocol explicitly does not. Layering
+muxws on one buys a single API across both worlds and nothing else.
+
+**Disqualified:** UDP and unreliable data channels (reassembly assumes nothing is lost and nothing
+overtakes); brokers such as Kafka, NATS, AMQP and Redis pub/sub (no session between two named ends,
+no close, and stream-id parity has nothing to stand on); SSE-plus-POST (two half-channels glued back
+into one ordering by hand).
+
+**Two things such an adapter must solve that the four signatures do not show.** Codec agreement is
+carried by the WebSocket subprotocol today (`muxws.v1.<codec>`, WSM-CDC-022/027/028); another
+transport either configures it on both ends or invents a first message, and the second option is a
+wire change. And the close path speaks in WebSocket close codes in places — WSM-RCN-011's 1000, the
+policy-violation code in WSM-CDC-028 — so an adapter over a transport with no such numbers has to
+choose a mapping, and that mapping should be stated once rather than per adapter.
+
+Not scheduled. Recorded because the claim "the adapter is the only transport-specific code" is
+currently unfalsified rather than demonstrated, and a second, non-WebSocket adapter is what would
+change that — the same argument the demo made in M8.
+
+## muxws-m5a-fragmentation-and-writer.md — WSM-BPR-001/002, half a decision is on the record
+
+**What the rules say:** v1 MUST NOT implement per-stream flow control, and `window_update` is
+reserved as a frame name a v1 peer MUST NOT send (WSM-BPR-001). WSM-BPR-002 then states what the
+mechanisms in v1 *are*: the receiver's concurrency limit (WSM-STM-036 — how many producers may exist
+at once) and `MAX_FRAME_BYTES` (WSM-FRG-004 — how long one of them may hold the send queue).
+
+**What is not on the record anywhere:** what those two mechanisms leave uncovered. Both bound
+*concurrency* and *latency*; neither bounds *rate*. Nothing anywhere makes a producer slow down for a
+consumer that cannot keep up. A peer pushing telemetry faster than the far end renders it fills the
+socket's send buffer, then the writer's queues, then memory — and every rule in the suite is
+satisfied throughout. `docs/guide/sizes-and-fragmentation.md` describes the two limits accurately and
+never says that they are the whole of what "backpressure" means here, so a reader who has met HTTP/2
+`WINDOW_UPDATE` or QUIC `MAX_STREAM_DATA` is entitled to assume an equivalent exists.
+
+**Why this is a gap and not a defect.** The decision itself is sound: per-stream windows on a
+transport with one global message order buy less than they do over QUIC, they cost a frame type and a
+state variable per stream in both directions, and reserving the name keeps the door open at the cost
+of one sentence. Deferring it is right for v1. Recording only the deferral and not its consequence is
+what is wrong, and this entry is the consequence.
+
+**What a reader should be told, and now is** — `docs/guide/comparison.md` says it under *What is
+missing*: treat backpressure in v1 as meaning exactly those two constants, and put the rate limit in
+the application if the traffic needs one.
+
+**What it would cost to close.** A `window_update` frame, a per-stream credit counter on both sides,
+an initial-credit value that cannot be negotiated (there is no `settings` frame, WSM-CON-031) and so
+would have to be another protocol constant, and a connection-level window on top if the aggregate is
+to be bounded as well. That is a wire change and therefore a new generation (`muxws.v2.<codec>`,
+WSM-CON-009) — which is the reason the name is reserved rather than the mechanism half-built.
+
+**A cheaper adjacent thing, which is not flow control and should not be sold as it:** the send path
+knows its own queue depth (`writer.depth`), so a peer could expose it and let an application throttle
+itself. That is local observation, needs nothing on the wire, and tells a producer only about its own
+end — the far end's inability to keep up stays invisible.

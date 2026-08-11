@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: muxws
-  text: Many streams, one WebSocket
-  tagline: HTTP/3 stream semantics over a WebSocket - one wire format, any number of ports.
+  text: One WebSocket, as many conversations as you need
+  tagline: Either end can start one. Any one of them can be cancelled on its own. A large payload never holds up a small one. It is the layer you would otherwise write again and again in every project.
   actions:
     - theme: brand
       text: Get Started
@@ -17,7 +17,7 @@ hero:
       link: https://github.com/velis74/muxws
 
 features:
-  - title: HTTP/3 semantics, on a WebSocket
+  - title: HTTP/2 and HTTP/3 semantics, on a WebSocket
     details: The stream model HTTP/2 and HTTP/3 already settled - many independent streams, either end able to open one, cancellation per stream - without needing QUIC or an HTTP/3 stack.
   - title: Symmetric peers
     details: One Peer type per language. Server push is the same mechanism as a client request.

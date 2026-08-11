@@ -98,6 +98,27 @@ And one thing that is deliberately *not* copied even though it could have been: 
 open with a `SETTINGS` exchange, and muxws has none at all. No limit is ever negotiated - see
 [Connection lifecycle](./connection-lifecycle.md).
 
+### The blocking that is solved, and the blocking that is not
+
+The first bullet above says what muxws does not fix and can read as though multiplexing bought you
+nothing. It bought you the half you meet daily. There are two different problems with the same name.
+
+**Application-level head-of-line blocking** is self-inflicted: you put more than one conversation on
+one channel, and a 1 MB export occupies the send queue from its first byte to its last while a
+200-byte progress update waits behind it. **This is solved.** Large payloads are fragmented, the
+frame cap is a constant so no stream can hold the queue for longer than one frame, and the writer
+rotates between streams with at most one prepared frame each - see
+[Sizes & fragmentation](./sizes-and-fragmentation.md).
+
+**Transport-level head-of-line blocking** is inflicted by the network: one lost TCP segment stalls
+every stream until it is retransmitted. **This is not solved, and cannot be above TCP.** Loss is
+visible only to whoever owns the packets, and by the time a message reaches muxws the kernel has
+already either repaired the gap or is still holding everything behind it. QUIC fixes this by *being*
+the transport.
+
+So: muxws removes the blocking you cause yourself and leaves the blocking the network causes you.
+[Comparison to HTTP/2 and HTTP/3](./comparison.md) is the full accounting.
+
 ## The three things muxws is not
 
 **Not a router.** There is one incoming-stream handler per peer, registered with `on_stream`, and it

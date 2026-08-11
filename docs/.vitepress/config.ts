@@ -22,6 +22,7 @@ export default defineConfig({
           text: 'Introduction',
           items: [
             { text: 'Rationale', link: '/guide/rationale' },
+            { text: 'Comparison to HTTP/2 and HTTP/3', link: '/guide/comparison' },
             { text: 'Getting Started', link: '/guide/getting-started' },
           ],
         },
