@@ -108,7 +108,10 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["muxws"]
+# `docs/examples` is here because leaving it out meant `run_examples_test.py` never ran: it holds the
+# end-to-end checks that the shipped examples still print what the guide says they print, and a test
+# nothing collects is weaker than a test that skips - a skip at least says so.
+testpaths = ["muxws", "docs/examples"]
 python_files = ["*_test.py"]
 asyncio_mode = "auto"
 

@@ -44,6 +44,17 @@ API_EXAMPLE = re.compile(
     r"^#{3,}\s+Example\b[^\n]*\n(?:(?!^#{1,6}\s).)*?^```python\n(?P<code>.*?)^```", re.DOTALL | re.MULTILINE
 )
 
+#: The environment every example subprocess gets, with **this checkout** ahead of anything installed.
+#:
+#: Python puts the *script's* directory on `sys.path`, never the working directory, and
+#: `docs/examples/` holds no package - so without this an example can only import `muxws` when the
+#: interpreter happens to have a copy installed, and what it imports then is that copy rather than
+#: the tree under test. `cwd=REPOSITORY` does not help: it is not on `sys.path` for a script.
+EXAMPLE_ENV = {
+    **os.environ,
+    "PYTHONPATH": os.pathsep.join([str(REPOSITORY), *filter(None, [os.environ.get("PYTHONPATH")])]),
+}
+
 MISSING_ACCEPTOR = importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("uvicorn") is None
 needs_acceptor = pytest.mark.skipif(
     MISSING_ACCEPTOR,
@@ -87,7 +98,7 @@ def example_server(script: str) -> Iterator[str]:
     process = subprocess.Popen(  # noqa: S603 - a fixed script, run with this interpreter
         [sys.executable, str(EXAMPLES / script)],
         cwd=str(REPOSITORY),
-        env={**os.environ, "MUXWS_PORT": str(port)},
+        env={**EXAMPLE_ENV, "MUXWS_PORT": str(port)},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -109,7 +120,7 @@ def run_client(script: str, url: str) -> str:
     completed = subprocess.run(  # noqa: S603 - a fixed script, run with this interpreter
         [sys.executable, str(EXAMPLES / script)],
         cwd=str(REPOSITORY),
-        env={**os.environ, "MUXWS_URL": url},
+        env={**EXAMPLE_ENV, "MUXWS_URL": url},
         capture_output=True,
         text=True,
         timeout=CLIENT_TIMEOUT_SECONDS,
@@ -164,6 +175,7 @@ def test_every_api_example_executes(tmp_path: Path) -> None:
         completed = subprocess.run(  # noqa: S603 - a documented example, run with this interpreter
             [sys.executable, str(script)],
             cwd=str(REPOSITORY),
+            env=EXAMPLE_ENV,
             capture_output=True,
             text=True,
             timeout=CLIENT_TIMEOUT_SECONDS,

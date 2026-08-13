@@ -5,16 +5,17 @@
  * `quickstart-client.ts` must print, byte for byte, what `quickstart_client.py` prints and what
  * `docs/guide/getting-started.md` says they both print.
  *
- * The Python interpreter is `MUXWS_PYTHON`, or `python3`. Where that interpreter cannot import
- * `muxws`, `fastapi` and `uvicorn` the suite skips rather than fails: the TypeScript package has no
- * Python dependency, and a checkout without one is not a broken example.
+ * The Python interpreter is `MUXWS_PYTHON`, or `python3`. It runs the example scripts with this
+ * checkout on `PYTHONPATH`, so `muxws` itself need not be installed; where that interpreter cannot
+ * import `fastapi` and `uvicorn` the suite skips rather than fails, because the TypeScript package
+ * has no Python dependency and a checkout without one is not a broken example.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const EXAMPLES = dirname(fileURLToPath(import.meta.url));
@@ -33,7 +34,37 @@ const RUN_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 50;
 
 const PYTHON = process.env.MUXWS_PYTHON ?? 'python3';
-const pythonReady = spawnSync(PYTHON, ['-c', 'import muxws, fastapi, uvicorn'], { stdio: 'ignore' }).status === 0;
+
+/**
+ * The environment every Python subprocess here gets, with **this checkout** ahead of anything
+ * installed.
+ *
+ * Without it the example servers cannot import `muxws` at all unless the interpreter happens to have
+ * it installed, because Python puts the *script's* directory on `sys.path` and not the working
+ * directory - `docs/examples/` holds no package. With it they import the tree the test is testing,
+ * which is the version a repository test wants anyway: an installed copy would let a green run mean
+ * nothing about the code in front of you.
+ */
+const PYTHON_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  PYTHONPATH: [REPOSITORY, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
+};
+
+/**
+ * Whether the example servers can actually run - asked the way they are actually started.
+ *
+ * `cwd` is a directory with no `muxws` in it, deliberately. The previous form ran `python -c` from
+ * the repository root, where `sys.path[0]` is the working directory and `./muxws/` therefore imports
+ * cleanly - so the probe passed on every checkout while the servers, run as scripts from
+ * `docs/examples/`, could not import a thing. A guard that answers a different question from the one
+ * it is guarding does not skip: it lets the suite fail somewhere else, which is what it did.
+ */
+const pythonReady =
+  spawnSync(PYTHON, ['-c', 'import muxws, fastapi, uvicorn'], {
+    cwd: tmpdir(),
+    env: PYTHON_ENV,
+    stdio: 'ignore',
+  }).status === 0;
 
 /** `<!-- expected-output: name -->` followed by the fenced block the page prints. */
 const EXPECTED_OUTPUT = /<!--\s*expected-output:\s*([a-z][a-z-]*)\s*-->\s*\n+```[a-z]*\n([\s\S]*?)^```/gm;
@@ -105,7 +136,7 @@ async function startServer(script: string): Promise<RunningServer> {
   const port = await freePort();
   const child = spawn(PYTHON, [join(EXAMPLES, script)], {
     cwd: REPOSITORY,
-    env: { ...process.env, MUXWS_PORT: String(port) },
+    env: { ...PYTHON_ENV, MUXWS_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
