@@ -19,8 +19,6 @@ import muxws
 from muxws.errors import ProtocolError
 from muxws.stream import Stream
 
-pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
-
 
 async def _echo(payload: Any, stream: Stream) -> None:
     if (payload or {}).get("action") == "stream":

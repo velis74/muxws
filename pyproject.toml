@@ -61,7 +61,11 @@ dev = [
     "starlette",
     "websockets",
     "msgpack",
-    "httpx",
+    # Starlette's TestClient is what `transports/starlette_test.py` drives a real ASGI app with, and
+    # it wants httpx2: with plain `httpx` it still works and warns, and the warning is emitted at
+    # *import* time, where a `pytest.mark.filterwarnings` inside the module cannot reach it. Filtering
+    # it would have been silencing a deprecation that can simply be resolved instead.
+    "httpx2",
     # The quick start in `docs/guide/getting-started.md` is a FastAPI app served by uvicorn, and
     # `docs/examples/run_examples_test.py` starts it for real. Without these two the three
     # end-to-end example tests skip, which is indistinguishable from passing.
