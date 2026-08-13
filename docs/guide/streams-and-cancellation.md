@@ -97,6 +97,56 @@ await stream.reply({ total: 42 });
 A handler that returns without having ended its stream ends it implicitly, so the common case needs
 no ceremony.
 
+## Leading headers ride each side's first frame
+
+`headers` on `open` is how the opener says what a stream is about before the body is read. The peer
+answering has the same one chance, on the **first frame it sends** - which may carry no payload at
+all, so it can announce what is coming before it has produced any of it.
+
+```python
+# fragment
+async def handler(payload, stream):
+    await stream.send_headers({"content-type": "text/csv", "rows-estimated": 40_000})
+    async for row in rows():           # minutes later, perhaps
+        await stream.send(row)
+    await stream.end()
+```
+
+```typescript
+// fragment
+acceptor.onStream(async (payload, stream) => {
+  await stream.sendHeaders({ 'content-type': 'text/csv', 'rows-estimated': 40_000 });
+  for await (const row of rows()) await stream.send(row);
+  await stream.end();
+});
+```
+
+The opener reads them off `reply_headers` / `replyHeaders`, and waits for them where waiting is the
+point:
+
+```python
+# fragment
+stream = peer.open({"q": "export"}, end=True)
+await stream.reply_headers_arrived.wait()
+print(stream.reply_headers)            # {"content-type": "text/csv", ...} - before the first row
+```
+
+```typescript
+// fragment
+const stream = peer.open({ q: 'export' }, { end: true });
+await stream.replyHeadersArrived;
+console.log(stream.replyHeaders);      // before the first row
+```
+
+If there is nothing to announce early, they can ride the first payload instead -
+`send(payload, headers=...)`, `reply(payload, headers=...)` - and that is one frame rather than two.
+
+Two attributes, not one: `stream.headers` is always the `open`'s and `stream.reply_headers` always
+the answer's, and both read the same from either end of the stream. Each peer gets **one** set per
+stream, spent by its first frame whether or not that frame carried any; a later one raises locally
+and, if a peer puts one on the wire anyway, resets that stream. There is no status field here and
+`headers` is not one - a failed exchange is a `reset` with a code. muxws never reads either set.
+
 ## Trailers ride the `end` frame
 
 Trailers are metadata you only know once the body is finished - a checksum, a row count, a

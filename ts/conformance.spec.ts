@@ -58,11 +58,11 @@ const INVALID_FILES = fixtureFiles(INVALID_DIR);
  * lines* to prove the counts still agree. A fixture that stopped being collected would otherwise be
  * a suite that passes by testing nothing, so keep the declarations on one line each.
  */
-const EXPECTED_SEQUENCE_FIXTURES = 13;
-const EXPECTED_INVALID_FIXTURES = 8;
+const EXPECTED_SEQUENCE_FIXTURES = 14;
+const EXPECTED_INVALID_FIXTURES = 9;
 
 /**
- * The eight cases WSM-TST-003 enumerates, **by name**. Enumerated rather than counted: a count alone
+ * The nine cases WSM-TST-003 enumerates, **by name**. Enumerated rather than counted: a count alone
  * passes when one case is deleted and another duplicated under a new name.
  */
 const REQUIRED_INVALID_CASES = [
@@ -71,6 +71,7 @@ const REQUIRED_INVALID_CASES = [
   'data-for-closed-id',
   'fragment-interrupted-by-non-fragment',
   'frame-over-max-frame-bytes',
+  'headers-on-a-later-frame',
   'open-id-not-monotonic',
   'open-wrong-parity',
   'undecodable-message',
@@ -365,6 +366,7 @@ class Replay {
     else if ('expect_frame' in step) this.expectFrame(step);
     else if ('expect_no_frame' in step) this.expectNoFrame(step);
     else if ('expect_result' in step) await this.expectResult(step.expect_result);
+    else if ('expect_headers' in step) await this.expectHeaders(step.expect_headers);
     else if ('expect_error' in step) await this.expectError(step.expect_error);
     else if ('expect_closed' in step) await this.expectClosed(step.expect_closed);
     else throw new Error(`no step kind in ${JSON.stringify(step)}`);
@@ -377,6 +379,7 @@ class Replay {
       request: (s) => this.callRequest(s),
       notify: (s) => this.callNotify(s),
       send: (s) => this.callSend(s),
+      send_headers: (s) => this.callSendHeaders(s),
       end: (s) => this.callEnd(s),
       reply: (s) => this.callReply(s),
       cancel: (s) => this.callCancel(s),
@@ -443,7 +446,15 @@ class Replay {
   private async callSend(step: Step): Promise<void> {
     await this.streamFor(step.peer as Who, Number(step.stream_ref)).send(step.payload ?? null, {
       end: step.end === true,
+      headers: step.headers as Record<string, unknown> | undefined,
     });
+  }
+
+  /** The answering side's leading headers, on a frame with no payload at all (WSM-API-024). */
+  private async callSendHeaders(step: Step): Promise<void> {
+    await this.streamFor(step.peer as Who, Number(step.stream_ref)).sendHeaders(
+      step.headers as Record<string, unknown>,
+    );
   }
 
   private async callEnd(step: Step): Promise<void> {
@@ -451,12 +462,14 @@ class Replay {
     await this.streamFor(step.peer as Who, Number(step.stream_ref)).end({
       payload: 'payload' in step ? step.payload : undefined,
       trailers: step.trailers,
+      headers: step.headers as Record<string, unknown> | undefined,
     });
   }
 
   private async callReply(step: Step): Promise<void> {
     await this.streamFor(step.peer as Who, Number(step.stream_ref)).reply(step.payload ?? null, {
       trailers: step.trailers,
+      headers: step.headers as Record<string, unknown> | undefined,
     });
   }
 
@@ -634,6 +647,30 @@ class Replay {
     // a peer that delivered the right number of entirely wrong bytes.
     const value = await this.valueOf(spec.ref as string);
     expect(deepEqual(value, spec.value), `${String(spec.ref)} produced ${render(value)}`).toBe(true);
+  }
+
+  /**
+   * What a peer ended up **holding**, which no assertion on frames can see (WSM-API-025).
+   *
+   * `expect_frame` proves the headers went out; this proves they were surfaced, on the attribute
+   * that is theirs. `of` is required rather than defaulted, because the two attributes are the whole
+   * distinction the step exists to check and a fixture that omitted it would be asserting whichever
+   * one this runner happened to prefer. For `reply` the wait is on `replyHeadersArrived` rather than
+   * on a settle count: that event fires the moment the value stops changing, and a fixture that
+   * slept instead would pass against a port that never fired it at all.
+   */
+  private async expectHeaders(spec: Step): Promise<void> {
+    const stream = this.streamFor(spec.peer as Who, Number(spec.stream_ref));
+    const of = String(spec.of);
+    if (of !== 'open' && of !== 'reply') throw new Error(`expect_headers needs "of": "open" or "reply", not ${of}`);
+    if (of === 'reply') {
+      await withTimeout(
+        stream.replyHeadersArrived,
+        `${String(spec.peer)} stream ${String(spec.stream_ref)} reply headers`,
+      );
+    }
+    const held = of === 'open' ? stream.headers : stream.replyHeaders;
+    expect(deepEqual(held, spec.value), `${of} headers were ${render(held)}`).toBe(true);
   }
 
   private async expectError(spec: Step): Promise<void> {
@@ -929,7 +966,7 @@ describe('conformance/invalid', () => {
     });
   });
 
-  it('has a fixture for every one of the eight cases of WSM-TST-003, by name', () => {
+  it('has a fixture for every one of the nine cases of WSM-TST-003, by name', () => {
     // Without this, a deleted fixture is a silently passing suite.
     expect(INVALID_FILES.map((file) => file.replace(/\.json$/, ''))).toEqual(REQUIRED_INVALID_CASES);
     expect(INVALID_FILES.length).toBe(EXPECTED_INVALID_FIXTURES);

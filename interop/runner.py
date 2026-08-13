@@ -567,11 +567,24 @@ STEP_KINDS = (
     "expect_frame",
     "expect_no_frame",
     "expect_result",
+    "expect_headers",
     "expect_error",
     "expect_closed",
 )
 IMPLEMENTED_CALLS = frozenset(
-    {"open", "request", "notify", "send", "end", "reply", "cancel", "iterate", "close", "await_close"}
+    {
+        "open",
+        "request",
+        "notify",
+        "send",
+        "send_headers",
+        "end",
+        "reply",
+        "cancel",
+        "iterate",
+        "close",
+        "await_close",
+    }
 )
 #: The three calls that append an ordinal, in step order (`conformance/README.md`).
 ALLOCATING_CALLS = frozenset({"open", "request", "notify"})
@@ -730,6 +743,8 @@ class Side:
             self.expect_no_frame(step["expect_no_frame"])
         elif "expect_result" in step:
             await self.expect_result(step["expect_result"])
+        elif "expect_headers" in step:
+            await self.expect_headers(step["expect_headers"])
         elif "expect_error" in step:
             await self.expect_error(step["expect_error"])
         elif "expect_closed" in step:
@@ -785,16 +800,25 @@ class Side:
         return self._adopt(step, await self._discover(before))
 
     async def corpus_send(self, step: dict[str, Any]) -> None:
-        await (await self.stream_for(step["stream_ref"])).send(step.get("payload"), end=step.get("end", False))
+        stream = await self.stream_for(step["stream_ref"])
+        await stream.send(step.get("payload"), end=step.get("end", False), headers=step.get("headers"))
+
+    async def corpus_send_headers(self, step: dict[str, Any]) -> None:
+        """The answering side's leading headers, on a frame with no payload at all (WSM-API-024)."""
+        await (await self.stream_for(step["stream_ref"])).send_headers(step["headers"])
 
     async def corpus_end(self, step: dict[str, Any]) -> None:
         stream = await self.stream_for(step["stream_ref"])
         # An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
-        await stream.end(step["payload"] if "payload" in step else ABSENT, trailers=step.get("trailers"))
+        await stream.end(
+            step["payload"] if "payload" in step else ABSENT,
+            trailers=step.get("trailers"),
+            headers=step.get("headers"),
+        )
 
     async def corpus_reply(self, step: dict[str, Any]) -> None:
         stream = await self.stream_for(step["stream_ref"])
-        await stream.reply(step.get("payload"), trailers=step.get("trailers"))
+        await stream.reply(step.get("payload"), trailers=step.get("trailers"), headers=step.get("headers"))
 
     async def corpus_cancel(self, step: dict[str, Any]) -> None:
         await (await self.stream_for(step["stream_ref"])).cancel(step.get("reason"))
@@ -930,6 +954,21 @@ class Side:
             raise StepError(f"{spec['ref']} never produced a result") from None
         if value != spec["value"]:
             raise StepError(f"{spec['ref']} produced {value!r}, expected {spec['value']!r}")
+
+    async def expect_headers(self, spec: dict[str, Any]) -> None:
+        """What this peer holds on the attribute `of` names, once it can no longer change (WSM-API-025)."""
+        stream = await self.stream_for(spec["stream_ref"])
+        of = spec["of"]
+        if of not in ("open", "reply"):
+            raise StepError(f'expect_headers needs "of": "open" or "reply", not {of!r}')
+        if of == "reply":
+            try:
+                await asyncio.wait_for(stream.reply_headers_arrived.wait(), CORPUS_STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                raise StepError(f"stream {spec['stream_ref']} never saw reply headers arrive") from None
+        held = stream.headers if of == "open" else stream.reply_headers
+        if held != spec["value"]:
+            raise StepError(f"{of} headers were {held!r}, expected {spec['value']!r}")
 
     async def expect_error(self, spec: dict[str, Any]) -> None:
         expected = ERROR_CLASSES.get(spec["error"])
@@ -1198,6 +1237,8 @@ def owner_of(step: dict[str, Any], labels: dict[str, str]) -> str:
             return str(step["peer"])
     if "expect_closed" in step:
         return str(step["expect_closed"]["peer"])
+    if "expect_headers" in step:
+        return str(step["expect_headers"]["peer"])
     for key in ("expect_result", "expect_error"):
         if key in step:
             ref = step[key]["ref"]

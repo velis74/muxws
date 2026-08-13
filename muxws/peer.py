@@ -822,6 +822,13 @@ class Peer:
             await self._reset_stream(stream, ResetCode.PROTOCOL_ERROR, "data after end (WSM-STM-020)")
             return True
 
+        # WSM-FRM-016, before anything is delivered: headers ride the remote's first frame on the
+        # stream or no frame at all. Stream-level, so a peer that gets this wrong loses its stream
+        # and not the connection - the same weight as `data after end` above, and for the same reason.
+        if not stream._note_remote_frame(frame.headers):
+            await self._reset_stream(stream, ResetCode.PROTOCOL_ERROR, "headers after the first frame (WSM-FRM-016)")
+            return True
+
         if stream._assembler.in_progress and frame.fragment is None:
             await self._reset_stream(
                 stream, ResetCode.PROTOCOL_ERROR, "non-fragment frame mid-reassembly (WSM-FRG-033)"

@@ -1,0 +1,38 @@
+{
+  "name": "headers-on-a-later-frame",
+  "description": "The dialer opens a stream, sends one ordinary data frame, and then puts headers on a second one. Headers ride the first frame a peer sends on a stream or no frame at all (WSM-FRM-016), and a second set is a stream-level error: the peers still agree about every other stream and about the connection, so only this one dies (§4.3). The first data frame is deliberately headerless - what makes the third frame illegal is that it is not the first, not that headers were used twice.",
+  "inbound": [
+    {
+      "type": "open",
+      "stream": 1,
+      "payload": {
+        "action": "upload"
+      }
+    },
+    {
+      "type": "data",
+      "stream": 1,
+      "payload": {
+        "chunk": 1
+      }
+    },
+    {
+      "type": "data",
+      "stream": 1,
+      "headers": {
+        "content-type": "text/csv"
+      },
+      "payload": {
+        "chunk": 2
+      }
+    }
+  ],
+  "expect_out": [
+    {
+      "type": "reset",
+      "stream": 1,
+      "code": 3
+    }
+  ],
+  "connection_survives": true
+}

@@ -1,0 +1,57 @@
+{
+  "name": "answering-side-announces-headers",
+  "description": "The peer that did **not** open the stream sends its leading headers before it has produced anything at all, on a data frame with no payload, and then streams the body (WSM-FRM-016, WSM-API-024). Two things are pinned that only differ here: the headers frame carries no payload key, so a port that folded headers into the first chunk would fail the first expect_frame; and the opener's own stream surfaces them under `reply_headers` before the first row arrives, which is the whole point of announcing rather than trailing. `headers` and `reply_headers` are two attributes and each reads the same from either end, so all four readings are asserted: the open's on the acceptor, the answer's on the dialer that received them and on the acceptor that sent them.",
+  "steps": [
+    {
+      "peer": "dialer",
+      "call": "open",
+      "payload": { "q": "export" },
+      "headers": { "trace": "abc123" },
+      "end": true
+    },
+    { "settle": 12 },
+    { "expect_headers": { "peer": "acceptor", "stream_ref": 1, "of": "open", "value": { "trace": "abc123" } } },
+
+    {
+      "peer": "acceptor",
+      "call": "send_headers",
+      "stream_ref": 1,
+      "headers": { "content-type": "text/csv", "rows-estimated": 3 }
+    },
+    { "settle": 12 },
+
+    {
+      "peer": "acceptor",
+      "expect_frame": {
+        "type": "data",
+        "stream_ref": 1,
+        "headers": { "content-type": "text/csv", "rows-estimated": 3 },
+        "end": false
+      }
+    },
+    {
+      "expect_headers": {
+        "peer": "dialer",
+        "stream_ref": 1,
+        "of": "reply",
+        "value": { "content-type": "text/csv", "rows-estimated": 3 }
+      }
+    },
+
+    {
+      "expect_headers": {
+        "peer": "acceptor",
+        "stream_ref": 1,
+        "of": "reply",
+        "value": { "content-type": "text/csv", "rows-estimated": 3 }
+      }
+    },
+
+    { "peer": "dialer", "call": "iterate", "stream_ref": 1, "as": "rows" },
+    { "peer": "acceptor", "call": "send", "stream_ref": 1, "payload": { "row": 1 } },
+    { "peer": "acceptor", "call": "end", "stream_ref": 1, "payload": { "row": 2 } },
+    { "settle": 24 },
+
+    { "expect_result": { "ref": "rows", "value": [{ "row": 1 }, { "row": 2 }] } }
+  ]
+}

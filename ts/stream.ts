@@ -40,17 +40,23 @@ export type StreamClaim = 'await' | 'iterate' | 'notify';
 /** `send()`'s options object. */
 export interface SendOptions {
   end?: boolean;
+  /** This side's leading headers, if this is the first frame it sends on the stream (WSM-API-024). */
+  headers?: Record<string, unknown>;
 }
 
 /** `end()`'s options object. TypeScript takes the last payload here rather than positionally. */
 export interface EndOptions {
   payload?: unknown;
   trailers?: Record<string, unknown>;
+  /** This side's leading headers, if this is the first frame it sends on the stream (WSM-API-024). */
+  headers?: Record<string, unknown>;
 }
 
 /** `reply()`'s options object. */
 export interface ReplyOptions {
   trailers?: Record<string, unknown>;
+  /** This side's leading headers, if this is the first frame it sends on the stream (WSM-API-024). */
+  headers?: Record<string, unknown>;
 }
 
 /**
@@ -190,8 +196,30 @@ class PayloadQueue {
 export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   readonly id: number;
 
-  /** The `open` frame's headers; empty for locally opened streams. */
+  /** The `open` frame's headers. The same mapping on both peers: the opener's, as it sent them. */
   readonly headers: Record<string, unknown>;
+
+  /**
+   * The **answering** side's leading headers, empty until there are any (WSM-API-025).
+   *
+   * The other half of `headers`, and read the same way from either end: the peer that opened the
+   * stream sees what the answer announced, the peer answering sees what it announced itself. Empty
+   * rather than null when nothing was announced, so a caller never has two absences to handle.
+   *
+   * Not `readonly`, because on the opener's side these land when the answer's first frame does -
+   * `replyHeadersArrived` is how a caller knows the value it is reading is the final one.
+   */
+  replyHeaders: Record<string, unknown> = {};
+
+  /**
+   * Resolves when `replyHeaders` can no longer change, and **never rejects** (WSM-API-025).
+   *
+   * That instant is the answering side's first frame on the stream - carrying headers or not, since
+   * a first frame without them means none are coming - or the close of a stream that was never
+   * answered. Both, because the second is the one the remote controls: a stream reset before any
+   * answer, or a socket that dies, would otherwise leave this pending for the rest of the process.
+   */
+  readonly replyHeadersArrived: Promise<void>;
 
   /**
    * The opening payload, already reassembled.
@@ -241,7 +269,17 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   private readonly queue = new PayloadQueue();
   private readonly answer = deferred<T>();
   private readonly closeGate = deferred<void>();
+  private readonly headersGate = deferred<void>();
   private readonly closeController = new AbortController();
+
+  /** @internal True once this side has put any frame on this stream - the one chance of WSM-FRM-016. */
+  private sentAFrame = false;
+
+  /** True once the remote has sent one - the other half of the same rule. */
+  private receivedAFrame = false;
+
+  /** True once `headersArrived` has been resolved; it resolves exactly once, from three places. */
+  private headersSettled = false;
 
   /** True once the memoized promise has been settled, either way. It settles exactly once. */
   private answerSettled = false;
@@ -263,6 +301,13 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     this.payload = options.payload === undefined ? ABSENT : options.payload;
     this.local = options.local;
     this.closed = this.closeGate.promise;
+    this.replyHeadersArrived = this.headersGate.promise;
+
+    // Each side's one chance at leading headers (WSM-FRM-016) is spent by its first frame, and one
+    // of the two is already gone: a locally opened stream was created by the `open` this peer had
+    // just enqueued, a remotely opened one by the `open` it had just read.
+    if (options.local) this.sentAFrame = true;
+    else this.receivedAFrame = true;
 
     // WSM-API-016: attached **here**, not on the first `then`. By the time a caller reaches for the
     // stream the rejection may already have been reported to the runtime as unhandled, and there is
@@ -291,8 +336,24 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     if (this.state === StreamState.HALF_CLOSED_LOCAL) {
       throw new StreamClosed(`stream ${this.id} already sent end; it cannot send again`);
     }
-    this.peer.enqueue({ type: 'data', stream: this.id, payload, end });
+    const headers = this.leadingHeaders(options.headers);
+    this.peer.enqueue({ type: 'data', stream: this.id, payload, headers, end });
     if (end) this.localEnd();
+  }
+
+  /**
+   * Announce this side's leading headers with no payload at all (WSM-API-024).
+   *
+   * The frame that carries them is a `data` with nothing in it, which is what lets an answering peer
+   * say what is coming before it has computed any of it. It spends this side's one chance either
+   * way, so a later `send({ headers })` on the same stream raises.
+   */
+  async sendHeaders(headers: Record<string, unknown>): Promise<void> {
+    this.raiseIfNotSendable();
+    if (this.state === StreamState.HALF_CLOSED_LOCAL) {
+      throw new StreamClosed(`stream ${this.id} already sent end; it cannot send headers after it`);
+    }
+    this.peer.enqueue({ type: 'data', stream: this.id, headers: this.leadingHeaders(headers) });
   }
 
   /** End this side of the stream, optionally with a last payload and trailers. */
@@ -302,13 +363,45 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
       throw new StreamClosed(`stream ${this.id} already sent end; it cannot end twice`);
     }
     const payload = options.payload === undefined ? ABSENT : options.payload;
-    this.peer.enqueue({ type: 'data', stream: this.id, payload, end: true, trailers: options.trailers ?? null });
+    const headers = this.leadingHeaders(options.headers);
+    this.peer.enqueue({
+      type: 'data',
+      stream: this.id,
+      payload,
+      headers,
+      end: true,
+      trailers: options.trailers ?? null,
+    });
     this.localEnd();
   }
 
   /** `send` plus `end`, which is what a unary handler wants. */
   async reply(payload: unknown, options: ReplyOptions = {}): Promise<void> {
-    await this.end({ payload, trailers: options.trailers });
+    await this.end({ payload, trailers: options.trailers, headers: options.headers });
+  }
+
+  /**
+   * WSM-FRM-016's sending half: headers ride this side's first frame on the stream, or nothing.
+   *
+   * Called on the way to **every** frame this side sends, headers or not, because the rule is about
+   * which frame is first and not about which call carried a `headers` argument. Refusing rather than
+   * dropping is the point of WSM-API-024: a sender whose second set vanished quietly would believe
+   * it had announced something the remote never saw.
+   */
+  private leadingHeaders(headers: Record<string, unknown> | undefined): Record<string, unknown> | null {
+    if (headers !== undefined && this.sentAFrame) {
+      throw new ProtocolError(
+        this.local
+          ? `stream ${this.id} was opened by this peer, so its first frame was the open; ` +
+              'pass headers to open() instead (WSM-FRM-016)'
+          : `stream ${this.id} has already sent its first frame; headers ride that one or none (WSM-FRM-016)`,
+      );
+    }
+    this.sentAFrame = true;
+    // This peer is the one answering, so what it announces is what `replyHeaders` means on both
+    // ends: a handler reads back what it sent, exactly as the opener reads back what it received.
+    if (!this.local) this.acceptReplyHeaders(headers);
+    return headers ?? null;
   }
 
   /** WSM-ERR-009: three different outcomes, three different classes. */
@@ -344,6 +437,38 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   // ------------------------------------------------------------------ receiving
+
+  /**
+   * @internal WSM-FRM-016's receiving half. Returns false when the frame breaks it.
+   *
+   * Called for every stream-level frame the remote sends, headers or not: what makes a set of
+   * headers legal is being on the remote's **first** frame, so the first frame has to be recognised
+   * even when it carries none - and recognising it is also what lets `headersArrived` settle then
+   * rather than waiting for a second set that the rule says can never come.
+   */
+  noteRemoteFrame(headers: Record<string, unknown> | null | undefined): boolean {
+    const first = !this.receivedAFrame;
+    this.receivedAFrame = true;
+    if (!first) return headers === null || headers === undefined;
+    // The remote's first frame on a stream **this** peer opened is its answer, so these are the
+    // reply headers. On a stream the remote opened, its first frame was the `open`, whose headers
+    // are `headers` and were read at construction - an opener has no reply to announce.
+    if (this.local) this.acceptReplyHeaders(headers);
+    return true;
+  }
+
+  /** `replyHeaders` and its gate move together, whichever side of the stream produced them. */
+  private acceptReplyHeaders(headers: Record<string, unknown> | null | undefined): void {
+    if (headers !== null && headers !== undefined) this.replyHeaders = headers;
+    this.settleHeaders();
+  }
+
+  /** `replyHeadersArrived` resolves exactly once, from the answering side's first frame or the close. */
+  private settleHeaders(): void {
+    if (this.headersSettled) return;
+    this.headersSettled = true;
+    this.headersGate.resolve();
+  }
 
   /** @internal Deliver one reassembled payload to whichever shape is consuming this stream. */
   acceptPayload(payload: unknown): void {
@@ -414,6 +539,9 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
 
   /** `closed` and `signal` move together, on every close path (WSM-API-023). */
   private markClosed(reason?: StreamReset): void {
+    // A stream that closes before it was ever answered is the path WSM-API-025 cares about: no reply
+    // headers are coming, so the wait for them ends here rather than never.
+    this.settleHeaders();
     this.closeGate.resolve();
     if (!this.closeController.signal.aborted) this.closeController.abort(reason);
   }

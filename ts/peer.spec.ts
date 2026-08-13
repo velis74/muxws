@@ -1842,6 +1842,57 @@ describe("open()'s overloads", () => {
     expect(pair.acceptor.isOpen).toBe(true);
   });
 
+  it('never interprets the answering side’s headers either - WSM-AUT-002/WSM-FRM-016', async () => {
+    // The same shape of proof as the opener's half above, pointed the other way. A library that grew
+    // opinions about an answer's metadata would grow them here first - a `content-type` it decoded
+    // on, a `status` it turned into an exception - so the keys are spelled to invite exactly that.
+    const announced = {
+      'content-type': 'application/octet-stream',
+      status: 500,
+      error: true,
+      code: 3,
+      type: 'reset',
+      expires_at: 0,
+    };
+    const expected = JSON.parse(JSON.stringify(announced)) as typeof announced;
+
+    const pair = makePair();
+    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+      // Stream 1 is answered with them and stream 3 without, so the two exchanges can be compared
+      // frame for frame below.
+      if ((payload as { n: number }).n === 1) await stream.reply({ ok: true }, { headers: announced });
+      else await stream.reply({ ok: true });
+    });
+    pair.start();
+
+    const first = pair.dialer.open({ n: 1 }, { end: true });
+    const withHeaders = await first;
+    const second = pair.dialer.open({ n: 2 }, { end: true });
+    const without = await second;
+    await pair.settle();
+
+    await first.replyHeadersArrived;
+    await second.replyHeadersArrived;
+    expect(first.replyHeaders).toEqual(expected);
+    expect(announced, "the handler's own headers object was modified in flight").toEqual(expected);
+    // An answer that announced none leaves an empty mapping, not the other stream's.
+    expect(second.replyHeaders).toEqual({});
+    expect(pair.framesOfType('acceptor', 'data')[0].headers).toEqual(expected);
+
+    // And they changed nothing: `status: 500` did not become an exception, and both sides of the two
+    // exchanges are the same frames in the same order once the ids and the headers are normalised.
+    expect(withHeaders).toEqual(without);
+    const trace = (who: Who, id: number): unknown[] =>
+      pair
+        .sentBy(who)
+        .filter((frame) => frame.stream === id)
+        .map((frame) => ({ ...toMapping(frame), stream: 0, headers: undefined, payload: undefined }));
+    expect(trace('dialer', first.id)).toEqual(trace('dialer', second.id));
+    expect(trace('acceptor', first.id)).toEqual(trace('acceptor', second.id));
+    expect(pair.framesOfType('acceptor', 'reset')).toHaveLength(0);
+    expect(pair.acceptor.isOpen).toBe(true);
+  });
+
   it('defines no vocabulary inside payload - WSM-FRM-006/WSM-INV-016', async () => {
     // Every envelope field name, used as a payload key, plus the discriminators a library of this
     // shape is usually tempted to reserve. If any of these meant anything to muxws, two consumers

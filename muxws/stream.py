@@ -73,10 +73,20 @@ class Stream:
     ) -> None:
         self._peer = peer
         self.id = stream_id
+        #: The `open` frame's headers. The same mapping on both peers: the opener's, as it sent them.
         self.headers: dict[str, Any] = headers or {}
+        #: The **answering** side's leading headers, empty until there are any (WSM-API-025). The
+        #: other half of `headers`, read the same way from either end: the peer that opened the
+        #: stream sees what the answer announced, the peer answering sees what it announced itself.
+        self.reply_headers: dict[str, Any] = {}
         self.payload: Any = payload
         self.trailers: dict[str, Any] | None = None
         self.closed = asyncio.Event()
+        #: Set when `reply_headers` can no longer change: the answering side's first frame on the
+        #: stream, or the close of a stream that was never answered. Both, because the second is the
+        #: path the remote controls - a reset before any answer, or a dead socket - and a wait for
+        #: metadata that will never come is the spinner WSM-INV-011 names.
+        self.reply_headers_arrived = asyncio.Event()
 
         self.state = StreamState.IDLE
         #: True when this peer opened the stream, false when the remote did (WSM-STM-037 counts only
@@ -96,29 +106,84 @@ class Stream:
         self._opening = False
         #: The handler task, so an incoming reset(CANCELLED) can cancel it (WSM-ERR-013).
         self.handler_task: asyncio.Task[None] | None = None
+        #: Each side's one chance at leading headers (WSM-FRM-016) is spent by its first frame, and
+        #: one of the two is already gone: a locally opened stream was created by the `open` this
+        #: peer had just enqueued, a remotely opened one by the `open` it had just read.
+        self._sent_a_frame = local
+        self._received_a_frame = not local
 
     # ------------------------------------------------------------------ sending
 
-    async def send(self, payload: Any, *, end: bool = False) -> None:
+    async def send(self, payload: Any, *, end: bool = False, headers: dict[str, Any] | None = None) -> None:
         """Send one payload. Raises per WSM-ERR-009 on a stream that is no longer open."""
         self._raise_if_not_sendable()
         if self.state is StreamState.HALF_CLOSED_LOCAL:
             raise StreamClosed(f"stream {self.id} already sent end; it cannot send again")
-        self._peer._enqueue(Frame("data", stream=self.id, payload=payload, end=end))
+        leading = self._leading_headers(headers)
+        self._peer._enqueue(Frame("data", stream=self.id, payload=payload, headers=leading, end=end))
         if end:
             self._local_end()
 
-    async def end(self, payload: Any = ABSENT, *, trailers: dict[str, Any] | None = None) -> None:
+    async def send_headers(self, headers: dict[str, Any]) -> None:
+        """Announce this side's leading headers with no payload at all (WSM-API-024).
+
+        The frame that carries them is a `data` with nothing in it, which is what lets an answering
+        peer say what is coming before it has computed any of it. It spends this side's one chance
+        either way, so a later `send(headers=)` on the same stream raises.
+        """
+        self._raise_if_not_sendable()
+        if self.state is StreamState.HALF_CLOSED_LOCAL:
+            raise StreamClosed(f"stream {self.id} already sent end; it cannot send headers after it")
+        self._peer._enqueue(Frame("data", stream=self.id, headers=self._leading_headers(headers)))
+
+    async def end(
+        self,
+        payload: Any = ABSENT,
+        *,
+        trailers: dict[str, Any] | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
         """End this side of the stream, optionally with a last payload and trailers."""
         self._raise_if_not_sendable()
         if self.state is StreamState.HALF_CLOSED_LOCAL:
             raise StreamClosed(f"stream {self.id} already sent end; it cannot end twice")
-        self._peer._enqueue(Frame("data", stream=self.id, payload=payload, end=True, trailers=trailers))
+        leading = self._leading_headers(headers)
+        self._peer._enqueue(
+            Frame("data", stream=self.id, payload=payload, headers=leading, end=True, trailers=trailers)
+        )
         self._local_end()
 
-    async def reply(self, payload: Any, *, trailers: dict[str, Any] | None = None) -> None:
+    async def reply(
+        self,
+        payload: Any,
+        *,
+        trailers: dict[str, Any] | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
         """`send` plus `end`, which is what a unary handler wants."""
-        await self.end(payload, trailers=trailers)
+        await self.end(payload, trailers=trailers, headers=headers)
+
+    def _leading_headers(self, headers: dict[str, Any] | None) -> dict[str, Any] | None:
+        """WSM-FRM-016's sending half: headers ride this side's first frame on the stream, or nothing.
+
+        Called on the way to **every** frame this side sends, headers or not, because the rule is
+        about which frame is first and not about which call carried a `headers` argument. Refusing
+        rather than dropping is the point of WSM-API-024: a sender whose second set vanished quietly
+        would believe it had announced something the remote never saw.
+        """
+        if headers is not None and self._sent_a_frame:
+            raise ProtocolError(
+                f"stream {self.id} was opened by this peer, so its first frame was the open; "
+                f"pass headers to open() instead (WSM-FRM-016)"
+                if self.local
+                else f"stream {self.id} has already sent its first frame; headers ride that one or none (WSM-FRM-016)"
+            )
+        self._sent_a_frame = True
+        # This peer is the one answering, so what it announces is what `reply_headers` means on both
+        # ends: a handler reads back what it sent, exactly as the opener reads back what it received.
+        if not self.local:
+            self._accept_reply_headers(headers)
+        return headers
 
     def _raise_if_not_sendable(self) -> None:
         """WSM-ERR-009: three different outcomes, three different classes."""
@@ -154,6 +219,32 @@ class Stream:
 
     # ------------------------------------------------------------------ receiving
 
+    def _note_remote_frame(self, headers: dict[str, Any] | None) -> bool:
+        """WSM-FRM-016's receiving half. Returns False when the frame breaks it.
+
+        Called for every stream-level frame the remote sends, headers or not: what makes a set of
+        headers legal is being on the remote's **first** frame, so the first frame has to be
+        recognised even when it carries none - and recognising it is also what lets
+        `reply_headers_arrived` fire then rather than waiting for a second set that the rule says
+        can never come.
+        """
+        first = not self._received_a_frame
+        self._received_a_frame = True
+        if not first:
+            return headers is None
+        # The remote's first frame on a stream **this** peer opened is its answer, so these are the
+        # reply headers. On a stream the remote opened, its first frame was the `open`, whose headers
+        # are `headers` and were read at construction - an opener has no reply to announce.
+        if self.local:
+            self._accept_reply_headers(headers)
+        return True
+
+    def _accept_reply_headers(self, headers: dict[str, Any] | None) -> None:
+        """`reply_headers` and its event move together, whichever side produced them."""
+        if headers is not None:
+            self.reply_headers = headers
+        self.reply_headers_arrived.set()
+
     def _accept_payload(self, payload: Any) -> None:
         """Deliver one reassembled payload to whichever shape is consuming this stream."""
         if self._future is not None and not self._future.done():
@@ -181,8 +272,17 @@ class Stream:
         self._close_cause = "normal"
         self._queue.put_nowait(_END)
         self._settle_future_if_empty()
-        self.closed.set()
+        self._mark_closed()
         self._peer._forget(self)
+
+    def _mark_closed(self) -> None:
+        """`closed` and `reply_headers_arrived` move together on every close path.
+
+        A stream that closes before it was ever answered is the path WSM-API-025 cares about: no
+        reply headers are coming, so the wait for them ends here rather than never.
+        """
+        self.reply_headers_arrived.set()
+        self.closed.set()
 
     def _settle_future_if_empty(self) -> None:
         """A stream that ends without ever producing a payload must not leave an await hanging."""
@@ -211,7 +311,7 @@ class Stream:
         self._assembler.reset()
         self._fail_future(error)
         self._queue.put_nowait(error)
-        self.closed.set()
+        self._mark_closed()
         if self.handler_task is not None and not self.handler_task.done():
             self.handler_task.cancel()
         self._peer._forget(self)

@@ -25,6 +25,25 @@
     "json_wire": "{\"type\":\"data\",\"stream\":7,\"payload\":{\"rows\":128}}"
   },
   {
+    "name": "data-with-headers",
+    "frame": {
+      "type": "data",
+      "stream": 3,
+      "headers": { "content-type": "text/csv", "rows-estimated": 40000 }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":3,\"headers\":{\"content-type\":\"text/csv\",\"rows-estimated\":40000}}"
+  },
+  {
+    "name": "data-with-headers-and-payload",
+    "frame": {
+      "type": "data",
+      "stream": 3,
+      "headers": { "content-type": "text/csv" },
+      "payload": { "row": 1 }
+    },
+    "json_wire": "{\"type\":\"data\",\"stream\":3,\"headers\":{\"content-type\":\"text/csv\"},\"payload\":{\"row\":1}}"
+  },
+  {
     "name": "data-end-with-trailers",
     "frame": {
       "type": "data",

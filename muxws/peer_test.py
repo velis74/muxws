@@ -1450,6 +1450,64 @@ async def test_per_stream_headers_arrive_unchanged_and_change_nothing(make_pair)
     assert acceptor_with == acceptor_without, "the headers changed what the remote sent back"
 
 
+async def test_the_answering_sides_headers_arrive_unchanged_and_change_nothing(make_pair):
+    """WSM-AUT-002, the direction WSM-FRM-016 added: the answer's metadata is the application's too.
+
+    The same shape of proof as the opener's half above, pointed the other way: two exchanges
+    identical but for the headers the *acceptor* announces, and the dialer's own frames compared
+    with `headers` taken off. A library that grew opinions about an answer's metadata would grow
+    them here first - a `content-type` it decoded on, a `status` it turned into an exception - and
+    the payload it would have branched on is deliberately spelled to invite exactly that.
+    """
+    announced = {
+        "content-type": "application/octet-stream",
+        "status": 500,
+        "error": True,
+        "code": 3,
+        "type": "reset",
+        "expires_at": 0,
+    }
+    seen: list[dict[str, Any]] = []
+
+    async def exchange(headers: dict[str, Any] | None) -> tuple[Any, list[Frame], list[Frame]]:
+        async def handler(payload: Any, stream: Stream) -> None:
+            _ = payload
+            if headers is None:
+                await stream.reply({"ok": True})
+            else:
+                await stream.reply({"ok": True}, headers=headers)
+
+        pair = make_pair()
+        pair.acceptor.on_stream(handler)
+        pair.start()
+        try:
+            stream = pair.dialer.open({"q": 1}, end=True)
+            result = await stream
+            await asyncio.wait_for(stream.reply_headers_arrived.wait(), 2)
+            seen.append(stream.reply_headers)
+            await pair.settle()
+            return result, pair.sent_by("dialer"), pair.sent_by("acceptor")
+        finally:
+            await pair.stop()
+
+    with_headers, dialer_with, acceptor_with = await exchange(announced)
+    without, dialer_without, acceptor_without = await exchange(None)
+
+    # Delivered whole, on the opener's own handle, and an answer with none leaves an empty mapping
+    # rather than the previous exchange's.
+    assert seen[0] == announced
+    assert list(seen[0]) == list(announced), "no key was reordered away"
+    assert seen[1] == {}
+    assert acceptor_with[0].headers == announced, "verbatim on the wire"
+
+    # And they bought nothing and cost nothing. `status: 500` and `error: True` did not become an
+    # exception, and the opener's side of the exchange is frame for frame what it was without them.
+    assert with_headers == without == {"ok": True}
+    assert dialer_with == dialer_without, "the answer's headers changed what the opener sent"
+    stripped = [dataclasses.replace(frame, headers=None) for frame in acceptor_with]
+    assert stripped == acceptor_without, "the answer's headers changed something beside themselves"
+
+
 class _WatchedPayload(dict):
     """A payload that records every key muxws looks up on it, for WSM-FRM-006.
 
@@ -1599,6 +1657,7 @@ _MUST_BE_ASYNC = frozenset(
         "Stream.reset",
         "Stream.result",
         "Stream.send",
+        "Stream.send_headers",
         "accept",
         "connect",
         "serve",
@@ -1623,7 +1682,7 @@ def test_the_public_api_is_async_exactly_where_the_rule_says():
     asynchronous = {name for name, function in surface if inspect.iscoroutinefunction(function)}
     assert asynchronous == _MUST_BE_ASYNC
 
-    # Named individually as well, because a set of eighteen strings is easy to edit and hard to
+    # Named individually as well, because a set of nineteen strings is easy to edit and hard to
     # read: these are the ones §5.1 lists, plus the one it forbids.
     for name in ("connect", "accept", "serve"):
         assert inspect.iscoroutinefunction(getattr(muxws, name)), name

@@ -23,7 +23,7 @@ The envelope is twelve fields, and no others:
 | `payload` | anything | absent — and absent is not `null`, see below |
 | `fragment` | string or bytes | absent |
 | `more` | boolean | `false` |
-| `headers` | object | absent |
+| `headers` | object | absent — on `open`, and on the first `data` a peer sends |
 | `end` | boolean | `false` |
 | `trailers` | object | absent |
 | `code` | integer | absent |

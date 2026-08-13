@@ -269,11 +269,12 @@ step is a fixture that passes by testing nothing.
 | `expect_frame` | `peer` | Subset-match the next matching frame on that peer's wire. |
 | `expect_no_frame` | `peer` | Assert that peer's whole wire contains no matching frame. |
 | `expect_result` | — | `{"ref", "value"}`: the named stream completes with that value. |
+| `expect_headers` | — | `{"peer", "stream_ref", "of", "value"}`: on that peer's handle for that ordinal, `stream.headers` (`"of": "open"`) or `stream.reply_headers` (`"of": "reply"`) equals `value`. `of` is required. The `reply` form waits on `reply_headers_arrived`/`replyHeadersArrived`, never on a settle count; both attributes read the same from either end of the stream (WSM-API-025). |
 | `expect_error` | — | `{"ref", "error", "code"?, "payload"?}`: the named stream fails with that class. |
 | `expect_closed` | — | `{"peer", "socket"?}`: that peer is no longer open. |
 
-`peer` is `"dialer"` or `"acceptor"` and is **required** on `call`, `inject`, `expect_frame` and
-`expect_no_frame` - an `expect_frame` without it cannot say whose wire to search, and a runner that
+`peer` is `"dialer"` or `"acceptor"` and is **required** on `call`, `inject`, `expect_frame`,
+`expect_no_frame` and (inside its own object) `expect_headers` - an `expect_frame` without it cannot say whose wire to search, and a runner that
 guessed would be asserting something different in each language.
 
 #### `inject`
@@ -310,9 +311,10 @@ addresses a stream that already exists, by `stream_ref`.
 | `open` | `payload`?, `headers`?, `end`?, `as`? | `peer.open(...)`. **Allocates an ordinal.** Synchronous; never queues. |
 | `request` | `payload`?, `headers`?, `timeout_ms`?, `as`? | `peer.request(...)`, **started and not awaited** (WSM-API-006). **Allocates an ordinal.** |
 | `notify` | `payload`?, `headers`?, `as`? | `peer.notify(...)`, awaited. **Allocates an ordinal.** |
-| `send` | `stream_ref`, `payload`?, `end`? | `stream.send(payload, end)`. |
-| `end` | `stream_ref`, `payload`?, `trailers`? | `stream.end(...)`. An **absent** `payload` key is `ABSENT`, an explicit `null` is null (D1). |
-| `reply` | `stream_ref`, `payload`?, `trailers`? | `stream.reply(payload)` on that peer's handle for that ordinal. |
+| `send` | `stream_ref`, `payload`?, `end`?, `headers`? | `stream.send(payload, end, headers)`. |
+| `send_headers` | `stream_ref`, `headers` | `stream.send_headers(...)` - a payload-less `data` carrying this side's leading headers (WSM-API-024). Legal only on this side's first frame on the stream (WSM-FRM-016). |
+| `end` | `stream_ref`, `payload`?, `trailers`?, `headers`? | `stream.end(...)`. An **absent** `payload` key is `ABSENT`, an explicit `null` is null (D1). |
+| `reply` | `stream_ref`, `payload`?, `trailers`?, `headers`? | `stream.reply(payload)` on that peer's handle for that ordinal. |
 | `cancel` | `stream_ref`, `reason`? | `stream.cancel(reason)` - `reset(CANCELLED)`, sent without waiting (WSM-ERR-013). |
 | `iterate` | `stream_ref`, `as` | Start consuming the stream as an async iterator; the collected list is the label's value. |
 | `close` | `code`?, `reason`?, `drain_ms`? | `peer.close(...)`, **started and not awaited** - `close()` sends `goaway` and *then* drains, and the steps after it are what the drain window exists to let happen (WSM-CON-025). Defaults: `code` 0 (`NO_ERROR`), `drain_ms` 10000. |

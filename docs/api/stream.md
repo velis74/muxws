@@ -205,6 +205,230 @@ console.log(await stream);
 await dialer.close({ drainMs: 100 });
 ```
 
+## `stream.reply_headers` (Python)
+
+The **answering** side's leading headers: the other half of `headers`, and what the peer that did not
+open the stream announces before or with its first frame (WSM-FRM-016).
+
+Read the same way from either end. The peer that opened the stream sees what the answer announced;
+the peer answering sees what it announced itself. `{}` until there are any - use
+[`stream.reply_headers_arrived`](#stream-reply-headers-arrived-python) to know that the value you are
+reading is the final one.
+
+muxws never reads them (WSM-AUT-002). There is no status field on the wire and this is not one: a
+failed exchange is a `reset` with a code (§2.4), not a header a receiver has to remember to check.
+
+### Signature
+
+```python
+self.reply_headers: dict[str, Any] = {}
+```
+
+### Parameters
+
+None — a plain instance attribute.
+
+### Return
+
+`dict[str, Any]` — `{}` when the answering side announced none.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import Peer, Stream
+from muxws.codecs.json_ import JsonCodec
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    dialer_socket, acceptor_socket = memory_pair()
+    dialer = Peer(dialer_socket, codec=JsonCodec(), is_dialer=True)
+    acceptor = Peer(acceptor_socket, codec=JsonCodec(), is_dialer=False)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.reply({"rows": 2}, headers={"content-type": "text/csv"})
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    stream = dialer.open("export", end=True)
+    print(await stream)
+    await stream.reply_headers_arrived.wait()
+    print("the answer announced:", stream.reply_headers)
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `stream.replyHeaders` (TypeScript)
+
+### Signature
+
+```ts
+replyHeaders: Record<string, unknown>;
+```
+
+### Parameters
+
+None — a field, mutable because on the opener's side it is filled in when the answer's first frame
+arrives.
+
+### Return
+
+`Record<string, unknown>` — `{}` when the answering side announced none.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import { JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+  await stream.reply({ rows: 2 }, { headers: { 'content-type': 'text/csv' } });
+});
+
+void dialer.serve();
+void acceptor.serve();
+
+const stream = dialer.open('export', { end: true });
+console.log(await stream);
+await stream.replyHeadersArrived;
+console.log('the answer announced:', stream.replyHeaders);
+await dialer.close({ drainMs: 100 });
+```
+
+## `stream.reply_headers_arrived` (Python)
+
+Set at the instant `reply_headers` can no longer change.
+
+That instant is the answering side's first frame on the stream - carrying headers or not, since a
+first frame without them means none are coming - or the close of a stream that was never answered.
+Both, because the second is the one the remote controls: a stream it resets before answering, or a
+socket that dies, would otherwise leave a wait here pending forever (WSM-INV-011).
+
+Waiting on it is what makes announcing worth anything: a consumer that learns the content type only
+after the body has started has learned it too late.
+
+### Signature
+
+```python
+self.reply_headers_arrived = asyncio.Event()
+```
+
+### Parameters
+
+None — a plain instance attribute.
+
+### Return
+
+`asyncio.Event` — `await stream.reply_headers_arrived.wait()`, or `.is_set()` for a look that does
+not wait.
+
+### Raises
+
+Raises: nothing. It is set on every path, including the ones on which no headers ever came.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import Peer, Stream
+from muxws.codecs.json_ import JsonCodec
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    dialer_socket, acceptor_socket = memory_pair()
+    dialer = Peer(dialer_socket, codec=JsonCodec(), is_dialer=True)
+    acceptor = Peer(acceptor_socket, codec=JsonCodec(), is_dialer=False)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.send_headers({"content-type": "text/csv"})
+        await asyncio.sleep(0.02)  # the rows take a while to produce
+        await stream.end({"row": 1})
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    stream = dialer.open("export", end=True)
+    await stream.reply_headers_arrived.wait()
+    print("before the body:", stream.reply_headers)
+    print(await stream)
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `stream.replyHeadersArrived` (TypeScript)
+
+### Signature
+
+```ts
+readonly replyHeadersArrived: Promise<void>;
+```
+
+### Parameters
+
+None — a readonly field.
+
+### Return
+
+`Promise<void>` — resolving when `replyHeaders` is final. Like `closed`, it resolves and never
+rejects.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import { JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+  await stream.sendHeaders({ 'content-type': 'text/csv' });
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  await stream.end({ payload: { row: 1 } });
+});
+
+void dialer.serve();
+void acceptor.serve();
+
+const stream = dialer.open('export', { end: true });
+await stream.replyHeadersArrived;
+console.log('before the body:', stream.replyHeaders);
+console.log(await stream);
+await dialer.close({ drainMs: 100 });
+```
+
 ## `stream.payload` (Python)
 
 The opening payload, already reassembled.
@@ -877,7 +1101,7 @@ Send one payload on a stream that is still open, optionally ending it in the sam
 ### Signature
 
 ```python
-async def send(self, payload: Any, *, end: bool = False) -> None:
+async def send(self, payload: Any, *, end: bool = False, headers: dict[str, Any] | None = None) -> None:
 ```
 
 ### Parameters
@@ -886,6 +1110,7 @@ async def send(self, payload: Any, *, end: bool = False) -> None:
 |---|---|---|---|
 | `payload` | `Any` | required | The value to send. It is encoded by the codec and fragmented automatically if the encoded form exceeds the 64 KiB frame cap; a stream holds at most one unsent fragment, and the writer round-robins, so a large payload cannot starve another stream. |
 | `end` | `bool` | `False` | Half-close this side in the same frame. `end` is a flag, never a frame of its own. |
+| `headers` | `dict[str, Any] \| None` | `None` | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). Later ones raise; see [`stream.send_headers()`](#stream-send-headers-python). |
 
 ### Return
 
@@ -902,6 +1127,7 @@ Three different outcomes with three different classes, which is the point:
   instance of the stored failure is raised each time.
 - `ConnectionLost` — the socket died. It is itself a `StreamReset`, because the stream really did end
   early; `ConnectionClosed` is not, because it describes the connection rather than a stream.
+- `ProtocolError` — `headers` was passed on a frame that is not this side's first on the stream.
 
 ### Example
 
@@ -957,7 +1183,7 @@ async send(payload: unknown, options: SendOptions = {}): Promise<void>;
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `unknown` | required | The value to send, fragmented automatically above the 64 KiB frame cap. |
-| `options` | `SendOptions` | `{}` | Only `end`. See [`SendOptions`](#sendoptions-typescript). |
+| `options` | `SendOptions` | `{}` | `end` and `headers`. See [`SendOptions`](#sendoptions-typescript). |
 
 ### Return
 
@@ -966,7 +1192,8 @@ async send(payload: unknown, options: SendOptions = {}): Promise<void>;
 ### Raises
 
 Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`, exactly as Python does and
-for the same three reasons.
+for the same three reasons — plus `ProtocolError` when `headers` rides a frame that is not this side's
+first on the stream.
 
 ### Example
 
@@ -998,6 +1225,129 @@ try {
 await dialer.close({ drainMs: 100 });
 ```
 
+## `stream.send_headers()` (Python)
+
+Announce this side's leading headers with no payload at all.
+
+This is what a handler calls when it knows *what* is coming before it has produced any of it: the
+frame it puts on the wire is a `data` with headers and nothing else, so the opener can read
+`reply_headers` while the first row is still being computed. Riding them along with the first payload
+instead is `send(..., headers=...)` or `reply(..., headers=...)`; the difference is only whether the
+announcement waits for the body.
+
+Each peer gets **one** chance per stream, and it is spent by that peer's first frame whether or not
+that frame carried headers (WSM-FRM-016). On a stream this peer opened, the first frame was the
+`open`, so the headers belong to `peer.open(headers=...)` and this call raises.
+
+### Signature
+
+```python
+async def send_headers(self, headers: dict[str, Any]) -> None:
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `headers` | `dict[str, Any]` | required | Application metadata: string keys, codec-encodable values. muxws never reads them (WSM-AUT-002). They are not fragmented, so headers alone that exceed the frame cap are an error rather than a split (WSM-FRG-021). |
+
+### Return
+
+`None`. The frame is enqueued for the writer.
+
+### Raises
+
+- `ProtocolError` — this side has already sent a frame on the stream. On a locally opened stream that
+  is true from the start, and the message says to use `open()` instead.
+- `StreamClosed` — the stream closed normally, or this side already sent `end`.
+- `StreamReset` (or a subclass) — the stream was reset.
+- `ConnectionLost` — the socket died.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import Peer, Stream
+from muxws.codecs.json_ import JsonCodec
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    dialer_socket, acceptor_socket = memory_pair()
+    dialer = Peer(dialer_socket, codec=JsonCodec(), is_dialer=True)
+    acceptor = Peer(acceptor_socket, codec=JsonCodec(), is_dialer=False)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.send_headers({"content-type": "text/csv", "rows-estimated": 2})
+        await stream.send({"row": 1})
+        await stream.end({"row": 2})
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    stream = dialer.open("export", end=True)
+    await stream.reply_headers_arrived.wait()
+    print("announced:", stream.reply_headers)
+    print("rows:", [row async for row in stream])
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `stream.sendHeaders()` (TypeScript)
+
+### Signature
+
+```ts
+async sendHeaders(headers: Record<string, unknown>): Promise<void>;
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `headers` | `Record<string, unknown>` | required | Application metadata, carried on a `data` frame with no payload. |
+
+### Return
+
+`Promise<void>` — resolving once the frame is enqueued, not once it is on the wire.
+
+### Raises
+
+Rejects with `ProtocolError` when this side has already sent a frame on the stream, and otherwise
+with the same three as `send()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`.
+
+### Example
+
+```ts
+import { JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+  await stream.sendHeaders({ 'content-type': 'text/csv', 'rows-estimated': 2 });
+  await stream.send({ row: 1 });
+  await stream.end({ payload: { row: 2 } });
+});
+
+void dialer.serve();
+void acceptor.serve();
+
+const stream = dialer.open('export', { end: true });
+await stream.replyHeadersArrived;
+console.log('announced:', stream.replyHeaders);
+for await (const row of stream) console.log('row:', row);
+await dialer.close({ drainMs: 100 });
+```
+
 ## `SendOptions` (TypeScript)
 
 ### Signature
@@ -1005,6 +1355,7 @@ await dialer.close({ drainMs: 100 });
 ```ts
 export interface SendOptions {
   end?: boolean;
+  headers?: Record<string, unknown>;
 }
 ```
 
@@ -1013,6 +1364,7 @@ export interface SendOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `end` | `boolean` | `false` | Half-close this side in the same frame as the payload. |
+| `headers` | `Record<string, unknown>` | — | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). |
 
 ### Return
 
@@ -1052,7 +1404,13 @@ End this side of the stream, optionally with a last payload and trailers.
 ### Signature
 
 ```python
-async def end(self, payload: Any = ABSENT, *, trailers: dict[str, Any] | None = None) -> None:
+async def end(
+    self,
+    payload: Any = ABSENT,
+    *,
+    trailers: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+) -> None:
 ```
 
 ### Parameters
@@ -1061,6 +1419,7 @@ async def end(self, payload: Any = ABSENT, *, trailers: dict[str, Any] | None = 
 |---|---|---|---|
 | `payload` | `Any` | `ABSENT` | A final payload. The default sentinel means "no payload": the `end` frame carries no `payload` field at all, which is different from sending `None`. |
 | `trailers` | `dict[str, Any] \| None` | `None` | Metadata riding the `end` frame, read by the other side as `stream.trailers` once the stream has finished. |
+| `headers` | `dict[str, Any] \| None` | `None` | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). Later ones raise; see [`stream.send_headers()`](#stream-send-headers-python). |
 
 ### Return
 
@@ -1073,6 +1432,7 @@ half-closed-local and the remote may still send.
   twice.
 - `StreamReset` (or a subclass) — the stream was reset.
 - `ConnectionLost` — the socket died.
+- `ProtocolError` — `headers` was passed on a frame that is not this side's first on the stream.
 
 ### Example
 
@@ -1128,7 +1488,7 @@ async end(options: EndOptions = {}): Promise<void>;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `options` | `EndOptions` | `{}` | `payload` and `trailers`. TypeScript takes the last payload in the options object rather than positionally, so `end()` with no argument ends the stream carrying nothing. See [`EndOptions`](#endoptions-typescript). |
+| `options` | `EndOptions` | `{}` | `payload`, `trailers` and `headers`. TypeScript takes the last payload in the options object rather than positionally, so `end()` with no argument ends the stream carrying nothing. See [`EndOptions`](#endoptions-typescript). |
 
 ### Return
 
@@ -1137,7 +1497,8 @@ async end(options: EndOptions = {}): Promise<void>;
 ### Raises
 
 Rejects with `StreamClosed` (closed normally, or `end` already sent), a `StreamReset` subclass, or
-`ConnectionLost`.
+`ConnectionLost` — plus `ProtocolError` when `headers` rides a frame that is not this side's first on
+the stream.
 
 ### Example
 
@@ -1178,6 +1539,7 @@ await dialer.close({ drainMs: 100 });
 export interface EndOptions {
   payload?: unknown;
   trailers?: Record<string, unknown>;
+  headers?: Record<string, unknown>;
 }
 ```
 
@@ -1187,6 +1549,7 @@ export interface EndOptions {
 |---|---|---|---|
 | `payload` | `unknown` | absent | The final payload. Leaving it out sends an `end` frame with no `payload` field, which is not the same as sending `null`. |
 | `trailers` | `Record<string, unknown>` | `null` | Metadata riding the `end` frame. |
+| `headers` | `Record<string, unknown>` | — | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). |
 
 ### Return
 
@@ -1230,7 +1593,13 @@ It is exactly `end(payload, trailers=trailers)`, spelled the way a request/respo
 ### Signature
 
 ```python
-async def reply(self, payload: Any, *, trailers: dict[str, Any] | None = None) -> None:
+async def reply(
+    self,
+    payload: Any,
+    *,
+    trailers: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+) -> None:
 ```
 
 ### Parameters
@@ -1239,6 +1608,7 @@ async def reply(self, payload: Any, *, trailers: dict[str, Any] | None = None) -
 |---|---|---|---|
 | `payload` | `Any` | required | The response. Unlike `end()`, it is required here: a reply with nothing in it is `end()`. |
 | `trailers` | `dict[str, Any] \| None` | `None` | Metadata riding the same `end` frame. |
+| `headers` | `dict[str, Any] \| None` | `None` | The answer's leading headers, riding the same frame. Only legal when this is the handler's first frame on the stream (WSM-FRM-016); to announce them *before* the answer is ready, use [`stream.send_headers()`](#stream-send-headers-python). |
 
 ### Return
 
@@ -1246,7 +1616,7 @@ async def reply(self, payload: Any, *, trailers: dict[str, Any] | None = None) -
 
 ### Raises
 
-The same three as `end()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`.
+The same four as `end()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, `ProtocolError`.
 
 ### Example
 
@@ -1295,7 +1665,7 @@ async reply(payload: unknown, options: ReplyOptions = {}): Promise<void>;
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `unknown` | required | The response. Positional here, unlike `end()`. |
-| `options` | `ReplyOptions` | `{}` | Only `trailers`. See [`ReplyOptions`](#replyoptions-typescript). |
+| `options` | `ReplyOptions` | `{}` | `trailers` and `headers`. See [`ReplyOptions`](#replyoptions-typescript). |
 
 ### Return
 
@@ -1303,7 +1673,8 @@ async reply(payload: unknown, options: ReplyOptions = {}): Promise<void>;
 
 ### Raises
 
-Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`.
+Rejects with `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, or `ProtocolError` when
+`headers` rides a frame that is not this side's first on the stream.
 
 ### Example
 
@@ -1334,6 +1705,7 @@ await dialer.close({ drainMs: 100 });
 ```ts
 export interface ReplyOptions {
   trailers?: Record<string, unknown>;
+  headers?: Record<string, unknown>;
 }
 ```
 
@@ -1342,6 +1714,7 @@ export interface ReplyOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `trailers` | `Record<string, unknown>` | `undefined` | Metadata riding the `end` frame the reply sends. |
+| `headers` | `Record<string, unknown>` | `undefined` | The answer's leading headers, riding the same frame (WSM-FRM-016). |
 
 ### Return
 

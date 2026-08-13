@@ -20,7 +20,7 @@ from muxws.errors import (
     StreamReset,
     StreamTimeout,
 )
-from muxws.frames import Frame
+from muxws.frames import ABSENT, Frame
 from muxws.peer import Peer
 from muxws.stream import Stream, StreamState
 
@@ -828,3 +828,168 @@ async def test_an_unconsumed_failure_reports_no_never_retrieved_warning(make_pai
     gc.collect()
     await asyncio.sleep(0)
     assert "never retrieved" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- leading headers
+
+
+async def test_leading_headers_are_sendable_once_and_only_first(make_pair):
+    """WSM-API-024: one chance per peer per stream, and it is spent by the frame."""
+    pair = make_pair()
+    answered: list[Stream] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        answered.append(stream)
+        await stream.closed.wait()
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        pair.dialer.open({"q": "export"}, end=True)
+        await pair.settle()
+        answering = answered[0]
+
+        await answering.send_headers({"content-type": "text/csv"})
+        # The chance is spent by the *frame*, not by the argument: a second set raises whether it
+        # rides `send_headers`, `send` or `end`, and a port that only guarded the first would let two
+        # sets onto a wire whose rule is one.
+        with pytest.raises(ProtocolError):
+            await answering.send_headers({"late": True})
+        with pytest.raises(ProtocolError):
+            await answering.send({"row": 1}, headers={"late": True})
+        with pytest.raises(ProtocolError):
+            await answering.end(headers={"late": True})
+
+        # Still sendable without them, which is the half a "raises on the second call" check misses:
+        # refusing the headers must not have refused the frame.
+        await answering.send({"row": 1})
+        await pair.settle()
+        data = pair.frames_of_type("acceptor", "data")
+        assert [frame.headers for frame in data] == [{"content-type": "text/csv"}, None]
+        # ABSENT and not None: a headers frame carries no payload key at all (D1).
+        assert data[0].payload is ABSENT
+    finally:
+        await pair.stop()
+
+
+async def test_leading_headers_on_a_locally_opened_stream_point_at_open(make_pair):
+    pair = make_pair()
+    pair.acceptor.on_stream(_echo_handler)
+    pair.start()
+    try:
+        # The opener's first frame was the `open`, so its one chance is already spent - and the error
+        # has to name `open()` rather than repeat the rule, since the caller has somewhere to put them.
+        stream = pair.dialer.open({"q": 1})
+        with pytest.raises(ProtocolError, match=r"open\(\)"):
+            await stream.send_headers({"trace": "abc"})
+    finally:
+        await pair.stop()
+
+
+async def test_leading_headers_arrive_before_the_first_payload(make_pair):
+    pair = make_pair()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.send_headers({"content-type": "text/csv"})
+        await stream.end({"row": 1})
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": "export"}, end=True)
+        # The ordering is the whole feature: a consumer that learns the content type only after the
+        # body has started has learned it too late. `headers_arrived` fires on the frame that carried
+        # them, which arrived before the one carrying the payload.
+        await asyncio.wait_for(stream.reply_headers_arrived.wait(), 2)
+        assert stream.reply_headers == {"content-type": "text/csv"}
+        assert await stream == {"row": 1}
+    finally:
+        await pair.stop()
+
+
+async def test_leading_headers_can_ride_the_first_payload(make_pair):
+    pair = make_pair()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.reply({"rows": 2}, headers={"content-type": "application/json"})
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1}, end=True)
+        assert await stream == {"rows": 2}
+        await asyncio.wait_for(stream.reply_headers_arrived.wait(), 2)
+        assert stream.reply_headers == {"content-type": "application/json"}
+        # One frame, not two: `reply` carried them rather than announcing them separately.
+        assert len(pair.frames_of_type("acceptor", "data")) == 1
+    finally:
+        await pair.stop()
+
+
+async def test_headers_after_the_first_frame_reset_the_stream_and_nothing_else(make_lone):
+    """The receiving half of WSM-FRM-016, which the local handle refuses to produce."""
+    lone = make_lone()
+    lone.peer.on_stream(_echo_handler)
+    lone.start()
+    try:
+        lone.inject(Frame("open", stream=1, payload={"q": 1}))
+        lone.inject(Frame("open", stream=3, payload={"q": 2}))
+        lone.inject(Frame("data", stream=1, payload={"chunk": 1}))
+        await lone.settle()
+        assert lone.frames_of_type("reset") == []
+
+        lone.inject(Frame("data", stream=1, headers={"late": True}, payload={"chunk": 2}))
+        await lone.settle()
+
+        resets = lone.frames_of_type("reset")
+        assert [(frame.stream, frame.code) for frame in resets] == [(1, int(ResetCode.PROTOCOL_ERROR))]
+        # Stream-level: the connection and every other stream on it are untouched (§4.3).
+        assert lone.frames_of_type("goaway") == []
+        assert 3 in lone.peer.streams
+    finally:
+        await lone.stop()
+
+
+async def test_reply_headers_arrived_settles_on_every_path(make_pair):
+    """WSM-API-025: including the paths on which no headers will ever come."""
+    pair = make_pair()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.cancel("not answering this one")
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        # A remote that resets before answering sends no headers and never will. The rule makes that
+        # settle rather than hang: this wait is the assertion, and a port that only set the event on
+        # a first frame would fail it by timing out.
+        refused = pair.dialer.open({"q": 1})
+        await asyncio.wait_for(refused.reply_headers_arrived.wait(), 2)
+        assert refused.reply_headers == {}
+    finally:
+        await pair.stop()
+
+
+async def test_an_opens_headers_are_the_acceptors_from_construction(make_pair):
+    pair = make_pair()
+    answered: list[Stream] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        answered.append(stream)
+        await stream.closed.wait()
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        pair.dialer.open({"q": 1}, headers={"trace": "abc123"}, end=True)
+        await pair.settle()
+        assert answered[0].headers == {"trace": "abc123"}
+        # The open's headers are not the answer's: this handler has announced nothing yet.
+        assert answered[0].reply_headers == {}
+    finally:
+        await pair.stop()

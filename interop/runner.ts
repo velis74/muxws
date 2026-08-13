@@ -644,6 +644,7 @@ const STEP_KINDS = [
   'expect_frame',
   'expect_no_frame',
   'expect_result',
+  'expect_headers',
   'expect_error',
   'expect_closed',
 ];
@@ -652,6 +653,7 @@ const IMPLEMENTED_CALLS = [
   'request',
   'notify',
   'send',
+  'send_headers',
   'end',
   'reply',
   'cancel',
@@ -858,6 +860,7 @@ class Side {
     else if ('expect_frame' in step) this.expectFrame(step.expect_frame as Record<string, unknown>);
     else if ('expect_no_frame' in step) this.expectNoFrame(step.expect_no_frame as Record<string, unknown>);
     else if ('expect_result' in step) await this.expectResult(step.expect_result as Step);
+    else if ('expect_headers' in step) await this.expectHeaders(step.expect_headers as Step);
     else if ('expect_error' in step) await this.expectError(step.expect_error as Step);
     else if ('expect_closed' in step) await this.expectClosed(step.expect_closed as Step);
     else throw new StepError(`no step kind in ${JSON.stringify(step)}`);
@@ -870,6 +873,7 @@ class Side {
       request: (s) => this.corpusRequest(s),
       notify: (s) => this.corpusNotify(s),
       send: (s) => this.corpusSend(s),
+      send_headers: (s) => this.corpusSendHeaders(s),
       end: (s) => this.corpusEnd(s),
       reply: (s) => this.corpusReply(s),
       cancel: (s) => this.corpusCancel(s),
@@ -928,20 +932,37 @@ class Side {
 
   private async corpusSend(step: Step): Promise<null> {
     const { stream } = await this.streamFor(Number(step.stream_ref));
-    await stream.send(step.payload ?? null, { end: step.end === true });
+    await stream.send(step.payload ?? null, {
+      end: step.end === true,
+      headers: step.headers as Record<string, unknown> | undefined,
+    });
+    return null;
+  }
+
+  /** The answering side's leading headers, on a frame with no payload at all (WSM-API-024). */
+  private async corpusSendHeaders(step: Step): Promise<null> {
+    const { stream } = await this.streamFor(Number(step.stream_ref));
+    await stream.sendHeaders(step.headers as Record<string, unknown>);
     return null;
   }
 
   private async corpusEnd(step: Step): Promise<null> {
     const { stream } = await this.streamFor(Number(step.stream_ref));
     // An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
-    await stream.end({ payload: 'payload' in step ? step.payload : undefined, trailers: step.trailers });
+    await stream.end({
+      payload: 'payload' in step ? step.payload : undefined,
+      trailers: step.trailers,
+      headers: step.headers as Record<string, unknown> | undefined,
+    });
     return null;
   }
 
   private async corpusReply(step: Step): Promise<null> {
     const { stream } = await this.streamFor(Number(step.stream_ref));
-    await stream.reply(step.payload ?? null, { trailers: step.trailers });
+    await stream.reply(step.payload ?? null, {
+      trailers: step.trailers,
+      headers: step.headers as Record<string, unknown> | undefined,
+    });
     return null;
   }
 
@@ -1113,6 +1134,26 @@ class Side {
     const value = await this.valueOf(spec.ref as string);
     if (!deepEqual(value, spec.value)) {
       throw new StepError(`${String(spec.ref)} produced ${renderValue(value)}, expected ${renderValue(spec.value)}`);
+    }
+  }
+
+  /** What this peer holds on the attribute `of` names, once it can no longer change (WSM-API-025). */
+  private async expectHeaders(spec: Step): Promise<void> {
+    const { stream } = await this.streamFor(Number(spec.stream_ref));
+    const of = String(spec.of);
+    if (of !== 'open' && of !== 'reply') {
+      throw new StepError(`expect_headers needs "of": "open" or "reply", not ${of}`);
+    }
+    if (of === 'reply') {
+      await withDeadline(
+        stream.replyHeadersArrived,
+        CORPUS_STEP_TIMEOUT_MS,
+        `stream ${String(spec.stream_ref)} reply headers`,
+      );
+    }
+    const held = of === 'open' ? stream.headers : stream.replyHeaders;
+    if (!deepEqual(held, spec.value)) {
+      throw new StepError(`${of} headers were ${renderValue(held)}, expected ${renderValue(spec.value)}`);
     }
   }
 
@@ -1470,6 +1511,7 @@ function ownerOf(step: Step, labels: Map<string, Who>): Who {
   const named = ['call', 'expect_frame', 'expect_no_frame'].find((key) => key in step);
   if (named !== undefined) return step.peer as Who;
   if ('expect_closed' in step) return (step.expect_closed as Step).peer as Who;
+  if ('expect_headers' in step) return (step.expect_headers as Step).peer as Who;
   const labelled = ['expect_result', 'expect_error'].find((key) => key in step);
   if (labelled !== undefined) {
     const ref = String((step[labelled] as Step).ref);

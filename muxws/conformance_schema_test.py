@@ -27,6 +27,7 @@ REQUIRED_INVALID_CASES = {
     "fragment-interrupted-by-non-fragment",
     "data-above-high-water-mark",
     "data-for-closed-id",
+    "headers-on-a-later-frame",
 }
 
 
@@ -74,6 +75,7 @@ def test_connection_level_cases_die_and_stream_level_cases_survive():
         "frame-over-max-frame-bytes": True,
         "fragment-interrupted-by-non-fragment": True,
         "data-for-closed-id": True,
+        "headers-on-a-later-frame": True,
     }
 
 

@@ -54,10 +54,10 @@ INVALID = sorted(INVALID_DIR.glob("*.json"))
 #: `test_both_runners_collect_the_same_number_of_fixtures` reads the TypeScript file to prove they
 #: still agree. A fixture that stopped being collected would otherwise be a suite that passes by
 #: testing nothing.
-EXPECTED_SEQUENCE_FIXTURES = 13
-EXPECTED_INVALID_FIXTURES = 8
+EXPECTED_SEQUENCE_FIXTURES = 14
+EXPECTED_INVALID_FIXTURES = 9
 
-#: The eight cases WSM-TST-003 enumerates, **by name**. Enumerated rather than counted: a count alone
+#: The nine cases WSM-TST-003 enumerates, **by name**. Enumerated rather than counted: a count alone
 #: passes when one case is deleted and another duplicated under a new name.
 REQUIRED_INVALID_CASES = frozenset(
     {
@@ -69,6 +69,7 @@ REQUIRED_INVALID_CASES = frozenset(
         "fragment-interrupted-by-non-fragment",
         "data-above-high-water-mark",
         "data-for-closed-id",
+        "headers-on-a-later-frame",
     }
 )
 
@@ -77,7 +78,7 @@ REQUIRED_INVALID_CASES = frozenset(
 #: bytes and reads **this** literal out of this file, so there is exactly one checked-in digest and a
 #: port that reads a different corpus fails. Changing the JSON wire after 1.0 means editing the line
 #: below, deliberately, in the same commit as the change.
-JSON_WIRE_DIGEST = "8edb30f1a73248a36ad08208e3706df60868534a180aa58bb58ffae1ef587961"
+JSON_WIRE_DIGEST = "c9d11fccae5fb76273f7328274ccda66968297e5ed2527f8ce40ae360ccb8d49"
 
 #: Wall-clock ceiling on any one waiting step. A fixture that cannot make progress must fail as a
 #: named assertion rather than hang the suite.
@@ -256,6 +257,8 @@ class Replay:
             self.expect_no_frame(step)
         elif "expect_result" in step:
             await self.expect_result(step["expect_result"])
+        elif "expect_headers" in step:
+            await self.expect_headers(step["expect_headers"])
         elif "expect_error" in step:
             await self.expect_error(step["expect_error"])
         elif "expect_closed" in step:
@@ -315,16 +318,25 @@ class Replay:
 
     async def call_send(self, step: dict[str, Any]) -> None:
         stream = self.stream_for(step["peer"], step["stream_ref"])
-        await stream.send(step.get("payload"), end=step.get("end", False))
+        await stream.send(step.get("payload"), end=step.get("end", False), headers=step.get("headers"))
+
+    async def call_send_headers(self, step: dict[str, Any]) -> None:
+        """The answering side's leading headers, on a frame with no payload at all (WSM-API-024)."""
+        stream = self.stream_for(step["peer"], step["stream_ref"])
+        await stream.send_headers(step["headers"])
 
     async def call_end(self, step: dict[str, Any]) -> None:
         stream = self.stream_for(step["peer"], step["stream_ref"])
         # An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
-        await stream.end(step["payload"] if "payload" in step else ABSENT, trailers=step.get("trailers"))
+        await stream.end(
+            step["payload"] if "payload" in step else ABSENT,
+            trailers=step.get("trailers"),
+            headers=step.get("headers"),
+        )
 
     async def call_reply(self, step: dict[str, Any]) -> None:
         stream = self.stream_for(step["peer"], step["stream_ref"])
-        await stream.reply(step.get("payload"), trailers=step.get("trailers"))
+        await stream.reply(step.get("payload"), trailers=step.get("trailers"), headers=step.get("headers"))
 
     async def call_cancel(self, step: dict[str, Any]) -> None:
         await self.stream_for(step["peer"], step["stream_ref"]).cancel(step.get("reason"))
@@ -468,6 +480,30 @@ class Replay:
         value = await self._value_of(spec["ref"])
         if value != spec["value"]:
             raise AssertionError(f"{spec['ref']} produced {value!r}, expected {spec['value']!r}")
+
+    async def expect_headers(self, spec: dict[str, Any]) -> None:
+        """What a peer ended up **holding**, which no assertion on frames can see (WSM-API-025).
+
+        `expect_frame` proves the headers went out; this proves they were surfaced, on the attribute
+        that is theirs. `of` is required rather than defaulted, because the two attributes are the
+        whole distinction the step exists to check. For `reply` the wait is on
+        `reply_headers_arrived` rather than on a settle count: that event fires the moment the value
+        stops changing, and a fixture that slept instead would pass against a port that never set it.
+        """
+        stream = self.stream_for(spec["peer"], spec["stream_ref"])
+        of = spec["of"]
+        if of not in ("open", "reply"):
+            raise AssertionError(f'expect_headers needs "of": "open" or "reply", not {of!r}')
+        if of == "reply":
+            try:
+                await asyncio.wait_for(stream.reply_headers_arrived.wait(), STEP_TIMEOUT)
+            except asyncio.TimeoutError:
+                raise AssertionError(
+                    f"{spec['peer']} stream {spec['stream_ref']} never saw reply headers arrive"
+                ) from None
+        held = stream.headers if of == "open" else stream.reply_headers
+        if held != spec["value"]:
+            raise AssertionError(f"{of} headers were {held!r}, expected {spec['value']!r}")
 
     async def expect_error(self, spec: dict[str, Any]) -> None:
         expected = ERROR_CLASSES[spec["error"]]
@@ -739,7 +775,7 @@ def _assert_expected_frames(emitted: list[Frame], fixture: dict[str, Any]) -> No
 
 
 def test_every_invalid_case_of_wsm_tst_003_has_a_fixture():
-    """The eight cases, by name. Without this, a deleted fixture is a silently passing suite."""
+    """The nine cases, by name. Without this, a deleted fixture is a silently passing suite."""
     assert {path.stem for path in INVALID} == set(REQUIRED_INVALID_CASES)
     assert len(INVALID) == EXPECTED_INVALID_FIXTURES
 

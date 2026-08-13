@@ -8,7 +8,7 @@
 
 import { JsonCodec } from './codec';
 import { ProtocolError, RemoteError, ResetCode, StreamAlreadyConsumed, StreamClosed, StreamReset } from './errors';
-import { type Frame, framesEqual } from './frames';
+import { ABSENT, type Frame, framesEqual } from './frames';
 import { Peer } from './peer';
 import { Stream, StreamState } from './stream';
 import { type MemorySocket, memoryPair } from './transports/memory';
@@ -723,3 +723,152 @@ async function collect(stream: Stream): Promise<unknown[]> {
   for await (const item of stream) items.push(item);
   return items;
 }
+
+// --------------------------------------------------------------------------- leading headers
+
+describe('the answering side’s leading headers (WSM-FRM-016)', () => {
+  it('sends leading headers once, and refuses a second set - WSM-API-024', async () => {
+    const pair = new Pair();
+    const answered: Stream[] = [];
+    pair.acceptor.onStream(capture(answered));
+    pair.start();
+    try {
+      pair.dialer.open({ q: 'export' }, { end: true });
+      await pair.settle();
+      const [answering] = answered;
+
+      await answering.sendHeaders({ 'content-type': 'text/csv' });
+      // The chance is spent by the *frame*, not by the argument: a second set raises whether it
+      // rides `sendHeaders`, `send` or `end`, and a port that only guarded the first would let two
+      // sets onto a wire whose rule is one.
+      await expect(answering.sendHeaders({ late: true })).rejects.toBeInstanceOf(ProtocolError);
+      await expect(answering.send({ row: 1 }, { headers: { late: true } })).rejects.toBeInstanceOf(ProtocolError);
+      await expect(answering.end({ headers: { late: true } })).rejects.toBeInstanceOf(ProtocolError);
+
+      // Still sendable without them, which is the half a "raises on the second call" check misses:
+      // refusing the headers must not have refused the frame.
+      await answering.send({ row: 1 });
+      await pair.settle();
+      const data = pair.framesOfType('acceptor', 'data');
+      expect(data.map((frame) => frame.headers ?? null)).toEqual([{ 'content-type': 'text/csv' }, null]);
+      // ABSENT and not null: a headers frame carries no payload key at all (D1).
+      expect(data[0].payload).toBe(ABSENT);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('refuses them on a stream this peer opened, and says where they belong', async () => {
+    const pair = new Pair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+    try {
+      // The opener's first frame was the `open`, so its one chance is already spent - and the error
+      // has to name `open()` rather than repeat the rule, since the caller has somewhere to put them.
+      const stream = pair.dialer.open({ q: 1 });
+      await expect(stream.sendHeaders({ trace: 'abc' })).rejects.toThrow(/open\(\)/);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('arrive before the first payload does', async () => {
+    const pair = new Pair();
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      await stream.sendHeaders({ 'content-type': 'text/csv' });
+      await stream.end({ payload: { row: 1 } });
+    });
+    pair.start();
+    try {
+      const stream = pair.dialer.open({ q: 'export' }, { end: true });
+      // The ordering is the whole feature: a consumer that learns the content type only after the
+      // body has started has learned it too late. `headersArrived` settles on the frame that carried
+      // them, which arrived before the one carrying the payload.
+      await stream.replyHeadersArrived;
+      expect(stream.replyHeaders).toEqual({ 'content-type': 'text/csv' });
+      expect(await stream).toEqual({ row: 1 });
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('ride the first payload when the answer has nothing to announce early', async () => {
+    const pair = new Pair();
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      await stream.reply({ rows: 2 }, { headers: { 'content-type': 'application/json' } });
+    });
+    pair.start();
+    try {
+      const stream = pair.dialer.open({ q: 1 }, { end: true });
+      expect(await stream).toEqual({ rows: 2 });
+      await stream.replyHeadersArrived;
+      expect(stream.replyHeaders).toEqual({ 'content-type': 'application/json' });
+      // One frame, not two: `reply` carried them rather than announcing them separately.
+      expect(pair.framesOfType('acceptor', 'data')).toHaveLength(1);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('resets the stream, and only the stream, when they arrive late', async () => {
+    const pair = new Pair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      const other = pair.dialer.open({ q: 2 });
+      await pair.settle();
+
+      // Injected rather than sent: the local handle refuses to build this frame (WSM-API-024), which
+      // is exactly why the receiver's half needs a witness of its own.
+      pair.inject('dialer', { type: 'data', stream: stream.id, payload: { row: 1 } });
+      pair.inject('dialer', { type: 'data', stream: stream.id, headers: { late: true }, payload: { row: 2 } });
+      await pair.settle();
+
+      await expect(Promise.resolve(stream)).rejects.toBeInstanceOf(StreamReset);
+      const [reset] = pair.framesOfType('dialer', 'reset');
+      expect(reset.code).toBe(ResetCode.PROTOCOL_ERROR);
+      expect(reset.stream).toBe(stream.id);
+      // Stream-level: the connection and every other stream on it are untouched (§4.3).
+      expect(other.state).not.toBe(StreamState.CLOSED);
+      expect(pair.framesOfType('dialer', 'goaway')).toHaveLength(0);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('settles replyHeadersArrived on every path, including the ones with no headers on them', async () => {
+    const pair = new Pair();
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      await stream.cancel('not answering this one');
+    });
+    pair.start();
+    try {
+      // A remote that resets before answering sends no headers and never will. WSM-API-025 makes
+      // that settle rather than hang: this await is the assertion, and a port that only settled on a
+      // first frame would fail it by never returning.
+      const refused = pair.dialer.open({ q: 1 });
+      void Promise.resolve(refused).catch(() => undefined);
+      await refused.replyHeadersArrived;
+      expect(refused.replyHeaders).toEqual({});
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('is what the acceptor already had: an open’s headers, from construction', async () => {
+    const pair = new Pair();
+    const answered: Stream[] = [];
+    pair.acceptor.onStream(capture(answered));
+    pair.start();
+    try {
+      pair.dialer.open({ q: 1 }, { headers: { trace: 'abc123' }, end: true });
+      await pair.settle();
+      expect(answered[0].headers).toEqual({ trace: 'abc123' });
+      // The open's headers are not the answer's: this handler has announced nothing yet.
+      expect(answered[0].replyHeaders).toEqual({});
+    } finally {
+      await pair.stop();
+    }
+  });
+});

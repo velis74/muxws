@@ -82,7 +82,7 @@ in every language.
 | `payload` | any codec value | no | absent | `open`, `data`, `reset` | The application value. On `reset`, the optional structured error object. Absent means "no payload", which is a different frame from `"payload": null`. Mutually exclusive with `fragment`. |
 | `fragment` | string (text codec) / bytes (binary codec) | no | absent | `open`, `data`, `reset` | A slice of the codec-encoded logical payload. Mutually exclusive with `payload`. |
 | `more` | bool | no | `false` | frames with `fragment` | `true` on every fragment but the last. |
-| `headers` | object | no | absent | `open` | Application metadata; string keys, codec-encodable values. Never interpreted by muxws. |
+| `headers` | object | no | absent | `open`, and the first `data` a peer sends on a stream | Application metadata; string keys, codec-encodable values. Never interpreted by muxws. Each peer gets one chance per stream (WSM-FRM-016). |
 | `end` | bool | no | `false` | `open`, `data` | Last frame this peer will send on this stream. |
 | `trailers` | object | no | absent | frames with `end: true` | Post-body metadata. |
 | `code` | int | yes | — | `reset`, `goaway` | Reset code (§2.4). |
@@ -121,6 +121,7 @@ A receiver ignores envelope fields it does not know (WSM-FRM-001) and frame type
 ```json
 {"type":"open","stream":1,"end":true,"payload":{"action":"list"}}
 {"type":"open","stream":3,"headers":{"trace":"abc123","attempt":2},"payload":{"action":"export"}}
+{"type":"data","stream":3,"headers":{"content-type":"text/csv","rows-estimated":40000}}
 {"type":"data","stream":7,"payload":{"rows":128}}
 {"type":"data","stream":7,"end":true,"payload":{"rows":4},"trailers":{"checksum":"deadbeef"}}
 {"type":"data","stream":7,"end":true}
@@ -129,6 +130,11 @@ A receiver ignores envelope fields it does not know (WSM-FRM-001) and frame type
 {"type":"pong","nonce":"8f14e45fceea167a"}
 {"type":"goaway","code":0,"last_stream":7,"reason":"shutting down"}
 ```
+
+The second `data` line is the answering side's leading headers: a peer that did not open the stream
+says what is coming before it starts sending it, on a frame that carries no payload at all. That
+frame is its **first** on the stream, which is the only place headers may ride (WSM-FRM-016) — the
+opener's equivalent is the `headers` on `open`.
 
 A fragmented payload looks like this — `headers` on the first fragment only, `end` and `trailers` on
 the last only, `code` and `reason` repeated on every fragment of a `reset`, `more: true` on all but
@@ -167,7 +173,9 @@ of the read loop, and the peer then looks open with every await hanging.
 No limit, in any form: `MAX_FRAME_BYTES` is a protocol constant, `max_payload_bytes` and the
 concurrency limit are each one receiver's own defence (WSM-CON-031). No capability list. No version
 beyond the subprotocol generation. No credential (§5.2). No muxws-defined vocabulary inside `payload`
-— no `kind`, no reserved key, no discriminator of any sort (WSM-FRM-006).
+— no `kind`, no reserved key, no discriminator of any sort (WSM-FRM-006). No status: the answering
+side's `headers` (WSM-FRM-016) are the application's, key for key, and muxws neither defines a
+success key nor reads one (WSM-AUT-002). A failed exchange is a `reset`, which is typed (§2.4).
 
 ---
 
@@ -265,7 +273,8 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   Test: `stream_test.py::test_open_resolves_first_payload_while_request_raises`.
 - **WSM-API-008** The async surface is closed, and it is exactly this: `connect()`, `accept()`,
   `serve()`; `peer.notify()`, `peer.request()`, `peer.ping()`, `peer.close()`; every `Stream` method
-  that sends or waits — `send()`, `end()`, `reply()`, `reset()`, `cancel()` (WSM-ERR-012) and
+  that sends or waits — `send()`, `send_headers()`/`sendHeaders()` (WSM-API-024), `end()`,
+  `reply()`, `reset()`, `cancel()` (WSM-ERR-012) and
   `result()` (WSM-API-012); and the four members of the socket adapter protocol (WSM-API-021), which
   are the transport seam rather than a call an application makes. **Everything else MUST NOT be
   async**, and the two that matter are `peer.open()` (WSM-API-001 — a synchronous open is what makes
@@ -320,9 +329,35 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   TypeScript, settling when the stream closes, including on socket death. That promise MUST resolve
   and MUST NOT reject — a stream that closed by being reset still closed, and the reset reaches the
   awaits and the iterator instead — so WSM-API-016's precaution does not apply to it.
+- **WSM-API-024** Sending the leading headers of WSM-FRM-016 MUST be possible **without a payload**:
+  `stream.send_headers()` / `stream.sendHeaders()`, which puts a payload-less `data` frame on the
+  wire. Riding them along with the first payload MUST also be possible, as a `headers` argument to
+  `send()`, `end()` and `reply()`. Both MUST raise `ProtocolError` once this side has sent any frame
+  on the stream — the wire rule is one chance per peer per stream, and a call that silently dropped
+  the second set would leave the sender believing it had announced something it had not. On a stream
+  this peer opened, the `open` **is** that first frame, so `send_headers()` there MUST raise and say
+  that `open(headers=)` is the place.
+  Test: `stream_test.py::test_leading_headers_are_sendable_once_and_only_first`;
+  `ts/stream.spec.ts` *"sends leading headers once, and refuses a second set"*.
+- **WSM-API-025** The two sets of leading headers MUST be two attributes, and each MUST read the
+  same from either end of the stream. `stream.headers` is the `open`'s, which both peers already
+  see today; `stream.reply_headers` / `stream.replyHeaders` is the answering side's — what the
+  opener received, and what the answering peer itself announced. Both MUST be an empty mapping when
+  there are none, never `None`/`undefined`. Overloading `stream.headers` to mean "whatever the
+  *other* peer sent" MUST NOT be done: it reads as one attribute and is two, and it would take the
+  opener's own headers away from the opener, which is where they are today.
+  `stream.reply_headers_arrived` / `replyHeadersArrived` MUST be an `asyncio.Event` in Python and a
+  `Promise<void>` in TypeScript, settling at the instant `reply_headers` can no longer change: the
+  answering side's first frame on the stream, or the close of a stream that was never answered. It
+  MUST settle on **every** path, including a stream reset before any answer and one whose socket
+  dies — an await on metadata that will never come is the spinner that never stops (WSM-INV-011),
+  and here it is one the remote can cause.
+  Test: `stream_test.py::test_reply_headers_arrived_settles_on_every_path`;
+  `ts/stream.spec.ts` *"settles replyHeadersArrived on every path"*.
 
 **Call shapes.** Unary is `open(end)` → `data(end)`; a streaming response is `open(end)` → `data`…
-`data(end)`; bidirectional is `open` → interleaved `data` both ways → `data(end)` both ways; a
+`data(end)`, optionally led by a payload-less `data(headers)` announcing what is coming
+(WSM-FRM-016); bidirectional is `open` → interleaved `data` both ways → `data(end)` both ways; a
 one-shot push is `open(end)` with nothing awaited. Durations are **seconds as floats in Python** and
 **milliseconds in TypeScript**; wire field names stay snake_case in every language.
 
@@ -340,7 +375,10 @@ one-shot push is `open(end)` with nothing awaited. Durations are **seconds as fl
   `peer_test.py::test_per_stream_headers_arrive_unchanged_and_change_nothing` (WSM-AUT-002), and by
   the upgrade tests in `transports/websockets_test.py` and `ts/node.spec.ts`.
 - **WSM-AUT-002** muxws MUST NOT interpret per-stream `headers`. They exist for the application and
-  MUST NOT be used for re-authentication by the library.
+  MUST NOT be used for re-authentication by the library. This binds both directions: the answering
+  side's leading headers (WSM-FRM-016) are delivered as sent and change no outcome either, and a
+  library that started reading the answer's metadata would be inventing a status code — which is
+  what WSM-FRM-006 forbids inside `payload` and there is no reason to permit beside it.
 - **WSM-AUT-003** **On the deploying application** (a SHOULD, and its call): a connection whose
   credential expires mid-life SHOULD be closed with `goaway`. muxws neither knows what a credential
   is nor when one expires (WSM-AUT-001), so it cannot do this and cannot be tested for it.
@@ -619,8 +657,11 @@ MuxwsError
   pair — a writer with its own green tests can still be bypassed by the send path.
 - **WSM-FRG-020** `end: true` MUST appear only on the final fragment of a payload. A fragment
   sequence MUST end with a fragment carrying `more: false`, even when that fragment carries no bytes.
-- **WSM-FRG-021** `headers` MUST NOT be fragmented. An `open` whose headers alone push the frame over
-  the cap MUST be rejected by the receiver with `reset(PAYLOAD_TOO_LARGE)`.
+- **WSM-FRG-021** `headers` MUST NOT be fragmented. A frame whose headers alone push it over the cap
+  MUST be rejected by the receiver with `reset(PAYLOAD_TOO_LARGE)`. This binds every frame headers
+  may ride (WSM-FRM-016), not the `open` alone: an answering peer's leading `data` is the same frame
+  with the same field on it, and a splitter that special-cased `open` would fragment the one place
+  the rule was never checked.
 - **WSM-FRG-030** The receiver MUST concatenate `fragment` values and hand the result to the codec
   for decoding when a fragment arrives without `more: true`.
 - **WSM-FRG-031** A receiver that enforces a frame-size limit MUST measure the entire encoded
@@ -664,8 +705,8 @@ MuxwsError
   (required), `headers`, `payload`/`fragment`+`more`, `end`. `end: true` on `open` is the unary
   request shape.
 - **WSM-FRM-011** `data` carries a payload chunk on an existing stream. Fields: `stream`,
-  `payload`/`fragment`+`more`, `end`, `trailers`. A peer MUST NOT send `data` on a stream where its
-  own side is already half-closed.
+  `headers` (first one only, WSM-FRM-016), `payload`/`fragment`+`more`, `end`, `trailers`. A peer
+  MUST NOT send `data` on a stream where its own side is already half-closed.
 - **WSM-FRM-012** End of stream MUST be a flag, never its own frame type. A peer with nothing left to
   say sends `{"type": "data", "stream": N, "end": true}` with no payload. There MUST NOT be an `end`
   frame type.
@@ -676,6 +717,20 @@ MuxwsError
   error object.
 - **WSM-FRM-015** `ping`, `pong` and `goaway` are connection-level and MUST omit `stream`, or set it
   to `0`.
+- **WSM-FRM-016** `headers` MAY ride the **first stream-level frame a peer sends on a stream** and
+  MUST NOT appear on any later one. For the peer that opened the stream that frame is the `open`;
+  for the peer answering it, its first `data`. The two directions are independent — each peer has
+  its own one chance, and neither can spend the other's. A receiver that sees `headers` on a later
+  frame MUST reset that stream with `PROTOCOL_ERROR`; that is a stream-level error and MUST NOT take
+  the connection down (§4.3).
+  Two consequences a port must get right. `reset` never carries headers, however early it arrives: a
+  reset is not an answer, and the field table lists it on `open` and `data` only. And "first frame"
+  means *sent*, not *carrying a payload* — a peer with metadata to announce and nothing yet to say
+  sends `{"type":"data","stream":N,"headers":{...}}`, which is a legal frame with no payload, and has
+  then spent its chance.
+  Tests: `conformance/frames/v1-frames.json` (`data-with-headers`),
+  `conformance/sequences/answering-side-announces-headers.json`,
+  `conformance/invalid/headers-on-a-later-frame.json`.
 
 ### 5.9 `WSM-INV-` — cross-cutting invariants
 
@@ -1034,7 +1089,8 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   previous open; `data` after `end`; an over-cap encoded message; a message the configured codec
   refuses to decode; a fragment sequence interrupted by a non-fragment frame; a stream-level frame
   above the high-water mark (connection dies); a `data` frame for an already-closed id (connection
-  survives, nothing goes out).
+  survives, nothing goes out); `headers` on a frame that is not the sender's first on the stream
+  (WSM-FRM-016, connection survives).
 - **WSM-TST-004** CI MUST run the live cross-language matrix in **both role assignments** over the
   same scenario script: concurrent unary requests interleaved with a streaming export and a server
   push, one cancelled mid-flight, and a `goaway` shutdown.
@@ -1110,7 +1166,7 @@ In order, because each step is cheap only once the previous one holds:
    `decode(json_wire) == frame` and `decode(encode(frame)) == frame`, comparing parsed objects
    (WSM-CDC-004/005). Then `v1-fragment-boundaries.json`: the exact cut points, element for element
    (WSM-FRG-016).
-2. **The invalid corpus.** All eight cases of WSM-TST-003, each asserting the outgoing frame *and*
+2. **The invalid corpus.** All nine cases of WSM-TST-003, each asserting the outgoing frame *and*
    whether the connection lived. The empty `expect_out` of `data-for-closed-id` is an assertion, not
    an absence of one.
 3. **The sequence corpus**, replayed in **both role assignments** (WSM-TST-002). This is what proves
@@ -1167,7 +1223,7 @@ witness was added in the M8 audit, the mutation that proves it can fail is given
 
 ### The count
 
-Of the **215** individually numbered rules in §5:
+Of the **218** individually numbered rules in §5:
 
 | | rules with no citing test |
 |---|---|
