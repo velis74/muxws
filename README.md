@@ -33,7 +33,7 @@ npm install muxws                       # optional peers: ws, @msgpack/msgpack
 
 ## Status
 
-0.1.0, alpha - the first release. Two versions that move independently: the *wire* is already at its
+Alpha - the first releases. Two versions that move independently: the *wire* is already at its
 first generation and frozen there (`muxws.v1.<codec>` is the subprotocol, and `v1` stays until a
 breaking change earns a new one), while the *package* carries a leading zero because none of this has
 been through a real deployment yet. 1.0 is what the first confirmed production use earns. Python

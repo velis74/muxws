@@ -78,6 +78,14 @@ Documentation = "https://docs.velis.si/muxws/"
 [tool.hatch.version]
 path = "muxws/__init__.py"
 
+# The release tool stamps the two manifests by itself. `ts/version.ts` is the third place the version
+# is written down - the npm half exports it as a constant - and nothing about a Python manifest points
+# at it, so it is named here. Leaving it out is what makes WSM-PKG-001 fail *after* a release rather
+# than before one: the bump lands in `package.json`, the constant keeps the previous number, and the
+# test that exists to notice exactly that only runs once the version has already been tagged.
+[tool.publish]
+additional_files = ["ts/version.ts"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["muxws"]
 # The wheel is the artefact a consumer actually installs, and until this existed it carried the whole

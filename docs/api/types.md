@@ -532,11 +532,11 @@ package version is.
 ### Signature
 
 ```python
-__version__ = "0.1.0"
+__version__: str
 ```
 
 ```ts
-export const VERSION = '0.1.0';
+export const VERSION: string;
 ```
 
 ### Parameters
