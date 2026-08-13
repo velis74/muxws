@@ -7,6 +7,7 @@
  */
 
 import { CodecMismatch } from './errors';
+import { logger } from './observability';
 
 /**
  * The generation prefix. The version component of this name is the **only** version on the wire
@@ -60,7 +61,12 @@ export function select(offered: readonly string[], configured: string): string |
   const entry = findOffer(offered);
   if (entry === wanted) return wanted;
 
-  console.error(
+  // Through the logger rather than straight to `console`, which is how the Python twin spells it
+  // (`logging.getLogger("muxws.codec").error`). A raw `console.error` was the same line with the
+  // level control removed: an application embedding this port could not turn it down, while the same
+  // application in Python could, and the shim in `observability.ts` exists precisely to close that
+  // gap. It still reaches `console.error` at the default level, so the diagnostic is unchanged.
+  logger.error(
     `muxws refusing the upgrade: the dialer offered ${describe(offered, entry)}, this acceptor is ` +
       `configured for '${configured}'. Set MUXWS_CODEC here or VITE_MUXWS_CODEC / MUXWS_CODEC ` +
       'there so both ends agree; muxws never negotiates a fallback (WSM-CDC-022/023).',

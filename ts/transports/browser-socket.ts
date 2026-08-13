@@ -10,6 +10,7 @@
  */
 
 import { CodecMismatch, ConnectionClosed, ProtocolError } from '../errors';
+import { logger } from '../observability';
 import { PREFIX, mismatchError, offer } from '../subprotocol';
 
 import type { SocketAdapter } from './index';
@@ -119,8 +120,10 @@ export class BrowserSocket implements SocketAdapter {
     const wanted = `${PREFIX}${codecName}`;
     if (adapter.socket.protocol !== wanted) {
       // The same line `websockets_.verify_negotiated` logs: the throw below reaches the caller, this
-      // reaches whoever is reading the console when the caller swallowed it.
-      console.error(
+      // reaches whoever is reading the console when the caller swallowed it. Through the logger, for
+      // the reason `subprotocol.ts` gives - the Python twin logs it to `muxws.transport` and is
+      // therefore silenceable, and a port that mirrors the message but not the control is not a port.
+      logger.error(
         `muxws negotiated subprotocol is '${adapter.socket.protocol}', expected '${wanted}'; ` +
           `closing with ${POLICY_VIOLATION}`,
       );
