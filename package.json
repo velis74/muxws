@@ -1,7 +1,7 @@
 {
   "name": "muxws",
   "private": false,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "sideEffects": false,
   "description": "Multiplexed, cancellable, bidirectional streams over one WebSocket",

@@ -11,7 +11,7 @@ export default defineConfig({
     visualizer({ open: false, filename: 'coverage/stats.html', gzipSize: true, brotliSize: true }),
   ],
   resolve: {
-    alias: { '@': resolve(__dirname, './ts') },
+    alias: { '@': resolve(import.meta.dirname, './ts') },
     extensions: ['.js', '.mjs', '.ts'],
   },
   build: {
@@ -19,9 +19,9 @@ export default defineConfig({
     sourcemap: true,
     lib: {
       entry: {
-        index: resolve(__dirname, 'ts/index.ts'),
-        node: resolve(__dirname, 'ts/node.ts'),
-        msgpack: resolve(__dirname, 'ts/msgpack.ts'),
+        index: resolve(import.meta.dirname, 'ts/index.ts'),
+        node: resolve(import.meta.dirname, 'ts/node.ts'),
+        msgpack: resolve(import.meta.dirname, 'ts/msgpack.ts'),
       },
       formats: ['es', 'cjs'],
       fileName: (format, name) => (format === 'cjs' ? `${name}.cjs` : `${name}.js`),
