@@ -2300,7 +2300,9 @@ async def main() -> None:
 
     async def handler(payload: object, stream: Stream) -> None:
         if payload == "slow":
-            await asyncio.sleep(10)
+            # Never answers, and waits on the stream rather than on a clock: `closed` is set when the
+            # caller's deadline resets it (WSM-API-023).
+            await stream.closed.wait()
             return
         await stream.reply({"echo": payload})
 
@@ -2365,7 +2367,10 @@ const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: fa
 const codes: number[] = [];
 acceptor.onStream(async (payload: unknown, stream: Stream) => {
   if (payload === 'slow') {
-    await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
+    // Never answers, and waits on the stream rather than on a clock: `closed` resolves when the
+    // caller's deadline resets it (WSM-API-023). A timer would keep this process alive for ten
+    // seconds after the last line had been printed.
+    await stream.closed;
     return;
   }
   await stream.reply({ echo: payload });
@@ -2429,7 +2434,11 @@ const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true }
 const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
 
 acceptor.onStream(async (_payload: unknown, stream: Stream) => {
-  await new Promise<void>((resolve) => setTimeout(resolve, 10_000));
+  // Slower than the consumer's patience, and no slower: the abort below lands at 50 ms, so this is
+  // late by any measure. It is a plain sleep rather than a wait on `closed` because the point of the
+  // example is the reply that arrives *after* the stream is gone - and ten seconds of it would only
+  // be ten seconds of a process with nothing left to do.
+  await new Promise<void>((resolve) => setTimeout(resolve, 200));
   await stream.reply('too late');
 });
 

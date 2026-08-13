@@ -959,7 +959,10 @@ async def main() -> None:
 
     @acceptor.on_stream
     async def handle(payload, stream):
-        await asyncio.sleep(30.0)
+        # Never answers, and waits on the stream rather than on a clock: `closed` is set the moment
+        # the caller's deadline resets this stream (WSM-API-023), which is what a handler should
+        # cooperate with rather than sleep through.
+        await stream.closed.wait()
 
     tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
 
@@ -978,15 +981,19 @@ asyncio.run(main())
 ```
 
 ```ts
-import { JsonCodec, Peer, ResetCode, StreamTimeout, memoryPair } from 'muxws';
+import { JsonCodec, Peer, ResetCode, type Stream, StreamTimeout, memoryPair } from 'muxws';
 
 async function main(): Promise<void> {
   const [left, right] = memoryPair();
   const codec = new JsonCodec();
   const dialer = new Peer(left, { codec, isDialer: true });
   const acceptor = new Peer(right, { codec, isDialer: false });
-  acceptor.onStream(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 30_000));
+  acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+    // A handler that never answers, spelled as a wait on the stream rather than on a clock. `closed`
+    // resolves the moment the caller's deadline resets this stream (WSM-API-023), so the example
+    // ends when the exchange does - a timer would hold the process open long after the last line was
+    // printed, and would also model a handler that ignores the cancellation it is being sent.
+    await stream.closed;
   });
   void dialer.serve();
   void acceptor.serve();
@@ -1159,7 +1166,10 @@ async def main() -> None:
 
     @acceptor.on_stream
     async def handle(payload, stream):
-        await asyncio.sleep(30.0)
+        # Never answers, and waits on the stream rather than on a clock: `closed` is set the moment
+        # the caller's deadline resets this stream (WSM-API-023), which is what a handler should
+        # cooperate with rather than sleep through.
+        await stream.closed.wait()
 
     tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
 
@@ -1184,15 +1194,19 @@ asyncio.run(main())
 ```
 
 ```ts
-import { ConnectionLost, JsonCodec, Peer, ProtocolError, ResetCode, memoryPair } from 'muxws';
+import { ConnectionLost, JsonCodec, Peer, ProtocolError, ResetCode, type Stream, memoryPair } from 'muxws';
 
 async function main(): Promise<void> {
   const [left, right] = memoryPair();
   const codec = new JsonCodec();
   const dialer = new Peer(left, { codec, isDialer: true });
   const acceptor = new Peer(right, { codec, isDialer: false });
-  acceptor.onStream(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 30_000));
+  acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+    // A handler that never answers, spelled as a wait on the stream rather than on a clock. `closed`
+    // resolves the moment the caller's deadline resets this stream (WSM-API-023), so the example
+    // ends when the exchange does - a timer would hold the process open long after the last line was
+    // printed, and would also model a handler that ignores the cancellation it is being sent.
+    await stream.closed;
   });
   void dialer.serve();
   void acceptor.serve();
