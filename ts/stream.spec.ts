@@ -9,7 +9,7 @@
 import { JsonCodec } from './codec';
 import { ProtocolError, RemoteError, ResetCode, StreamAlreadyConsumed, StreamClosed, StreamReset } from './errors';
 import { ABSENT, type Frame, framesEqual } from './frames';
-import { Peer } from './peer';
+import { logger, Peer } from './peer';
 import { Stream, StreamState } from './stream';
 import { type MemorySocket, memoryPair } from './transports/memory';
 
@@ -142,6 +142,17 @@ describe('the state table', () => {
     const [state, event] = cell.split('|');
 
     it(`${state} + ${event} -> ${outcome}`, async () => {
+      // An ILL-C cell drives the peer into a connection-level protocol error deliberately, and a
+      // peer that meets one is **required** to log it (§12) - so the line on the console is the
+      // implementation working, not noise from a broken test. Python's twin is quiet only because
+      // pytest captures `logging`; the TypeScript logger is a `console` shim, since the browser entry
+      // point may not depend on a logging library (WSM-PKG-003), and vitest prints what it writes.
+      //
+      // Silenced for these seven cells and nowhere wider. A global filter would also hide a log from
+      // a test that never asked for one, and that log is a signal: it is how an accidental
+      // connection-level failure announces itself in a suite where every other test is quiet.
+      const level = logger.level;
+      if (outcome === 'ILL-C') logger.level = 'silent';
       const pair = new Pair();
       try {
         if (state === 'idle') {
@@ -155,6 +166,7 @@ describe('the state table', () => {
         await assertCell(pair, stream, event, outcome);
       } finally {
         await pair.stop();
+        logger.level = level;
       }
     });
   });

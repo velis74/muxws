@@ -67,6 +67,19 @@ interface Seen {
   readonly byteLength: number;
 }
 
+/**
+ * A measurement worth reading while you are investigating, and noise while you are not.
+ *
+ * Every call below sits beside an `expect` on the same number, so these lines are evidence for a
+ * human and never the test's strength - and a suite whose normal state is silence is one where an
+ * unexpected line means something. Set `MUXWS_VERBOSE` to get them back; a failing assertion prints
+ * its own actual value either way.
+ */
+function note(line: string): void {
+  const verbose = process.env.MUXWS_VERBOSE;
+  if (verbose !== undefined && verbose !== '') console.log(line);
+}
+
 function pause(ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
@@ -256,7 +269,7 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
         .map(({ index }) => index),
     );
 
-    console.log(
+    note(
       `export fragments=${fragments.length} span=${fragments[0]}..${fragments[fragments.length - 1]} ` +
         `of ${received.length} frames`,
     );
@@ -267,7 +280,7 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
     const firstFragment = fragments[0];
     const lastFragment = fragments[fragments.length - 1];
     const interleaved = [...ticks].filter((index) => index > firstFragment && index < lastFragment).length;
-    console.log(`tick frames between the first and last export fragment: ${interleaved}`);
+    note(`tick frames between the first and last export fragment: ${interleaved}`);
     expect(interleaved).toBeGreaterThanOrEqual(40);
 
     // The sharper form of the same claim, and the one a FIFO cannot survive: no tick ever waits on
@@ -275,13 +288,13 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
     const window = received.slice(firstFragment, lastFragment + 1);
     const inWindow = new Set(fragments);
     const backToBack = runsOf(window.map((_frame, index) => inWindow.has(index + firstFragment)));
-    console.log(`longest run of consecutive export fragments: ${backToBack}`);
+    note(`longest run of consecutive export fragments: ${backToBack}`);
     expect(backToBack).toBeLessThanOrEqual(2);
 
     // And it was the whole board that kept moving, not one lucky stream: the rotation asks every lane
     // once before it asks any lane twice.
     const streams = new Set(window.filter((frame) => isTickFrame(frame)).map((frame) => frame.stream));
-    console.log(`distinct tick streams delivering during the export: ${streams.size} of ${SYMBOLS.length}`);
+    note(`distinct tick streams delivering during the export: ${streams.size} of ${SYMBOLS.length}`);
     expect(streams.size).toBe(SYMBOLS.length);
   });
 }, 30_000);
@@ -338,7 +351,7 @@ it('answers every action the frontend can name', async () => {
       .filter((entry) => entry.direction === 'rx' && isFragment(entry.frame))
       .map((entry) => entry.byteLength);
     const bytes = pieces.reduce((total, length) => total + length, 0);
-    console.log(`depth: ${pieces.length} fragments, ${bytes} bytes on the wire`);
+    note(`depth: ${pieces.length} fragments, ${bytes} bytes on the wire`);
     expect(pieces.length).toBeGreaterThan(1);
     expect(bytes).toBeGreaterThan(MAX_FRAME_BYTES);
 
@@ -417,7 +430,7 @@ it('stops the generator when the browser cancels a history', async () => {
     expect(counters.history_started).toBe(1);
     // WSM-API-023: the generator was told, rather than finding out on its next write. Inside half a
     // delay there has been no next write to find out on.
-    console.log(`the generator noticed the cancellation after ${noticedMs}ms of a ${historyDelayMs}ms delay`);
+    note(`the generator noticed the cancellation after ${noticedMs}ms of a ${historyDelayMs}ms delay`);
     expect(counters.history_cancelled).toBe(1);
     expect(noticedMs).toBeLessThan(window);
 
@@ -425,7 +438,7 @@ it('stops the generator when the browser cancels a history', async () => {
     expect(stoppedAt).toBeLessThan(HISTORY_POINTS);
     // Longer than the delay itself, so a generator still looping would have sent at least one more.
     await pause(historyDelayMs * 2);
-    console.log(
+    note(
       `points sent before the cancellation: ${stoppedAt}; ` +
         `after another ${historyDelayMs * 2}ms: ${counters.history_points_sent}`,
     );
@@ -444,7 +457,7 @@ it('fragments the export payload without anybody asking it to', async () => {
     const fragments = arrived.filter((entry) => isFragment(entry.frame));
     const total = fragments.reduce((sum, entry) => sum + entry.byteLength, 0);
 
-    console.log(`export: ${fragments.length} fragments, ${total} bytes on the wire`);
+    note(`export: ${fragments.length} fragments, ${total} bytes on the wire`);
     expect(fragments.length).toBeGreaterThan(1);
     expect(total).toBeGreaterThan(1_000_000);
     // A receiver must accept anything up to the cap and a sender must never exceed it. The cap is a
@@ -516,7 +529,7 @@ it('closes every peer when the kill switch is thrown', async () => {
     // The browser is *told*, which is the whole of the panel: a UI that only froze would be
     // indistinguishable from a slow backend.
     expect(wire.closes.length).toBeGreaterThan(0);
-    console.log(`the browser was told: code=${wire.closes[0].code} clean=${wire.closes[0].wasClean}`);
+    note(`the browser was told: code=${wire.closes[0].code} clean=${wire.closes[0].wasClean}`);
     expect(wire.dialer.isOpen).toBe(false);
     expect(wire.dialer.streams.size).toBe(0);
     // WSM-REG-016 end to end, and it is the *library* this witnesses rather than the demo: the registry

@@ -32,7 +32,7 @@ import { ConnectionLost, RemoteError, ResetCode, StreamRefused, StreamReset, Str
 import { ABSENT, deepEqual, fromMapping } from './frames';
 import type { Frame } from './frames';
 import { MsgpackCodec } from './msgpack';
-import { Peer } from './peer';
+import { logger, Peer } from './peer';
 import type { Stream } from './stream';
 import { MemorySocket, memoryPair } from './transports/memory';
 
@@ -926,6 +926,12 @@ function assertExpectedFrames(emitted: Frame[], fixture: InvalidFixture): void {
 describe('conformance/invalid', () => {
   INVALID_FILES.forEach((fileName) => {
     it(`answers ${fileName} as declared, and survives or does not`, async () => {
+      // Four of these fixtures are messages that kill the connection on purpose, and a peer that
+      // meets one is required to log it (§12) - the console line is the implementation working. It
+      // is silenced for this describe and nowhere wider, on the same reasoning as the ILL-C cells in
+      // `ts/stream.spec.ts`: a log from a test that never provoked one is a signal worth keeping.
+      const level = logger.level;
+      logger.level = 'silent';
       const fixture = JSON.parse(readFileSync(join(INVALID_DIR, fileName), 'utf-8')) as InvalidFixture;
       expect(fixture.name).toBe(fileName.replace(/\.json$/, ''));
       const codec = new JsonCodec();
@@ -962,6 +968,7 @@ describe('conformance/invalid', () => {
       } finally {
         acceptorSocket.close();
         await settle(2);
+        logger.level = level;
       }
     });
   });

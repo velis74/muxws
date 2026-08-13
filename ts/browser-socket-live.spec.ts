@@ -34,7 +34,7 @@ import { JsonCodec } from './codec';
 import { CodecMismatch } from './errors';
 import './index';
 import { handleProtocols, refuseMismatchedUpgrade, serve } from './node';
-import { Peer } from './peer';
+import { logger, Peer } from './peer';
 import { BrowserSocket } from './transports/browser-socket';
 
 const servers: WebSocketServer[] = [];
@@ -83,7 +83,19 @@ describe('BrowserSocket against a real WebSocket', () => {
     // The acceptor is configured for json and refuses this upgrade with HTTP 400 (WSM-CDC-022). A
     // browser cannot read that status, which is exactly why the dialer composes the diagnostic from
     // the codec it offered rather than from anything the server said.
-    await expect(BrowserSocket.connect(url, 'msgpack')).rejects.toBeInstanceOf(CodecMismatch);
+    //
+    // The refusal is logged by the acceptor because WSM-CDC-029 requires it, and this test is the one
+    // place that provokes a real one - so the level is dropped here rather than in a setup file,
+    // exactly as the ILL-C cells do in `ts/stream.spec.ts`. Every other spec that reaches this line
+    // silences it by spying on `console.error`, which this file deliberately does not do: the whole
+    // point here is that nothing in the path is a double.
+    const level = logger.level;
+    logger.level = 'silent';
+    try {
+      await expect(BrowserSocket.connect(url, 'msgpack')).rejects.toBeInstanceOf(CodecMismatch);
+    } finally {
+      logger.level = level;
+    }
   });
 
   it('reports the socket dying as ConnectionClosed, which is the peer only death signal', async () => {
