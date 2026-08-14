@@ -81,6 +81,14 @@ for an adapter.
 Raises: nothing itself. `receive()` implementations raise `ConnectionClosed` on socket death, and
 send implementations raise it when asked to write to a socket that is already closed.
 
+`ConnectionClosed` is the one error this protocol *mandates*, which is why it lives in the shared
+error module and not in any transport's: every adapter raises it because the contract requires it of
+every adapter. Anything else your adapter reports — an address it cannot open, a dependency it cannot
+find — is yours, and belongs in your own module as a subclass of `TransportUrlError` or
+`TransportUnsupportedError`. Both bases are exported from the package root, precisely so that an
+adapter written outside this repository can subclass them; see
+[Writing an adapter of your own](../guide/errors.md#writing-an-adapter-of-your-own).
+
 ### Example
 
 ```python
@@ -554,6 +562,12 @@ same module exports.
 
 Dialling through `muxws.connect()` builds this adapter for you and there is nothing to name.
 
+It is also the adapter over a Unix domain socket, unchanged and unaware: `unix_serve` and a
+`ws+unix://` dial produce the same `websockets` connection object as their TCP counterparts, and this
+class never learns which one it got. That is the strongest evidence the library has for the claim that
+the adapter is the only transport-specific code in it — a whole transport arrived without touching
+these four methods.
+
 ### Signature
 
 ```python
@@ -864,6 +878,7 @@ void main();
   `send_bytes`.
 - [Connect](./connect.md) and [Accept](./accept.md) — the factories that build these adapters for
   you.
-- [Errors](./errors.md) — `ConnectionClosed` and `CodecMismatch`, the two an adapter raises.
+- [Errors](./errors.md) — `ConnectionClosed` and `CodecMismatch`, the two an adapter raises, plus
+  `TransportUrlError` and `TransportUnsupportedError`, the two bases an adapter of your own subclasses.
 - [Guide: transports](../guide/transports.md) — one runnable snippet per framework, and where
   authentication belongs.

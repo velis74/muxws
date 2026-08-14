@@ -57,6 +57,7 @@ SEARCH_MODULES = [
     "muxws.transports",
     "muxws.transports.memory",
     "muxws.transports.starlette",
+    "muxws.transports.unix",
     "muxws.transports.websockets_",
 ]
 

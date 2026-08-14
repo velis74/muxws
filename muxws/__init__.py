@@ -25,6 +25,8 @@ from muxws.errors import (
     StreamRefused,
     StreamReset,
     StreamTimeout,
+    TransportUnsupportedError,
+    TransportUrlError,
 )
 from muxws.fragment import Assembler, encoded_length, MAX_FRAME_BYTES, split_frame
 from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
@@ -73,6 +75,8 @@ __all__ = [
     "StreamReset",
     "StreamState",
     "StreamTimeout",
+    "TransportUnsupportedError",
+    "TransportUrlError",
     "__version__",
     "accept",
     "backoff_delay",

@@ -19,6 +19,8 @@ MuxwsError                     everything below is one of these
 ├── CodecError                 configuration failure, not a stream failure
 │   ├── CodecNotRegistered     the configured codec name was never registered
 │   └── CodecMismatch          the two ends disagree; the handshake was rejected
+├── TransportUrlError          this transport cannot open that address — retype the URL
+├── TransportUnsupportedError  this runtime has no such transport — change where you run
 └── StreamReset                a stream ended early — carries code, reason, stream_id
     ├── RemoteError            code 2  the remote handler raised
     ├── StreamRefused          code 4  not accepted and definitively not processed
@@ -28,6 +30,13 @@ MuxwsError                     everything below is one of these
 
 `StreamReset` itself is what you get for every other code — `NO_ERROR`, `CANCELLED`,
 `PROTOCOL_ERROR`, `PAYLOAD_TOO_LARGE`, `INTERNAL_ERROR`, and any code this generation does not define.
+
+The two `Transport…` classes are **bases**, never raised as themselves. What arrives is a subclass
+named after the transport that could not do the job — `UnixUrlError` for a bad `ws+unix://` URL,
+`WsNotInstalledError` for a `muxws/node` dial in a process without the `ws` package — and those
+subclasses live in their transports' own modules rather than in the shared one. Catch the base if you
+do not want to know which transport a configured URL named; see
+[Writing an adapter of your own](#writing-an-adapter-of-your-own) for why the split is where it is.
 
 Three attributes are on every `StreamReset`:
 
@@ -215,10 +224,102 @@ first use claims it, and the second use — awaiting one that is being iterated,
 stream with `CONNECTION_CLOSED`, which may never be sent, or with a number this generation does not
 define.
 
+## Errors a transport reports, and the two you catch
+
+A transport can fail in two ways that have nothing to do with the protocol, and muxws gives each of
+them a base class so that you can act on the difference without reading a message.
+
+**`TransportUrlError` — the address could not be opened.** The URL is wrong: a `ws:` URL with no
+hostname, a port that is not a number, a `ws+unix:` URL whose request target does not start with `/`,
+a `wss+unix:` URL, which does not exist. Always raised **before** the dial, so it can never resurface
+later out of a background reconnection, and never confused with a refused handshake. The action is to
+fix the URL. In Python it is a `ValueError` too, so a caller who never heard of muxws and wrapped its
+own configuration parsing in `except ValueError` still catches it.
+
+**`TransportUnsupportedError` — this runtime cannot provide that transport at all.** The URL is fine
+and the same program would work elsewhere: `websockets` or `ws` is not installed, the interpreter has
+no `AF_UNIX`, the entry point you imported does not ship the transport the scheme names. The action
+is to change the environment, not the URL, and a class raised for a missing package **names the
+install** — `pip install muxws[websockets]`, `npm install ws` — because "no module named …" is what
+the runtime already told you. In Python it is a `RuntimeError` too, for the same reason the other one
+is a `ValueError`. Retrying never helps.
+
+Neither is ever raised as itself. What you receive is a concrete subclass belonging to the transport
+that failed, and those are **not** importable from `muxws`:
+
+```python
+# fragment
+from muxws import connect, TransportUnsupportedError, TransportUrlError
+from muxws.transports.unix import UnixUrlError  # the concrete one, from its transport
+
+try:
+    peer = await connect(url)
+except UnixUrlError:
+    ...  # only a ws+unix: URL can be this
+except TransportUrlError:
+    ...  # any transport, any scheme: the URL is unusable
+except TransportUnsupportedError:
+    ...  # the URL is fine; this process or this platform cannot dial it
+```
+
+Most applications want only the two bases. They are exported from the package root in both languages
+and carry no dependency of their own, so `except TransportUrlError` is writable in a process that
+cannot even import the transport that raised.
+
+### Writing an adapter of your own
+
+The socket seam is public: an adapter is any object with the four members `SocketAdapter` names, and
+transports muxws does not ship — a QUIC datagram carrier, an SSH channel, a test double that fails on
+demand — are expected to be written outside this repository. If yours reports a failure of its own,
+this is the convention, and it exists so that an application cannot tell your adapter from a shipped
+one by the shape of what it catches.
+
+1. **Subclass one of the two bases.** `TransportUrlError` if the address is unusable;
+   `TransportUnsupportedError` if the transport cannot exist here at all. Both are exported from the
+   package root in both languages — `from muxws import TransportUrlError` and
+   `import { TransportUrlError } from 'muxws'`. Everything an application catches must be a
+   `MuxwsError`, and these are the two doors into it that are not about a stream.
+2. **In TypeScript, set `name` on the subclass.** JavaScript has one prototype chain, so `name` is
+   the discriminator that carries the class's identity across the two ports, and a subclass that does
+   not assign it inherits `'TransportUrlError'` — every log line and every cross-language comparison
+   then reads the base instead of your class. It is three lines, and it is what `UnixUrlError` and
+   `WsUrlError` already are:
+
+   ```ts
+   export class MyQuicUrlError extends TransportUrlError {
+     constructor(message?: string, options: { cause?: unknown } = {}) {
+       super(message, options);
+       this.name = 'MyQuicUrlError';
+     }
+   }
+   ```
+
+   Python needs nothing here: `type(exc).__name__` is the class's own name already.
+3. **Put the class in your own module, next to the code that raises it.** Not in a shared errors
+   module, not re-exported from a package root that also exports muxws's own names. Callers reach it
+   as `from your_package.transport import YourUrlError`, exactly the way they reach `UnixUrlError`.
+4. **Keep the module importable without the dependency it adapts.** If your class only exists after
+   `import your_dependency` succeeds, then `except YourDependencyMissingError` raises the very
+   `ImportError` it was written to replace. Import the dependency lazily, inside the dial.
+5. **Chain, do not replace.** `raise YourUrlError(...) from exc` in Python, `{ cause: error }` in
+   TypeScript. Your class says which category the failure is in; the original still says what
+   actually went wrong, and it is usually the more specific of the two.
+6. **Name the remedy when there is exactly one.** A missing package has one fix and your message
+   should contain it verbatim, in a form the reader can paste.
+7. **Do not invent a class for a failure you cannot reach.** If you cannot write the command that
+   produces it, the class is decoration, and it will be the one an application branches on.
+
+The one thing you cannot do is add a class to `muxws/errors.py` — which is exactly why the rule is
+"subclass the base, keep the class local" and not "everything lives in the shared module". The
+shared module holds what the *contract* mandates. `ConnectionClosed` is the case that fixes that
+boundary: every adapter raises it, including yours, but it stays shared because the `SocketAdapter`
+protocol requires it of every adapter. Ownership decides where an error lives, not who raises it.
+
 ## See also
 
 - [`api/errors`](/api/errors) — every class above, `ResetCode`, `default_error_serializer`
 - [`api/stream`](/api/stream) — `send`, `end`, `reply`, `cancel`, `reset`, `result`, `closed`
 - [`api/peer`](/api/peer) — `open`, `request`, `notify`, `ping`, `close`, `on_close`, `on_reconnect`
 - [`api/connect`](/api/connect) and [`api/accept`](/api/accept) — the `error_serializer` parameter
+- [`api/transports`](/api/transports) — `SocketAdapter`, the seam an adapter of your own implements
 - [`api/types`](/api/types) — `ErrorSerializer`, `CloseReason`

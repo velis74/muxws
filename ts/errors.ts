@@ -3,6 +3,14 @@
  *
  * Mirrors `muxws/errors.py` class for class. Every class sets `name`, so a cross-language test can
  * assert on error identity the way Python asserts on `__class__` (WSM-ERR-004).
+ *
+ * What is deliberately **not** here is as load-bearing as what is: no concrete transport error. The
+ * two transport bases at the bottom of this file are shared because an application must be able to
+ * catch them without importing a transport; `UnixUrlError`, `WsUrlError` and the rest belong to the
+ * one transport that produces them and are exported from the entry point that ships it (WSM-ERR-016).
+ * `ConnectionClosed` is the case that fixes the boundary the other way: every adapter throws it, but
+ * the `SocketAdapter` contract *requires* it of every adapter (WSM-API-021), so it is owned by the
+ * seam and stays shared. Ownership decides, not who throws.
  */
 
 /**
@@ -162,6 +170,57 @@ export class ConnectionLost extends StreamReset {
   constructor(reason?: string | null, options: { streamId?: number | null } = {}) {
     super(reason, { code: ResetCode.CONNECTION_CLOSED, streamId: options.streamId });
     this.name = 'ConnectionLost';
+  }
+}
+
+/**
+ * A transport cannot open the address it was given (WSM-ERR-016).
+ *
+ * Never thrown directly. It exists so that `error instanceof TransportUrlError` can be written by an
+ * application that has not imported - and, in a browser build, cannot import - the transport that
+ * refused the url. The concrete classes live in their transport's own module (`UnixUrlError` and
+ * `WsUrlError` behind `muxws/node`), because the adapter seam is public (WSM-API-021): a third party
+ * writing an adapter cannot add a class to this file, so a convention that required one would be a
+ * convention only this repository could follow.
+ *
+ * Python spells this `TransportUrlError(MuxwsError, ValueError)`. JavaScript has one prototype chain
+ * and `MuxwsError` is the half that has to survive: the whole purpose of the rule is that a single
+ * `instanceof MuxwsError` handler cannot be leaked through, and there is no builtin habit to preserve
+ * on this side - no runtime raises `TypeError` for a bad WebSocket url. jsdom and undici raise a
+ * `DOMException` named `SyntaxError`, `ws` raises a real `SyntaxError`, and neither is what a caller
+ * would have written a `catch` for. `name` therefore carries the whole of the Python class's identity
+ * across (WSM-ERR-004), which is why every subclass must set its own.
+ */
+export class TransportUrlError extends MuxwsError {
+  constructor(message?: string, options: { cause?: unknown } = {}) {
+    super(message);
+    this.name = 'TransportUrlError';
+    // Assigned rather than passed through `super`: `MuxwsError` takes a message only, and
+    // `new Error(msg, { cause: undefined })` leaves an own `cause` property reading "the original was
+    // nothing" where the truth is "there was no original". WSM-ERR-016 requires the chain when there
+    // is one, and says nothing about inventing one when there is not.
+    if (options.cause !== undefined) this.cause = options.cause;
+  }
+}
+
+/**
+ * This runtime, build or entry point cannot provide the transport at all (WSM-ERR-016).
+ *
+ * Never thrown directly. The distinction from `TransportUrlError` is the one the caller acts on:
+ * a `TransportUrlError` means *retype the url*, this means *the url is fine, change where or how you
+ * run it* - an optional dependency that is not installed, a kernel with no `AF_UNIX`, a bundle that
+ * WSM-API-022 keeps the dependency out of. A port that collapsed the two would send a reader who has
+ * nothing to fix off to re-read a url that was already correct.
+ *
+ * Python adds `RuntimeError` to the bases for the same reason `TransportUrlError` adds `ValueError`;
+ * here the single prototype chain goes to `MuxwsError` and `name` carries the identity, exactly as
+ * for the sibling above.
+ */
+export class TransportUnsupportedError extends MuxwsError {
+  constructor(message?: string, options: { cause?: unknown } = {}) {
+    super(message);
+    this.name = 'TransportUnsupportedError';
+    if (options.cause !== undefined) this.cause = options.cause;
   }
 }
 

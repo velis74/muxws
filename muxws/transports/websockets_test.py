@@ -3,21 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import socket as socketlib
+import sys
+import tempfile
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
 import websockets
 
+from websockets.asyncio.server import unix_serve
+from websockets.exceptions import InvalidURI
+
 import muxws
 
-from muxws.errors import CodecMismatch, RemoteError, ResetCode
+from muxws.errors import CodecMismatch, MuxwsError, RemoteError, ResetCode, TransportUnsupportedError, TransportUrlError
 from muxws.stream import Stream
-from muxws.transports.websockets_ import WebsocketsSocket
+from muxws.transports.unix import parse_unix_url
+from muxws.transports.websockets_ import (
+    INSTALL_HINT,
+    WebsocketsNotInstalledError,
+    WebsocketsSocket,
+    WebsocketUrlError,
+)
 
 
 async def _echo(payload: Any, stream: Stream) -> None:
@@ -88,10 +103,29 @@ async def _upgrade(url: str, offered: str) -> tuple[int, dict[str, str]]:
     parts = urlsplit(url)
     host, port = parts.hostname or "127.0.0.1", parts.port or 80
     reader, writer = await asyncio.open_connection(host, port)
+    return await _speak_the_upgrade(reader, writer, host=f"{host}:{port}", request_target="/", offered=offered)
+
+
+async def _speak_the_upgrade(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    host: str,
+    request_target: str,
+    offered: str,
+) -> tuple[int, dict[str, str]]:
+    """The upgrade request itself, byte for byte, over whatever stream pair the caller opened.
+
+    Split out from `_upgrade` when the Unix-socket twin arrived, because the twin's whole claim is
+    that WSM-CDC-022 is answered *identically* over a filesystem socket - and two hand-written
+    request builders that drift apart by one header would turn any difference in the answer into a
+    difference in the question. `asyncio.open_connection` and `asyncio.open_unix_connection` return
+    the same pair of objects, so the transport is the only thing that differs between the callers.
+    """
     try:
         writer.write(
-            "GET / HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
+            f"GET {request_target} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             # A fixed key is fine: nothing here verifies `Sec-WebSocket-Accept`, and a constant makes
@@ -184,6 +218,11 @@ async def test_mismatched_codecs_reject_handshake(
     Both peers would live in this process, so the `muxws.frames` logger sees every frame either of
     them sends or receives, and `hello=` guarantees there would be one to see: a dialer that got a
     socket puts its hello on the wire immediately (WSM-RCN-021).
+
+    The last assertion is the other half of WSM-ERR-016's layering, from this side: a real refusal
+    reaches a server, which means its URL parsed, which means the URL check ahead of the dial let it
+    through untouched. A translation written so eagerly that it claimed a dialable address would show
+    up here as a `TransportUrlError` in place of the `CodecMismatch` the rule requires.
     """
 
     class Msgpackish(muxws.JsonCodec):
@@ -204,6 +243,7 @@ async def test_mismatched_codecs_reject_handshake(
     exchanged = [record.getMessage() for record in caplog.records if record.name == "muxws.frames"]
     assert exchanged == [], f"a refused handshake exchanged {len(exchanged)} muxws frame(s)"
     assert acceptor.handshakes == 0, "the upgrade must have been refused, not completed and closed"
+    assert not isinstance(info.value, TransportUrlError), "a refused upgrade is not a bad address"
 
 
 async def test_a_101_that_negotiated_something_else_is_caught_on_the_open_socket():
@@ -350,3 +390,525 @@ async def test_reset_codes_survive_a_real_socket(server: str):
         assert info.value.code is ResetCode.APPLICATION_ERROR
     finally:
         await peer._socket.close()
+
+
+# --------------------------------------------------------------------------- the same, over AF_UNIX
+#
+# `ws+unix:///path/to.sock:/route` dials a filesystem socket. Nothing below is a new protocol: each
+# test here is the twin of one above it, and the point of writing them again rather than trusting the
+# transport to be transparent is that a dial has four transport-shaped ways to go wrong - the request
+# target and `Host` a filesystem path cannot supply, the subprotocol offer, the 400 that must still
+# be translated, and the socket file a reconnect has to re-open.
+
+#: AF_UNIX does not exist on Windows, so every test that opens a socket file carries this. The
+#: grammar itself is tested in `unix_test.py`, which needs no socket and therefore never skips: that
+#: split is what keeps the portability guard honest on a CI that only ever runs Linux.
+requires_af_unix = pytest.mark.skipif(
+    not hasattr(socketlib, "AF_UNIX"),
+    reason="this platform has no AF_UNIX, so no ws+unix: URL can be dialled here",
+)
+
+
+@pytest.fixture
+async def unix_acceptor() -> AsyncIterator[Acceptor]:
+    """The `acceptor` fixture's twin, listening on a socket file instead of an ephemeral port.
+
+    `tempfile.TemporaryDirectory`, not pytest's `tmp_path`: `sun_path` holds about 108 bytes and
+    pytest's per-test directory is already ~74 of them on Linux and ~120 under a macOS `TMPDIR`, so
+    the natural choice is the one that fails there with `AF_UNIX path too long` and nowhere else.
+    """
+    running = Acceptor()
+
+    async def handle(connection: Any) -> None:
+        running.handshakes += 1
+        peer = await muxws.accept(WebsocketsSocket(connection), codec=muxws.get_codec("json"))
+        peer.on_stream(_echo)
+        await peer.serve()
+
+    with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
+        path = str(Path(directory) / "s.sock")
+        async with unix_serve(handle, path, select_subprotocol=muxws.select_subprotocol):
+            running.url = f"ws+unix://{path}:/ws"
+            yield running
+
+
+@pytest.fixture
+def unix_server(unix_acceptor: Acceptor) -> str:
+    """The same acceptor for the tests that only need a `ws+unix:` URL to dial."""
+    return unix_acceptor.url
+
+
+async def _upgrade_over_unix(url: str, offered: str) -> tuple[int, dict[str, str]]:
+    """`_upgrade`, over a socket file: the same request, sent down `open_unix_connection` instead.
+
+    The URL is resolved with the library's own parser rather than by pulling the path out of the
+    fixture, because that makes this the one test that proves the two halves of the feature meet: the
+    grammar really does name the file the acceptor is listening on. A broken parser cannot make this
+    pass quietly - there is nothing to connect to - it can only make it fail.
+    """
+    target = parse_unix_url(url)
+    assert target is not None, f"{url!r} must parse as a ws+unix: URL"
+    logical = urlsplit(target.uri)
+    reader, writer = await asyncio.open_unix_connection(target.path)
+    return await _speak_the_upgrade(
+        reader,
+        writer,
+        host=logical.netloc,
+        request_target=logical.path,
+        offered=offered,
+    )
+
+
+@requires_af_unix
+async def test_a_mismatched_codec_offer_over_a_unix_socket_is_answered_with_http_400(unix_acceptor: Acceptor):
+    """WSM-CDC-022 over AF_UNIX, at the only level that can see it.
+
+    The refusal is HTTP, and HTTP is exactly as present over a socket file as over a port - so an
+    implementation that reached for a shortcut here, "it is a local socket, the peer is trusted, let
+    the post-handshake check catch it", would be completing the handshake and closing afterwards.
+    `handshakes == 0` is the assertion that says it did not.
+    """
+    status, headers = await _upgrade_over_unix(unix_acceptor.url, "muxws.v1.msgpack")
+
+    assert status == 400
+    assert "sec-websocket-protocol" not in headers
+    assert unix_acceptor.handshakes == 0, "a refused upgrade must never reach the connection handler"
+
+
+@requires_af_unix
+async def test_a_matching_codec_offer_over_a_unix_socket_is_answered_with_http_101(unix_acceptor: Acceptor):
+    """The other half, without which the 400 above is also what an acceptor answers everyone.
+
+    It doubles as the proof that the request target and `Host` this transport has to invent out of
+    the URL are ones a real acceptor accepts: `websockets` answers 400 to a malformed request line
+    just as readily as to a codec it does not speak, and the pair of tests would then agree for
+    entirely the wrong reason.
+    """
+    status, headers = await _upgrade_over_unix(unix_acceptor.url, "muxws.v1.json")
+
+    assert status == 101
+    assert headers["sec-websocket-protocol"] == "muxws.v1.json"
+
+
+@requires_af_unix
+async def test_a_unix_socket_carries_the_m2_shapes(unix_server: str):
+    """Unary, streaming response, notify, a remote failure and cancel, over a socket file.
+
+    The whole feature in one test: `connect()` given a `ws+unix:` URL returns a peer that is not
+    distinguishable from a TCP one by anything an application can do to it. `ping()` is here too, and
+    is not decoration - the heartbeat is what declares a socket dead (WSM-RCN-010/011), and it runs
+    over the frame layer, which means over whatever `WebsocketsSocket` was handed.
+    """
+    peer = await muxws.connect(unix_server)
+    try:
+        assert await peer.request({"action": "echo", "v": 1}) == {"echo": {"action": "echo", "v": 1}}
+
+        chunks = [item async for item in peer.open({"action": "stream"})]
+        assert chunks == [{"chunk": i} for i in range(4)]
+
+        assert await peer.notify({"action": "echo"}) is None
+
+        with pytest.raises(RemoteError) as info:
+            await peer.request({"action": "raise"})
+        assert info.value.payload == {"type": "ValueError", "message": "handler said no"}
+
+        held = peer.open({"action": "forever"})
+        await asyncio.sleep(0.05)
+        await held.cancel()
+        assert held.closed.is_set()
+
+        assert await peer.ping() >= 0.0, "the heartbeat's round trip has to complete over AF_UNIX too"
+    finally:
+        await peer._socket.close()
+
+
+@requires_af_unix
+async def test_a_mismatched_codec_over_a_unix_socket_reaches_the_caller_as_a_codec_mismatch(
+    unix_acceptor: Acceptor,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """WSM-CDC-022/024 through the public entry point, which is where the translation can be lost.
+
+    The 400 an acceptor sends is only useful if the dialer turns it into `CodecMismatch`, and that
+    translation lives in one `except` around the dial. A Unix dial written in a `try` of its own
+    still connects, still gets its 400, and still raises - as `InvalidStatus`, a `websockets` type
+    naming a status code, to an application that was told to catch `CodecMismatch`. Nothing else in
+    the suite goes red when that happens, which is why this test exists.
+
+    The empty frame log is the stronger of the two assertions, exactly as in the TCP twin: `hello=`
+    guarantees a dialer that got a socket would have put something on the wire immediately.
+    """
+
+    class Msgpackish(muxws.JsonCodec):
+        name = "msgpack"
+
+    monkeypatch.setattr(muxws.conf.settings, "codec", "json")
+    with caplog.at_level(logging.DEBUG, logger="muxws.frames"), pytest.raises(CodecMismatch) as info:
+        await muxws.connect(unix_acceptor.url, codec=Msgpackish(), hello={"session": "abc"})
+
+    assert "msgpack" in str(info.value)
+
+    exchanged = [record.getMessage() for record in caplog.records if record.name == "muxws.frames"]
+    assert exchanged == [], f"a refused handshake exchanged {len(exchanged)} muxws frame(s)"
+    assert unix_acceptor.handshakes == 0, "the upgrade must have been refused, not completed and closed"
+
+
+@requires_af_unix
+async def test_a_missing_socket_file_is_not_reported_as_a_codec_mismatch():
+    """The UDS twin of the dead-port test: nothing listening is not a misconfigured codec.
+
+    A socket file that is not there is the commonest failure of this transport by a wide margin - the
+    service has not started yet, or writes its socket somewhere else - and it has to arrive as the
+    `FileNotFoundError` naming the path. Reporting it as `CodecMismatch` would send the reader off to
+    compare MUXWS_CODEC on both ends of a connection that was never made.
+    """
+    with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
+        url = f"ws+unix://{Path(directory) / 'absent.sock'}:/ws"
+
+        # `CodecMismatch` is not an `OSError`, so naming the expected class here is the assertion.
+        with pytest.raises(FileNotFoundError):
+            await muxws.connect(url)
+
+
+@requires_af_unix
+async def test_a_peer_reconnects_across_a_re_created_socket_file():
+    """WSM-RCN-020/030 over AF_UNIX: the dial closure re-opens the path, and gets the new inode.
+
+    A socket file is not a port. `unix_serve` leaves the file behind when it closes, and the next
+    server unlinks that stale entry and binds a **new** inode at the same path - so a dialer holding
+    anything resolved once, a file descriptor or an inode, reconnects to a socket nobody is listening
+    on and hangs. Re-opening the path on every attempt is the only thing that works, and it is what
+    parsing the URL outside the closure and passing only the path into it buys.
+
+    The hello is asserted twice because that is the rule: replayed verbatim on the new connection
+    (WSM-RCN-020), and `on_reconnect` fires after it is acknowledged and not before (WSM-RCN-030).
+    """
+    hellos: list[Any] = []
+
+    async def handle(connection: Any) -> None:
+        peer = await muxws.accept(WebsocketsSocket(connection))
+        peer.on_stream(lambda payload, _stream: hellos.append(payload))
+        await peer.serve()
+
+    def listen(path: str) -> Any:
+        return unix_serve(handle, path, select_subprotocol=muxws.select_subprotocol)
+
+    with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
+        path = str(Path(directory) / "s.sock")
+        first = await listen(path)
+        peer = await muxws.connect(
+            f"ws+unix://{path}:/ws",
+            hello={"tab": "abc"},
+            reconnect=muxws.Reconnect(initial_delay=0.01, max_delay=0.05),
+            ping_interval=0.0,
+        )
+        reconnected: list[int] = []
+        again = asyncio.Event()
+        peer.on_reconnect(lambda attempt, _peer: (reconnected.append(attempt), again.set()))
+        try:
+            assert hellos == [{"tab": "abc"}], "the hello goes out on the first connection too"
+
+            first.close()
+            await first.wait_closed()
+            second = await listen(path)
+            try:
+                await asyncio.wait_for(again.wait(), 5.0)
+
+                assert reconnected == [1]
+                assert hellos == [{"tab": "abc"}, {"tab": "abc"}], "replayed verbatim on the new socket"
+                assert peer.is_open is True
+
+                await peer.notify({"after": "the reconnect"})
+                await asyncio.sleep(0.1)
+                assert hellos[-1] == {"after": "the reconnect"}, "and the new socket carries traffic"
+            finally:
+                second.close()
+                await second.wait_closed()
+        finally:
+            await peer.close()
+
+
+# ------------------------------------------------------- the address and the dependency (WSM-ERR-016)
+#
+# Nothing below reaches a socket, and none of it can be witnessed by the tests above, every one of
+# which has an acceptor. Two failures live here - an address `websockets` cannot parse, and a
+# `websockets` that is not installed at all - and both used to arrive as somebody else's exception:
+# `websockets.exceptions.InvalidURI` for the first, a bare `ModuleNotFoundError` for the second.
+# Neither is a `MuxwsError`, so an application with one `except MuxwsError` around `connect()` caught
+# a malformed `ws+unix:` URL, which has been a `UnixUrlError` since that transport landed, and missed
+# the identical typo in a `ws:` one. The pair of shared bases is what closes that, and these tests
+# are what stop it reopening.
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ws:/nohost",
+        "wss:/nohost",
+        "ws://",
+        "http://example.com/x",
+        "not a url at all",
+        "ws://host:notaport/x",
+    ],
+    ids=[
+        "ws-with-no-hostname",
+        "wss-with-no-hostname",
+        "an-authority-that-is-empty",
+        "a-scheme-that-is-not-ws-or-wss",
+        "a-string-that-is-not-a-url",
+        "a-port-that-is-not-a-number",
+    ],
+)
+async def test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error(url: str):
+    """WSM-ERR-016: a `ws:`/`wss:` address this transport cannot open is a `TransportUrlError`.
+
+    Both schemes are here because the translation is one call and a rewrite that special-cased `ws:`
+    would still pass a `ws:`-only table. The last two rows are the ones a narrower implementation
+    misses: `parse_uri` answers a bad port with a plain `ValueError` out of `urllib.parse`, and
+    `InvalidURI` is not a `ValueError`, so an `except InvalidURI` alone lets that shape through
+    unchanged - while a string that is not a URL at all is the shape a configuration file produces
+    when a variable was never substituted.
+
+    The three `isinstance` assertions are the rule itself rather than three ways of saying one thing:
+    `MuxwsError` is what an application-wide handler names, `ValueError` is what a caller who never
+    heard of muxws already catches around a URL it typed, and `TransportUrlError` is what a caller
+    that wants "this address is wrong, whatever transport it named" writes without importing this
+    module (it is not importable at all on a machine with no `websockets`).
+    """
+    with pytest.raises(WebsocketUrlError) as info:
+        await muxws.connect(url)
+
+    assert isinstance(info.value, TransportUrlError)
+    assert isinstance(info.value, MuxwsError)
+    assert isinstance(info.value, ValueError)
+    assert url in str(info.value), "the message has to name the URL that was rejected"
+
+
+@pytest.mark.parametrize(
+    ("url", "underlying"),
+    [("ws:/nohost", InvalidURI), ("ws://host:notaport/x", ValueError)],
+    ids=["invalid-uri", "a-port-that-is-not-a-number"],
+)
+async def test_the_librarys_own_diagnostic_survives_the_translation(url: str, underlying: type[BaseException]):
+    """The original is chained with `from exc`, so the traceback still says *what* was wrong.
+
+    `WebsocketUrlError` knows that a URL was refused; only `websockets` knows whether the hostname was
+    missing, the scheme was wrong or the port was not a number. A translation that swallowed that
+    would turn a one-glance diagnosis into a puzzle, so the class frames the library's wording and
+    never replaces it - the message quotes it and `__cause__` still holds the exception object.
+    """
+    with pytest.raises(WebsocketUrlError) as info:
+        await muxws.connect(url)
+
+    cause = info.value.__cause__
+    assert isinstance(cause, underlying), f"__cause__ is {cause!r}"
+    assert str(cause) in str(info.value), "the library's own words are quoted, not paraphrased"
+
+
+async def test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch():
+    """The layering, and the one measured defect it exists to fix (WSM-ERR-016, WSM-CDC-024).
+
+    `_looks_like_a_refused_handshake` falls back to matching `HTTP 400` in the exception's prose, and
+    an `InvalidURI` quotes the offending URL in its message - so before the URL check was layered
+    *outside* the dial closure, `connect("ws:/HTTP 400")` raised `CodecMismatch`. That sent the reader
+    off to compare `MUXWS_CODEC` on two ends of a connection that was never made, over a typo.
+
+    This is the test that makes "before the dial, not inside the failed-dial handler" normative rather
+    than advisory: moving the translation into `dial()`'s `except`, beneath the refusal check, leaves
+    every other test in this file green and fails only this one. `not isinstance` is asserted as well
+    as the positive class, because `CodecMismatch` and `WebsocketUrlError` are unrelated branches of
+    the tree and a future implementation that raised both-ish would satisfy neither reader.
+    """
+    with pytest.raises(WebsocketUrlError) as info:
+        await muxws.connect("ws:/HTTP 400")
+
+    assert not isinstance(info.value, CodecMismatch)
+
+
+@requires_af_unix
+async def test_a_ws_unix_url_with_an_unparseable_authority_is_a_transport_url_error():
+    """The `ws+unix:` arm goes through the same URL check, on the URI it synthesises.
+
+    A `ws+unix:` URL carries an optional authority, which becomes the `Host` header of a handshake
+    that is still HTTP; `parse_unix_url` copies it through without looking at it, so a port that is
+    not a number survives the grammar and dies in `websockets` when the *logical* URI is parsed. It
+    reached the caller as a bare `ValueError` naming neither muxws nor the URL. Checking `unix.uri`
+    rather than `url` is what puts it under the same base as the TCP shapes - `except
+    TransportUrlError` covers a mistyped address over either transport, which is the practical thing
+    the shared base buys - and the message names both spellings, because the caller typed one of them
+    and the diagnostic is about the other.
+    """
+    with pytest.raises(WebsocketUrlError) as info:
+        await muxws.connect("ws+unix://host:notaport/tmp/p.sock:/r")
+
+    assert isinstance(info.value, TransportUrlError)
+    message = str(info.value)
+    assert "ws+unix://host:notaport/tmp/p.sock:/r" in message, "the URL the caller typed"
+    assert "ws://host:notaport/r" in message, "and the logical URI the handshake would have asked for"
+
+
+class _RefuseWebsockets:
+    """A `sys.meta_path` finder that makes `import websockets` fail without uninstalling anything.
+
+    Raising from `find_spec` rather than returning `None` is what produces the `ModuleNotFoundError`
+    an absent package produces, at the moment of import, for the submodules too - `websockets.uri`
+    and `websockets.asyncio.client` are imported by name elsewhere in this transport and a blocker
+    that only hid the top-level package would leave a half-usable dependency that no real machine has.
+    """
+
+    def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+        _ = path, target
+        if name == "websockets" or name.startswith("websockets."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return None
+
+
+#: The name of the transitive dependency a partially-installed `websockets` is missing. Any name will
+#: do; what matters is only that it is *not* `websockets`, because that difference is the whole of
+#: what `require_websockets` narrows on (WSM-ERR-016).
+LOST_TRANSITIVE_DEPENDENCY = "websockets_internal_helper_that_does_not_exist"
+
+
+class _BreakWebsockets:
+    """A finder that makes `websockets` present but unimportable - the broken install, not the absent one.
+
+    `find_spec` raises a `ModuleNotFoundError` naming a *different* module, which is what an
+    interrupted install or a version skew inside the package really produces: the package is found and
+    executing its `__init__` reaches for something that is gone. `_RefuseWebsockets` raises for the
+    same statement with `name="websockets"`, and those two names are the only thing telling the two
+    situations apart, which is exactly why this test exists.
+    """
+
+    def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+        _ = path, target
+        if name == "websockets" or name.startswith("websockets."):
+            missing = LOST_TRANSITIVE_DEPENDENCY
+            raise ModuleNotFoundError(f"No module named {missing!r}", name=missing)
+        return None
+
+
+@contextmanager
+def _websockets_import_broken_by(blocker: Any) -> Iterator[None]:
+    """Install `blocker` on `sys.meta_path` for the body, and leave the interpreter exactly as found.
+
+    Every `websockets` module is taken out of `sys.modules` as well as blocked, because an import of
+    an already-imported package never reaches a finder at all and the fixture would then prove
+    nothing. Both halves are put back in `finally`: the module objects are restored by identity, so
+    the classes the rest of this file already holds - `websockets.serve`, `unix_serve`, `InvalidURI` -
+    are the same objects afterwards as before, and a test ordered after this one still dials a real
+    socket. A fixture that leaked its blocker would take every remaining test in the session with it.
+    """
+    saved = {name: module for name, module in sys.modules.items() if name.partition(".")[0] == "websockets"}
+    for name in saved:
+        del sys.modules[name]
+    sys.meta_path.insert(0, blocker)
+    try:
+        yield
+    finally:
+        sys.meta_path.remove(blocker)
+        sys.modules.update(saved)
+
+
+@pytest.fixture
+def websockets_uninstalled() -> Iterator[None]:
+    """Make this interpreter look like one where `pip install muxws[websockets]` was never run."""
+    with _websockets_import_broken_by(_RefuseWebsockets()):
+        yield
+
+
+@pytest.fixture
+def websockets_installed_but_broken() -> Iterator[None]:
+    """Make this interpreter look like one where `websockets` is installed and does not import."""
+    with _websockets_import_broken_by(_BreakWebsockets()):
+        yield
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("ws://127.0.0.1:9/x", id="over-tcp"),
+        # Guarded, and the TCP row deliberately is not. `_websocket_dialer` parses the `ws+unix:` URL
+        # before it checks the dependency (`api.py`, and the ordering there is load-bearing for a
+        # different reason), so on a platform with no `AF_UNIX` this URL raises
+        # `UnixSocketsUnsupportedError` and never reaches `require_websockets` at all. The TCP row
+        # must keep running everywhere, because it is the one that proves the class exists on a
+        # platform that cannot dial a socket file.
+        pytest.param("ws+unix:///tmp/muxws-absent.sock:/ws", id="over-a-socket-file", marks=requires_af_unix),
+    ],
+)
+async def test_a_missing_websockets_package_names_the_extra_that_installs_it(
+    websockets_uninstalled: None,
+    url: str,
+):
+    """WSM-ERR-016: a missing optional dependency is a `TransportUnsupportedError` with the remedy.
+
+    A bare `ModuleNotFoundError: No module named 'websockets'` out of a `connect()` names neither the
+    library that needed it nor the command that fixes it, and it is not a `MuxwsError`, so an
+    application that handles every muxws failure in one place sees it as a crash. GAPS.md records the
+    same shape one layer down: an install with no WebSocket implementation answered every upgrade 404
+    and was read as a muxws defect for want of a message naming the package.
+
+    Both arms are here because they share the dependency and must therefore share the class: a
+    `ws+unix:` dial fails on the identical `import websockets` a `ws://` dial does, and inventing a
+    second class for it would tell the reader there were two things to install. `RuntimeError` rather
+    than `ValueError` is the other half of the sentence - the URL is fine and no retry will help.
+    """
+    _ = websockets_uninstalled
+
+    with pytest.raises(WebsocketsNotInstalledError) as info:
+        await muxws.connect(url)
+
+    assert isinstance(info.value, TransportUnsupportedError)
+    assert isinstance(info.value, MuxwsError)
+    assert isinstance(info.value, RuntimeError)
+    assert "pip install muxws[websockets]" in str(info.value)
+    assert not isinstance(info.value, TransportUrlError), "the address was never the problem"
+
+
+async def test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error(
+    websockets_installed_but_broken: None,
+):
+    """WSM-ERR-016: an import failure that is not the dependency being absent is re-raised untouched.
+
+    The control on the test above, and the half that is easy to lose: a handler that catches every
+    `ImportError` answers a corrupt install with `WebsocketsNotInstalledError` and the remedy `pip
+    install muxws[websockets]`, which tells a reader who already has the package to install it again
+    - a confidently wrong answer, and one that also swallows the `ModuleNotFoundError` naming the
+    module that is really missing, the only sentence in the traceback that pointed at the fault.
+    Measured on this tree before the narrowing: a `websockets/__init__.py` importing a package that
+    was gone produced exactly that class and exactly that remedy.
+
+    The twin of `ts/transport-errors.spec.ts` *"rethrows a broken install untouched, so it is never
+    reported as an absent one"*, which narrows on `ERR_MODULE_NOT_FOUND` for the same reason.
+    """
+    _ = websockets_installed_but_broken
+
+    with pytest.raises(ModuleNotFoundError) as info:
+        await muxws.connect("ws://127.0.0.1:9/x")
+
+    assert info.value.name == LOST_TRANSITIVE_DEPENDENCY, "the module that is actually missing"
+    assert not isinstance(info.value, MuxwsError), "muxws must not claim a failure it cannot remedy"
+    assert INSTALL_HINT not in str(info.value), "the package is installed; suggesting the install is wrong"
+
+
+def test_this_transport_module_still_imports_with_its_dependency_blocked(websockets_uninstalled: None):
+    """`except WebsocketsNotInstalledError` must not itself raise the `ImportError` it replaces.
+
+    The class only helps a caller who can name it, and naming it means importing this module on the
+    machine that has no `websockets` - so the module must have no `websockets` at import time, which
+    is also what WSM-PKG-002 asks of every adapter. The module is executed from its own file under a
+    throwaway name rather than reloaded in place, because rebinding the real module's classes
+    mid-session would leave `api.py` holding a `WebsocketsNotInstalledError` that no longer matches
+    the one this file imported.
+    """
+    _ = websockets_uninstalled
+    source = Path(str(sys.modules[WebsocketsSocket.__module__].__file__))
+
+    spec = importlib.util.spec_from_file_location("muxws_websockets_probe", source)
+    assert spec is not None
+    assert spec.loader is not None
+    module: ModuleType = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert issubclass(module.WebsocketsNotInstalledError, TransportUnsupportedError)

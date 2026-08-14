@@ -4,7 +4,7 @@ import { type Codec, getCodec, JsonCodec, registerCodec } from './codec';
 import { settings } from './conf';
 import type { Peer } from './peer';
 import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
-import { BrowserSocket } from './transports/browser-socket';
+import { BrowserSocket, UnixSocketsUnsupportedError } from './transports/browser-socket';
 
 /**
  * Dial `url` and return a serving peer (m3 §4.5).
@@ -20,11 +20,50 @@ import { BrowserSocket } from './transports/browser-socket';
  * error.
  */
 export async function connect(url: string, options: ConnectOptions = {}): Promise<Peer> {
+  // Before the codec, and therefore before everything: a url this entry point can never dial is not
+  // a socket, so refusing it here does not weaken WSM-CDC-016 - it keeps the codec error for the
+  // case where the url *was* dialable, which is the diagnosis a reader of that error wants.
+  refuseUnixScheme(url);
   const codec: Codec = options.codec ?? getCodec(settings.codec);
   // The one closure the reconnect driver holds. It captures nothing the first dial did not, so the
   // hundredth attempt offers the same subprotocol to the same url as the first (WSM-RCN-020).
   const dial: Dial = async () => BrowserSocket.connect(url, codec.name, { subprotocols: options.subprotocols });
   return dialAndEstablish(await dial(), dial, options, codec);
+}
+
+/**
+ * The one url this entry point inspects, and the only reason it inspects any (WSM-API-022).
+ *
+ * `ws+unix:///run/app.sock:/route` dials a filesystem socket. That is a `ws` capability and nothing
+ * else's: the platform's global `WebSocket` - a browser's, and node's own undici one - rejects the
+ * scheme in its own parser, with prose that names neither muxws nor the entry point that would have
+ * worked (`expected a ws: or wss: url` under node, `The URL's scheme must be either 'ws' or 'wss'`
+ * under jsdom). Both are true and neither is actionable, and the reader has typed a url this library
+ * documents as supported, so the fix - import `connect` from `muxws/node` - has to be in the message.
+ * This is the same reasoning as `unopenedError` in `ts/transports/browser-socket.ts`: when the
+ * platform cannot say why, the dialer composes the diagnostic itself.
+ *
+ * A `UnixSocketsUnsupportedError` and therefore a `MuxwsError`, which reverses an earlier decision
+ * recorded in this comment: a bare `TypeError`, on the argument that caller input rejected before any
+ * protocol exists is not a protocol failure. WSM-ERR-016 overrides it. The argument was about *when*
+ * the failure happens; the rule is about *who* has to catch it, and an application that wraps its
+ * dials in one `instanceof MuxwsError` handler must not have a refusal muxws itself composed leak
+ * through. `CodecMismatch` is still reserved for a handshake that was actually refused (WSM-CDC-024),
+ * and no handshake happens here.
+ *
+ * Matched as a lowercased string rather than through `new URL()` deliberately: the parser throws
+ * `ERR_INVALID_URL` for anything malformed, which would swap the platform's own diagnostic for ours
+ * on every mistyped url, not just this one. A scheme is ASCII-case-insensitive (`new URL()` folds
+ * `WS+UNIX:` to `ws+unix:`), hence the fold; leading whitespace is what the parser would strip,
+ * hence the trim.
+ */
+function refuseUnixScheme(url: string): void {
+  if (!url.trim().toLowerCase().startsWith('ws+unix:')) return;
+  throw new UnixSocketsUnsupportedError(
+    `cannot dial '${url}' from this entry point: a ws+unix: url names a filesystem socket, which ` +
+      "neither a browser nor node's global WebSocket can open. Import connect from 'muxws/node', " +
+      'which dials it through the `ws` package.',
+  );
 }
 
 export { type Codec, JsonCodec, clearCodecs, getCodec, registerCodec, registeredCodecs } from './codec';
@@ -45,6 +84,14 @@ export {
   StreamRefused,
   StreamReset,
   StreamTimeout,
+  // The two shared transport bases (WSM-ERR-016). They are exported from the package root and no
+  // concrete transport class is *defined* there: a browser build must be able to write
+  // `instanceof TransportUrlError` without importing `muxws/node`, which is where the classes that
+  // extend them live. `UnixSocketsUnsupportedError` is re-exported from this entry point below, from
+  // the transport module that defines it, which is the rule and not an exception to it - it is the
+  // concrete class of the transport *this* entry point ships.
+  TransportUnsupportedError,
+  TransportUrlError,
   exceptionForReset,
 } from './errors';
 export { ABSENT, type Absent, type Frame, V1_FRAME_TYPES, framesEqual, fromMapping, toMapping } from './frames';
@@ -99,7 +146,11 @@ export {
 // dialer and the acceptor build and read the handshake between themselves; Python exports none of
 // them either, and an application that needs the prefix needs the constant, not the machinery.
 export { PREFIX, select } from './subprotocol';
-export { BrowserSocket, type BrowserSocketOptions } from './transports/browser-socket';
+// `UnixSocketsUnsupportedError` is defined beside the transport that refuses the url and re-exported
+// here, which is both halves of WSM-ERR-016's placement clause: a concrete transport error lives in
+// its own transport's module, and is reachable only from the entry point that ships that transport.
+// `muxws/node` must not carry it - that subpath's unix dial works.
+export { BrowserSocket, type BrowserSocketOptions, UnixSocketsUnsupportedError } from './transports/browser-socket';
 export { type SocketAdapter } from './transports/index';
 export { MemorySocket, memoryPair } from './transports/memory';
 export { VERSION } from './version';

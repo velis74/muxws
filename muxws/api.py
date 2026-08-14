@@ -18,6 +18,8 @@ from muxws.peer import ErrorSerializer, Peer, StreamHandler
 from muxws.reconnect import ConnectionLoop, Hello, Reconnect
 from muxws.subprotocol import mismatch_error, offer, PREFIX
 from muxws.transports import SocketAdapter
+from muxws.transports.unix import parse_unix_url
+from muxws.transports.websockets_ import verify_dialable_url
 
 
 def resolve_codec(override: Codec | None = None) -> Codec:
@@ -52,6 +54,11 @@ async def connect(
     on_reconnect: Callable[[int, Any], None] | None = None,
 ) -> Peer:
     """Dial `url` and return a serving peer.
+
+    `url` is `ws://`, `wss://`, or `ws+unix:///path/to.sock:/route` for a Unix domain socket. The
+    third is the same handshake as the first two - an HTTP upgrade offering `muxws.v1.<codec>`,
+    answered 101 or 400 - carried over a file instead of a port, and every parameter below means
+    exactly what it means over TCP.
 
     Raises if the **first** attempt fails, with the underlying error, whatever `reconnect` says
     (WSM-RCN-006). Reconnection applies to connections that were established and then lost; a peer
@@ -119,18 +126,60 @@ def _websocket_dialer(
     the first connection did not (WSM-CDC-016/020).
     """
     offered = offer(resolved.name, subprotocols)
+    # Parsed **here** rather than inside `dial()`, for the same three reasons the offered list is
+    # built here: a malformed `ws+unix:` URL, a `wss+unix:` one and a platform without AF_UNIX all
+    # raise out of `connect()` synchronously, before any socket is touched, instead of surfacing from
+    # a background reconnect attempt minutes later; and the hundredth attempt dials the very same
+    # socket file the first one did, because there is nothing left to re-derive.
+    unix = parse_unix_url(url)
+    # Checked here, one line below the `ws+unix:` parse and for the same reason, but the ordering
+    # between these two lines is load-bearing twice over. `parse_unix_url` is stdlib-only, so a
+    # malformed `ws+unix:` URL is still a `UnixUrlError` on a machine with no `websockets` at all -
+    # correct, because fixing that install would not make that URL dialable. And `verify_dialable_url`
+    # checks the dependency before the URL, because the URL parser is supplied by the dependency.
+    #
+    # Both checks are outside `dial()` rather than inside it, which is what keeps them out of reach of
+    # the `except` below: that handler reads a refused upgrade out of the exception and answers
+    # `CodecMismatch` (WSM-CDC-022/024), and its string fallback matches `HTTP 400` in the prose of an
+    # `InvalidURI` that is merely quoting the URL back - which is how `connect("ws:/HTTP 400")` came
+    # to be reported as a codec mismatch on a connection that was never made (WSM-ERR-016). A URL that
+    # cannot be parsed now never reaches the closure, so the two failures cannot answer for each other.
+    verify_dialable_url(url, uri=unix.uri if unix is not None else None)
 
     async def dial() -> SocketAdapter:
         import websockets
 
         from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
 
+        # Both arms live inside this one `try`, and that is not tidiness: the `except` below is the
+        # 400 -> `CodecMismatch` translation WSM-CDC-022/024 is about, and a Unix dial in a `try` of
+        # its own would lose it over the new transport without a single test going red except the
+        # one written for exactly this.
         try:
-            connection = await websockets.connect(
-                url,
-                subprotocols=offered,  # type: ignore[arg-type]
-                additional_headers=headers,
-            )
+            if unix is None:
+                connection = await websockets.connect(
+                    url,
+                    subprotocols=offered,  # type: ignore[arg-type]
+                    additional_headers=headers,
+                )
+            else:
+                # Imported in the branch that uses it, and not beside `websockets` above, so a TCP
+                # dial pays nothing for a submodule it will never call. The manifest's floor is 14,
+                # where `websockets.asyncio` is not merely present but is what the top-level
+                # `connect` above already resolves to, so this is a cost question and not an
+                # availability one - which is why it is safe to leave it lazy rather than necessary.
+                from websockets.asyncio.client import unix_connect
+
+                # `uri=` is the *logical* URL: the handshake is still HTTP and still needs a request
+                # target and a `Host`, and neither can be guessed from a filesystem path. Every other
+                # argument is the one the TCP arm passes, which is what makes the subprotocol offer,
+                # the credential headers and everything below this block transport-agnostic.
+                connection = await unix_connect(
+                    unix.path,
+                    uri=unix.uri,
+                    subprotocols=offered,  # type: ignore[arg-type]
+                    additional_headers=headers,
+                )
         except Exception as exc:
             if _looks_like_a_refused_handshake(exc):
                 raise mismatch_error(resolved.name) from exc

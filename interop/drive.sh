@@ -5,12 +5,25 @@
 #   interop/drive.sh ts python                     the reverse
 #   interop/drive.sh python ts reconnect           the same pair, WSM-TST-005
 #   interop/drive.sh python ts main msgpack        the same, with the codec pinned independently
+#   interop/drive.sh python ts unix json           WSM-TST-004 again, over a Unix domain socket
 #   interop/drive.sh python ts corpus msgpack 13   the sequence corpus, cross-language (WSM-CDC-007)
 #
 # Both role assignments run the same scenario, which is the point (WSM-TST-004). The reconnect
 # scenario needs the acceptor **killed and restarted**, so this script owns the process rather than
 # the socket: it starts it, reads the port it bound, SIGKILLs it with streams open, and starts a
 # second one on that same port (WSM-TST-005).
+#
+# `unix` is `main` with the acceptor bound to a socket file and the dialer given a
+# `ws+unix://<path>:/<route>` URL: the same WSM-TST-004 script, deliberately not a new one, because the
+# claim being tested is that nothing above the socket noticed. It runs in both role assignments for
+# the reason the matrix exists at all - the URL is parsed by two different libraries, one of which
+# has to agree with the other about where the filesystem path ends and the HTTP request target
+# begins, and that agreement is invisible to either language's own test suite. It is deliberately
+# **not** offered for `reconnect`: that scenario SIGKILLs the acceptor, a killed process cannot
+# unlink its socket file, and the restart would then meet EADDRINUSE - which would be a fact about
+# stale inodes rather than about reconnection, and the only ways out of it (a driver that unlinks
+# another process's socket, or runners that unlink before binding and can therefore steal a live
+# peer's address) are both worse than not making the claim.
 #
 # The codec is whatever MUXWS_CODEC / VITE_MUXWS_CODEC say; this script passes the environment
 # through untouched, so one driver serves every CI job. The optional fourth argument is the
@@ -30,7 +43,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VENV="${MUXWS_VENV:-/home/jure/.venv/muxws/bin}"
-USAGE="usage: drive.sh <python|ts> <python|ts> [main|reconnect|corpus] [expected-codec] [expected-fixtures]"
+USAGE="usage: drive.sh <python|ts> <python|ts> [main|unix|reconnect|corpus] [expected-codec] [expected-fixtures]"
 ACCEPTOR="${1:?$USAGE}"
 DIALER="${2:?$USAGE}"
 SCENARIO="${3:-main}"
@@ -51,6 +64,8 @@ ACCEPTOR_LOG="$(mktemp)"
 DIALER_LOG="$(mktemp)"
 ACCEPTOR_PID=""
 DIALER_PID=""
+SOCKET_DIR=""
+SOCKET=""
 
 # `if` rather than `[ ... ] && kill`: under `set -e` a false test is a failing command, and an exit
 # trap that aborted on its first empty pid would leave the other process running - which for the
@@ -59,6 +74,9 @@ cleanup() {
   if [ -n "$ACCEPTOR_PID" ]; then kill -9 "$ACCEPTOR_PID" 2>/dev/null || true; fi
   if [ -n "$DIALER_PID" ]; then kill -9 "$DIALER_PID" 2>/dev/null || true; fi
   rm -f "$ACCEPTOR_LOG" "$DIALER_LOG"
+  # The socket file outlives the acceptor - a SIGKILLed process unlinks nothing - so the directory
+  # goes with the run rather than with the process that bound it.
+  if [ -n "$SOCKET_DIR" ]; then rm -rf "$SOCKET_DIR"; fi
   return 0
 }
 trap cleanup EXIT
@@ -74,14 +92,15 @@ fail() {
 
 # Which entry point the acceptor process runs. `accept` serves the hand-written WSM-TST-004/005
 # scripts; `corpus-accept` serves the sequence corpus and reports a **control** port rather than a
-# WebSocket one (WSM-CDC-007).
+# WebSocket one (WSM-CDC-007); `accept-unix` is `accept` bound to a socket file.
 ACCEPTOR_MODE=accept
 if [ "$SCENARIO" = corpus ]; then ACCEPTOR_MODE=corpus-accept; fi
+if [ "$SCENARIO" = unix ]; then ACCEPTOR_MODE=accept-unix; fi
 
 # `node --import tsx` and not `npx tsx`: the tsx CLI runs the program in a *child* process, so a
 # SIGKILL aimed at the pid this script recorded would leave the real acceptor alive and holding the
 # port - and the reconnect scenario would then reconnect to the process it believes it killed.
-start_acceptor() {  # $1 = port, 0 to let the kernel choose
+start_acceptor() {  # $1 = the address to bind: a port, 0 to let the kernel choose, or a socket path
   if [ "$ACCEPTOR" = python ]; then
     "$VENV/python" interop/runner.py "$ACCEPTOR_MODE" "$1" >> "$ACCEPTOR_LOG" 2>&1 &
   else
@@ -109,6 +128,10 @@ wait_for() {  # $1 = file, $2 = ERE, $3 = how many matches, $4 = what we are wai
 # Both ports emit one JSON object per line; Python's `json.dumps` puts a space after the colon and
 # `JSON.stringify` does not, hence the ` *`.
 PORT_LINE='"port": *[0-9]+'
+# The Unix acceptors report the socket file instead, and they report it *after* `listen` - the file
+# appears at `bind`, one syscall earlier, so a driver that waited for the path to exist on disk would
+# race the listen and meet ECONNREFUSED on a socket that is about to be fine.
+PATH_LINE='"path": *"[^"]+"'
 CODEC_LINE='"codec": *"[a-z0-9_-]+"'
 
 # CI passes `MUXWS_VENV=$(dirname $(which python))`; an empty result there is falsy for `:-`, so a
@@ -124,10 +147,37 @@ if [ "$EXPECT_GIVEN" -ge 4 ] && [ -z "$EXPECT_CODEC" ]; then
   fail "an expected codec was passed but came out empty - check the caller's interpolation"
 fi
 
-start_acceptor 0
-wait_for "$ACCEPTOR_LOG" "$PORT_LINE" 1 "the $ACCEPTOR acceptor to report a port"
-PORT="$(grep -oE "$PORT_LINE" "$ACCEPTOR_LOG" | head -1 | grep -oE '[0-9]+' || true)"
-if [ -z "$PORT" ]; then fail "the $ACCEPTOR acceptor reported a port line this driver cannot parse"; fi
+# What the acceptor bound, read back from the acceptor itself rather than assumed. The two
+# transports answer different questions here - the kernel chose the port, this script chose the
+# path - but both answers arrive the same way, in the acceptor's own line, because a driver that
+# inferred readiness from anything else is a driver that races the listen.
+PORT=""
+if [ "$SCENARIO" = unix ]; then
+  # Short on purpose, and measured rather than assumed: a Unix socket address is capped at 108 bytes
+  # on Linux and 104 on macOS, and TMPDIR belongs to the caller. Nothing is truncated silently - an
+  # overrun is `OSError: AF_UNIX path too long` from Python and `EINVAL` quoting the whole path from
+  # node - but it surfaces inside an acceptor this script only sees the log of, and neither message
+  # says which component to shorten. Failing here says it, with the number.
+  SOCKET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/muxws.XXXXXX")"
+  SOCKET="$SOCKET_DIR/s.sock"
+  if [ "${#SOCKET}" -gt 100 ]; then
+    fail "the socket path is ${#SOCKET} bytes, near the ~108 the kernel allows: $SOCKET (set TMPDIR shorter)"
+  fi
+  start_acceptor "$SOCKET"
+  wait_for "$ACCEPTOR_LOG" "$PATH_LINE" 1 "the $ACCEPTOR acceptor to report the socket file it bound"
+  BOUND="$(grep -oE "$PATH_LINE" "$ACCEPTOR_LOG" | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+  # Checked and not merely read: the dialer below is handed the path this script composed, so an
+  # acceptor that bound somewhere else would leave the dialer meeting ENOENT and the log blaming the
+  # dial for a mistake made one process earlier.
+  if [ "$BOUND" != "$SOCKET" ]; then
+    fail "the $ACCEPTOR acceptor bound '$BOUND', not the '$SOCKET' this driver gave it"
+  fi
+else
+  start_acceptor 0
+  wait_for "$ACCEPTOR_LOG" "$PORT_LINE" 1 "the $ACCEPTOR acceptor to report a port"
+  PORT="$(grep -oE "$PORT_LINE" "$ACCEPTOR_LOG" | head -1 | grep -oE '[0-9]+' || true)"
+  if [ -z "$PORT" ]; then fail "the $ACCEPTOR acceptor reported a port line this driver cannot parse"; fi
+fi
 
 # What the acceptor says it is actually running, against what the caller pinned. Only the acceptor is
 # checked because only the acceptor reports; a dialer configured for another codec cannot get past
@@ -153,16 +203,49 @@ echo "{\"driver\": \"codec\", \"acceptor\": \"$ACCEPTOR\", \"running\": \"$REPOR
 # the script". Every scenario below therefore greps for the runner's own `ok` line as well.
 OK_LINE='"ok": *true'
 
-if [ "$SCENARIO" = main ]; then
+if [ "$SCENARIO" = main ] || [ "$SCENARIO" = unix ]; then
+  # The only difference the transport makes to this scenario, and it is one string. The route is a
+  # variable rather than two literals because the acceptor's report is checked against it below, and
+  # a check whose expectation can drift away from the URL it checks is not a check.
+  #
+  # It carries a query string on purpose, and a colon inside that query for a second purpose. The
+  # request target is the URL's pathname **and search**, so a dialer that built it from the pathname
+  # alone - the obvious mistake, and the one a single-language test never notices because nothing
+  # routes on the target - would arrive here with `/ws`. And the whole URL is split on the *first*
+  # colon, so a dialer that split on every one of them - which is what the `ws` package does on its
+  # own, and what `muxws/node` overrides it to stop doing - would arrive with `/ws?probe=1`. Both
+  # are caught by the comparison below, in the only place either can be seen: with the two
+  # implementations at opposite ends of one connection.
+  UNIX_ROUTE='/ws?probe=1:2'
+  URL="ws://127.0.0.1:$PORT"
+  if [ "$SCENARIO" = unix ]; then URL="ws+unix://$SOCKET:$UNIX_ROUTE"; fi
   # `if !` rather than letting `set -e` abort here: an abort prints the dialer's own message and
   # nothing else, and the cause of a cross-language failure lives in the acceptor's log at least as
   # often - a handler that raised, an upgrade it refused, a codec it could not register.
-  if ! run_dialer dial "ws://127.0.0.1:$PORT" > "$DIALER_LOG" 2>&1; then
-    fail "the $DIALER dialer failed against the $ACCEPTOR acceptor"
+  if ! run_dialer dial "$URL" > "$DIALER_LOG" 2>&1; then
+    fail "the $DIALER dialer failed against the $ACCEPTOR acceptor at $URL"
   fi
   cat "$DIALER_LOG"
   if ! grep -Eq "$OK_LINE" "$DIALER_LOG"; then
     fail "the $DIALER dialer exited 0 without reporting the WSM-TST-004 script complete"
+  fi
+  if [ "$SCENARIO" = unix ]; then
+    # The half of the URL grammar that reaching the socket does not prove. Both acceptors report the
+    # request target they were handed; a dialer that split the URL anywhere but at the first colon
+    # would arrive on the same socket carrying a different target, and every assertion above would
+    # still pass. This is the only place the two languages' parsers are compared with each other.
+    REPORTED_TARGET="$(grep -oE '"target": *("[^"]*"|null)' "$ACCEPTOR_LOG" | head -1 || true)"
+    if [ -z "$REPORTED_TARGET" ]; then
+      fail "the $ACCEPTOR acceptor reported no request target; this driver cannot check the URL split"
+    fi
+    # Anchored at the front and unquoted from the ends, rather than "everything after the colon":
+    # the target itself contains one, and a greedy match reported `2` for `/ws?probe=1:2` - the
+    # driver failing a pair that had agreed perfectly, which is the worst kind of red.
+    TARGET="$(printf '%s' "$REPORTED_TARGET" | sed -E 's/^"target": *//; s/^"//; s/"$//')"
+    if [ "$TARGET" != "$UNIX_ROUTE" ]; then
+      fail "the $ACCEPTOR acceptor saw request target '$TARGET'; the $DIALER dialer was given '$UNIX_ROUTE'"
+    fi
+    echo "{\"driver\": \"unix\", \"acceptor\": \"$ACCEPTOR\", \"dialer\": \"$DIALER\", \"target\": \"$TARGET\"}"
   fi
   exit 0
 fi

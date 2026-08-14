@@ -18,10 +18,10 @@ import { vi } from 'vitest';
 import { WebSocketServer } from 'ws';
 
 import { type Codec, JsonCodec } from './codec';
-import { CodecMismatch } from './errors';
+import { CodecMismatch, MuxwsError, TransportUrlError } from './errors';
 // The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` deliberately does not.
 import './index';
-import { connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
+import { WsUrlError, connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
 import { logger } from './observability';
 
 // --------------------------------------------------------------------------- the harness
@@ -326,6 +326,60 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(CodecMismatch);
     expect((caught as Error).message).toContain('ECONNREFUSED');
+  });
+});
+
+describe('a url this transport cannot open - WSM-ERR-016', () => {
+  it("arrives as a WsUrlError framing the wording `ws` used, not as ws's own SyntaxError", async () => {
+    // Measured before the class existed: `connect('nonsense')` rejected with
+    // `SyntaxError: Invalid URL: nonsense`, thrown synchronously out of `ws`'s constructor inside
+    // `dialWs` and not a `MuxwsError` at all - so an application that wrapped every muxws call in one
+    // handler caught a bad `ws+unix:` url and missed a bad `ws:` one. The sentence is `ws`'s and stays
+    // `ws`'s: it names the offending text, and this frame only says who was asked to dial it.
+    const caught = await connect('nonsense').then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(caught).toBeInstanceOf(WsUrlError);
+    expect(caught).toBeInstanceOf(TransportUrlError);
+    expect(caught).toBeInstanceOf(MuxwsError);
+    expect((caught as Error).message).toContain('nonsense');
+    expect((caught as Error).message).toContain('Invalid URL');
+    expect((caught as Error).cause).toBeInstanceOf(SyntaxError);
+  });
+
+  it('leaves a dial that failed for any other reason exactly as it was - the control', async () => {
+    // A host that does not resolve is not an address this transport cannot *open*; it is one nothing
+    // answers at. The remedy is somewhere other than the address bar, and reporting it as a url error
+    // would send the reader to re-read a string that is spelled correctly. This is the same shape as
+    // the ECONNREFUSED controls above, one class over.
+    const caught = await connect('ws:/bad').then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(TransportUrlError);
+    expect(caught).not.toBeInstanceOf(MuxwsError);
+    expect((caught as Error).message).toContain('ENOTFOUND');
+  });
+
+  it('leaves a bad subprotocol as a bad subprotocol, which is why the guard is not a blanket catch', async () => {
+    // The measurement that forced the shape of the translation: `ws` throws a `SyntaxError` for
+    // `An invalid or duplicated subprotocol was specified` as well as for `Invalid URL`, and nothing
+    // on either object tells them apart. A `catch` around the constructor that translated everything
+    // would report a space in a subprotocol token as a malformed address. So the address is re-read -
+    // `new URL()` parses `ws://127.0.0.1:1/x` to a scheme `ws` takes - and this throw is passed
+    // through untouched.
+    const caught = await connect('ws://127.0.0.1:1/x', { subprotocols: ['bad protocol'] }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(caught).toBeInstanceOf(SyntaxError);
+    expect(caught).not.toBeInstanceOf(MuxwsError);
+    expect((caught as Error).message).toContain('subprotocol');
   });
 });
 

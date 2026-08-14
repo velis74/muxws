@@ -1,14 +1,23 @@
 """The Python half of the live cross-language interop matrix (M6 §7, tests 19-22).
 
 Run as an acceptor:          python interop/runner.py accept <port>
+Accept on a socket file:     python interop/runner.py accept-unix <path>
 Run the WSM-TST-004 script:  python interop/runner.py dial ws://127.0.0.1:<port>
+     ... over a socket file: python interop/runner.py dial ws+unix://<path>:/ws
 Run the WSM-TST-005 script:  python interop/runner.py reconnect-dial ws://127.0.0.1:<port>
 Serve the corpus:            python interop/runner.py corpus-accept <control-port>
 Conduct the corpus:          python interop/runner.py corpus-dial 127.0.0.1:<control-port>
 
-The same four entry points exist in `interop/runner.ts`, and `interop/drive.sh` pairs them in both
+The same entry points exist in `interop/runner.ts`, and `interop/drive.sh` pairs them in both
 role assignments, so a rule one port implements differently from the other shows up as a named
 failure rather than as a hang.
+
+`dial` takes a URL and nothing else, which is why the Unix pairing needs no dialling mode of its
+own: `ws+unix:///path/to.sock:/route` is the whole of the difference, and the same script that runs
+over TCP runs over a socket file with the string changed. The one cross-language risk in that URL is
+that the two ports must split it identically - pathname-and-search up to the **first** colon is the
+filesystem path, the rest is the HTTP request target - and no single-language test can witness an
+agreement between two parsers.
 
 `assert` is deliberately absent: this file is not a `*_test.py`, so ruff's S101 applies and, more to
 the point, a driver that vanished under `python -O` would be worse than no driver.
@@ -20,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import re
+import socket
 import sys
 
 from pathlib import Path
@@ -197,36 +207,80 @@ async def drip(stream: Stream, state: dict[str, Any]) -> None:
         state["drip_stopped"] = True
 
 
+async def serve_one_connection(connection: Any) -> None:
+    """One accepted connection, whatever carried it - a TCP socket or a socket file.
+
+    Module level rather than nested inside `accept_forever`, and that is the whole claim the Unix
+    pairing makes: `accept_unix_forever` below hands the same coroutine to `unix_serve`, so the two
+    acceptors differ in the line that binds and in nothing else. A UDS acceptor with its own copy of
+    this handler could pass while the transport-agnostic path was broken, which is the failure the
+    matrix exists to catch rather than to reproduce (WSM-API-021).
+    """
+    # The HTTP request target this connection arrived on. Reported because it is the half of the
+    # `ws+unix://<path>:/route` grammar that reaching the socket does not prove: the socket file is
+    # the address, neither acceptor routes on the target, so a dialer that dropped the target and
+    # sent `/`, or built it from the URL's pathname and left the query string behind, would connect
+    # and pass every assertion in the script. The driver compares this line against the route it put
+    # in the URL, which is the only place the two languages' parsers meet each other.
+    request = connection.request
+    emit(event="accepted", target=None if request is None else request.path)
+    peer = await muxws.accept(WebsocketsSocket(connection))
+    state: dict[str, Any] = {"drip_sent": 0, "drip_stopped": False, "shutdown": None}
+    seen_open = False
+
+    def journal(direction: str, frame: Frame, _length: int) -> None:
+        """Report the first inbound `open` of this connection, re-encoded.
+
+        This is where WSM-TST-005's "byte-identical hello" is checked from the *other* language:
+        the driver compares this line across the two acceptor processes, so the comparison is
+        made by the port that had to accept the replay rather than by the one that sent it.
+        Being the *first* open is itself WSM-RCN-023 - nothing may precede the hello.
+        """
+        nonlocal seen_open
+        if direction == "rx" and frame.type == "open" and not seen_open:
+            seen_open = True
+            emit(event="first-open", encoding=encoding_of(frame))
+
+    peer.on_frame(journal)
+    peer.on_stream(make_handler(peer, state))
+    # A dialer that walks away leaves the read loop reporting the close; that is this
+    # connection ending, not this process failing.
+    with contextlib.suppress(muxws.ConnectionClosed):
+        await peer.serve()
+
+
 async def accept_forever(port: int) -> None:
     """Serve until the driver kills us. It does, and in the reconnect scenario it means it."""
-
-    async def handle(connection: Any) -> None:
-        peer = await muxws.accept(WebsocketsSocket(connection))
-        state: dict[str, Any] = {"drip_sent": 0, "drip_stopped": False, "shutdown": None}
-        seen_open = False
-
-        def journal(direction: str, frame: Frame, _length: int) -> None:
-            """Report the first inbound `open` of this connection, re-encoded.
-
-            This is where WSM-TST-005's "byte-identical hello" is checked from the *other* language:
-            the driver compares this line across the two acceptor processes, so the comparison is
-            made by the port that had to accept the replay rather than by the one that sent it.
-            Being the *first* open is itself WSM-RCN-023 - nothing may precede the hello.
-            """
-            nonlocal seen_open
-            if direction == "rx" and frame.type == "open" and not seen_open:
-                seen_open = True
-                emit(event="first-open", encoding=encoding_of(frame))
-
-        peer.on_frame(journal)
-        peer.on_stream(make_handler(peer, state))
-        # A dialer that walks away leaves the read loop reporting the close; that is this
-        # connection ending, not this process failing.
-        with contextlib.suppress(muxws.ConnectionClosed):
-            await peer.serve()
-
-    async with websockets.serve(handle, "127.0.0.1", port, select_subprotocol=muxws.select_subprotocol) as service:
+    async with websockets.serve(
+        serve_one_connection, "127.0.0.1", port, select_subprotocol=muxws.select_subprotocol
+    ) as service:
         emit(role="python-acceptor", port=service.sockets[0].getsockname()[1], codec=muxws.settings.codec)
+        await asyncio.Future()
+
+
+async def accept_unix_forever(path: str) -> None:
+    """The same acceptor on a socket **file**, for the Unix half of WSM-TST-004.
+
+    `select_subprotocol` is the same hook the TCP acceptor passes, so a dialer offering a codec this
+    process does not speak still meets HTTP 400 here and still has to turn it into `CodecMismatch`
+    (WSM-CDC-022/024). That is the point of running the matrix over this transport at all: the only
+    thing that changed is which kernel object the handshake travelled over, and the driver proves it
+    by running the unmodified WSM-TST-004 script across it.
+
+    The driver's readiness signal is the `path=` line below rather than a `port=` one - a socket file
+    exists between `bind` and `listen`, so a driver that waited for the file would race the listen.
+    """
+    # Checked here rather than left to the bind: on Windows the failure is an event loop reporting
+    # that it has no `create_unix_server`, which reads as a defect in this file rather than as the
+    # platform saying no, and a red CI log deserves the second sentence.
+    if not hasattr(socket, "AF_UNIX"):
+        raise SystemExit("this platform has no AF_UNIX, so the unix scenario cannot run here")
+    # Imported inside the guard for the same reason: on a platform this cannot run on, nothing about
+    # the module should be touched before the line that explains why.
+    from websockets.asyncio.server import unix_serve
+
+    async with unix_serve(serve_one_connection, path, select_subprotocol=muxws.select_subprotocol):
+        emit(role="python-acceptor", path=path, codec=muxws.settings.codec)
         await asyncio.Future()
 
 
@@ -1412,13 +1466,15 @@ async def dial(url: str) -> None:
 def main() -> None:
     if len(sys.argv) < 3:
         raise SystemExit(
-            "usage: runner.py accept <port> | dial <url> | reconnect-dial <url> | "
-            "corpus-accept <port> | corpus-dial <host:port>"
+            "usage: runner.py accept <port> | accept-unix <path> | dial <url> | "
+            "reconnect-dial <url> | corpus-accept <port> | corpus-dial <host:port>"
         )
     register_configured_codec()
     mode, argument = sys.argv[1], sys.argv[2]
     if mode == "accept":
         asyncio.run(accept_forever(int(argument)))
+    elif mode == "accept-unix":
+        asyncio.run(accept_unix_forever(argument))
     elif mode == "dial":
         asyncio.run(dial(argument))
     elif mode == "reconnect-dial":

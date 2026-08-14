@@ -34,7 +34,17 @@ dependencies = []
 
 [project.optional-dependencies]
 starlette = ["starlette>=0.37"]
-websockets = ["websockets>=12"]
+# 14, not 12, and the two releases in between are not a rounding error. `muxws/api.py` dials with
+# `websockets.connect(..., additional_headers=...)`, and the top-level `connect` was an alias for
+# `websockets.legacy.client.connect` until 14.0 moved it to `websockets.asyncio.client`. The legacy
+# one spells that argument `extra_headers` and forwards anything it does not recognise straight to
+# the event loop, so under 12 or 13 the *first* dial dies with `TypeError:
+# BaseEventLoop.create_connection() got an unexpected keyword argument 'additional_headers'` - an
+# error that names neither muxws nor the release that is too old. The floor said 12 from the
+# scaffolding brief onwards and was never lowered against a real install; it was found by asking
+# which release `websockets.asyncio.client.unix_connect` needs (13) and discovering that the answer
+# for the TCP path that shipped long before it was higher still.
+websockets = ["websockets>=14"]
 msgpack = ["msgpack>=1.0"]
 # The demo (`demo.py`, `demo/backend_python/`) is a consumer of the shipped package, not part of it: it is
 # excluded from both artefacts and nothing in the library imports it. These two are here so that

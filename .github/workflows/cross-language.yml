@@ -35,19 +35,19 @@ jobs:
           - acceptor: python
             dialer: ts
             codec: json
-            fixtures: 12
+            fixtures: 13
           - acceptor: ts
             dialer: python
             codec: json
-            fixtures: 12
+            fixtures: 13
           - acceptor: python
             dialer: ts
             codec: msgpack
-            fixtures: 13
+            fixtures: 14
           - acceptor: ts
             dialer: python
             codec: msgpack
-            fixtures: 13
+            fixtures: 14
     env:
       # One codec name, spelled the way each language reads it (WSM-CDC-010). Both are exported for
       # both processes: the Python half reads MUXWS_CODEC, and the TypeScript half reads
@@ -85,9 +85,22 @@ jobs:
         run: |
           MUXWS_VENV=$(dirname $(which python)) \
             interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} main '${{ matrix.codec }}'
+      # The same scenario, over a socket file instead of a TCP port. It is a separate step rather
+      # than a second matrix axis because the thing at risk is not the protocol - not one frame or
+      # close code differs - but the `ws+unix:` URL grammar, where each port has its own parser and
+      # neither language's own suite can see the other's. The acceptors report the HTTP request
+      # target they were handed and the driver compares it against the route it put in the URL,
+      # query string included, so a dialer that dropped the target or built it from the pathname
+      # alone fails here and passes everything else. Not added to the reconnect job or the corpus
+      # step: the reasons are in `interop/drive.sh`'s header, and both are about a SIGKILLed acceptor
+      # being unable to unlink its own socket file rather than about coverage.
+      - name: WSM-TST-004 (over a unix domain socket)
+        run: |
+          MUXWS_VENV=$(dirname $(which python)) \
+            interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} unix '${{ matrix.codec }}'
       # WSM-CDC-007 asks for more than a live pair: the pair must run the **sequence corpus**. The
       # step above runs one hand-written scenario, which proves the two ports interoperate on that
-      # script and says nothing about the twelve fixtures the two in-process runners replay - and
+      # script and says nothing about the fixtures the two in-process runners replay - and
       # those runners have a peer at each end of one process, so each proves only that its own port
       # agrees with itself. This step is where a Python peer and a TypeScript peer replay the corpus
       # to each other over a real socket, which is the sentence the rule actually contains.

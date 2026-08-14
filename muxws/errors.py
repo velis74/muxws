@@ -76,6 +76,49 @@ class CodecMismatch(CodecError):
     """The acceptor's codec differs from ours; the WebSocket handshake was rejected."""
 
 
+class TransportUrlError(MuxwsError, ValueError):
+    """A transport was given an address it cannot open (WSM-ERR-016). Never raised directly.
+
+    The concrete class is the transport's - `muxws.transports.unix.UnixUrlError` for a `ws+unix:` URL
+    naming no socket file, the `websockets` adapter's for a `ws:` URL that library cannot parse - and
+    each of them lives in its own transport's module rather than here. That placement is a rule and
+    not an accident of where the first one was written: the adapter seam is public (WSM-API-021),
+    third parties are expected to write their own adapters, and a third party cannot add a class to
+    this file, so the convention has to be one they can follow too. What *is* shared is this base,
+    because `except TransportUrlError` must be writable by an application that has not imported - and
+    may not be able to import - the transport whose URL was wrong.
+
+    A `ValueError` as well as a `MuxwsError` for the same two callers `UnixUrlError` was written for:
+    someone who never heard of this library is already catching `ValueError` around a URL they typed,
+    and an application that funnels every muxws failure through one handler must not have a bad
+    address leak through it.
+
+    What does **not** belong here is anything the `SocketAdapter` contract itself mandates.
+    `ConnectionClosed` is the case that fixes the boundary: every adapter raises it, but the protocol
+    *requires* it of every adapter, so it is owned by the seam and stays in the shared vocabulary
+    above. Ownership decides where an error lives, not who raises it - and a URL grammar, a missing
+    package or a missing kernel feature is owned by exactly one transport.
+    """
+
+
+class TransportUnsupportedError(MuxwsError, RuntimeError):
+    """This runtime cannot provide the transport at all (WSM-ERR-016). Never raised directly.
+
+    No `AF_UNIX` in the interpreter, an optional dependency that was never installed: conditions that
+    are local, permanent, and fixed by changing the environment rather than the address. That is the
+    whole reason this is a separate base from `TransportUrlError` instead of a flag on it -
+    `TransportUrlError` means *retype the URL*, this one means *the URL is fine, change where or how
+    you are running*, and no retry and no different address can turn one into the other.
+
+    A `RuntimeError` rather than a `ValueError` says exactly that to a caller who never heard of
+    muxws, and a `MuxwsError` so that an application-wide handler still catches it. A subclass raised
+    for a dependency that is not installed MUST name the install that fixes it - `pip install
+    muxws[websockets]` - because "no module named X" is what the interpreter already said and is not
+    the answer the reader needs. As with `TransportUrlError`, the concrete subclasses belong to their
+    transports' modules and are not exported from the package root.
+    """
+
+
 class StreamReset(MuxwsError):
     """A stream ended early. Carries the reset code, its reason and the stream id."""
 

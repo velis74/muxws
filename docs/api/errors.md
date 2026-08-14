@@ -4,12 +4,17 @@ outline: deep
 
 # Errors
 
-Every failure muxws reports is an instance of one class hierarchy per language, and the two
-hierarchies are the same shape class for class. What a caller catches tells it what happened without
-inspecting a message.
+Every failure muxws reports is an instance of one class hierarchy per language, and the shared part
+of the two hierarchies is the same shape class for class. What a caller catches tells it what
+happened without inspecting a message.
+
+The **shared** classes — everything down to and including the two `Transport…` bases — are importable
+from the package root in both languages. The classes indented under those bases are **transport
+errors**: each one belongs to a single transport, is imported from that transport's own module, and
+is never re-exported from the root. The right-hand column says where each of those comes from.
 
 ```
-MuxwsError
+MuxwsError                          from muxws / 'muxws' — the whole tree is catchable as this
 ├── ProtocolError
 ├── ConnectionClosed
 ├── ConnectionGoingAway
@@ -18,12 +23,47 @@ MuxwsError
 ├── CodecError
 │   ├── CodecNotRegistered
 │   └── CodecMismatch
+├── TransportUrlError               this transport cannot open that address; also a ValueError
+│   ├── UnixUrlError                py: muxws.transports.unix   ts: 'muxws/node'
+│   ├── WebsocketUrlError           py: muxws.transports.websockets_
+│   └── WsUrlError                  ts: 'muxws/node'
+├── TransportUnsupportedError       this runtime has no such transport; also a RuntimeError
+│   ├── UnixSocketsUnsupportedError py: muxws.transports.unix   ts: 'muxws'
+│   ├── WebsocketsNotInstalledError py: muxws.transports.websockets_
+│   └── WsNotInstalledError         ts: 'muxws/node'
 └── StreamReset
     ├── RemoteError
     ├── StreamTimeout
     ├── StreamRefused
     └── ConnectionLost
 ```
+
+**Why a transport error is not importable from `muxws`.** It is a rule now rather than an
+arrangement: a concrete transport error lives in its transport's own module, and only the two bases
+are shared. The reason is the adapter seam. `SocketAdapter` is public and third parties are expected
+to write adapters for transports this repository does not ship — and a third party cannot add a class
+to `muxws/errors.py` or to `ts/errors.ts`. A convention that required a root export would therefore
+be one only this repository could follow, so the convention is the other one: subclass a shared base,
+keep the class beside the code that raises it, and let `except TransportUrlError` be the thing an
+application writes when it does not know or care which transport was asked for the address. Both
+bases are plain classes with no dependency of their own, which is what makes that `except` writable
+in a process that cannot even import the transport that raised.
+
+TypeScript has no module path below its entry points — `package.json` publishes `muxws`, `muxws/node`
+and `muxws/msgpack`, and nothing finer — so the same rule reads there as "exported from the entry
+point that ships that transport, and from no other". That is why `UnixSocketsUnsupportedError` comes
+from `muxws` — the entry point that refuses the scheme is the one dialling with the platform
+`WebSocket` — while `WsUrlError` and `WsNotInstalledError` come from `muxws/node`, and why the browser
+bundle contains neither of the `ws`-flavoured names.
+
+One gap is worth knowing rather than discovering: the `connect()` exported from `muxws` does **not**
+yet frame a URL the platform's own `WebSocket` constructor rejects. A malformed URL still arrives
+there as the runtime's `DOMException` — jsdom says `The URL 'nonsense' is invalid.`, undici says
+`TypeError: Invalid URL` — and neither is a `MuxwsError`. Every other entry point translates; this one
+is the outstanding half.
+
+`except MuxwsError` still catches every one of them without importing anything, and so does
+`except TransportUrlError` / `except TransportUnsupportedError` for the half a caller usually wants.
 
 `StreamClosed` sits outside `StreamReset` on purpose: a stream that ended normally while a last
 `send()` was in flight is an expected race, not a failure. `ConnectionLost` sits *inside*
@@ -1457,10 +1497,571 @@ function redactingErrorSerializer(error: unknown): unknown {
 console.log(redactingErrorSerializer(new Error('SELECT * FROM accounts WHERE id = 7')));
 ```
 
+## `TransportUrlError`
+
+The base for *this transport cannot open the address it was given*. Never raised directly: what
+reaches a caller is always one of the concrete classes below it, named after the transport whose
+grammar the address broke. Catch this one when you do not know, or do not care, which transport a
+configured URL names.
+
+It is not, on its own, enough for every entry point. A bad `ws+unix://` URL is a `UnixUrlError` — a
+`TransportUrlError` — in Python and behind `muxws/node`, but the `muxws` entry point refuses the
+scheme before it ever parses the grammar and answers `UnixSocketsUnsupportedError`, because that
+build ships no transport that could open a socket file however the URL is spelled. The handler that
+covers every port is therefore `except (TransportUrlError, TransportUnsupportedError)` in Python and
+`instanceof MuxwsError` in TypeScript. The two bases are a distinction about *what to do next* —
+retype the address, or change where you are running — and an entry point that cannot carry a scheme
+at all is answering the second question.
+
+In Python it is a `ValueError` as well as a `MuxwsError`. Both halves are load-bearing: a caller who
+never heard of this library is already catching `ValueError` around a URL it typed, and an
+application whose one handler is `except MuxwsError` must not have a bad address leak through it. In
+TypeScript there is one prototype chain, so the class extends `MuxwsError` and carries its identity
+in `name` — the handler that must not be escapable is `instanceof MuxwsError`, and no JavaScript
+runtime raises `TypeError` for a bad WebSocket URL anyway, so nothing is lost by not being one.
+
+It is always raised **before the dial**, never out of a failed one. That ordering is what keeps a URL
+whose text happens to contain `HTTP 400` from being reported as a refused handshake, and it is what
+stops a bad address from resurfacing hours later out of a background reconnection.
+
+### Signature
+
+```python
+class TransportUrlError(MuxwsError, ValueError): ...
+```
+
+```ts
+export class TransportUrlError extends MuxwsError {
+  constructor(message?: string, options?: { cause?: unknown });
+}
+```
+
+Imported from the package root in both languages: `from muxws import TransportUrlError`,
+`import { TransportUrlError } from 'muxws'`. Its subclasses are not — see the note under the tree at
+the top of this page.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text. A library-raised one quotes the address and states the rule it broke. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | The underlying library's own error, kept so its wording survives the translation. Python chains with `raise … from exc` instead, which puts the original on `__cause__`. |
+
+### Return
+
+A new exception instance. Constructing one does not raise it.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import connect, TransportUrlError
+
+BAD_URLS = ["ws:/nohost", "ws+unix:///run/muxws/api.sock:ws"]
+
+
+async def main() -> None:
+    """Two transports, two grammars, two concrete classes - and one `except` that covers both.
+
+    Written without importing either transport module, which is the whole point of the shared base.
+    """
+    for url in BAD_URLS:
+        try:
+            await connect(url)
+        except TransportUrlError as exc:
+            print(f"{url} -> {type(exc).__name__}")
+
+
+asyncio.run(main())
+```
+
+```ts
+import 'muxws';
+import { TransportUrlError } from 'muxws';
+import { connect } from 'muxws/node';
+
+// The concrete class is `WsUrlError`, and this catch never names it: `TransportUrlError` comes from
+// the package root and is the same `except` over every transport, including ones muxws does not ship.
+try {
+  await connect('nonsense');
+} catch (error) {
+  if (!(error instanceof TransportUrlError)) throw error;
+  console.log(error.name, '| framing:', String((error.cause as Error).message));
+}
+```
+
+## `TransportUnsupportedError`
+
+The base for *this runtime cannot provide that transport at all*: no `AF_UNIX` in the interpreter, an
+optional dependency that was never installed, an entry point whose bundle deliberately does not carry
+the transport. Never raised directly.
+
+It is a separate base from `TransportUrlError` rather than a flag on it because the two ask the
+reader for different actions. `TransportUrlError` means *retype the address*.
+`TransportUnsupportedError` means *the address is fine, change where or how you are running* — and no
+retry, no backoff and no different URL can turn one into the other. In Python it is a `RuntimeError`
+as well as a `MuxwsError`, which says exactly that to a caller who never heard of muxws.
+
+A subclass raised because a package is missing **names the install that fixes it**. That is the whole
+value of the class: `ModuleNotFoundError: No module named 'websockets'` is what the interpreter
+already said, and it does not tell the reader that the answer is `pip install muxws[websockets]`.
+
+### Signature
+
+```python
+class TransportUnsupportedError(MuxwsError, RuntimeError): ...
+```
+
+```ts
+export class TransportUnsupportedError extends MuxwsError {
+  constructor(message?: string, options?: { cause?: unknown });
+}
+```
+
+Imported from the package root in both languages: `from muxws import TransportUnsupportedError`,
+`import { TransportUnsupportedError } from 'muxws'`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text. A library-raised one names the missing dependency, kernel feature or entry point, and the remedy. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | The original `ERR_MODULE_NOT_FOUND` or platform error. Python uses `raise … from exc`. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws import MuxwsError, TransportUnsupportedError
+from muxws.transports.unix import UnixSocketsUnsupportedError
+
+try:
+    raise UnixSocketsUnsupportedError("this interpreter has no socket.AF_UNIX")
+except TransportUnsupportedError as exc:
+    # One `except` for "this deployment cannot do that", written without importing the transport
+    # that could not be provided.
+    print(type(exc).__name__, "|", exc)
+
+print(issubclass(TransportUnsupportedError, MuxwsError), issubclass(TransportUnsupportedError, RuntimeError))
+```
+
+```ts
+import { MuxwsError, TransportUnsupportedError } from 'muxws';
+
+const failure = new TransportUnsupportedError('this build ships no filesystem transport');
+console.log(failure.name, failure instanceof MuxwsError, failure instanceof TransportUnsupportedError);
+```
+
+## `UnixUrlError`
+
+A `ws+unix://` URL that cannot be dialled: one naming no socket file, one whose request target does
+not begin with `/`, or a `wss+unix://` URL, which is not a scheme muxws has. Raised out of
+`connect()` before any socket is touched, and therefore before the first dial attempt, so it cannot
+reappear later out of a background reconnection.
+
+It is the `ws+unix:` **grammar's** error, and that grammar belongs to one transport in each port, so
+the class lives with the transport rather than in the shared error module. Python raises it from
+`muxws.transports.unix`; TypeScript raises it from the `ws+unix:` parser behind `muxws/node`, which
+is the only entry point that can dial a socket file at all.
+
+Both ports refuse the same three shapes with the same reasoning, which is the point of naming the
+class identically: a deployment can paste one URL into either port's configuration and get the same
+answer, including the same refusal.
+
+### Signature
+
+```python
+class UnixUrlError(TransportUrlError): ...
+```
+
+```ts
+export class UnixUrlError extends TransportUrlError {
+  constructor(message?: string, options?: { cause?: unknown });
+}
+```
+
+Imported from the transport, not the package root: `from muxws.transports.unix import UnixUrlError`,
+`import { UnixUrlError } from 'muxws/node'`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text, inherited from the base. The library's own message quotes the URL and states the rule it broke. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | The parser error being framed, where there was one. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import connect, MuxwsError
+from muxws.transports.unix import UnixUrlError
+
+
+async def main() -> None:
+    try:
+        await connect("ws+unix:///run/muxws/api.sock:ws")
+    except UnixUrlError as exc:
+        print("bad url:", exc)
+    except MuxwsError:
+        print("something else muxws reports")
+
+
+asyncio.run(main())
+```
+
+```ts
+import 'muxws';
+import { connect, UnixUrlError } from 'muxws/node';
+
+try {
+  await connect('ws+unix:///run/muxws/api.sock:ws');
+} catch (error) {
+  if (error instanceof UnixUrlError) console.log('bad url:', error.message);
+  else throw error;
+}
+```
+
+## `UnixSocketsUnsupportedError`
+
+A `ws+unix://` URL that this runtime cannot dial at all — as opposed to one it will not dial because
+of how it is written. The two ports reach it from different directions, and the sentence to the
+reader is the same in both: *a `ws+unix:` URL cannot be opened here.*
+
+**Python:** the interpreter has no `socket.AF_UNIX`, which means Windows. Raised from the URL parse,
+where the message can still name the platform, the scheme and the reason — `websockets`'
+`unix_connect` imports perfectly well there and fails deep inside the dial with a bare
+`AttributeError` on `loop.create_unix_connection`, which names none of the three and arrives from
+whichever attempt happened to run it.
+
+**TypeScript:** `connect()` from the package root was given a `ws+unix:` URL. Neither a browser nor
+Node's global `WebSocket` can open a filesystem socket, so the root entry point refuses the scheme up
+front and the message names `muxws/node` as the import that can dial it. There is deliberately **no**
+counterpart out of `muxws/node` itself, on any platform: `net.connect({ path })` opens a named pipe
+on Windows rather than failing, so refusing there would delete a transport that works — and no
+`ws+unix:` URL can address a named pipe anyway, because `new URL()` rejects the backslashes in
+`\\.\pipe\name` everywhere. A `muxws/node` dial of a POSIX-looking path on Windows fails with an
+ordinary connect error naming the path it tried.
+
+Nothing about the call was wrong in either case, which is why the Python class is a `RuntimeError` as
+well as a `MuxwsError`: the URL is valid and the same program would work unchanged elsewhere.
+
+### Signature
+
+```python
+class UnixSocketsUnsupportedError(TransportUnsupportedError): ...
+```
+
+```ts
+export class UnixSocketsUnsupportedError extends TransportUnsupportedError {
+  constructor(message?: string, options?: { cause?: unknown });
+}
+```
+
+Imported from the transport that refuses, not the package root in Python:
+`from muxws.transports.unix import UnixSocketsUnsupportedError`. In TypeScript the refusing transport
+*is* the root entry point's: `import { UnixSocketsUnsupportedError } from 'muxws'`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text. Python's names `socket.AF_UNIX` and points at `ws://` and `wss://`; TypeScript's names `muxws/node`. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | Unused by the library's own raise — the refusal is a scheme check, not a framed failure. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws.transports.unix import parse_unix_url, UnixSocketsUnsupportedError
+
+try:
+    parse_unix_url("ws+unix:///run/muxws/api.sock:/ws")
+except UnixSocketsUnsupportedError as exc:
+    print("not on this platform:", exc)  # Only ever printed on Windows.
+```
+
+```ts
+import { connect, UnixSocketsUnsupportedError } from 'muxws';
+
+try {
+  await connect('ws+unix:///run/muxws/api.sock:/ws');
+} catch (error) {
+  // Always taken: the root entry point cannot dial a socket file on any platform.
+  if (error instanceof UnixSocketsUnsupportedError) console.log(error.message);
+  else throw error;
+}
+```
+
+## `WebsocketUrlError` (Python)
+
+A `ws://` or `wss://` URL that the `websockets` library cannot turn into something dialable: one with
+no hostname (`ws:/nohost`, `ws://user@/x`), one whose scheme is not `ws` or `wss`
+(`http://example.com/x`), one whose port is not an integer (`ws://host:notaport/x`), or a string that
+is not a URL at all. Raised from `connect()` before any socket is opened, with the `InvalidURI` or
+`ValueError` that `websockets.uri.parse_uri` produced chained as `__cause__`, so the underlying
+library's own wording is framed rather than replaced.
+
+It also covers the logical `ws://` URI that a `ws+unix://` URL is turned into, because that string is
+what `unix_connect(uri=…)` parses. A malformed `ws+unix:` URL is still a `UnixUrlError` — that
+grammar is checked first, and by stdlib alone, so it answers the same way whether or not `websockets`
+is installed.
+
+**Why the check is where it is.** Before this class existed, `websockets`' `InvalidURI` escaped
+`connect()` unwrapped: an application catching `MuxwsError` around a dial caught a bad `ws+unix:` URL
+and missed a bad `ws:` one. Worse, the URL was parsed *inside* the failed-dial handler, which decides
+whether a failure was a refused muxws handshake by looking for a 400 — so `connect("ws:/HTTP 400")`
+came back as `CodecMismatch` and sent the reader off to compare `MUXWS_CODEC` on two ends of a
+connection that had never been made. The parse now happens before the dial, where a refusal handler
+cannot see it.
+
+### Signature
+
+```python
+class WebsocketUrlError(TransportUrlError): ...
+```
+
+Imported from the transport module, not the package root:
+`from muxws.transports.websockets_ import WebsocketUrlError`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` | required | The exception text, inherited from the base. The library's own message quotes the URL and repeats what `websockets` said about it. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import connect, TransportUrlError
+from muxws.transports.websockets_ import WebsocketUrlError
+
+
+async def main() -> None:
+    try:
+        await connect("ws:/nohost")
+    except WebsocketUrlError as exc:
+        print("bad url:", exc)
+        print("because:", type(exc.__cause__).__name__)
+    print(issubclass(WebsocketUrlError, TransportUrlError))
+
+
+asyncio.run(main())
+```
+
+## `WebsocketsNotInstalledError` (Python)
+
+`connect()` was called and `import websockets` failed. One class covers both arms — a `ws://` dial
+and a `ws+unix://` dial fail on the identical import — because it is the identical dependency.
+
+**The message names the extra:** `pip install muxws[websockets]`. That is the whole reason the class
+exists, and the reason it is not called `WebsocketsUnavailableError`: "unavailable", read in a
+traceback out of a dial, sounds like *the endpoint was unreachable*, which is a transient condition a
+caller may reasonably retry. This one is permanent, local, and has exactly one remedy, and the name
+has to say which of the two it is.
+
+Only the package being **absent** is claimed — a `ModuleNotFoundError` whose `name` is exactly
+`websockets`. Any other import failure, a broken install or a syntax error inside the package, is
+re-raised untouched, because a corrupt package reported as an uninstalled one sends the reader to
+reinstall something they already have and throws away the only message naming the real fault. A
+missing *sub*module (`websockets.asyncio`) counts as broken, not absent. `WsNotInstalledError` narrows
+identically, on `ERR_MODULE_NOT_FOUND`.
+
+`muxws.transports.websockets_` stays importable when `websockets` is absent — nothing is imported at
+module scope — which is what makes `except WebsocketsNotInstalledError` writable at all. A module that
+had to import its own dependency to define the class would raise the very `ImportError` the class
+exists to replace.
+
+### Signature
+
+```python
+class WebsocketsNotInstalledError(TransportUnsupportedError): ...
+```
+
+Imported from the transport module, not the package root:
+`from muxws.transports.websockets_ import WebsocketsNotInstalledError`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` | required | The exception text, inherited from the base. The library's own message names `pip install muxws[websockets]`. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws import TransportUnsupportedError
+from muxws.transports.websockets_ import WebsocketsNotInstalledError
+
+# The class is importable whether or not `websockets` is - which is the point of it.
+try:
+    raise WebsocketsNotInstalledError("connect() needs the websockets library: pip install muxws[websockets]")
+except TransportUnsupportedError as exc:
+    print(type(exc).__name__, "|", exc)
+```
+
+## `WsUrlError` (TypeScript)
+
+The `ws` package's `WebSocket` constructor refused the URL. Thrown by the `connect()` exported from
+`muxws/node`, and named after the third-party library that owns that dial, exactly as Python's
+`WebsocketUrlError` is named after `websockets`.
+
+`ws` reports a URL it cannot read as a real `SyntaxError` — `Invalid URL: nonsense` — which is not a
+`MuxwsError` and is therefore invisible to an application's one handler. It is framed here, with the
+original on `cause` so the wording survives.
+
+A **dial** failure is not a URL failure and is never wrapped: an unreachable host still rejects with
+Node's own `ENOTFOUND`, a refused connection with `ECONNREFUSED`, and a TLS failure with whatever TLS
+said. `TransportUrlError` means the address could not be read, not that nothing answered at it.
+
+### Signature
+
+```ts
+export class WsUrlError extends TransportUrlError {
+  constructor(message?: string, options?: { cause?: unknown });
+}
+```
+
+Imported from the entry point that ships the transport: `import { WsUrlError } from 'muxws/node'`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `string \| undefined` | `undefined` | The exception text; the library's own quotes the URL and repeats what `ws` said. |
+| `options.cause` | `unknown` | `undefined` | The `SyntaxError` `ws` threw. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import 'muxws';
+import { connect, WsUrlError } from 'muxws/node';
+
+try {
+  await connect('nonsense');
+} catch (error) {
+  if (!(error instanceof WsUrlError)) throw error;
+  console.log(error.name, '| ws said:', String((error.cause as Error).message));
+}
+```
+
+## `WsNotInstalledError` (TypeScript)
+
+`await import('ws')` inside the `muxws/node` dial failed because the optional peer dependency is not
+installed. **The message names the install that fixes it:** `npm install ws`.
+
+Without the class the reader gets `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws' imported
+from …/node_modules/muxws/dist/node.js` — a path they did not write, in a package they did not
+install, naming no remedy. It is the TypeScript twin of a bare `ImportError` in Python, one layer
+further from the reader.
+
+Only `ERR_MODULE_NOT_FOUND` is claimed. Any other import failure — a broken install, a syntax error
+inside `ws` itself — is rethrown untouched, because a corrupt package reported as an absent one sends
+the reader to reinstall something that is already there.
+
+The import is dynamic and lives on the dial path alone, which is why `accept()`, `serve()`,
+`handleProtocols()` and `refuseMismatchedUpgrade()` all keep working in a process that never dials.
+
+### Signature
+
+```ts
+export class WsNotInstalledError extends TransportUnsupportedError {
+  constructor(message?: string, options?: { cause?: unknown });
+}
+```
+
+Imported from the entry point that ships the transport:
+`import { WsNotInstalledError } from 'muxws/node'`.
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `string \| undefined` | `undefined` | The exception text; the library's own names `npm install ws`. |
+| `options.cause` | `unknown` | `undefined` | The original `ERR_MODULE_NOT_FOUND` error. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import { TransportUnsupportedError } from 'muxws';
+import { WsNotInstalledError } from 'muxws/node';
+
+// Reachable only in a checkout without `ws`; the class is importable either way, which is what
+// makes `catch (e) { if (e instanceof WsNotInstalledError) }` writable at all.
+const failure = new WsNotInstalledError("the 'ws' package is not installed: npm install ws");
+console.log(failure.name, failure instanceof TransportUnsupportedError, failure.message.includes('npm install ws'));
+```
+
 ## See also
 
 - [Codecs](./codec.md) — `CodecError`, `CodecNotRegistered` and `CodecMismatch` all come out of the
   codec seam.
+- [Unix domain sockets](../guide/transports.md#unix-domain-sockets) — the URL grammar `UnixUrlError`
+  enforces, and what each port does on Windows.
+- [Errors](../guide/errors.md#writing-an-adapter-of-your-own) — what to subclass, and where to put
+  it, if you are writing a transport of your own.
 - [Types](./types.md) — `ErrorSerializer`, the type `error_serializer=` must satisfy.
 - [Peer](./peer.md) — where `error_serializer` / `errorSerializer` is configured.
 - [Stream](./stream.md) — `cancel()`, `reset()` and the calls that raise these classes.

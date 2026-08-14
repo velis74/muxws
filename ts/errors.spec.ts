@@ -14,6 +14,8 @@ import {
   StreamRefused,
   StreamReset,
   StreamTimeout,
+  TransportUnsupportedError,
+  TransportUrlError,
   exceptionForReset,
 } from './errors';
 
@@ -49,6 +51,41 @@ describe('the exception hierarchy', () => {
     });
   });
 
+  it('places the two transport bases under MuxwsError and outside StreamReset - WSM-ERR-016', () => {
+    // The claim an application relies on: one `instanceof MuxwsError` handler around a dial catches a
+    // url the transport cannot open and a transport this build cannot provide, whichever transport
+    // was named and without importing it. Python reaches the same place through
+    // `TransportUrlError(MuxwsError, ValueError)`; here `MuxwsError` is the only branch of that
+    // diamond a single prototype chain can keep, and it is the one that matters.
+    [new TransportUrlError(), new TransportUnsupportedError()].forEach((error) => {
+      expect(error).toBeInstanceOf(MuxwsError);
+      expect(error).toBeInstanceOf(Error);
+      // Neither is a stream failure: nothing was ever opened, so there is no stream to reset and no
+      // reset code to carry.
+      expect(error).not.toBeInstanceOf(StreamReset);
+    });
+
+    // And they are siblings, not a chain. Collapsing them would tell a reader whose url is fine and
+    // whose runtime cannot dial it to go and retype the url - the one wrong answer this split exists
+    // to prevent.
+    expect(new TransportUrlError()).not.toBeInstanceOf(TransportUnsupportedError);
+    expect(new TransportUnsupportedError()).not.toBeInstanceOf(TransportUrlError);
+  });
+
+  it('chains the original on a transport base, and invents no chain when there was none', () => {
+    // WSM-ERR-016 requires the underlying library's own throw to survive translation: `ws` names the
+    // offending text, jsdom and undici word the same refusal differently, and a frame that dropped
+    // any of it would leave the reader with muxws's paraphrase of a diagnosis it did not make.
+    const original = new SyntaxError('Invalid URL: nonsense');
+
+    expect(new TransportUrlError('framed', { cause: original }).cause).toBe(original);
+    expect(new TransportUnsupportedError('framed', { cause: original }).cause).toBe(original);
+    // `undefined` and absent are different answers to "what caused this": the second is the honest
+    // one for a refusal muxws composed itself, and `new Error(msg, { cause: undefined })` would give
+    // the first.
+    expect('cause' in new TransportUrlError('composed here')).toBe(false);
+  });
+
   it('sets a name discriminator on every class - WSM-ERR-004', () => {
     const cases: [Error, string][] = [
       [new MuxwsError(), 'MuxwsError'],
@@ -65,8 +102,53 @@ describe('the exception hierarchy', () => {
       [new StreamTimeout(), 'StreamTimeout'],
       [new StreamRefused(), 'StreamRefused'],
       [new ConnectionLost(), 'ConnectionLost'],
+      [new TransportUrlError(), 'TransportUrlError'],
+      [new TransportUnsupportedError(), 'TransportUnsupportedError'],
     ];
     cases.forEach(([error, name]) => expect(error.name).toBe(name));
+  });
+
+  it('defines no concrete transport error, because each one belongs to its transport - WSM-ERR-016', async () => {
+    // The module-level witness, and the cheapest one this port has. A concrete class that drifted
+    // into the shared module would be invisible to every behavioural test - the throw sites would go
+    // on passing - and it is exactly how the rule stops being followable: a third party writing an
+    // adapter against the public seam (WSM-API-021) cannot add a class to `ts/errors.ts`, so a
+    // convention this repository only keeps by habit is one nobody else can keep at all.
+    const errors = await import('./errors');
+
+    // Enumerated, not listed. A name list can only see the classes somebody remembered to add to it,
+    // so the mutation the rule is actually about - a *new* concrete error written into the shared
+    // module next year - walks straight past it; measured, by appending a `RogueUrlError` here and
+    // watching this file stay green. Python's twin,
+    // `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`,
+    // recurses through `MuxwsError.__subclasses__()` for the same reason, and this is the prototype
+    // chain saying the same thing: anything in this module that *extends* either base is a concrete
+    // transport class in the one file that must hold none.
+    const concreteInSharedModule = Object.entries(errors)
+      .filter(
+        ([, value]) =>
+          typeof value === 'function' &&
+          value !== TransportUrlError &&
+          value !== TransportUnsupportedError &&
+          (Object.prototype.isPrototypeOf.call(TransportUrlError, value) ||
+            Object.prototype.isPrototypeOf.call(TransportUnsupportedError, value)),
+      )
+      .map(([name]) => name);
+    expect(concreteInSharedModule, 'a concrete transport error belongs to its transport, not here').toEqual([]);
+
+    // The name list stays as the non-vacuity control, exactly as the Python test keeps
+    // `_TRANSPORT_ERRORS_THAT_MUST_EXIST`: the walk above is a comparison of two empty lists unless
+    // the four classes it is meant to keep out really do exist somewhere else. `UnixSocketsUnsupportedError`
+    // is `ts/transports/browser-socket.ts`'s, because the platform-WebSocket transport is what refuses
+    // a `ws+unix:` url; the other three are `muxws/node`'s. None of the four is here.
+    const elsewhere = { ...(await import('./index')), ...(await import('./node')) };
+    ['UnixSocketsUnsupportedError', 'UnixUrlError', 'WsUrlError', 'WsNotInstalledError'].forEach((name) => {
+      expect(name in errors, `${name} belongs to its transport's module, not to the shared one`).toBe(false);
+      expect(name in elsewhere, `${name} must exist, or the walk above proves nothing`).toBe(true);
+    });
+    // And the same assertion against a name that *is* here, so a typo in the import cannot make the
+    // loop pass by testing an empty module.
+    expect('TransportUrlError' in errors).toBe(true);
   });
 });
 

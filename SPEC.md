@@ -8,8 +8,9 @@ The stream model is deliberately that of **HTTP/2 and HTTP/3**: many independent
 connection, either peer able to open one, headers then body then optional trailers, per-stream
 cancellation, and `goaway` for graceful shutdown. An implementer who knows those protocols will find
 this one familiar, and that is the intent. Two differences are load-bearing and are *not* accidents
-of an unfinished design. A WebSocket is a single TCP connection, so there is **one global message
-order** and no per-stream loss recovery — which is why the frame cap is a protocol constant
+of an unfinished design. A WebSocket runs over one stream-oriented connection — a TCP socket, or a
+Unix domain socket where both ends are on the same machine — so there is **one global message
+order** and no per-stream loss recovery, which is why the frame cap is a protocol constant
 (WSM-FRG-004) rather than a negotiated limit. And there is **no `SETTINGS` exchange at all**
 (WSM-CON-031): every limit here is either a constant or one peer's private defence.
 
@@ -538,20 +539,29 @@ cross-language test can assert on error identity:
 
 ```
 MuxwsError
-├── ProtocolError            # this peer or the remote violated the spec
-├── ConnectionClosed         # socket died; carries .code, .reason, .was_clean
-├── ConnectionGoingAway      # open() after goaway — raised synchronously out of open()
-├── StreamAlreadyConsumed    # await and iterate, or two iterations, on one stream
-├── StreamClosed             # send()/end()/reply() on a stream that closed normally
-├── CodecError               # configuration; carries .configured and .available
-│   ├── CodecNotRegistered   # configured name never registered — raised at startup
-│   └── CodecMismatch        # acceptor's codec differs; the handshake was rejected
-└── StreamReset              # carries .code (ResetCode), .reason, .stream_id
-    ├── RemoteError          # code == APPLICATION_ERROR; carries .payload
-    ├── StreamTimeout        # code == TIMEOUT
-    ├── StreamRefused        # code == REFUSED; not processed — retry, elsewhere or later
-    └── ConnectionLost       # code == CONNECTION_CLOSED; synthesised locally, never from the wire
+├── ProtocolError              # this peer or the remote violated the spec
+├── ConnectionClosed           # socket died; carries .code, .reason, .was_clean
+├── ConnectionGoingAway        # open() after goaway — raised synchronously out of open()
+├── StreamAlreadyConsumed      # await and iterate, or two iterations, on one stream
+├── StreamClosed               # send()/end()/reply() on a stream that closed normally
+├── CodecError                 # configuration; carries .configured and .available
+│   ├── CodecNotRegistered     # configured name never registered — raised at startup
+│   └── CodecMismatch          # acceptor's codec differs; the handshake was rejected
+├── TransportUrlError          # base: this transport cannot open that address (also a ValueError)
+├── TransportUnsupportedError  # base: this runtime has no such transport (also a RuntimeError)
+└── StreamReset                # carries .code (ResetCode), .reason, .stream_id
+    ├── RemoteError            # code == APPLICATION_ERROR; carries .payload
+    ├── StreamTimeout          # code == TIMEOUT
+    ├── StreamRefused          # code == REFUSED; not processed — retry, elsewhere or later
+    └── ConnectionLost         # code == CONNECTION_CLOSED; synthesised locally, never from the wire
 ```
+
+The two transport bases are in the tree and their subclasses are not, deliberately. The tree is the
+**shared** vocabulary — the part every port carries under the same names — and a concrete transport
+error is named after a transport, or after a third-party package only one port has
+(`WebsocketsNotInstalledError` in Python, `WsNotInstalledError` in TypeScript, for the same failure).
+A port carries such a class only where it ships that transport. Where those live, and why they may
+not be added to this tree, is WSM-ERR-016.
 
 - **WSM-ERR-001** *Retired.* It required `StreamRefused` and `StreamLimit` to be sibling classes.
   With the announced quota gone there is no `StreamLimit` (WSM-STM-022, WSM-API-004) and
@@ -564,7 +574,11 @@ MuxwsError
   swallowed into a callback.
 - **WSM-ERR-004** Every port MUST mirror this hierarchy with classes of the same names, delivered as
   rejections and as throws inside an async iteration, and MUST set a discriminator so cross-language
-  tests can assert on error identity.
+  tests can assert on error identity. *The hierarchy this rule quantifies over is the shared one in
+  the block above, the two transport bases included.* A transport-specific subclass of either base is
+  governed by WSM-ERR-016 instead, and MUST be mirrored only by a port that actually ships that
+  transport — no TypeScript port will ever carry a class named after a Python distribution, and a
+  rule that demanded one would be unfollowable rather than strict.
 - **WSM-ERR-005** `CodecNotRegistered` and `CodecMismatch` MUST sit outside `StreamReset`: neither is
   a stream failure and neither is retryable.
 - **WSM-ERR-006** A handler that raises MUST produce `reset(APPLICATION_ERROR)` with a `reason` and
@@ -604,6 +618,89 @@ MuxwsError
   pretend to carry it for a dropped promise.
 - **WSM-ERR-015** An incoming `reset(APPLICATION_ERROR)` on a stream this peer is consuming MUST
   raise `RemoteError` out of the pending await or the async iteration.
+- **WSM-ERR-016** Every exception a transport raises out of `connect()` MUST be a `MuxwsError`, and
+  the two shared bases carry the distinction the caller acts on. A transport that cannot open the
+  address it was given MUST raise a subclass of `TransportUrlError`; a transport this runtime cannot
+  provide **at all** — no `AF_UNIX`, an optional dependency that is not installed, an entry point a
+  bundling rule (WSM-API-022) keeps the dependency out of — MUST raise a subclass of
+  `TransportUnsupportedError`. `TransportUrlError` means *retype the address*;
+  `TransportUnsupportedError` means *the address is fine, change where or how you are running*, and a
+  port MUST NOT collapse the two. Both bases MUST live in the shared error module (`muxws/errors.py`,
+  `ts/errors.ts`), MUST be exported from the package root, and MUST NOT acquire a dependency of their
+  own — an application must be able to write `except TransportUrlError` without importing, and
+  possibly without being *able* to import, the transport that raised.
+  In Python `TransportUrlError` MUST also be a `ValueError` and `TransportUnsupportedError` a
+  `RuntimeError`: a caller who never heard of this library is already catching the builtin around a
+  URL it typed or a platform it cannot run on, and an application that funnels every muxws call
+  through one handler must not have these leak through it. A port with a single inheritance chain
+  MUST choose `MuxwsError` and carry the identity in its discriminator (WSM-ERR-004) — the one
+  handler that must not be escapable is `instanceof MuxwsError`, and no JavaScript runtime raises
+  `TypeError` for a bad WebSocket URL anyway, so there is no builtin habit to preserve. Faking the
+  diamond with `Symbol.hasInstance` MUST NOT be used: it makes `instanceof` answer for a prototype
+  chain that does not contain the class, which is a lie to the debugger and to the type system.
+  Concrete, transport-specific errors MUST subclass one of the two bases, MUST be defined in their
+  own transport's module, and MUST NOT be exported from the package root; they are reached as
+  `from muxws.transports.<transport> import <Error>` and `import { <Error> } from 'muxws/node'`. This
+  is a rule and not an accident of where the first two were written: the adapter seam is public
+  (WSM-API-021), third parties are expected to write adapters, and a third party cannot add a class
+  to `muxws/errors.py` — so a convention that required a root export would be one only this
+  repository could follow. Where a port's packaging gives a transport no module path of its own, its
+  concrete errors MUST be exported from the entry point that ships that transport and MUST NOT be
+  reachable from any other. A transport module MUST stay importable when the dependency it adapts is
+  absent, or `except <Transport>NotInstalledError` would itself raise the `ImportError` it exists to
+  replace.
+  **Ownership decides where an error lives, not who raises it.** `ConnectionClosed` is the case that
+  fixes the boundary: every adapter raises it, but the `SocketAdapter` protocol *requires* it of
+  every adapter (WSM-API-021), so it belongs to the seam and stays shared. An error the adapter
+  contract does not mention — a URL grammar, a missing package, a missing kernel feature — belongs to
+  the one transport that has it, and MUST NOT be promoted to the shared module because a second
+  transport happens to want something similar.
+  A missing optional dependency MUST NOT reach the caller as a bare `ImportError` or
+  `ERR_MODULE_NOT_FOUND`, and the message MUST name the install that fixes it —
+  `pip install muxws[websockets]`, `npm install ws`. The failure is permanent, local and has exactly
+  one remedy; a class that cannot state that remedy is not worth raising, and "cannot find package"
+  is what the runtime already said. A translated failure MUST chain the original — `raise ... from
+  exc` in Python, `{ cause }` in TypeScript — and MUST frame the underlying library's wording rather
+  than replace it. An import failure that is *not* the dependency being absent — a broken install, a
+  syntax error inside it — MUST be re-raised untouched, so a corrupt package is never reported as an
+  uninstalled one.
+  An address the transport cannot parse MUST be detected **before the dial is attempted** and MUST
+  NOT be translated inside the failed-dial handler. That clause is not stylistic:
+  `_looks_like_a_refused_handshake` reads a 400 out of the dial's exception, so a URL translation
+  layered beneath it lets a URL whose own text contains the refusal's status be reported as
+  `CodecMismatch` (WSM-CDC-024) — a measured outcome for `ws:/HTTP 400`, which sent the reader to
+  compare `MUXWS_CODEC` on two ends of a connection that was never made. A refused handshake and an
+  unparseable address are different failures and the handler for one MUST NOT be able to answer the
+  other. Equally, a *dial* failure is not an address failure: an unreachable host, a refused
+  connection or a TLS error MUST keep propagating as whatever the platform raised.
+  A transport MUST NOT invent a class for a failure it cannot actually produce. Each port MUST mirror
+  the two bases (WSM-ERR-004) and MUST define a concrete subclass only for a transport it ships and a
+  failure that transport can reach; an entry point that refuses a scheme it cannot carry MAY raise a
+  base directly rather than invent a class for a transport it does not have.
+  Test: `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`,
+  `::test_the_transport_bases_are_root_exported_and_their_subclasses_are_not`,
+  `::test_the_two_transport_bases_carry_their_builtin_as_well_as_muxwserror`;
+  `transports/websockets_test.py::test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error`,
+  `::test_the_librarys_own_diagnostic_survives_the_translation`,
+  `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`,
+  `::test_a_missing_websockets_package_names_the_extra_that_installs_it`,
+  `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`,
+  `::test_this_transport_module_still_imports_with_its_dependency_blocked`,
+  `::test_an_unreachable_acceptor_is_not_reported_as_a_codec_mismatch`;
+  `transports/unix_test.py::test_both_refusals_are_catchable_as_muxws_errors_and_as_what_they_are`,
+  `::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`;
+  `ts/errors.spec.ts` *"places the two transport bases under MuxwsError and outside StreamReset"*,
+  *"defines no concrete transport error, because each one belongs to its transport"*,
+  *"chains the original on a transport base, and invents no chain when there was none"*;
+  `ts/node.spec.ts` *"arrives as a WsUrlError framing the wording `ws` used"*;
+  `ts/unix.spec.ts` *"refuses a request target that is not an absolute path, by name"*,
+  *"names muxws/node as the entry point that can dial a socket file"*;
+  `ts/transport-errors.spec.ts` *"names the install rather than the module the resolver could not
+  find"*, *"rethrows a broken install untouched, so it is never reported as an absent one"*;
+  `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports
+  own"*, *"leaves node:net a real import, so the unix dial has a socket to open"*.
+  **The platform-`WebSocket` entry point does not satisfy the first sentence yet; see the known
+  deviation in Appendix A.**
 
 ### 5.7 `WSM-FRG-` — sizes and fragmentation
 
@@ -1272,6 +1369,7 @@ restored after each. A row without a demonstrated mutation does not belong in th
 | `WSM-ERR-003` | `peer_test.py::test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site` | a `Peer.on_error` hook added — fails on the exhaustive hook-name set. The rule's force is that there is nowhere to divert an error *to*; see *bounded witnesses* for what this test does not prove. |
 | `WSM-ERR-007` | `errors_test.py::test_nothing_in_the_error_hierarchy_carries_a_status_code` | (a) `RemoteError.status_code = 500`; (b) `default_error_serializer` grows a `"status": 500` key. Both caught. |
 | `WSM-ERR-010` | `peer_test.py::test_request_arms_no_deadline_unless_it_is_given_one`; `ts/peer.spec.ts` *"has no default request timeout"* | (a) `timeout: float \| None = 30.0` on `Peer.request` — caught by the signature half; (b) `_collect_unary` substituting `30.0` for `None` with the signature left alone — caught by the `asyncio.wait_for` spy, with `timeout=0.02` as the control that proves the spy fires at all. The two halves are independently live. TypeScript counts `setTimeout` calls and is killed by a default in either `collectUnary` or `resolveCall`. |
+| `WSM-ERR-016` | `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`, `::test_the_transport_bases_are_root_exported_and_their_subclasses_are_not`; `transports/websockets_test.py::test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error`, `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`, `::test_a_missing_websockets_package_names_the_extra_that_installs_it`, `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`; `transports/unix_test.py::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`; `ts/errors.spec.ts` *"defines no concrete transport error, because each one belongs to its transport"*; `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports own"*, *"leaves node:net a real import, so the unix dial has a socket to open"* | Four, each killing a different half, each run against the finished tree in a scratch copy and each restored after. (a) `class WebsocketUrlError(MuxwsError, ValueError)` — reparented off the base, behaviour byte-for-byte identical: caught **only** by the subclass walk, which is why that test enumerates by importing every shipped module and recursing through `MuxwsError.__subclasses__()` rather than grepping for a base name, and why it asserts a floor on the modules it imported and names all four concrete classes as a control. (b) `"WebsocketUrlError"` added to `muxws.__all__` and to the import block — caught **only** by the export test. (c) the `verify_dialable_url(...)` line deleted from `_websocket_dialer`, so `websockets`' own `InvalidURI` reaches the caller: 12 of 32 tests in `websockets_test.py` fail. (d) the finer version of (c), and the one the layering clause is for: `require_websockets()` left where it is and only the URL parse moved *inside* `dial()`'s `except`, one line beneath `_looks_like_a_refused_handshake`. Every URL in the suite still ends up a `TransportUrlError` and exactly one test fails — `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`, where `ws:/HTTP 400` comes back as `CodecMismatch`. That is the measured defect this rule was written for, and it is invisible to every other witness. Applying (a) to `UnixUrlError` instead fails the walk **and** `transports/unix_test.py::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`, while `::test_both_refusals_are_catchable_as_muxws_errors_and_as_what_they_are` stays green — it asserts the `MuxwsError`/`ValueError` pair, which the reparent preserves. The older test holds the pre-WSM-ERR-016 contract and the newer one holds this rule; neither is redundant and neither should be deleted as such. Three more were added when the rule's own witnesses were audited, each for a clause that had none. (e) `except ImportError` in `require_websockets` widened back to translating every import failure: caught only by `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`, and measured against a real shadowing `websockets/__init__.py` before the narrowing existed — a package that *was* installed came back as `WebsocketsNotInstalledError` telling the reader to install it. (f) a concrete `RogueUrlError` appended to `ts/errors.ts` and root-exported from `ts/index.ts`: the name-listed guards saw nothing, and both enumerative walks — `ts/errors.spec.ts` *"defines no concrete transport error…"* and `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports own"* — now fail on it, which is why they read the prototype chain and keep the name lists only as the non-vacuity control. (g) `/^node:/` removed from `vite.config.ts`'s externals: caught only by *"leaves node:net a real import, so the unix dial has a socket to open"*. That one is the reason a source-level witness was not enough — vitest, `interop/drive.sh` and every spec run against `ts/`, and the defect existed only in the artifact `npm run build` emits, where `node:net` had been swapped for Vite's empty browser stub and every `ws+unix:` dial through the published package died as `TypeError: n is not a function`, which is neither a `MuxwsError` nor a sentence naming the url. |
 | `WSM-FRM-006`, `WSM-INV-016` | `peer_test.py::test_a_payload_spelled_like_an_envelope_is_carried_and_never_read`, `::test_an_envelope_lookalike_payload_survives_being_fragmented`; `ts/peer.spec.ts` *"defines no vocabulary inside payload"* | (a) the sender lifts `end` out of the payload — caught twice over, by the subscript recorder and by the envelope assertions; (b) a *discarded* read `_ = payload["kind"]` — caught by the recorder alone; (c) on the fragmented path, the receiver peeks inside a fragment for `"type":"reset"` and resets; (d) the reassembler merges a nested `payload` key into the envelope. In TypeScript, `toMapping` deleting `payload.kind` in place, and the receiver acting on `payload.type`. |
 | `WSM-FRM-012`, `-013` | `frames_test.py::test_v1_frame_types_is_exactly_the_six_of_the_specification`, `::test_end_and_trailers_are_flags_and_not_frame_types`; `ts/frames.spec.ts` `describe('the v1 frame set')`; `ts/peer.spec.ts` *"puts only the six v1 frame types on the wire"* | adding `end` and `trailers` to `V1_FRAME_TYPES`; removing `goaway` from it; and `toMapping` spelling a trailer-bearing frame as `{"type":"trailers"}`. All three caught. Asserted by **set equality**, never by membership — every prior reference to this constant asked whether a type it already had was in it, which a seventh member satisfies just as well. |
 | `WSM-INV-001` | `packaging_test.py::test_no_library_module_imports_anything_above_it_in_the_stack`, `::test_every_third_party_import_is_an_extra_and_lives_only_in_its_own_module`, `::test_the_import_walker_sees_what_it_is_trusted_to_see` | (a) a `TYPE_CHECKING`-only `from fastapi import WebSocket` in `stream.py`; (b) a lazy `import httpx` inside a `Peer` method; (c) `import msgpack` in `writer.py`. All three caught. An AST walk, not a subprocess import-blocker, because the rule names the type-checking-only annotation explicitly and a runtime blocker structurally cannot see one. The third test is the control: a walker that found no modules would make the other two vacuously green. |
@@ -1450,6 +1548,30 @@ constructor is pinned by set equality in
 sibling cannot appear silently. Closing it properly means marking `Stream`'s constructor internal and
 allocating through a factory the peer owns, which is a public API change and therefore work for the
 next generation (WSM-PKG-005), not a patch to a frozen 1.0.
+
+### A known deviation: `WSM-ERR-016` is not satisfied by the platform-`WebSocket` dial
+
+The rule's first sentence — every exception a transport raises out of `connect()` is a `MuxwsError` —
+holds for Python's `websockets` dial, for both of its `ws+unix:` refusals, and for every dial behind
+`muxws/node`. It does **not** hold for the `connect()` exported from `muxws`. That entry point calls
+`new WebSocket(url, …)` and lets the constructor's throw escape, so a malformed URL arrives as a
+`DOMException` named `SyntaxError` — measured: `The URL 'nonsense' is invalid.` under jsdom, which is
+what vitest runs, and `TypeError: Invalid URL` under undici, which is what a bare `node` gives. Neither
+is a `MuxwsError`, and an application whose only handler is `instanceof MuxwsError` misses it.
+
+The fix is not the obvious one, which is why it is recorded rather than done in passing. A blanket
+`try`/`catch` around the constructor mislabels failures that are not about the URL at all: jsdom throws
+the *same* shape for `new WebSocket('ws://host/x', ['bad protocol'])` — `The subprotocol 'bad protocol'
+is invalid.` — and calling that a `TransportUrlError` would send the reader to re-read a URL that was
+correct. A conforming implementation has to claim the constructor's throw only when the URL is
+independently unparseable as a `ws:`/`wss:` address, rethrow everything else untouched, and keep the
+platform's own wording on `cause` because two runtimes describe the same bad URL differently.
+
+The rule is not weakened to fit: the wording is right and this one surface is behind it. Both bases
+are in `ts/errors.ts` and root-exported, the `ws+unix:` refusal at that entry point is already a
+`UnixSocketsUnsupportedError`, and what is missing is one concrete `TransportUrlError` subclass and
+the two-part guard above. `docs/api/errors.md` and `docs/api/connect.md` both say so where a reader
+would look.
 
 ### Three holes no grep for an id would have found
 
