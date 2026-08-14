@@ -109,17 +109,14 @@ describe('the exception hierarchy', () => {
   });
 
   it('defines no concrete transport error, because each one belongs to its transport - WSM-ERR-016', async () => {
-    // The module-level witness, and the cheapest one this port has. A concrete class that drifted
-    // into the shared module would be invisible to every behavioural test - the throw sites would go
-    // on passing - and it is exactly how the rule stops being followable: a third party writing an
-    // adapter against the public seam (WSM-API-021) cannot add a class to `ts/errors.ts`, so a
-    // convention this repository only keeps by habit is one nobody else can keep at all.
+    // A concrete class that drifted into the shared module would be invisible to every behavioural
+    // test - the throw sites would go on passing - and a third party writing an adapter against the
+    // public seam (WSM-API-021) cannot add a class to `ts/errors.ts`, so the convention has to be
+    // one anybody can keep.
     const errors = await import('./errors');
 
     // Enumerated, not listed. A name list can only see the classes somebody remembered to add to it,
-    // so the mutation the rule is actually about - a *new* concrete error written into the shared
-    // module next year - walks straight past it; measured, by appending a `RogueUrlError` here and
-    // watching this file stay green. Python's twin,
+    // so a *new* concrete error written into the shared module walks straight past it. Python's twin,
     // `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`,
     // recurses through `MuxwsError.__subclasses__()` for the same reason, and this is the prototype
     // chain saying the same thing: anything in this module that *extends* either base is a concrete

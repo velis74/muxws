@@ -240,19 +240,18 @@ describe("the shipped build's externals (WSM-ERR-016)", () => {
    *
    * A Vite library build resolves with **browser** conditions, so a `node:` builtin that is not
    * externalised is silently swapped for `__vite-browser-external`, a module whose body is
-   * `module.exports = {}`. Measured on the shipped artifact before `/^node:/` was added: `dist/node.js`
-   * contained no `node:net` at all and `await import('node:net')` yielded an object with no `connect`,
-   * so a consumer's `ws+unix:` dial died as `TypeError: n is not a function`.
+   * `module.exports = {}`. `await import('node:net')` then yields an object with no `connect`, and a
+   * consumer's `ws+unix:` dial dies as `TypeError: n is not a function`.
    */
   async function shippedNodeBundle(): Promise<{
     code: string;
     failure: string;
   }> {
-    // Reached through a variable specifier for the same reason `VITE_SPECIFIER` is, and one more:
-    // `vite.config.ts` sits outside `tsconfig.json`'s `include` and is written as ESM, so a literal
+    // A variable specifier for the same reason `VITE_SPECIFIER` is, and one more: `vite.config.ts`
+    // sits outside `tsconfig.json`'s `include` and is written as ESM, so a literal
     // `import('../vite.config')` would drag it into `tsc --noEmit`'s programme and fail on
     // `import.meta` (TS1343) and on Vite's `exports`-only types (TS2307). The config is data here,
-    // not a typed dependency; what matters is that this reads the file `npm run build` reads.
+    // not a typed dependency.
     const CONFIG_SPECIFIER = '../vite.config';
     const shipped = ((await import(CONFIG_SPECIFIER)) as { default: unknown }).default as {
       build?: { rollupOptions?: { external?: unknown } };
@@ -338,8 +337,7 @@ describe('where an error class is reachable from - WSM-ERR-016', () => {
     });
     // And the three `muxws/node` owns are reached as `from 'muxws/node'` and from nowhere else. This
     // is the half of the rule a third-party adapter has to be able to follow: it cannot add a class to
-    // `ts/errors.ts`, so a convention requiring a root export would be one only this repository could
-    // keep (WSM-API-021).
+    // `ts/errors.ts`, so the convention must not require a root export (WSM-API-021).
     NODE_TRANSPORT.forEach((name) => {
       expect(node, `${name} must be exported from muxws/node`).toContain(name);
       expect(root, `${name} must not be reachable from the package root`).not.toContain(name);

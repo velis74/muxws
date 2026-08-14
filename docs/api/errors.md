@@ -23,11 +23,11 @@ MuxwsError                          from muxws / 'muxws' — the whole tree is c
 ├── CodecError
 │   ├── CodecNotRegistered
 │   └── CodecMismatch
-├── TransportUrlError               this transport cannot open that address; also a ValueError
+├── TransportUrlError               this transport cannot open that address; py: also a ValueError
 │   ├── UnixUrlError                py: muxws.transports.unix   ts: 'muxws/node'
 │   ├── WebsocketUrlError           py: muxws.transports.websockets_
 │   └── WsUrlError                  ts: 'muxws/node'
-├── TransportUnsupportedError       this runtime has no such transport; also a RuntimeError
+├── TransportUnsupportedError       this runtime has no such transport; py: also a RuntimeError
 │   ├── UnixSocketsUnsupportedError py: muxws.transports.unix   ts: 'muxws'
 │   ├── WebsocketsNotInstalledError py: muxws.transports.websockets_
 │   └── WsNotInstalledError         ts: 'muxws/node'
@@ -38,16 +38,15 @@ MuxwsError                          from muxws / 'muxws' — the whole tree is c
     └── ConnectionLost
 ```
 
-**Why a transport error is not importable from `muxws`.** It is a rule now rather than an
-arrangement: a concrete transport error lives in its transport's own module, and only the two bases
-are shared. The reason is the adapter seam. `SocketAdapter` is public and third parties are expected
-to write adapters for transports this repository does not ship — and a third party cannot add a class
-to `muxws/errors.py` or to `ts/errors.ts`. A convention that required a root export would therefore
-be one only this repository could follow, so the convention is the other one: subclass a shared base,
-keep the class beside the code that raises it, and let `except TransportUrlError` be the thing an
-application writes when it does not know or care which transport was asked for the address. Both
-bases are plain classes with no dependency of their own, which is what makes that `except` writable
-in a process that cannot even import the transport that raised.
+**Why a transport error is not importable from `muxws`.** The rule follows from the adapter seam.
+`SocketAdapter` is public and third parties are expected to write adapters for transports this
+repository does not ship — and a third party cannot add a class to `muxws/errors.py` or to
+`ts/errors.ts`. A convention that required a root export would be one only this repository could
+follow, so the convention is the other one: subclass a shared base, keep the class beside the code
+that raises it, and let `except TransportUrlError` be what an application writes when it does not know
+or care which transport was asked for the address. Both bases are plain classes with no dependency of
+their own, which is what makes that `except` writable in a process that cannot even import the
+transport that raised.
 
 TypeScript has no module path below its entry points — `package.json` publishes `muxws`, `muxws/node`
 and `muxws/msgpack`, and nothing finer — so the same rule reads there as "exported from the entry
@@ -56,11 +55,13 @@ from `muxws` — the entry point that refuses the scheme is the one dialling wit
 `WebSocket` — while `WsUrlError` and `WsNotInstalledError` come from `muxws/node`, and why the browser
 bundle contains neither of the `ws`-flavoured names.
 
-One gap is worth knowing rather than discovering: the `connect()` exported from `muxws` does **not**
-yet frame a URL the platform's own `WebSocket` constructor rejects. A malformed URL still arrives
-there as the runtime's `DOMException` — jsdom says `The URL 'nonsense' is invalid.`, undici says
-`TypeError: Invalid URL` — and neither is a `MuxwsError`. Every other entry point translates; this one
-is the outstanding half.
+One asymmetry is worth knowing before you write the handler: the `connect()` exported from `muxws`
+does not frame a URL the platform's own `WebSocket` constructor rejects. A malformed URL arrives from
+that entry point as the runtime's `DOMException` — jsdom says `The URL 'nonsense' is invalid.`, undici
+says `TypeError: Invalid URL` — and neither is a `MuxwsError`. `muxws/node` answers a
+`TransportUrlError` for every one of those, and Python for every one its parsers reach: the exception
+is an authority with an unbalanced `[` (`ws://[::1`), which `urllib.parse.urlsplit` refuses before
+either check and which therefore leaves `connect()` as a bare `ValueError`.
 
 `except MuxwsError` still catches every one of them without importing anything, and so does
 `except TransportUrlError` / `except TransportUnsupportedError` for the half a caller usually wants.
@@ -195,9 +196,11 @@ try {
 
 ## `ConnectionClosed`
 
-The socket died. Raised by `peer.serve()` and by peer-level calls; **never** by a stream — a stream
-sees `ConnectionLost` instead, so a per-stream `except StreamReset` keeps working and a
-connection-level handler stays connection-level.
+The socket died. Raised by `peer.ping()` when the pong deadline expires, and by a socket adapter's
+`receive` / `send_text` / `send_bytes` when it is asked to work a socket that is gone. `peer.serve()`
+catches it, kills the peer and **returns**, so a read loop that ends does not raise into whatever
+awaited it. It is **never** raised by a stream — a stream sees `ConnectionLost` instead, so a
+per-stream `except StreamReset` keeps working and a connection-level handler stays connection-level.
 
 ### Signature
 
@@ -1506,19 +1509,16 @@ configured URL names.
 
 It is not, on its own, enough for every entry point. A bad `ws+unix://` URL is a `UnixUrlError` — a
 `TransportUrlError` — in Python and behind `muxws/node`, but the `muxws` entry point refuses the
-scheme before it ever parses the grammar and answers `UnixSocketsUnsupportedError`, because that
-build ships no transport that could open a socket file however the URL is spelled. The handler that
-covers every port is therefore `except (TransportUrlError, TransportUnsupportedError)` in Python and
-`instanceof MuxwsError` in TypeScript. The two bases are a distinction about *what to do next* —
-retype the address, or change where you are running — and an entry point that cannot carry a scheme
-at all is answering the second question.
+scheme before it parses the grammar and answers `UnixSocketsUnsupportedError`, because that build
+ships no transport that could open a socket file however the URL is spelled. The handler that covers
+every port is `except (TransportUrlError, TransportUnsupportedError)` in Python and
+`instanceof MuxwsError` in TypeScript.
 
 In Python it is a `ValueError` as well as a `MuxwsError`. Both halves are load-bearing: a caller who
 never heard of this library is already catching `ValueError` around a URL it typed, and an
 application whose one handler is `except MuxwsError` must not have a bad address leak through it. In
 TypeScript there is one prototype chain, so the class extends `MuxwsError` and carries its identity
-in `name` — the handler that must not be escapable is `instanceof MuxwsError`, and no JavaScript
-runtime raises `TypeError` for a bad WebSocket URL anyway, so nothing is lost by not being one.
+in `name`; the handler that must not be escapable there is `instanceof MuxwsError`.
 
 It is always raised **before the dial**, never out of a failed one. That ordering is what keeps a URL
 whose text happens to contain `HTTP 400` from being reported as a refused handshake, and it is what
@@ -1673,12 +1673,15 @@ reappear later out of a background reconnection.
 
 It is the `ws+unix:` **grammar's** error, and that grammar belongs to one transport in each port, so
 the class lives with the transport rather than in the shared error module. Python raises it from
-`muxws.transports.unix`; TypeScript raises it from the `ws+unix:` parser behind `muxws/node`, which
-is the only entry point that can dial a socket file at all.
+[`parse_unix_url`](./transports.md#parse-unix-url-python) in `muxws.transports.unix`; TypeScript
+raises it from the `ws+unix:` parser behind `muxws/node`, which is the only entry point that can dial
+a socket file at all.
 
-Both ports refuse the same three shapes with the same reasoning, which is the point of naming the
-class identically: a deployment can paste one URL into either port's configuration and get the same
-answer, including the same refusal.
+Both ports refuse the same three shapes, so a deployment can paste one URL into either port's
+configuration and get the same answer. On Windows the Python port answers two of them differently:
+`socket.AF_UNIX` is checked after the `wss+unix:` refusal but before the two grammar checks, so a bad
+request target or a URL naming no socket file is a `UnixSocketsUnsupportedError` there. The
+TypeScript port answers `UnixUrlError` for all three on every platform.
 
 ### Signature
 
@@ -1750,22 +1753,18 @@ of how it is written. The two ports reach it from different directions, and the 
 reader is the same in both: *a `ws+unix:` URL cannot be opened here.*
 
 **Python:** the interpreter has no `socket.AF_UNIX`, which means Windows. Raised from the URL parse,
-where the message can still name the platform, the scheme and the reason — `websockets`'
-`unix_connect` imports perfectly well there and fails deep inside the dial with a bare
-`AttributeError` on `loop.create_unix_connection`, which names none of the three and arrives from
-whichever attempt happened to run it.
+so the message names the platform, the scheme and the reason, and the failure arrives out of the
+`connect()` call rather than out of a background reconnect attempt.
 
 **TypeScript:** `connect()` from the package root was given a `ws+unix:` URL. Neither a browser nor
 Node's global `WebSocket` can open a filesystem socket, so the root entry point refuses the scheme up
-front and the message names `muxws/node` as the import that can dial it. There is deliberately **no**
-counterpart out of `muxws/node` itself, on any platform: `net.connect({ path })` opens a named pipe
-on Windows rather than failing, so refusing there would delete a transport that works — and no
-`ws+unix:` URL can address a named pipe anyway, because `new URL()` rejects the backslashes in
-`\\.\pipe\name` everywhere. A `muxws/node` dial of a POSIX-looking path on Windows fails with an
-ordinary connect error naming the path it tried.
+front and the message names `muxws/node` as the import that can dial it. `muxws/node` has no
+counterpart on any platform: `net.connect({ path })` opens a named pipe on Windows rather than
+failing, and no `ws+unix:` URL can address a named pipe anyway, because `new URL()` rejects the
+backslashes in `\\.\pipe\name` everywhere. A `muxws/node` dial of a POSIX-looking path on Windows
+fails with an ordinary connect error naming the path it tried.
 
-Nothing about the call was wrong in either case, which is why the Python class is a `RuntimeError` as
-well as a `MuxwsError`: the URL is valid and the same program would work unchanged elsewhere.
+Nothing about the call was wrong in either case, which is why the Python class is a `RuntimeError`.
 
 ### Signature
 
@@ -1831,17 +1830,18 @@ is not a URL at all. Raised from `connect()` before any socket is opened, with t
 library's own wording is framed rather than replaced.
 
 It also covers the logical `ws://` URI that a `ws+unix://` URL is turned into, because that string is
-what `unix_connect(uri=…)` parses. A malformed `ws+unix:` URL is still a `UnixUrlError` — that
-grammar is checked first, and by stdlib alone, so it answers the same way whether or not `websockets`
-is installed.
+what `unix_connect(uri=…)` parses: `ws+unix://user@/a.sock:/y` is a `WebsocketUrlError` about
+`ws://user@/y`. A malformed `ws+unix:` URL is still a `UnixUrlError` — that grammar is checked first,
+and by stdlib alone, so it answers the same way whether or not `websockets` is installed.
 
-**Why the check is where it is.** Before this class existed, `websockets`' `InvalidURI` escaped
-`connect()` unwrapped: an application catching `MuxwsError` around a dial caught a bad `ws+unix:` URL
-and missed a bad `ws:` one. Worse, the URL was parsed *inside* the failed-dial handler, which decides
-whether a failure was a refused muxws handshake by looking for a 400 — so `connect("ws:/HTTP 400")`
-came back as `CodecMismatch` and sent the reader off to compare `MUXWS_CODEC` on two ends of a
-connection that had never been made. The parse now happens before the dial, where a refusal handler
-cannot see it.
+An `http://` or `https://` URL is one of the shapes this class refuses. Neither TypeScript port
+refuses it: the platform `WebSocket` and `ws` both upgrade those schemes to `ws:`/`wss:` and dial.
+
+The parse happens before the dial and outside the failed-dial handler, which is what keeps the two
+apart: that handler decides whether a failure was a refused muxws handshake by looking for a 400, and
+a URL whose own text contains `HTTP 400` would otherwise be reported as a `CodecMismatch` on a
+connection that was never made. [`verify_dialable_url`](./transports.md#verify-dialable-url-python)
+is the function that runs it.
 
 ### Signature
 
@@ -1892,11 +1892,10 @@ asyncio.run(main())
 `connect()` was called and `import websockets` failed. One class covers both arms — a `ws://` dial
 and a `ws+unix://` dial fail on the identical import — because it is the identical dependency.
 
-**The message names the extra:** `pip install muxws[websockets]`. That is the whole reason the class
-exists, and the reason it is not called `WebsocketsUnavailableError`: "unavailable", read in a
-traceback out of a dial, sounds like *the endpoint was unreachable*, which is a transient condition a
-caller may reasonably retry. This one is permanent, local, and has exactly one remedy, and the name
-has to say which of the two it is.
+**The message names the extra:** `pip install muxws[websockets]`, which the module also exports as
+[`INSTALL_HINT`](./transports.md#install-hint-python) so the remedy is spelled in one place. That is
+the whole reason the class exists: the condition is permanent, local, and has exactly one fix, and
+`ModuleNotFoundError: No module named 'websockets'` names none of it.
 
 Only the package being **absent** is claimed — a `ModuleNotFoundError` whose `name` is exactly
 `websockets`. Any other import failure, a broken install or a syntax error inside the package, is
@@ -1908,7 +1907,9 @@ identically, on `ERR_MODULE_NOT_FOUND`.
 `muxws.transports.websockets_` stays importable when `websockets` is absent — nothing is imported at
 module scope — which is what makes `except WebsocketsNotInstalledError` writable at all. A module that
 had to import its own dependency to define the class would raise the very `ImportError` the class
-exists to replace.
+exists to replace. The import itself lives in
+[`require_websockets`](./transports.md#require-websockets-python), which is where this class is raised
+and the only way to ask whether this process can dial without dialling.
 
 ### Signature
 
@@ -2006,8 +2007,7 @@ installed. **The message names the install that fixes it:** `npm install ws`.
 
 Without the class the reader gets `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws' imported
 from …/node_modules/muxws/dist/node.js` — a path they did not write, in a package they did not
-install, naming no remedy. It is the TypeScript twin of a bare `ImportError` in Python, one layer
-further from the reader.
+install, naming no remedy.
 
 Only `ERR_MODULE_NOT_FOUND` is claimed. Any other import failure — a broken install, a syntax error
 inside `ws` itself — is rethrown untouched, because a corrupt package reported as an absent one sends

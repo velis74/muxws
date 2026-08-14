@@ -31,10 +31,8 @@ class WebsocketUrlError(TransportUrlError):
 
     No hostname (`ws:/nohost`), a scheme that is neither `ws` nor `wss`, a port that is not an
     integer, or a string that is not a URL at all. It is a `TransportUrlError` - and so a
-    `MuxwsError` and a `ValueError` - because before this class existed the identical typo reached
-    the caller as `websockets.exceptions.InvalidURI` over TCP and as `UnixUrlError` over
-    `ws+unix:`, so an application with one `except MuxwsError` around `connect()` caught the bad
-    `ws+unix:` URL and missed the bad `ws:` one (WSM-ERR-016).
+    `MuxwsError` and a `ValueError` - so that one `except MuxwsError` around `connect()` catches an
+    unusable URL whichever scheme it names (WSM-ERR-016).
 
     The library's own diagnostic is not replaced, only framed: it is quoted in the message and the
     original exception is chained with `from exc`, because `websockets` says *which* part of the URL
@@ -48,13 +46,10 @@ class WebsocketsNotInstalledError(TransportUnsupportedError):
     One class for both dial arms: a `ws://` dial and a `ws+unix://` dial fail on the identical
     `import websockets`, because it is the identical dependency.
 
-    `NotInstalled` rather than `Unavailable` on purpose. "Unavailable" in a traceback out of a dial
-    reads as "the endpoint was unreachable" - a transient condition a caller may retry - and this is
-    a permanent, local, install-time condition that no retry and no different URL can fix, which is
-    also why the base is `TransportUnsupportedError` (a `RuntimeError`) and not `TransportUrlError`.
-    GAPS.md records the failure this exists to prevent from the other side: an install missing a
-    WebSocket implementation answered every upgrade 404 and read as a muxws defect, because nothing
-    in the traceback named the package or the command that installs it.
+    `NotInstalled` rather than `Unavailable`: "unavailable" in a traceback out of a dial reads as a
+    transient endpoint failure a caller may retry, and this is a permanent local condition no retry
+    and no different URL can fix. That is also why the base is `TransportUnsupportedError` (a
+    `RuntimeError`) and not `TransportUrlError`.
 
     Only the package being absent becomes this class. A `websockets` that is present but broken keeps
     its own `ImportError` - see `require_websockets`, and the same narrowing in
@@ -65,26 +60,19 @@ class WebsocketsNotInstalledError(TransportUnsupportedError):
 def require_websockets() -> Any:
     """Import `websockets`, or raise `WebsocketsNotInstalledError` naming the extra.
 
-    The gate for both dial arms, and the reason this module still has no module-scope `import
-    websockets`: WSM-PKG-002 gives the package zero required runtime dependencies, so the only place
-    the absence can be detected is where it is needed, and the only way it can be reported usefully
-    is as a muxws error that says what to install (WSM-ERR-016).
+    The gate for both dial arms, and why this module has no module-scope `import websockets`: the
+    package has zero required runtime dependencies (WSM-PKG-002), so the absence can only be detected
+    where it is needed and reported as a muxws error that says what to install (WSM-ERR-016).
 
     Called from `verify_dialable_url` before the URL is parsed, because the URL parser is supplied by
     the dependency: a caller with neither gets the failure that blocks the other, rather than an
     `ImportError` out of the middle of a URL check.
 
-    **Only the package actually being absent becomes this class** (WSM-ERR-016), which is why the
-    handler re-reads the exception instead of translating every `ImportError`. A `websockets` that is
-    installed but broken - an interrupted install that lost a transitive dependency, a syntax error
-    inside the package, a version skew that leaves a submodule missing - raises an `ImportError` out
-    of the same statement, and answering it with a class named `NotInstalled` and the remedy `pip
-    install muxws[websockets]` tells a reader who already has the package to install it again, while
-    hiding the only message that named the real fault. `ModuleNotFoundError` with `name` exactly
-    `"websockets"` is the one shape that means absent: a missing *sub*module (`name` of
-    `"websockets.asyncio"`) is a broken install, and a plain `ImportError` means the package was found
-    and something inside it failed. `ts/node.ts::requireWs` narrows the same way on
-    `ERR_MODULE_NOT_FOUND`.
+    Only the package actually being absent becomes this class. `ModuleNotFoundError` with `name`
+    exactly `"websockets"` is the one shape that means absent; a missing *sub*module (`name` of
+    `"websockets.asyncio"`) or a plain `ImportError` means the package was found and something inside
+    it failed, and answering that with `pip install muxws[websockets]` would hide the only message
+    naming the real fault. `ts/node.ts::requireWs` narrows the same way on `ERR_MODULE_NOT_FOUND`.
     """
     try:
         import websockets
@@ -106,16 +94,13 @@ def verify_dialable_url(url: str, *, uri: str | None = None) -> None:
     checked. For a TCP dial there is nothing to synthesise and `url` is checked as it stands. Both
     arms go through here because both arms parse a URL with the same parser from the same package.
 
-    **Layering, which is the whole point of this function.** The check is made here, outside
-    `connect()`'s dial closure, and never inside the closure's `except`. That handler translates a
-    refused upgrade into `CodecMismatch` (WSM-CDC-022/024) by reading a 400 out of the exception, and
-    its string fallback matches the phrase `HTTP 400` anywhere in the message - including in the text
-    of an `InvalidURI` that is merely quoting the URL back. Measured on this tree before the layering
-    existed: `connect("ws:/HTTP 400")` raised `CodecMismatch`, sending the reader off to compare
-    `MUXWS_CODEC` on two ends of a connection that was never made. A URL that cannot be parsed now
-    never reaches the closure at all, so the refusal handler is never offered one, and no real
-    refusal changes - a real 400 requires a dial that reached a server, which requires a URL that
-    parsed (WSM-ERR-016).
+    Called outside `connect()`'s dial closure, never inside the closure's `except`. That handler
+    translates a refused upgrade into `CodecMismatch` (WSM-CDC-022/024) by reading a 400 out of the
+    exception, and its string fallback matches `HTTP 400` anywhere in the message - including in an
+    `InvalidURI` that is merely quoting the URL back, so `connect("ws:/HTTP 400")` would be reported
+    as a codec mismatch on a connection that was never made. An unparseable URL never reaches the
+    closure, and no real refusal changes: a real 400 requires a dial that reached a server, which
+    requires a URL that parsed (WSM-ERR-016).
 
     `parse_uri` raises `InvalidURI` for a scheme or hostname it rejects and a plain `ValueError` out
     of `urllib.parse` for a port that is not an integer; `InvalidURI` is not a `ValueError`, so

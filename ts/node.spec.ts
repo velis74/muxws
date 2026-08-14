@@ -331,11 +331,9 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
 
 describe('a url this transport cannot open - WSM-ERR-016', () => {
   it("arrives as a WsUrlError framing the wording `ws` used, not as ws's own SyntaxError", async () => {
-    // Measured before the class existed: `connect('nonsense')` rejected with
-    // `SyntaxError: Invalid URL: nonsense`, thrown synchronously out of `ws`'s constructor inside
-    // `dialWs` and not a `MuxwsError` at all - so an application that wrapped every muxws call in one
-    // handler caught a bad `ws+unix:` url and missed a bad `ws:` one. The sentence is `ws`'s and stays
-    // `ws`'s: it names the offending text, and this frame only says who was asked to dial it.
+    // Untranslated, `ws`'s constructor throws a bare `SyntaxError: Invalid URL: nonsense`, which an
+    // application wrapping its dials in one `instanceof MuxwsError` handler never sees. The sentence
+    // stays `ws`'s: it names the offending text, and this frame only says who was asked to dial it.
     const caught = await connect('nonsense').then(
       () => null,
       (error: unknown) => error,
@@ -356,12 +354,10 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
     // the ECONNREFUSED controls above, one class over.
     //
     // `.invalid` rather than a bare label: RFC 6761 reserves it never to resolve, while `bad` on a
-    // network with a search domain is a name a resolver may go looking for. And the assertion is on
+    // network with a search domain is a name a resolver may go looking for. The assertion is on
     // `getaddrinfo` plus a *family* of codes rather than on `ENOTFOUND`, because which one comes back
-    // is the resolver's answer and not this library's: the first CI run of this test failed with
-    // `getaddrinfo EAI_AGAIN`, a temporary-failure code, where every local run had produced
-    // `ENOTFOUND`. What the control actually claims is that name resolution failed and the failure
-    // reached the caller untranslated, and that is what is pinned here.
+    // is the resolver's answer and not this library's. The claim is that name resolution failed and
+    // the failure reached the caller untranslated.
     const caught = await connect('ws://no-such-host.invalid').then(
       () => null,
       (error: unknown) => error,
@@ -374,12 +370,11 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
   });
 
   it('leaves a bad subprotocol as a bad subprotocol, which is why the guard is not a blanket catch', async () => {
-    // The measurement that forced the shape of the translation: `ws` throws a `SyntaxError` for
-    // `An invalid or duplicated subprotocol was specified` as well as for `Invalid URL`, and nothing
-    // on either object tells them apart. A `catch` around the constructor that translated everything
-    // would report a space in a subprotocol token as a malformed address. So the address is re-read -
-    // `new URL()` parses `ws://127.0.0.1:1/x` to a scheme `ws` takes - and this throw is passed
-    // through untouched.
+    // `ws` throws a `SyntaxError` for `An invalid or duplicated subprotocol was specified` as well as
+    // for `Invalid URL`, and nothing on either object tells them apart, so a `catch` around the
+    // constructor that translated everything would report a space in a subprotocol token as a
+    // malformed address. The address is re-read instead - `new URL()` parses `ws://127.0.0.1:1/x` to
+    // a scheme `ws` takes - and this throw is passed through untouched.
     const caught = await connect('ws://127.0.0.1:1/x', { subprotocols: ['bad protocol'] }).then(
       () => null,
       (error: unknown) => error,

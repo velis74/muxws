@@ -49,9 +49,8 @@ def node_modules_present(entry_point: Any, monkeypatch: pytest.MonkeyPatch) -> N
     """Every test starts from an installed `node_modules`, whether the machine has one or not.
 
     The Python CI job installs the `dev` extra and never runs `npm install`, so reading the real
-    directory made half of this file depend on which job it ran in. A test that asserts what the
-    check says must own both halves of what the check looks at; the ones about a *missing* package
-    replace this with their own stub.
+    directory would make half of this file depend on which job it ran in. The tests about a
+    *missing* package replace this with their own stub.
     """
     monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: True)
 
@@ -291,8 +290,8 @@ def test_uds_is_a_mode_of_its_own_and_not_a_third_backend(entry_point: Any):
     """`--uds` selects a different demo, so it must not be reachable as a value of `backend`.
 
     The two are not variants of one run: the socket demo has no frontend, no port and no choice of
-    language. Making it a third `BACKENDS` entry would have put it in the same `--help` sentence as
-    "which language serves the sockets", which is a question it does not answer.
+    language, so a third `BACKENDS` entry would answer "which language serves the sockets" with a
+    mode that does not serve them.
     """
     assert entry_point.parse_arguments([]).uds is False
     assert entry_point.parse_arguments(["--uds"]).uds is True
@@ -326,9 +325,9 @@ def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
 ):
     """It starts neither uvicorn nor a dev server, so demanding either would be a lie.
 
-    The check is also the only place a Windows reader can be told before anything starts; the
-    platform's absent `AF_UNIX` is not a missing package and no install fixes it, but it belongs in
-    the same list rather than three seconds later inside the client.
+    The check is also where a Windows reader is told before anything starts: an absent `AF_UNIX` is
+    not a missing package and no install fixes it, but it belongs in the same list rather than three
+    seconds later inside the client.
     """
     monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
 
@@ -336,9 +335,8 @@ def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
         "the socket demo was refused over dependencies it never loads"
     )
 
-    # `raising=False` so this reads the same on a machine that has no `AF_UNIX` to remove - which is
-    # the very platform the branch is about, and the one place this test would otherwise error out
-    # instead of asserting.
+    # `raising=False` so this reads the same on a machine that has no `AF_UNIX` to remove, which is
+    # the very platform the branch is about.
     monkeypatch.delattr(entry_point.socket, "AF_UNIX", raising=False)
     problems = entry_point.missing_dependencies(uds=True)
     assert len(problems) == 1

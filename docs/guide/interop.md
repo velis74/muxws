@@ -125,8 +125,8 @@ building a third runner, those two are the worked examples.
 
 ### Rules that hold for every fixture
 
-These exist because of specific disagreements that were found the hard way, and a third implementation
-should know why before it adds a case of its own:
+These are constraints on the corpus rather than house style, and a third implementation has to
+satisfy every one of them before it adds a case of its own:
 
 - **No floats.** The two reference ports render them differently — Python writes `1.0`, `-0.0`,
   `1e+16`, `1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`. Fragment boundaries

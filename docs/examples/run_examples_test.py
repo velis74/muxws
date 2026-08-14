@@ -140,17 +140,13 @@ def example_server_on_a_socket_file(script: str) -> Iterator[str]:
     """Start one of the example servers on a socket **file** and yield the `ws+unix://` URL to dial.
 
     A sibling of `example_server` rather than a flag on it: the two differ in the variable they set,
-    the address they probe and the URL they build, so one function with three branches would be the
-    longer of the two ways to write this.
+    the address they probe and the URL they build.
 
     The directory is short on purpose. A Unix socket path goes into `sockaddr_un.sun_path`, which is
-    108 bytes on Linux and less elsewhere, and pytest's own `tmp_path` (`/tmp/pytest-of-<user>/pytest-
-    N/<the whole test name>0/`) is long enough to cross it on a normal machine. The measurement below
-    exists so that a checkout with a long `TMPDIR` skips with the number in the message instead of
-    dying inside `bind()`. Nothing is truncated silently - CPython raises `OSError: AF_UNIX path too
-    long` - but the exception arrives from a subprocess that has already been spawned, names no
-    length and points at no component, so "shorten your TMPDIR" is a conclusion the reader has to
-    reach unaided.
+    about 108 bytes on Linux and less elsewhere, and pytest's own `tmp_path` is long enough to cross
+    that on a normal machine. The length is measured here so that a checkout with a long `TMPDIR`
+    skips with the number in the message, rather than dying inside a subprocess' `bind()` with an
+    `OSError: AF_UNIX path too long` that names no length and no component.
     """
     with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
         path = Path(directory) / "s.sock"

@@ -7,12 +7,12 @@ exist today, and [`SPEC.md`](https://github.com/velis74/muxws/blob/main/SPEC.md)
 [`conformance/`](https://github.com/velis74/muxws/blob/main/conformance/README.md) are what a third is
 written from.
 
-The mimicry is of *semantics*, not transport: one connection - a TCP socket, or a Unix domain socket -
+The mimicry is of *semantics*, not transport: one connection - a TCP socket or a Unix domain socket -
 means one global message order and no per-stream loss recovery -
-[the rationale](https://docs.velis.si/muxws/guide/rationale) says what is and
-is not copied, and [the comparison](https://docs.velis.si/muxws/guide/comparison) accounts for it frame
-by frame. muxws is not a router, not a serializer of domain objects, not an authentication mechanism,
-not a durable store and not an RPC framework.
+[the rationale](https://docs.velis.si/muxws/guide/rationale) says what is and is not copied, and
+[the comparison](https://docs.velis.si/muxws/guide/comparison) accounts for it frame by frame. muxws
+is not a router, not a serializer of domain objects, not an authentication mechanism, not a durable
+store and not an RPC framework.
 
 ## Install
 

@@ -1,10 +1,9 @@
 """The `ws+unix:` grammar, on every platform - including the ones that cannot dial one.
 
-Not one test here opens a socket, and that is the whole design of the module under test. CI runs on
-`ubuntu-latest` only, so the Windows behaviour has exactly one witness: a table of strings that runs
-wherever pytest does. A grammar that lived in the `websockets` adapter would need a real acceptor to
-be exercised, would be skipped wholesale where AF_UNIX is missing, and would take the portability
-guard down with it - the guard that exists precisely for that platform.
+Not one test here opens a socket. CI runs on `ubuntu-latest` only, so the Windows behaviour has one
+witness: a table of strings that runs wherever pytest does. A grammar living in the `websockets`
+adapter would need a real acceptor, and would be skipped wholesale where AF_UNIX is missing - taking
+the portability guard with it.
 """
 
 from __future__ import annotations
@@ -43,19 +42,17 @@ from muxws.transports.unix import parse_unix_url, UnixSocketsUnsupportedError, U
 def test_the_grammar_splits_a_socket_path_from_a_request_target(url: str, path: str, uri: str):
     """The `ws` package's grammar, case by case, because the two ports must agree on every row.
 
-    A URL a deployment pastes into its configuration has to reach the same socket with the same
-    request target under both implementations, so the table is the contract rather than the prose
-    above it. Three of these rows are the ones an independent reimplementation gets wrong: the
-    missing colon defaulting to `/` rather than to the empty string that would put `GET  HTTP/1.1` on
-    the wire; the query travelling with the *target* and not with the path, since `urlsplit` hands it
-    back separately and it is lost unless it is put back; and the authority - decorative for the
-    dial, but the `Host` header the acceptor sees.
+    A URL a deployment pastes into its configuration must reach the same socket with the same request
+    target under both implementations, so the table is the contract. The rows that carry the most:
+    the missing colon defaults to `/`, not to the empty string that would put `GET  HTTP/1.1` on the
+    wire; the query is re-attached before the split, because `urlsplit` hands it back separately and
+    it is lost otherwise, so it rides the *target* when a colon precedes it and joins the file name
+    when none does; and the authority is the `Host` header the acceptor sees.
 
-    The eighth row is the one `ws` itself gets wrong, which is why it is here twice over: `ws` splits
-    on every colon and keeps `parts[1]`, reading `/ws:v2` as `/ws`, so `ts/node.ts` performs this
-    split before `ws` sees the URL. The TypeScript half of the row is
-    `splits on the first colon only` in `ts/unix.spec.ts`, which asserts the target a real acceptor
-    was handed - the only place the agreement between the two ports is observable at all.
+    `only-the-first-colon-splits` is the row `ws` itself gets wrong - it splits on every colon and
+    keeps `parts[1]`, reading `/ws:v2` as `/ws` - so `ts/node.ts` performs the split before `ws` sees
+    the URL. Its other half is `splits on the first colon only` in `ts/unix.spec.ts`, which asserts
+    the target a real acceptor was handed.
     """
     target = parse_unix_url(url)
 
@@ -106,14 +103,12 @@ def test_a_request_target_that_is_not_an_absolute_path_is_refused():
     """`…sock:ws` is refused rather than repaired, because repairing it dials the wrong thing.
 
     The target is pasted straight into `ws://<authority><target>`, so a target with no leading slash
-    makes `ws://localhostws` - a syntactically perfect URL naming a host that does not exist, into
-    whose authority the target has just been folded. The dial then succeeds, because the socket path
-    was right, and what arrives at the acceptor is a request for `/` carrying a nonsense `Host`.
-    Measured against `unix_serve`: 101, negotiated `muxws.v1.json`, handler run. Neither acceptor this
-    library documents routes on the target, so nothing fails and nothing is logged - the connection is
-    simply not the one the URL asked for. `ts/node.ts` refuses the same shape, where the alternative
-    is worse still: node answers `GET ws HTTP/1.1` with a 400 that the dialer reads as a codec
-    mismatch.
+    makes `ws://localhostws` - a syntactically perfect URL whose authority has swallowed the target.
+    The dial succeeds, because the socket path was right, and the acceptor sees a request for `/`
+    with a nonsense `Host`: against `unix_serve` that is 101, `muxws.v1.json` negotiated and the
+    handler run, since neither acceptor this library documents routes on the target. `ts/node.ts`
+    refuses the same shape, where node answers `GET ws HTTP/1.1` with a 400 the dialer would read as
+    a codec mismatch.
     """
     with pytest.raises(UnixUrlError, match="must begin with"):
         parse_unix_url("ws+unix:///run/muxws/api.sock:ws")
@@ -151,13 +146,11 @@ def test_both_refusals_are_catchable_as_muxws_errors_and_as_what_they_are():
 def test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not():
     """WSM-ERR-016: the two refusals sit under the two shared bases, and not under the same one.
 
-    The test above holds the older contract - both builtins, both `MuxwsError`s - and this one holds
-    what the shared bases added: an application that does not know which transport a configured URL
-    names can write `except TransportUrlError` around `connect()` and catch a bad `ws+unix:` address
-    and a bad `ws:` one with the same handler. That is only worth anything if the two bases stay
-    distinct, so the negatives are asserted too. A missing `AF_UNIX` is not a bad address: no rewriting
-    of the URL will help, and reporting it as one would send the reader to edit configuration that was
-    already correct.
+    An application that does not know which transport a configured URL names writes
+    `except TransportUrlError` around `connect()` and catches a bad `ws+unix:` address and a bad `ws:`
+    one with the same handler. That holds only while the two bases stay distinct, so the negatives are
+    asserted too: a missing `AF_UNIX` is not a bad address, and reporting it as one sends the reader to
+    edit configuration that was already correct.
     """
     assert issubclass(UnixUrlError, TransportUrlError)
     assert not issubclass(UnixUrlError, TransportUnsupportedError)

@@ -2,26 +2,22 @@
 /**
  * The one failure of `muxws/node` that has exactly one remedy: the `ws` peer dependency is absent.
  *
- * Measured before the class existed, in a checkout with no `ws` installed:
- * `Error: Cannot find package 'ws' imported from <...>/ts/node.ts`, `code: 'ERR_MODULE_NOT_FOUND'`,
- * not a `MuxwsError`. In an installed consumer the path inside that message is
- * `node_modules/muxws/dist/node.js` - a file the reader did not write, naming no remedy. That is the
- * TypeScript twin of the bare `ImportError` WSM-ERR-016 was written for, and GAPS.md records the same
- * shape one layer up: a uvicorn install with no WebSocket implementation answered 404 to every upgrade
- * and was read as a muxws defect.
+ * Untranslated, the resolver answers `Error: Cannot find package 'ws' imported from
+ * <...>/node_modules/muxws/dist/node.js` with `code: 'ERR_MODULE_NOT_FOUND'` and no `MuxwsError` in
+ * sight - a file the reader did not write, naming no remedy. That is the TypeScript twin of the bare
+ * `ImportError` WSM-ERR-016 was written for.
  *
- * **Why a subprocess rather than `vi.mock('ws')`.** Vitest wraps anything a mock factory throws in its
- * own `Error: [vitest] There was an error when mocking a module`, so the `code` the translation reads
- * never reaches `requireWs` and the branch under test is never entered - a mocked version of this test
- * passes or fails for reasons belonging to the mocking machinery. What is wanted is the resolver
- * failing the way it fails on a machine that has not run `npm install ws`, so the child process
- * installs a `node:module` resolve hook that throws exactly that error for exactly that specifier and
- * nothing else. It is the same instrument as the `sys.meta_path` finder the Python port's twin uses,
- * and it leaves every other dial in this suite alone because it lives in another process.
+ * A subprocess rather than `vi.mock('ws')`: vitest wraps anything a mock factory throws in its own
+ * `Error: [vitest] There was an error when mocking a module`, so the `code` the translation reads
+ * never reaches `requireWs` and the branch under test is never entered. What is wanted is the
+ * resolver failing the way it fails on a machine that has not run `npm install ws`, so the child
+ * process installs a `node:module` resolve hook that throws exactly that error for exactly that
+ * specifier. It is the same instrument as the `sys.meta_path` finder the Python port's twin uses, and
+ * it leaves every other dial in this suite alone because it lives in another process.
  *
  * The child imports `ts/index.ts` first in every probe. `ts/node.ts` registers no codec, so without it
- * `connect()` fails earlier with `CodecNotRegistered` (measured) and a test asserting "connect
- * rejects" would be green for a reason that has nothing to do with `ws`.
+ * `connect()` fails earlier with `CodecNotRegistered` and a test asserting "connect rejects" would be
+ * green for a reason that has nothing to do with `ws`.
  */
 
 import { execFileSync } from 'node:child_process';

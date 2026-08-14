@@ -30,24 +30,16 @@ export const POLICY_VIOLATION = 1008;
  * A `ws+unix:` url handed to the transport that has no filesystem to reach (WSM-ERR-016).
  *
  * The concrete `TransportUnsupportedError` of the platform-`WebSocket` transport, and the only one it
- * has. It lives here, in the module that owns the dial, and `ts/index.ts` re-exports it: WSM-ERR-016
- * puts a concrete transport error in its transport's own module and makes it reachable only from the
- * entry point that ships that transport, and for this class those are two different files. `muxws`
- * ships this transport, so `import { UnixSocketsUnsupportedError } from 'muxws'` is what a consumer
- * writes; `muxws/node` must not carry the name at all.
+ * has. It is defined here, in the module that owns the dial, and re-exported by `ts/index.ts`, which
+ * is WSM-ERR-016's placement clause: `import { UnixSocketsUnsupportedError } from 'muxws'` is what a
+ * consumer writes, and `muxws/node` does not carry the name at all - that subpath's unix dial works.
  *
- * It shares the name of `muxws.transports.unix.UnixSocketsUnsupportedError` on purpose: the sentence
- * to the reader is the same one - *this url names a socket file and cannot be dialled from here* -
- * and only the reason underneath differs. Python has no `AF_UNIX` on the interpreter it is running
- * on; this build has no filesystem transport at all, because WSM-API-022 keeps `ws` out of anything a
- * browser can load. Both are permanent local conditions no retyped url can fix, which is what
- * `TransportUnsupportedError` means and why this is not a `TransportUrlError`: the url is correct,
- * and `muxws/node` dials it.
- *
- * `muxws/node` never throws this. Its unix dial works, and on Windows `net.connect({ path })` opens a
- * named pipe rather than failing - a POSIX-looking path there fails with a connect error naming the
- * path it tried, and a pipe name cannot be spelled as a url at all (`ts/unix.spec.ts` pins it). So
- * there is no unsupported-platform case behind that subpath to raise a class for.
+ * It shares the name of `muxws.transports.unix.UnixSocketsUnsupportedError`: the sentence to the
+ * reader is the same one - *this url names a socket file and cannot be dialled from here* - and only
+ * the reason underneath differs. Python has no `AF_UNIX` on the interpreter it is running on; this
+ * build has no filesystem transport at all, because WSM-API-022 keeps `ws` out of anything a browser
+ * can load. Both are permanent local conditions no retyped url can fix, which is why this is not a
+ * `TransportUrlError`: the url is correct, and `muxws/node` dials it.
  *
  * The throw site is `refuseUnixScheme` in `ts/index.ts` rather than a method here, because the scheme
  * has to be refused *before* `connect()` resolves a codec: this class is about a url that will never

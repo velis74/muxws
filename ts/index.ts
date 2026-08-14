@@ -43,13 +43,9 @@ export async function connect(url: string, options: ConnectOptions = {}): Promis
  * This is the same reasoning as `unopenedError` in `ts/transports/browser-socket.ts`: when the
  * platform cannot say why, the dialer composes the diagnostic itself.
  *
- * A `UnixSocketsUnsupportedError` and therefore a `MuxwsError`, which reverses an earlier decision
- * recorded in this comment: a bare `TypeError`, on the argument that caller input rejected before any
- * protocol exists is not a protocol failure. WSM-ERR-016 overrides it. The argument was about *when*
- * the failure happens; the rule is about *who* has to catch it, and an application that wraps its
- * dials in one `instanceof MuxwsError` handler must not have a refusal muxws itself composed leak
- * through. `CodecMismatch` is still reserved for a handshake that was actually refused (WSM-CDC-024),
- * and no handshake happens here.
+ * A `UnixSocketsUnsupportedError` and therefore a `MuxwsError` (WSM-ERR-016): a refusal muxws itself
+ * composed must not leak through an application's one `instanceof MuxwsError` handler. `CodecMismatch`
+ * stays reserved for a handshake that was actually refused (WSM-CDC-024), and none happens here.
  *
  * Matched as a lowercased string rather than through `new URL()` deliberately: the parser throws
  * `ERR_INVALID_URL` for anything malformed, which would swap the platform's own diagnostic for ours
@@ -84,12 +80,9 @@ export {
   StreamRefused,
   StreamReset,
   StreamTimeout,
-  // The two shared transport bases (WSM-ERR-016). They are exported from the package root and no
-  // concrete transport class is *defined* there: a browser build must be able to write
-  // `instanceof TransportUrlError` without importing `muxws/node`, which is where the classes that
-  // extend them live. `UnixSocketsUnsupportedError` is re-exported from this entry point below, from
-  // the transport module that defines it, which is the rule and not an exception to it - it is the
-  // concrete class of the transport *this* entry point ships.
+  // The two shared transport bases (WSM-ERR-016). A browser build must be able to write
+  // `instanceof TransportUrlError` without importing `muxws/node`, where the classes that extend them
+  // live.
   TransportUnsupportedError,
   TransportUrlError,
   exceptionForReset,
@@ -147,8 +140,8 @@ export {
 // them either, and an application that needs the prefix needs the constant, not the machinery.
 export { PREFIX, select } from './subprotocol';
 // `UnixSocketsUnsupportedError` is defined beside the transport that refuses the url and re-exported
-// here, which is both halves of WSM-ERR-016's placement clause: a concrete transport error lives in
-// its own transport's module, and is reachable only from the entry point that ships that transport.
+// here, which is WSM-ERR-016's placement clause: a concrete transport error lives in its own
+// transport's module and is reachable only from the entry point that ships that transport.
 // `muxws/node` must not carry it - that subpath's unix dial works.
 export { BrowserSocket, type BrowserSocketOptions, UnixSocketsUnsupportedError } from './transports/browser-socket';
 export { type SocketAdapter } from './transports/index';

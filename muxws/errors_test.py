@@ -35,12 +35,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: guard goes green by seeing nothing.
 _OPTIONAL_DEPENDENCIES = frozenset({"msgpack", "starlette", "websockets"})
 
-#: The transport errors the walk must actually find, by name. Without this the guard would pass in an
-#: environment where no transport module imported at all. Every one of these lives in a module that
-#: imports with its optional dependency absent - which WSM-ERR-016 requires anyway, or
-#: `except WebsocketsNotInstalledError` would raise the `ImportError` it exists to replace - so naming
-#: them here cannot make the leanest supported environment red. Extend it when a transport gains an
-#: error: that is cheap, and it is the only part of this file a new transport has to touch.
+#: The transport errors the walk must actually find, by name; without them the guard would pass in an
+#: environment where no transport module imported at all. Each lives in a module that imports with
+#: its optional dependency absent, so naming them cannot make the leanest supported environment red.
 _TRANSPORT_ERRORS_THAT_MUST_EXIST = frozenset(
     {
         "UnixSocketsUnsupportedError",
@@ -83,13 +80,12 @@ def test_hierarchy():
 def test_the_two_transport_bases_carry_their_builtin_as_well_as_muxwserror():
     """WSM-ERR-016: each base is catchable by a handler written before muxws was ever heard of.
 
-    The dual inheritance is a promise to two different callers and it is asserted rather than
-    described, because dropping half of it breaks nothing that a behavioural test would notice. A
-    caller who typed a URL wrong is already catching `ValueError` around it; one who ran on a platform
-    the transport cannot exist on is already catching `RuntimeError`; and an application with a single
-    `except MuxwsError` must not have either of them leak through. The split between the two bases
-    carries the only distinction the caller acts on - retype the address, or change where you run - so
-    neither may be a subclass of the other.
+    The dual inheritance is asserted rather than described, because dropping half of it breaks
+    nothing a behavioural test would notice. A caller who typed a URL wrong is already catching
+    `ValueError`; one running where the transport cannot exist is already catching `RuntimeError`;
+    and an application with a single `except MuxwsError` must not have either leak through. The split
+    between the two bases carries the only distinction the caller acts on - retype the address, or
+    change where you run - so neither may be a subclass of the other.
     """
     assert issubclass(TransportUrlError, MuxwsError)
     assert issubclass(TransportUrlError, ValueError)
@@ -158,16 +154,14 @@ def _descendants(cls: type[BaseException]) -> set[type[BaseException]]:
 def test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base():
     """WSM-ERR-016: a transport's own exception is a `TransportUrlError` or a `TransportUnsupportedError`.
 
-    The rule this enforces is what makes `except MuxwsError` exhaustive across transports. Before it,
-    the two `ws+unix:` classes were the only muxws exceptions defined outside `muxws/errors.py` and
-    they got their bases right by hand; the next transport to be written would have had nothing
-    stopping it from raising a bare `ImportError` or its own library's `InvalidURI`, and an
-    application catching `MuxwsError` around `connect()` would have found out in production which
-    scheme it had configured.
+    The rule this enforces is what makes `except MuxwsError` exhaustive across transports: without
+    it a transport is free to raise a bare `ImportError` or its own library's `InvalidURI`, and an
+    application catching `MuxwsError` around `connect()` finds out which scheme it configured only in
+    production.
 
     Nothing here names a transport. The walk imports every shipped module and then asks the class
-    tree what exists, so a transport added next year is covered on the day its module is written -
-    and the failure names `module.QualName` so it also says which file to fix.
+    tree what exists, so a transport added later is covered on the day its module is written, and the
+    failure names `module.QualName` so it also says which file to fix.
     """
     imported, skipped = _import_the_whole_library()
     assert len(imported) > 15, imported
@@ -193,13 +187,12 @@ def test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_ba
 def test_the_transport_bases_are_root_exported_and_their_subclasses_are_not():
     """WSM-ERR-016's export half: the bases come from `muxws`, the concrete classes never do.
 
-    Both directions matter and neither implies the other. The bases must be root-exported because an
+    Both directions matter and neither implies the other. The bases must be root-exported, because an
     application configured with a URL it has not read yet cannot know which transport module to
-    import, and `except TransportUrlError` has to be writable without one. The concrete classes must
-    *not* be, because the adapter seam is public (WSM-API-021): a third party writing an adapter
-    cannot add a name to `muxws/__init__.py`, so a convention that expected them to would be one only
-    this repository could follow, and every root-exported concrete class here would be an example
-    inviting them to try.
+    import and `except TransportUrlError` has to be writable without one. The concrete classes must
+    *not* be: the adapter seam is public (WSM-API-021) and a third-party adapter cannot add a name to
+    `muxws/__init__.py`, so a root-exported concrete class here would set an example nobody outside
+    this repository can follow.
     """
     import muxws
 

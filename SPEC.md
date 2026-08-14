@@ -640,15 +640,14 @@ not be added to this tree, is WSM-ERR-016.
   chain that does not contain the class, which is a lie to the debugger and to the type system.
   Concrete, transport-specific errors MUST subclass one of the two bases, MUST be defined in their
   own transport's module, and MUST NOT be exported from the package root; they are reached as
-  `from muxws.transports.<transport> import <Error>` and `import { <Error> } from 'muxws/node'`. This
-  is a rule and not an accident of where the first two were written: the adapter seam is public
-  (WSM-API-021), third parties are expected to write adapters, and a third party cannot add a class
-  to `muxws/errors.py` — so a convention that required a root export would be one only this
-  repository could follow. Where a port's packaging gives a transport no module path of its own, its
-  concrete errors MUST be exported from the entry point that ships that transport and MUST NOT be
-  reachable from any other. A transport module MUST stay importable when the dependency it adapts is
-  absent, or `except <Transport>NotInstalledError` would itself raise the `ImportError` it exists to
-  replace.
+  `from muxws.transports.<transport> import <Error>` and `import { <Error> } from 'muxws/node'`. The
+  adapter seam is public (WSM-API-021), third parties are expected to write adapters, and a third
+  party cannot add a class to `muxws/errors.py` — so a convention that required a root export would
+  be one only this repository could follow. Where a port's packaging gives a transport no module path
+  of its own, its concrete errors MUST be exported from the entry point that ships that transport and
+  MUST NOT be reachable from any other. A transport module MUST stay importable when the dependency
+  it adapts is absent, or `except <Transport>NotInstalledError` would itself raise the `ImportError`
+  it exists to replace.
   **Ownership decides where an error lives, not who raises it.** `ConnectionClosed` is the case that
   fixes the boundary: every adapter raises it, but the `SocketAdapter` protocol *requires* it of
   every adapter (WSM-API-021), so it belongs to the seam and stays shared. An error the adapter
@@ -665,14 +664,13 @@ not be added to this tree, is WSM-ERR-016.
   syntax error inside it — MUST be re-raised untouched, so a corrupt package is never reported as an
   uninstalled one.
   An address the transport cannot parse MUST be detected **before the dial is attempted** and MUST
-  NOT be translated inside the failed-dial handler. That clause is not stylistic:
-  `_looks_like_a_refused_handshake` reads a 400 out of the dial's exception, so a URL translation
-  layered beneath it lets a URL whose own text contains the refusal's status be reported as
-  `CodecMismatch` (WSM-CDC-024) — a measured outcome for `ws:/HTTP 400`, which sent the reader to
-  compare `MUXWS_CODEC` on two ends of a connection that was never made. A refused handshake and an
-  unparseable address are different failures and the handler for one MUST NOT be able to answer the
-  other. Equally, a *dial* failure is not an address failure: an unreachable host, a refused
-  connection or a TLS error MUST keep propagating as whatever the platform raised.
+  NOT be translated inside the failed-dial handler. `_looks_like_a_refused_handshake` reads a 400 out
+  of the dial's exception, so a URL translation layered beneath it lets a URL whose own text contains
+  the refusal's status — `ws:/HTTP 400` — be reported as `CodecMismatch` (WSM-CDC-024), sending the
+  reader to compare `MUXWS_CODEC` on two ends of a connection that was never made. A refused
+  handshake and an unparseable address are different failures and the handler for one MUST NOT be
+  able to answer the other. Equally, a *dial* failure is not an address failure: an unreachable host,
+  a refused connection or a TLS error MUST keep propagating as whatever the platform raised.
   A transport MUST NOT invent a class for a failure it cannot actually produce. Each port MUST mirror
   the two bases (WSM-ERR-004) and MUST define a concrete subclass only for a transport it ships and a
   failure that transport can reach; an entry point that refuses a scheme it cannot carry MAY raise a
@@ -1549,15 +1547,15 @@ sibling cannot appear silently. Closing it properly means marking `Stream`'s con
 allocating through a factory the peer owns, which is a public API change and therefore work for the
 next generation (WSM-PKG-005), not a patch to a frozen 1.0.
 
-### A known deviation: `WSM-ERR-016` is not satisfied by the platform-`WebSocket` dial
+### A known deviation: `WSM-ERR-016` is not satisfied by every unparseable address
 
 The rule's first sentence — every exception a transport raises out of `connect()` is a `MuxwsError` —
-holds for Python's `websockets` dial, for both of its `ws+unix:` refusals, and for every dial behind
-`muxws/node`. It does **not** hold for the `connect()` exported from `muxws`. That entry point calls
-`new WebSocket(url, …)` and lets the constructor's throw escape, so a malformed URL arrives as a
-`DOMException` named `SyntaxError` — measured: `The URL 'nonsense' is invalid.` under jsdom, which is
-what vitest runs, and `TypeError: Invalid URL` under undici, which is what a bare `node` gives. Neither
-is a `MuxwsError`, and an application whose only handler is `instanceof MuxwsError` misses it.
+holds for both of Python's `ws+unix:` refusals and for every dial behind `muxws/node`. It does
+**not** hold for the `connect()` exported from `muxws`, and it has one hole in Python. That entry
+point calls `new WebSocket(url, …)` and lets the constructor's throw escape, so a malformed URL
+arrives as a `DOMException` named `SyntaxError` — `The URL 'nonsense' is invalid.` under jsdom, which
+is what vitest runs, and `TypeError: Invalid URL` under undici, which is what a bare `node` gives.
+Neither is a `MuxwsError`, and an application whose only handler is `instanceof MuxwsError` misses it.
 
 The fix is not the obvious one, which is why it is recorded rather than done in passing. A blanket
 `try`/`catch` around the constructor mislabels failures that are not about the URL at all: jsdom throws
@@ -1572,6 +1570,14 @@ are in `ts/errors.ts` and root-exported, the `ws+unix:` refusal at that entry po
 `UnixSocketsUnsupportedError`, and what is missing is one concrete `TransportUrlError` subclass and
 the two-part guard above. `docs/api/errors.md` and `docs/api/connect.md` both say so where a reader
 would look.
+
+Python's hole is narrower and of the same kind. `parse_unix_url` reads the scheme with
+`urllib.parse.urlsplit`, which is the first thing `connect()` does to a URL, and `urlsplit` raises a
+bare `ValueError` for an authority with an unbalanced `[` — so `ws://[::1` and `ws+unix://[x` leave
+`connect()` as a `ValueError` that is not a `MuxwsError`, and `except TransportUrlError` misses both.
+Every other unparseable address reaches `verify_dialable_url`, which frames `parse_uri`'s refusal as
+`WebsocketUrlError`; a conforming implementation lets this shape reach it too rather than answering
+the scheme check's own parser failure.
 
 ### Three holes no grep for an id would have found
 

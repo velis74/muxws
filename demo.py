@@ -20,12 +20,11 @@ wheel and looks inside it rather than taking that on trust.
     npm install                           # both backends and the frontend
     python demo.py                        # or: python demo.py node
 
-There is a third thing here, and it is not part of the page: `python demo.py --uds` runs the
-Unix-domain-socket pair from `docs/examples/` - an acceptor bound to a socket file and a client
-dialling it as `ws+unix:///…/muxws.sock:/ws`. It needs only `pip install -e ".[websockets]"`, since
-it starts neither uvicorn nor a browser. It lives here because a reader looking for "how do I see
-this work" looks in one place, and the browser demo structurally cannot show that transport: a page
-has no way to open a file as a socket.
+`python demo.py --uds` runs a third thing, not part of the page: the Unix-domain-socket pair from
+`docs/examples/`, an acceptor bound to a socket file and a client dialling it as
+`ws+unix:///…/muxws.sock:/ws`. It needs only `pip install -e ".[websockets]"`, since it starts
+neither uvicorn nor a browser, and it cannot be part of the page: a page has no way to open a file
+as a socket.
 
 `[demo]` carries `websockets` deliberately: uvicorn has no WebSocket protocol implementation of its
 own and answers 404 to every upgrade without one, while serving the page perfectly - so the demo
@@ -89,21 +88,15 @@ NODE_BACKEND_PACKAGES = (
 
 #: What the Unix-domain-socket demo needs, as `(import name, why it is needed)`.
 #:
-#: Two entries and not six: `--uds` starts neither FastAPI nor a browser, so demanding uvicorn, vue or
-#: `node_modules` would send a reader to install several hundred megabytes for a run that opens one
-#: file and prints five lines. `websockets` is here because it is what dials and what listens - the
-#: handshake over a socket file is the same HTTP upgrade it is over a port, and that library performs
-#: it at both ends.
+#: Two entries and not six: `--uds` starts neither FastAPI nor a browser, so demanding uvicorn, vue
+#: or `node_modules` would send a reader to install several hundred megabytes for a run that opens
+#: one file and prints five lines. `websockets` both dials and listens here.
 UDS_IMPORTS = (
     ("websockets", "unix_serve accepts and connect() dials, both through it"),
     ("muxws", "the library this demo exists to show; install the repository itself with -e"),
 )
 
 #: The two shipped scripts `--uds` runs, relative to `docs/examples/`.
-#:
-#: Run rather than reimplemented, and that is the point of this mode: they are the files the guide
-#: prints and `run_examples_test.py` asserts the output of, so a demo that drifted from the
-#: documentation would fail in CI rather than in a reader's terminal.
 UDS_SERVER = "uds_server.py"
 UDS_CLIENT = "uds_client.py"
 
@@ -256,7 +249,7 @@ def build_parser():
         help="start the backend alone, without the Vite dev server",
     )
     # A flag rather than a third value of `backend`, because it is not a language: it selects a
-    # different demo, and one that has no frontend, no port and no choice of port.
+    # different demo, and one that has no frontend, no port and no choice of language.
     parser.add_argument(
         "--uds",
         action="store_true",
@@ -408,21 +401,13 @@ def wait_for_socket(path, process):
 def run_uds():
     """The Unix-domain-socket demo: the shipped acceptor in a child, the shipped dialer against it.
 
-    A different demo from the one above and deliberately so. The browser demo cannot show this
-    transport at all - a page has no way to open a file as a socket - so what a reader needs here is
-    the other shape entirely: a daemon on a socket file and a client that dials it, which is the
-    situation the transport exists for.
+    The acceptor's output is captured rather than interleaved. Its second line is the one thing here
+    the client cannot know: `SO_PEERCRED` hands the acceptor the caller's pid, uid and gid straight
+    from the kernel, so the connection is authenticated at the upgrade with nothing on the wire.
+    Printing it after the client's output keeps the transcript in one order on every run.
 
-    The acceptor's own output is captured rather than interleaved. It prints two lines and the second
-    of them is the only thing in this demo the client cannot know - `SO_PEERCRED` hands the acceptor
-    the caller's pid, uid and gid straight from the kernel, so the connection is authenticated at the
-    upgrade with nothing on the wire and nothing for the dialer to forge. Printing it *after* the
-    client's output rather than racing it keeps the transcript in one order on every run, and makes
-    the client the thing a reader watches.
-
-    Both scripts are run as subprocesses instead of being imported: they are shipped documentation,
-    the guide asserts their output byte for byte, and a demo that reimplemented them would be free to
-    drift from the page.
+    Both scripts are run as subprocesses instead of being imported: they are shipped documentation
+    whose output the guide asserts byte for byte, and a reimplementation would be free to drift.
     """
     examples = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "examples")
     environment = example_environment()

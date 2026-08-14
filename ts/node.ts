@@ -42,10 +42,8 @@ const DEFAULT_AUTHORITY = 'localhost';
  * The schemes `ws`'s own constructor accepts. Read only to tell a url failure from any other failure.
  *
  * `ws` throws a `SyntaxError` for a url it cannot parse *and* for a subprotocol token it does not
- * like, with no field distinguishing them - measured: `new WebSocket('ws://h/x', ['bad protocol'])`
- * fails with `SyntaxError: An invalid or duplicated subprotocol was specified`, the same class a
- * malformed url produces. A blanket `catch` around the constructor would therefore report a bad
- * subprotocol as a bad address, so the translation asks this list first.
+ * like, with no field distinguishing them, so a blanket `catch` around the constructor would report
+ * a bad subprotocol as a bad address. The translation asks this list first.
  */
 const WS_SCHEMES = ['ws:', 'wss:', 'http:', 'https:', UNIX_SCHEME];
 
@@ -53,13 +51,11 @@ const WS_SCHEMES = ['ws:', 'wss:', 'http:', 'https:', UNIX_SCHEME];
  * An address `muxws/node` cannot open because `ws` cannot parse it (WSM-ERR-016).
  *
  * Named after the third-party package that owns this dial, the way Python's twin is named after
- * `websockets`. It frames `ws`'s own wording rather than replacing it - `SyntaxError: Invalid URL:
- * nonsense` is a better sentence than anything this module could compose about a string it also
- * failed to read - and chains the original as `cause` so a debugger keeps the stack that produced it.
+ * `websockets`. It frames `ws`'s own wording rather than replacing it and chains the original as
+ * `cause`, so a debugger keeps the stack that produced it.
  *
- * What it deliberately does not cover is a dial that failed: `ENOTFOUND`, `ECONNREFUSED` and a 503
- * from a proxy are not url errors and must reach the caller untouched, because the remedy for each of
- * them is somewhere other than the address bar.
+ * A dial that failed is not covered: `ENOTFOUND`, `ECONNREFUSED` and a 503 from a proxy are not url
+ * errors and reach the caller untouched.
  */
 export class WsUrlError extends TransportUrlError {
   constructor(message?: string, options: { cause?: unknown } = {}) {
@@ -74,8 +70,7 @@ export class WsUrlError extends TransportUrlError {
  * The twin of `muxws.transports.unix.UnixUrlError`, refusal for refusal: a request target that is not
  * an absolute path, a url naming no socket file, and `wss+unix:`. The three are checked here rather
  * than left to `ws` because the `ws+unix:` grammar is this library's - `unixTarget` already splits it
- * differently from `ws` for exactly that reason - and because two of the three would otherwise arrive
- * as a `ws`-shaped `SyntaxError` for a scheme muxws documents and `ws` merely tolerates.
+ * differently from `ws` for exactly that reason.
  *
  * A `TransportUrlError` and not a `TransportUnsupportedError`: every one of these is fixed by
  * retyping the url, and the transport itself is present and working.
@@ -91,19 +86,15 @@ export class UnixUrlError extends TransportUrlError {
  * `muxws/node` was asked to dial and the optional `ws` peer dependency is not installed.
  *
  * Without it the failure is `Error: Cannot find package 'ws' imported from …/node_modules/muxws/dist/
- * node.js` with `code: 'ERR_MODULE_NOT_FOUND'` - measured. That names a file the reader did not write
- * and does not name the one command that fixes it, which is why WSM-ERR-016 requires the class to
- * state the install. GAPS.md records the same shape one layer up: a uvicorn install with no WebSocket
- * implementation answered 404 to every upgrade and was read as a muxws defect.
+ * node.js` with `code: 'ERR_MODULE_NOT_FOUND'`, which names a file the reader did not write and not
+ * the one command that fixes it; WSM-ERR-016 requires the class to state the install.
  *
- * Named `NotInstalled` rather than `Unavailable` deliberately, and matching Python's
- * `WebsocketsNotInstalledError`: "unavailable" in a traceback out of a dial reads as *the endpoint was
- * unreachable*, a transient condition a caller may retry. This one is permanent until somebody runs
- * `npm install`, and the name has to say which of the two it is.
+ * `NotInstalled` rather than `Unavailable`, matching Python's `WebsocketsNotInstalledError`:
+ * "unavailable" in a traceback out of a dial reads as *the endpoint was unreachable*, a transient
+ * condition a caller may retry. This one is permanent until somebody runs `npm install`.
  *
  * Only `ERR_MODULE_NOT_FOUND` becomes this class. A broken install, or a syntax error inside `ws`
- * itself, is rethrown untouched - telling that reader to install a package they already have would be
- * a confident wrong answer, and the original message is the only thing that names the real fault.
+ * itself, is rethrown untouched: its own message is the only thing that names the real fault.
  */
 export class WsNotInstalledError extends TransportUnsupportedError {
   constructor(message?: string, options: { cause?: unknown } = {}) {
@@ -123,30 +114,25 @@ interface UnixTarget {
 /**
  * The `ws+unix:` grammar: split the path on the **first** colon, file in front, request target behind.
  *
- * `ws` has parsed this scheme for years and this function exists anyway, which needs justifying. `ws`
- * runs `opts.path.split(':')` and keeps `parts[1]`, so it splits on **every** colon:
- * `ws+unix:///a.sock:/ws:v2` asks for `/ws`, and `.../a.sock:/ws?since=2026-08-14T10:00:00Z` asks for
- * `/ws?since=2026-08-14T10`, both silently. `muxws/transports/unix.py` splits on the first colon and
- * keeps the remainder whole. Leaving that alone would have meant one url naming two different request
- * targets depending on which port read it, with no error on either side and nothing for a deployment
- * to notice - the acceptor routes on the target and the dialer never learns it was truncated. So the
- * split happens here, before `ws` sees anything, and `ws` is handed an ordinary `ws:` url plus a
- * `createConnection` that opens the file. It is not a second url parser: `ws`'s own `isIpcUrl` branch
- * is simply never reached, and everything else about the dial - the offer, the events, the 400 - is
- * `ws`'s exactly as it is over TCP.
+ * `ws` parses this scheme too, but runs `opts.path.split(':')` and keeps `parts[1]`, so it splits on
+ * **every** colon: `ws+unix:///a.sock:/ws:v2` asks for `/ws`, and
+ * `.../a.sock:/ws?since=2026-08-14T10:00:00Z` asks for `/ws?since=2026-08-14T10`, both silently.
+ * `muxws/transports/unix.py` splits on the first colon and keeps the remainder whole, so splitting
+ * here, before `ws` sees anything, is what keeps one url from naming two different request targets
+ * depending on which port read it - with no error on either side, since the acceptor routes on the
+ * target and the dialer never learns it was truncated. `ws` is handed an ordinary `ws:` url plus a
+ * `createConnection` that opens the file, so its own `isIpcUrl` branch is never reached and the rest
+ * of the dial - the offer, the events, the 400 - is `ws`'s exactly as it is over TCP.
  *
  * `null` for every other url, and for anything `new URL()` cannot read at all: this runs on **every**
- * dial, so it is the branch and not a validator. A url that is not `ws+unix:`-shaped must keep
- * reaching `ws`, whose own diagnostic - framed as a `WsUrlError` - is better than "not a ws+unix: url"
- * would be.
+ * dial, so it is the branch and not a validator. A url that is not `ws+unix:`-shaped keeps reaching
+ * `ws`, whose own diagnostic - framed as a `WsUrlError` - is better than "not a ws+unix: url".
  *
  * The three refusals below are the exception, and they are the three `parse_unix_url` refuses in
  * Python (WSM-ERR-016 requires each to be a `MuxwsError`, and this grammar's owner is this module):
- * a request target that is not absolute, a url naming no socket file, and `wss+unix:`. Two of them
- * were previously delegated to `ws` and came back as a `SyntaxError` about *its* scheme list, which
- * left the two ports disagreeing about who owns a scheme muxws documents. The refusals happen before
- * `ws` is imported and before anything is opened, so a `ws+unix:` typo is still a `UnixUrlError` on a
- * machine where `ws` is not installed - which is correct, since installing it would not make the url
+ * a request target that is not absolute, a url naming no socket file, and `wss+unix:`. They happen
+ * before `ws` is imported and before anything is opened, so a `ws+unix:` typo is still a
+ * `UnixUrlError` on a machine where `ws` is not installed - installing it would not make the url
  * dialable.
  */
 function unixTarget(url: string): UnixTarget | null {
@@ -158,9 +144,9 @@ function unixTarget(url: string): UnixTarget | null {
   }
   if (parsed.protocol === TLS_UNIX_SCHEME) {
     // There is no TLS to negotiate over a socket file - the filesystem permissions on the file are
-    // the access control - so the scheme does not exist in either port. `ws` would refuse it too, by
-    // listing the schemes it takes, which tells the reader nothing about muxws having a unix dial at
-    // all and reads as though `ws+unix:` were `ws`'s feature rather than this library's grammar.
+    // the access control - so the scheme does not exist in either port. Refused by name here: `ws`
+    // would answer by listing the schemes *it* takes, which says nothing about muxws having a unix
+    // dial at all.
     throw new UnixUrlError(
       `cannot dial '${url}': wss+unix: is not a scheme. A filesystem socket has no TLS to negotiate - ` +
         'the permissions on the socket file are the access control - so use ws+unix: instead.',
@@ -177,9 +163,8 @@ function unixTarget(url: string): UnixTarget | null {
   const route = colon === -1 ? '' : whole.slice(colon + 1);
 
   // A url with no path at all names no file, and there is nothing to dial. `ws` would answer "The
-  // URL's pathname is empty", which is true of the url and silent about what a ws+unix: url is
-  // supposed to contain; the reader who typed `ws+unix://run/app.sock` - an authority, no path -
-  // needs the shape, not the parser's verdict.
+  // URL's pathname is empty", which is silent about what a ws+unix: url is supposed to contain; the
+  // reader who typed `ws+unix://run` - an authority, no path - needs the shape.
   if (socketPath === '') {
     throw new UnixUrlError(
       `the url '${url}' names no socket file: a ws+unix: url is ` +
@@ -188,14 +173,13 @@ function unixTarget(url: string): UnixTarget | null {
     );
   }
   if (route !== '' && !route.startsWith('/')) {
-    // `ws://localhost` + `ws` is `ws://localhostws`: a *valid* url naming a host nothing resolves,
-    // so the target would be folded into the authority and the dial would reach the right file
-    // carrying `/` as its target and a `Host` nobody asked for. Against an acceptor that does not
-    // route - `unix_serve`, or a `WebSocketServer` with no `path` - that handshake **succeeds**,
-    // which is the worst of the available outcomes. Refused here for the reason
-    // `muxws/transports/unix.py` refuses it: a typo in a url must not become a working connection to
-    // the wrong request, nor - via node's own 400 for a malformed request line - a `CodecMismatch`
-    // sending the reader off to check `MUXWS_CODEC` on two ends that agree.
+    // `ws://localhost` + `ws` is `ws://localhostws`: a *valid* url, so the target folds into the
+    // authority and the dial reaches the right file carrying `/` as its target and a `Host` nobody
+    // asked for. Against an acceptor that does not route - `unix_serve`, or a `WebSocketServer` with
+    // no `path` - that handshake **succeeds**, which is the worst of the available outcomes. Refused
+    // here for the reason `muxws/transports/unix.py` refuses it: a typo must not become a working
+    // connection to the wrong request, nor - via node's own 400 for a malformed request line - a
+    // `CodecMismatch` sending the reader off to check `MUXWS_CODEC` on two ends that agree.
     throw new UnixUrlError(
       `the request target in '${url}' must begin with '/': the part after the ':' is an HTTP ` +
         'request target, not a path relative to anything',
@@ -209,11 +193,11 @@ function unixTarget(url: string): UnixTarget | null {
 /**
  * The one line of `ws`'s `isIpcUrl` branch that is still wanted: open the file instead of a port.
  *
- * `node:net` is imported inside the function rather than at module scope, for the reason `ws` is: an
- * acceptor that never dials, and every TCP dial, should pay nothing for a module only a unix dial
- * needs. The options object is the http agent's own, spread through untouched apart from `path`, so
- * `timeout` and anything else node put in still applies - `net.connect` reads `path` as an IPC
- * endpoint and ignores the host and port beside it.
+ * `node:net` is imported inside the function, for the reason `ws` is: an acceptor that never dials,
+ * and every TCP dial, should pay nothing for a module only a unix dial needs. The options object is
+ * the http agent's own, spread through untouched apart from `path`, so `timeout` and anything else
+ * node put in still applies - `net.connect` reads `path` as an IPC endpoint and ignores the host and
+ * port beside it.
  */
 async function unixConnector(socketPath: string): Promise<(options: NetConnectOpts) => Socket> {
   const { connect } = await import('node:net');
@@ -227,21 +211,20 @@ async function unixConnector(socketPath: string): Promise<(options: NetConnectOp
  * and the message must name the install. The check is here rather than at module scope because the
  * import is dynamic on purpose - `accept()`, `serve()`, `handleProtocols()` and
  * `refuseMismatchedUpgrade()` all keep working in a process that never dials, which is what lets a
- * pure acceptor run without the package at all. Guarding the import at module scope would break that
- * and would also make `catch (e) { e instanceof WsNotInstalledError }` throw the very error it exists
- * to replace, because importing `muxws/node` would already have failed.
+ * pure acceptor run without the package at all. A module-scope guard would break that, and would make
+ * `catch (e) { e instanceof WsNotInstalledError }` throw, because importing `muxws/node` would
+ * already have failed.
  */
 // The return type is inferred rather than written as `Promise<typeof import('ws')>`: under this
-// project's `module: commonjs` the two are genuinely different types - the written one is `ws`'s
-// `export =` shape, the inferred one is the namespace a dynamic import produces - and spelling it
-// wrong is a type error about `EventEmitter` statics that says nothing about this function.
+// project's `module: commonjs` the two are different types - the written one is `ws`'s `export =`
+// shape, the inferred one the namespace a dynamic import produces.
 async function requireWs() {
   try {
     return await import('ws');
   } catch (error) {
     // Narrowed to the resolution failure. Anything else - a corrupt install, a `ws` that throws while
-    // evaluating - keeps its own diagnostic, because "run npm install ws" would be a confident wrong
-    // answer to a reader who has it installed already.
+    // evaluating - keeps its own diagnostic: "run npm install ws" would be a wrong answer to a reader
+    // who has it installed already.
     if ((error as { code?: unknown } | null)?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
     throw new WsNotInstalledError(
       "muxws/node dials through the 'ws' package, which is not installed: run `npm install ws`. It is " +
@@ -255,12 +238,11 @@ async function requireWs() {
 /**
  * Frame a `ws` constructor throw as a `WsUrlError`, or leave it alone.
  *
- * The hybrid is forced by measurement: `ws` throws a `SyntaxError` both for `Invalid URL: nonsense`
- * and for `An invalid or duplicated subprotocol was specified`, and nothing on either object tells
- * them apart. So the address is re-read here - if `new URL()` cannot parse `dialed`, or parses it to
- * a scheme `ws` does not take, the throw was about the url; otherwise it was about something else and
- * is rethrown untouched. A blanket translation would label a bad subprotocol a bad address and send
- * the reader to fix a url that was already correct.
+ * `ws` throws a `SyntaxError` both for `Invalid URL: nonsense` and for `An invalid or duplicated
+ * subprotocol was specified`, and nothing on either object tells them apart, so the address is
+ * re-read here: if `new URL()` cannot parse `dialed`, or parses it to a scheme `ws` does not take,
+ * the throw was about the url; otherwise it is rethrown untouched. A blanket translation would label
+ * a bad subprotocol a bad address and send the reader to fix a url that was already correct.
  *
  * `dialed` is what `ws` was handed and `url` is what the caller typed; for a `ws+unix:` url the two
  * differ, and the message must quote the one the reader can find in their own source.
@@ -294,11 +276,9 @@ export { WsSocket } from './transports/ws-socket';
 export { VERSION } from './version';
 
 // `UnixUrlError`, `WsUrlError` and `WsNotInstalledError` are exported above, where they are defined,
-// and from **here only**. They are the concrete transport errors of the two transports this subpath
-// ships, and WSM-ERR-016 keeps them off the package root: `ts/errors.ts` holds the two bases so that a
-// browser build can write `instanceof TransportUrlError` without importing a module that reaches for
-// `ws` (WSM-API-022), and a third party writing an adapter - who cannot add a class to `ts/errors.ts`
-// - follows the same convention from its own package. Both bases come from `muxws`, not from here.
+// and from **here only**: WSM-ERR-016 keeps concrete transport errors off the package root, which
+// holds the two bases so a browser build can write `instanceof TransportUrlError` without importing a
+// module that reaches for `ws` (WSM-API-022). Both bases come from `muxws`, not from here.
 
 /** `ConnectOptions` plus the one field only node can honour: a browser cannot set handshake headers. */
 export interface NodeConnectOptions extends ConnectOptions {
@@ -325,50 +305,43 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
 /**
  * The dial itself, and the whole of what `ws` is imported for.
  *
- * `url` may be `ws:`, `wss:` or **`ws+unix:///absolute/path.sock:/route`**, and this function does
- * not branch on which: `ws` reads the scheme, and for the unix form sets `socketPath` on an otherwise
- * ordinary `http.ClientRequest` instead of a host and a port. The handshake on the wire is byte for
- * byte the one TCP carries - an HTTP GET with `Upgrade: websocket` and `Sec-WebSocket-Protocol:
- * muxws.v1.<codec>`, answered 101 or 400 - so every branch below is reached over a unix socket
- * exactly as it is over TCP, WSM-CDC-022/024/028 included. `ts/unix.spec.ts` is the witness; nothing
- * here was written for it.
+ * `url` may be `ws:`, `wss:` or **`ws+unix:///absolute/path.sock:/route`**. The unix form is taken
+ * apart by `unixTarget` and `ws` is handed a plain `ws://<authority><target>` url plus a
+ * `createConnection` that opens the file; everything after that is one path. The handshake on the
+ * wire is byte for byte the one TCP carries - an HTTP GET with `Upgrade: websocket` and
+ * `Sec-WebSocket-Protocol: muxws.v1.<codec>`, answered 101 or 400 - so every branch below is reached
+ * over a unix socket exactly as it is over TCP, WSM-CDC-022/024/028 included.
  *
  * The url grammar is `unixTarget`'s - the same first-colon split `muxws/transports/unix.py` performs,
- * so a socket path and a request target are spelled the same in both languages down to the byte. What
- * `ws` is given for the unix form is therefore a plain `ws://<authority><target>` url plus a
- * `createConnection` that opens the file, which is what `ws`'s own `isIpcUrl` branch would have built
- * one colon-split earlier. The authority is decorative - `ws+unix://` is normally followed straight by
- * an absolute path - but if one is given it becomes the `Host` header, and an empty one sends `Host:
- * localhost`, which is the value Python synthesises for the same url. `wss+unix:` does not exist and
- * never reaches `createConnection`: `unixTarget` refuses it as a `UnixUrlError` before `ws` is even
- * imported, which it did not always do - `ws` used to answer it by listing the schemes *it* takes,
- * a sentence that reads as though `ws+unix:` were `ws`'s feature rather than this library's grammar.
+ * so a socket path and a request target are spelled the same in both languages down to the byte. The
+ * authority is decorative - `ws+unix://` is normally followed straight by an absolute path - but if
+ * one is given it becomes the `Host` header, and an empty one sends `Host: localhost`, the value
+ * Python synthesises for the same url. `wss+unix:` never reaches `createConnection`: `unixTarget`
+ * refuses it as a `UnixUrlError` before `ws` is imported.
  *
- * `createConnection` rather than `socketPath` for one reason worth recording, because the option
- * exists and looks like the obvious way: `ws` overwrites `socketPath` with `undefined` immediately
- * after spreading the caller's options (`initAsClient`), so passing it does nothing and the dial
- * quietly goes to TCP port 80 instead - which on a developer's machine may well answer. `ws` leaves
- * `createConnection` alone, and uses it for every dial it makes, TCP included.
+ * `createConnection` rather than `socketPath`, though that option exists and looks like the obvious
+ * way: `ws` overwrites `socketPath` with `undefined` immediately after spreading the caller's options
+ * (`initAsClient`), so passing it does nothing and the dial quietly goes to TCP port 80 instead -
+ * which on a developer's machine may well answer. `ws` leaves `createConnection` alone, and uses it
+ * for every dial it makes, TCP included.
  *
- * One portability note that costs an afternoon when it bites: `sun_path` caps a unix socket path at
- * about 108 bytes on Linux (104 on macOS), and the failure is a bind or a connect error naming the
- * path rather than the length. Keep socket files in a short directory. There is no `process.platform`
- * guard here: `net.connect({ path })` is a named pipe on Windows rather than an error, so the dial is
- * meaningful there in a way it is not in Python - but no `ws+unix:` url can address a pipe, because
- * `new URL()` rejects the backslashes in `\\.\pipe\name` on every platform (`ts/unix.spec.ts` pins
- * it). A Windows dial of a POSIX-looking path therefore fails naming the path it tried, which is why
- * this port has nothing like Python's `UnixSocketsUnsupportedError` to raise. The browser entry point
- * does have one, for a different reason - see `UnixSocketsUnsupportedError` in `ts/index.ts`.
+ * `sun_path` caps a unix socket path at about 108 bytes on Linux (104 on macOS), and the failure is a
+ * bind or a connect error naming the path rather than the length: keep socket files in a short
+ * directory. There is no `process.platform` guard here: `net.connect({ path })` is a named pipe on
+ * Windows rather than an error, but no `ws+unix:` url can address a pipe, because `new URL()` rejects
+ * the backslashes in `\\.\pipe\name` on every platform. A Windows dial of a POSIX-looking path fails
+ * naming the path it tried, which is why this port has nothing like Python's
+ * `UnixSocketsUnsupportedError` to raise; the browser entry point has one for a different reason -
+ * see `UnixSocketsUnsupportedError` in `ts/index.ts`.
  *
  * Three things happen before a socket is opened, in this order, and the order is the rule
  * (WSM-ERR-016). The grammar first: `unixTarget` is `new URL()` and nothing else, so a malformed
  * `ws+unix:` url is a `UnixUrlError` even where `ws` is missing - installing it would not help. The
- * dependency second, because the url parser that judges the rest of the addresses is `ws`'s own, and a
- * reader with neither should be told about the one that blocks the other. The address last, framed as
- * a `WsUrlError`. All three are ahead of the refusal handling below, which is not stylistic: that
- * handler reads a 400 out of `ws`'s prose, and a url whose own text contains a status would otherwise
- * be reported as a `CodecMismatch` - a real, measured mistranslation in the Python port that sent a
- * reader off to compare `MUXWS_CODEC` across a connection that was never made.
+ * dependency second, because the url parser that judges the rest of the addresses is `ws`'s own. The
+ * address last, framed as a `WsUrlError`. All three are ahead of the refusal handling below, which
+ * reads a 400 out of `ws`'s prose: a url whose own text contains a status would otherwise be reported
+ * as a `CodecMismatch`, sending the reader off to compare `MUXWS_CODEC` across a connection that was
+ * never made.
  */
 async function dialWs(url: string, codecName: string, options: NodeConnectOptions): Promise<WsSocket> {
   const unix = unixTarget(url);

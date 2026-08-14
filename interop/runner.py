@@ -12,12 +12,10 @@ The same entry points exist in `interop/runner.ts`, and `interop/drive.sh` pairs
 role assignments, so a rule one port implements differently from the other shows up as a named
 failure rather than as a hang.
 
-`dial` takes a URL and nothing else, which is why the Unix pairing needs no dialling mode of its
-own: `ws+unix:///path/to.sock:/route` is the whole of the difference, and the same script that runs
-over TCP runs over a socket file with the string changed. The one cross-language risk in that URL is
-that the two ports must split it identically - pathname-and-search up to the **first** colon is the
-filesystem path, the rest is the HTTP request target - and no single-language test can witness an
-agreement between two parsers.
+`dial` takes a URL and nothing else, so the Unix pairing needs no dialling mode of its own: the same
+script runs over a socket file with `ws+unix:///path/to.sock:/route` in place of the TCP URL. What
+the pairing is here to witness is that the two ports split that URL identically - pathname and
+search up to the **first** colon is the filesystem path, the rest is the HTTP request target.
 
 `assert` is deliberately absent: this file is not a `*_test.py`, so ruff's S101 applies and, more to
 the point, a driver that vanished under `python -O` would be worse than no driver.
@@ -210,18 +208,15 @@ async def drip(stream: Stream, state: dict[str, Any]) -> None:
 async def serve_one_connection(connection: Any) -> None:
     """One accepted connection, whatever carried it - a TCP socket or a socket file.
 
-    Module level rather than nested inside `accept_forever`, and that is the whole claim the Unix
-    pairing makes: `accept_unix_forever` below hands the same coroutine to `unix_serve`, so the two
-    acceptors differ in the line that binds and in nothing else. A UDS acceptor with its own copy of
-    this handler could pass while the transport-agnostic path was broken, which is the failure the
-    matrix exists to catch rather than to reproduce (WSM-API-021).
+    Module level rather than nested inside `accept_forever`: `accept_unix_forever` below hands the
+    same coroutine to `unix_serve`, so the two acceptors differ in the line that binds and in nothing
+    else. A UDS acceptor with its own copy of this handler could pass while the transport-agnostic
+    path was broken (WSM-API-021).
     """
-    # The HTTP request target this connection arrived on. Reported because it is the half of the
-    # `ws+unix://<path>:/route` grammar that reaching the socket does not prove: the socket file is
-    # the address, neither acceptor routes on the target, so a dialer that dropped the target and
-    # sent `/`, or built it from the URL's pathname and left the query string behind, would connect
-    # and pass every assertion in the script. The driver compares this line against the route it put
-    # in the URL, which is the only place the two languages' parsers meet each other.
+    # The HTTP request target this connection arrived on: the half of the `ws+unix://<path>:/route`
+    # grammar that reaching the socket does not prove. Neither acceptor routes on the target, so a
+    # dialer that sent `/` instead, or that dropped the query string, would connect and pass every
+    # assertion in the script. The driver compares this line against the route it put in the URL.
     request = connection.request
     emit(event="accepted", target=None if request is None else request.path)
     peer = await muxws.accept(WebsocketsSocket(connection))
@@ -263,16 +258,14 @@ async def accept_unix_forever(path: str) -> None:
 
     `select_subprotocol` is the same hook the TCP acceptor passes, so a dialer offering a codec this
     process does not speak still meets HTTP 400 here and still has to turn it into `CodecMismatch`
-    (WSM-CDC-022/024). That is the point of running the matrix over this transport at all: the only
-    thing that changed is which kernel object the handshake travelled over, and the driver proves it
-    by running the unmodified WSM-TST-004 script across it.
+    (WSM-CDC-022/024): the only thing that changed is which kernel object the handshake travelled
+    over, and the driver proves it by running the unmodified WSM-TST-004 script across it.
 
     The driver's readiness signal is the `path=` line below rather than a `port=` one - a socket file
     exists between `bind` and `listen`, so a driver that waited for the file would race the listen.
     """
-    # Checked here rather than left to the bind: on Windows the failure is an event loop reporting
-    # that it has no `create_unix_server`, which reads as a defect in this file rather than as the
-    # platform saying no, and a red CI log deserves the second sentence.
+    # Checked here rather than left to the bind: on Windows the bind failure is an event loop
+    # reporting that it has no `create_unix_server`, which reads as a defect in this file.
     if not hasattr(socket, "AF_UNIX"):
         raise SystemExit("this platform has no AF_UNIX, so the unix scenario cannot run here")
     # Imported inside the guard for the same reason: on a platform this cannot run on, nothing about

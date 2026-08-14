@@ -6,12 +6,11 @@ directory that way, because a Unix socket path is capped at about 108 bytes and 
 `OSError: AF_UNIX path too long` out of `bind()`, which names the reason but not the component to
 shorten.
 
-Nothing about muxws changes here, and that is the claim this file exists to execute. `unix_serve`
-performs the same HTTP GET + Upgrade as `websockets.serve`, `select_subprotocol` is the same hook
-selecting the same `muxws.v1.<codec>` value, `accept()` wraps the connection in the same
-`WebsocketsSocket`, and a dialer offering a codec this acceptor does not speak is still refused with
-HTTP 400 before anything is accepted. The socket underneath is a file; that is the entire difference,
-and no adapter in the library can see it.
+Nothing about muxws changes here. `unix_serve` performs the same HTTP GET + Upgrade as
+`websockets.serve`, `select_subprotocol` is the same hook selecting the same `muxws.v1.<codec>`
+value, `accept()` wraps the connection in the same `WebsocketsSocket`, and a dialer offering a codec
+this acceptor does not speak is still refused with HTTP 400 before anything is accepted. The socket
+underneath is a file; that is the entire difference.
 
 What the file buys is the `accepted a dialer:` line. The socket's own filesystem permissions decide
 who may connect at all, and `SO_PEERCRED` hands the acceptor the caller's pid, uid and gid straight
@@ -57,11 +56,12 @@ async def on_stream(payload: object, stream: Stream) -> None:
 def peer_credentials(connection: object) -> str:
     """The dialer's pid, uid and gid as the kernel reports them, or why they are unavailable.
 
-    `SO_PEERCRED` is a Linux socket option; macOS and the BSDs answer the same question through
-    `getpeereid()`, which Python does not expose, and no other transport muxws ships can answer it at
-    all. Degrading to a string rather than raising is deliberate: the credential is a bonus this
-    transport happens to offer, and an acceptor that crashed on a platform without it would make the
-    example unrunnable on machines where the rest of the file works perfectly.
+    `SO_PEERCRED` is a Linux socket option; macOS and the BSDs answer part of it through
+    `getpeereid()` — the uid and the gid, not the pid — which Python does not expose, and no other
+    transport muxws ships can answer it at all. Degrading to a string rather than raising is
+    deliberate: the credential is a bonus this transport happens to offer, and an acceptor that
+    crashed on a platform without it would make the example unrunnable on machines where the rest of
+    the file works perfectly.
     """
     transport = getattr(connection, "transport", None)
     raw = transport.get_extra_info("socket") if transport is not None else None
@@ -86,15 +86,14 @@ def is_stale(path: str) -> bool:
     """True when `path` is a socket file nobody is listening on - the corpse a killed run leaves.
 
     A socket file outlives the process that bound it, so the next `bind()` fails with `EADDRINUSE`
-    until someone removes it. Removing it unconditionally is the tempting one-liner and it is wrong:
-    it would take the socket away from an acceptor that is alive and serving, and the two processes
-    would then be reachable under one path with no way for a dialer to tell which it got. Connecting
-    first answers the question the unlink needs answered - a corpse refuses, a live acceptor accepts.
+    until someone removes it. Removing it unconditionally would take the socket away from an acceptor
+    that is alive and serving, leaving two processes reachable under one path with no way for a
+    dialer to tell which it got. Connecting first answers that: a corpse refuses, a live acceptor
+    accepts.
 
-    The inode type is checked before the probe, and that guard is not defensive tidiness: `connect()`
-    on a regular file or a directory also fails with `ECONNREFUSED`, so a probe on its own reports
-    `MUXWS_SOCKET=~/notes.txt` as a corpse and this example deletes it. Refusing outright is the only
-    answer available - a path that is not a socket is never something this process may unlink.
+    The inode type is checked before the probe, because `connect()` on a regular file or a directory
+    also fails with `ECONNREFUSED`: a probe alone would report `MUXWS_SOCKET=~/notes.txt` as a corpse
+    and delete it. A path that is not a socket is never something this process may unlink.
     """
     if not os.path.exists(path):
         return False

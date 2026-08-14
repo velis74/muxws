@@ -3,13 +3,12 @@
 Start `uds_server.py` first, then run `python uds_client.py`. The URL is
 `ws+unix://<tempdir>/muxws.sock:/ws` unless the `MUXWS_URL` environment variable says otherwise.
 
-The point of this file is what is not in it. There is no new argument, no adapter to choose and no
-second dialer: `connect()` reads the scheme off the URL and everything after it - the codec offered at
-the handshake, the `CodecMismatch` an HTTP 400 turns into, the heartbeat, the reconnect loop - is the
-code that already ran over TCP. Read the URL by splitting the path on the **first** colon:
-`/tmp/muxws.sock` is the file to open and `/ws` is the HTTP request target inside the upgrade. There is
-no `wss+unix://`: a filesystem socket is not reachable from another machine, so there is nothing for
-TLS to protect against that the socket's own permissions do not already.
+There is no new argument, no adapter to choose and no second dialer: `connect()` reads the scheme off
+the URL, and everything after it - the codec offered at the handshake, the `CodecMismatch` an HTTP 400
+turns into, the heartbeat, the reconnect loop - is the code that already ran over TCP. Read the URL by
+splitting the path on the **first** colon: `/tmp/muxws.sock` is the file to open and `/ws` is the HTTP
+request target inside the upgrade. There is no `wss+unix://`: a filesystem socket is not reachable
+from another machine, and the socket's own permissions are the access control.
 """
 
 import asyncio

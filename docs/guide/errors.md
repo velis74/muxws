@@ -36,7 +36,8 @@ named after the transport that could not do the job — `UnixUrlError` for a bad
 `WsNotInstalledError` for a `muxws/node` dial in a process without the `ws` package — and those
 subclasses live in their transports' own modules rather than in the shared one. Catch the base if you
 do not want to know which transport a configured URL named; see
-[Writing an adapter of your own](#writing-an-adapter-of-your-own) for why the split is where it is.
+[Writing an adapter of your own](#writing-an-adapter-of-your-own) for the convention a transport of
+your own follows.
 
 Three attributes are on every `StreamReset`:
 
@@ -229,12 +230,15 @@ define.
 A transport can fail in two ways that have nothing to do with the protocol, and muxws gives each of
 them a base class so that you can act on the difference without reading a message.
 
-**`TransportUrlError` — the address could not be opened.** The URL is wrong: a `ws:` URL with no
-hostname, a port that is not a number, a `ws+unix:` URL whose request target does not start with `/`,
-a `wss+unix:` URL, which does not exist. Always raised **before** the dial, so it can never resurface
-later out of a background reconnection, and never confused with a refused handshake. The action is to
-fix the URL. In Python it is a `ValueError` too, so a caller who never heard of muxws and wrapped its
-own configuration parsing in `except ValueError` still catches it.
+**`TransportUrlError` — the address could not be opened.** The URL is wrong: a `ws+unix:` URL whose
+request target does not start with `/`, one naming no socket file, a `wss+unix:` URL, which does not
+exist. For a `ws:`/`wss:` URL the judge is whichever parser dials: Python's `WebsocketUrlError` covers
+a missing hostname or a port that is not a number, `muxws/node`'s `WsUrlError` covers whatever `ws`
+refuses, and the browser entry point lets the platform's own `WebSocket` throw. Always raised
+**before** the dial, so it can never resurface later out of a background reconnection, and never
+confused with a refused handshake. The action is to fix the URL. In Python it is a `ValueError` too,
+so a caller who never heard of muxws and wrapped its own configuration parsing in
+`except ValueError` still catches it.
 
 **`TransportUnsupportedError` — this runtime cannot provide that transport at all.** The URL is fine
 and the same program would work elsewhere: `websockets` or `ws` is not installed, the interpreter has
@@ -282,8 +286,8 @@ one by the shape of what it catches.
 2. **In TypeScript, set `name` on the subclass.** JavaScript has one prototype chain, so `name` is
    the discriminator that carries the class's identity across the two ports, and a subclass that does
    not assign it inherits `'TransportUrlError'` — every log line and every cross-language comparison
-   then reads the base instead of your class. It is three lines, and it is what `UnixUrlError` and
-   `WsUrlError` already are:
+   then reads the base instead of your class. `UnixUrlError` and `WsUrlError` are three lines each for
+   that reason:
 
    ```ts
    export class MyQuicUrlError extends TransportUrlError {
@@ -309,11 +313,10 @@ one by the shape of what it catches.
 7. **Do not invent a class for a failure you cannot reach.** If you cannot write the command that
    produces it, the class is decoration, and it will be the one an application branches on.
 
-The one thing you cannot do is add a class to `muxws/errors.py` — which is exactly why the rule is
-"subclass the base, keep the class local" and not "everything lives in the shared module". The
-shared module holds what the *contract* mandates. `ConnectionClosed` is the case that fixes that
-boundary: every adapter raises it, including yours, but it stays shared because the `SocketAdapter`
-protocol requires it of every adapter. Ownership decides where an error lives, not who raises it.
+The shared module holds what the *contract* mandates, which is where the boundary runs:
+`ConnectionClosed` lives there and yours does not, because the `SocketAdapter` protocol requires
+`ConnectionClosed` of every adapter, including yours. Ownership decides where an error lives, not who
+raises it.
 
 ## See also
 

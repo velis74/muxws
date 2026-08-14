@@ -116,11 +116,11 @@ async def _speak_the_upgrade(
 ) -> tuple[int, dict[str, str]]:
     """The upgrade request itself, byte for byte, over whatever stream pair the caller opened.
 
-    Split out from `_upgrade` when the Unix-socket twin arrived, because the twin's whole claim is
-    that WSM-CDC-022 is answered *identically* over a filesystem socket - and two hand-written
-    request builders that drift apart by one header would turn any difference in the answer into a
-    difference in the question. `asyncio.open_connection` and `asyncio.open_unix_connection` return
-    the same pair of objects, so the transport is the only thing that differs between the callers.
+    Shared with the Unix-socket twin, whose claim is that WSM-CDC-022 is answered *identically* over
+    a filesystem socket: two hand-written request builders drifting apart by one header would turn a
+    difference in the question into a difference in the answer. `asyncio.open_connection` and
+    `asyncio.open_unix_connection` return the same pair of objects, so the transport is all that
+    differs between the callers.
     """
     try:
         writer.write(
@@ -219,10 +219,9 @@ async def test_mismatched_codecs_reject_handshake(
     them sends or receives, and `hello=` guarantees there would be one to see: a dialer that got a
     socket puts its hello on the wire immediately (WSM-RCN-021).
 
-    The last assertion is the other half of WSM-ERR-016's layering, from this side: a real refusal
-    reaches a server, which means its URL parsed, which means the URL check ahead of the dial let it
-    through untouched. A translation written so eagerly that it claimed a dialable address would show
-    up here as a `TransportUrlError` in place of the `CodecMismatch` the rule requires.
+    The last assertion is the other half of WSM-ERR-016's layering: a real refusal reaches a server,
+    so its URL parsed, so the check ahead of the dial let it through. A URL check that claimed a
+    dialable address would show up here as a `TransportUrlError` in place of the `CodecMismatch`.
     """
 
     class Msgpackish(muxws.JsonCodec):
@@ -395,10 +394,9 @@ async def test_reset_codes_survive_a_real_socket(server: str):
 # --------------------------------------------------------------------------- the same, over AF_UNIX
 #
 # `ws+unix:///path/to.sock:/route` dials a filesystem socket. Nothing below is a new protocol: each
-# test here is the twin of one above it, and the point of writing them again rather than trusting the
-# transport to be transparent is that a dial has four transport-shaped ways to go wrong - the request
-# target and `Host` a filesystem path cannot supply, the subprotocol offer, the 400 that must still
-# be translated, and the socket file a reconnect has to re-open.
+# test is the twin of one above it, because a dial has four transport-shaped ways to go wrong - the
+# request target and `Host` a filesystem path cannot supply, the subprotocol offer, the 400 that must
+# still be translated, and the socket file a reconnect has to re-open.
 
 #: AF_UNIX does not exist on Windows, so every test that opens a socket file carries this. The
 #: grammar itself is tested in `unix_test.py`, which needs no socket and therefore never skips: that
@@ -633,12 +631,9 @@ async def test_a_peer_reconnects_across_a_re_created_socket_file():
 #
 # Nothing below reaches a socket, and none of it can be witnessed by the tests above, every one of
 # which has an acceptor. Two failures live here - an address `websockets` cannot parse, and a
-# `websockets` that is not installed at all - and both used to arrive as somebody else's exception:
-# `websockets.exceptions.InvalidURI` for the first, a bare `ModuleNotFoundError` for the second.
-# Neither is a `MuxwsError`, so an application with one `except MuxwsError` around `connect()` caught
-# a malformed `ws+unix:` URL, which has been a `UnixUrlError` since that transport landed, and missed
-# the identical typo in a `ws:` one. The pair of shared bases is what closes that, and these tests
-# are what stop it reopening.
+# `websockets` that is not installed at all - and each must arrive as a `MuxwsError` under a shared
+# transport base, so that one `except MuxwsError` around `connect()` catches a malformed address
+# whichever scheme it named.
 
 
 @pytest.mark.parametrize(
@@ -707,18 +702,16 @@ async def test_the_librarys_own_diagnostic_survives_the_translation(url: str, un
 
 
 async def test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch():
-    """The layering, and the one measured defect it exists to fix (WSM-ERR-016, WSM-CDC-024).
+    """The layering, and the defect it exists to prevent (WSM-ERR-016, WSM-CDC-024).
 
-    `_looks_like_a_refused_handshake` falls back to matching `HTTP 400` in the exception's prose, and
-    an `InvalidURI` quotes the offending URL in its message - so before the URL check was layered
-    *outside* the dial closure, `connect("ws:/HTTP 400")` raised `CodecMismatch`. That sent the reader
-    off to compare `MUXWS_CODEC` on two ends of a connection that was never made, over a typo.
+    `_looks_like_a_refused_handshake` falls back to matching `HTTP 400` in the exception's prose and
+    an `InvalidURI` quotes the offending URL, so a URL check made inside the dial closure reports
+    `connect("ws:/HTTP 400")` as a `CodecMismatch` on a connection that was never made.
 
-    This is the test that makes "before the dial, not inside the failed-dial handler" normative rather
-    than advisory: moving the translation into `dial()`'s `except`, beneath the refusal check, leaves
-    every other test in this file green and fails only this one. `not isinstance` is asserted as well
-    as the positive class, because `CodecMismatch` and `WebsocketUrlError` are unrelated branches of
-    the tree and a future implementation that raised both-ish would satisfy neither reader.
+    This is what makes "before the dial, not inside the failed-dial handler" normative rather than
+    advisory: moving the check into `dial()`'s `except` leaves every other test in this file green and
+    fails only this one. `not isinstance` is asserted as well as the positive class, because
+    `CodecMismatch` and `WebsocketUrlError` are unrelated branches of the tree.
     """
     with pytest.raises(WebsocketUrlError) as info:
         await muxws.connect("ws:/HTTP 400")
@@ -732,12 +725,11 @@ async def test_a_ws_unix_url_with_an_unparseable_authority_is_a_transport_url_er
 
     A `ws+unix:` URL carries an optional authority, which becomes the `Host` header of a handshake
     that is still HTTP; `parse_unix_url` copies it through without looking at it, so a port that is
-    not a number survives the grammar and dies in `websockets` when the *logical* URI is parsed. It
-    reached the caller as a bare `ValueError` naming neither muxws nor the URL. Checking `unix.uri`
-    rather than `url` is what puts it under the same base as the TCP shapes - `except
-    TransportUrlError` covers a mistyped address over either transport, which is the practical thing
-    the shared base buys - and the message names both spellings, because the caller typed one of them
-    and the diagnostic is about the other.
+    not a number survives the grammar and dies in `websockets` when the *logical* URI is parsed,
+    which without this check reaches the caller as a bare `ValueError` naming neither muxws nor the
+    URL. Checking `unix.uri` rather than `url` puts it under the same base as the TCP shapes, so
+    `except TransportUrlError` covers a mistyped address over either transport, and the message names
+    both spellings: the caller typed one of them and the diagnostic is about the other.
     """
     with pytest.raises(WebsocketUrlError) as info:
         await muxws.connect("ws+unix://host:notaport/tmp/p.sock:/r")
@@ -751,10 +743,10 @@ async def test_a_ws_unix_url_with_an_unparseable_authority_is_a_transport_url_er
 class _RefuseWebsockets:
     """A `sys.meta_path` finder that makes `import websockets` fail without uninstalling anything.
 
-    Raising from `find_spec` rather than returning `None` is what produces the `ModuleNotFoundError`
-    an absent package produces, at the moment of import, for the submodules too - `websockets.uri`
-    and `websockets.asyncio.client` are imported by name elsewhere in this transport and a blocker
-    that only hid the top-level package would leave a half-usable dependency that no real machine has.
+    Raising from `find_spec` rather than returning `None` produces the `ModuleNotFoundError` an absent
+    package produces, and it covers the submodules too: `websockets.uri` and
+    `websockets.asyncio.client` are imported by name elsewhere in this transport, so hiding only the
+    top-level package would leave a half-usable dependency no real machine has.
     """
 
     def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
@@ -871,13 +863,10 @@ async def test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_er
 ):
     """WSM-ERR-016: an import failure that is not the dependency being absent is re-raised untouched.
 
-    The control on the test above, and the half that is easy to lose: a handler that catches every
-    `ImportError` answers a corrupt install with `WebsocketsNotInstalledError` and the remedy `pip
-    install muxws[websockets]`, which tells a reader who already has the package to install it again
-    - a confidently wrong answer, and one that also swallows the `ModuleNotFoundError` naming the
-    module that is really missing, the only sentence in the traceback that pointed at the fault.
-    Measured on this tree before the narrowing: a `websockets/__init__.py` importing a package that
-    was gone produced exactly that class and exactly that remedy.
+    The control on the test above: a handler that catches every `ImportError` answers a corrupt
+    install with `WebsocketsNotInstalledError` and the remedy `pip install muxws[websockets]`, which
+    tells a reader who already has the package to install it again and swallows the
+    `ModuleNotFoundError` naming the module that is really missing.
 
     The twin of `ts/transport-errors.spec.ts` *"rethrows a broken install untouched, so it is never
     reported as an absent one"*, which narrows on `ERR_MODULE_NOT_FOUND` for the same reason.
