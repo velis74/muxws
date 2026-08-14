@@ -125,7 +125,14 @@ exclude = [
 # `docs/examples` is here because leaving it out meant `run_examples_test.py` never ran: it holds the
 # end-to-end checks that the shipped examples still print what the guide says they print, and a test
 # nothing collects is weaker than a test that skips - a skip at least says so.
-testpaths = ["muxws", "docs/examples"]
+#
+# `demo` for the same reason and found the same way: `demo/entry_point_test.py` and
+# `demo/backend_python/handlers_test.py` are forty tests that had never run in CI, because this list
+# named neither the directory nor a parent of it. They pass in about a second and load nothing the
+# `dev` extra does not already provide. Coverage is unaffected - `[tool.coverage.run]` omits `demo/*`
+# deliberately, since the demo is a consumer of the library and counting it would inflate the
+# library's own figure.
+testpaths = ["muxws", "docs/examples", "demo"]
 python_files = ["*_test.py"]
 asyncio_mode = "auto"
 

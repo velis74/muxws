@@ -56,11 +56,11 @@ jobs:
       MUXWS_CODEC: ${{ matrix.codec }}
       VITE_MUXWS_CODEC: ${{ matrix.codec }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       # `[dev]` already carries `msgpack`, so the Python side needs nothing conditional.
@@ -122,11 +122,11 @@ jobs:
       MUXWS_CODEC: json
       VITE_MUXWS_CODEC: json
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - run: pip install -e .[dev]

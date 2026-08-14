@@ -273,3 +273,68 @@ def test_the_node_backend_still_needs_npm_install_under_no_fe(entry_point: Any, 
     problems = entry_point.missing_dependencies("node", False)
     assert problems, "the node backend cannot run without node_modules and the check said nothing"
     assert not any("frontend" in problem for problem in problems), problems
+
+
+def test_uds_is_a_mode_of_its_own_and_not_a_third_backend(entry_point: Any):
+    """`--uds` selects a different demo, so it must not be reachable as a value of `backend`.
+
+    The two are not variants of one run: the socket demo has no frontend, no port and no choice of
+    language. Making it a third `BACKENDS` entry would have put it in the same `--help` sentence as
+    "which language serves the sockets", which is a question it does not answer.
+    """
+    assert entry_point.parse_arguments([]).uds is False
+    assert entry_point.parse_arguments(["--uds"]).uds is True
+    assert "uds" not in entry_point.BACKENDS
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Answering a request for the TypeScript port by silently running the Python one is the
+        # failure this refusal exists for; the socket demo is Python at both ends.
+        (["node", "--uds"], "no backend argument"),
+        (["python", "--uds"], "no backend argument"),
+        (["--backend", "node", "--uds"], "no backend argument"),
+        # Not an error worth being clever about, but silence here would leave a reader believing they
+        # had turned something off.
+        (["--uds", "--no-fe"], "nothing to turn off"),
+    ],
+)
+def test_uds_refuses_the_arguments_that_cannot_mean_anything(
+    entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str], expected: str
+):
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.parse_arguments(argv)
+    assert refusal.value.code == 2
+    assert expected in capsys.readouterr().err
+
+
+def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
+    entry_point: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """It starts neither uvicorn nor a dev server, so demanding either would be a lie.
+
+    The check is also the only place a Windows reader can be told before anything starts; the
+    platform's absent `AF_UNIX` is not a missing package and no install fixes it, but it belongs in
+    the same list rather than three seconds later inside the client.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
+
+    assert entry_point.missing_dependencies(uds=True) == [], (
+        "the socket demo was refused over dependencies it never loads"
+    )
+
+    # `raising=False` so this reads the same on a machine that has no `AF_UNIX` to remove - which is
+    # the very platform the branch is about, and the one place this test would otherwise error out
+    # instead of asserting.
+    monkeypatch.delattr(entry_point.socket, "AF_UNIX", raising=False)
+    problems = entry_point.missing_dependencies(uds=True)
+    assert len(problems) == 1
+    assert "AF_UNIX" in problems[0]
+
+
+def test_help_names_the_socket_demo_and_where_its_two_scripts_live(entry_point: Any):
+    """A reader who does not know the mode exists will not type `--uds`, so `--help` has to say it."""
+    text = entry_point.build_parser().format_help()
+    for expected in ("--uds", "socket file", "docs/examples/uds_"):
+        assert expected in text, expected

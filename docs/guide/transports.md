@@ -314,6 +314,14 @@ acceptor installs, and the same `accept()` afterwards:
 
 Both need `pip install "muxws[websockets]"`. Start the acceptor, run the dialer, and the dialer prints:
 
+::: tip Running the pair without two terminals
+`python demo.py --uds` from the repository root starts this acceptor on a socket file in a temporary
+directory, runs this dialer against it, and cleans both up. It runs these two files rather than a copy
+of them, so what it prints is what the page says. The browser demo has no `--uds` equivalent for the
+opposite reason: a page cannot open a file as a socket, which is why this transport needs a demo of
+its own at all.
+:::
+
 <!-- expected-output: unix-socket -->
 
 ```text

@@ -354,7 +354,15 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
     // answers at. The remedy is somewhere other than the address bar, and reporting it as a url error
     // would send the reader to re-read a string that is spelled correctly. This is the same shape as
     // the ECONNREFUSED controls above, one class over.
-    const caught = await connect('ws:/bad').then(
+    //
+    // `.invalid` rather than a bare label: RFC 6761 reserves it never to resolve, while `bad` on a
+    // network with a search domain is a name a resolver may go looking for. And the assertion is on
+    // `getaddrinfo` plus a *family* of codes rather than on `ENOTFOUND`, because which one comes back
+    // is the resolver's answer and not this library's: the first CI run of this test failed with
+    // `getaddrinfo EAI_AGAIN`, a temporary-failure code, where every local run had produced
+    // `ENOTFOUND`. What the control actually claims is that name resolution failed and the failure
+    // reached the caller untranslated, and that is what is pinned here.
+    const caught = await connect('ws://no-such-host.invalid').then(
       () => null,
       (error: unknown) => error,
     );
@@ -362,7 +370,7 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(TransportUrlError);
     expect(caught).not.toBeInstanceOf(MuxwsError);
-    expect((caught as Error).message).toContain('ENOTFOUND');
+    expect((caught as Error).message).toMatch(/getaddrinfo (ENOTFOUND|EAI_AGAIN|EAI_NODATA|ESERVFAIL)\b/);
   });
 
   it('leaves a bad subprotocol as a bad subprotocol, which is why the guard is not a blanket catch', async () => {
