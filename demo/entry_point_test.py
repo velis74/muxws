@@ -44,9 +44,21 @@ def entry_point() -> Any:
     return module
 
 
+@pytest.fixture(autouse=True)
+def node_modules_present(entry_point: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts from an installed `node_modules`, whether the machine has one or not.
+
+    The Python CI job installs the `dev` extra and never runs `npm install`, so reading the real
+    directory made half of this file depend on which job it ran in. A test that asserts what the
+    check says must own both halves of what the check looks at; the ones about a *missing* package
+    replace this with their own stub.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: True)
+
+
 @pytest.mark.parametrize("backend", ["python", "node", None])
 def test_a_complete_environment_reports_nothing_missing(entry_point: Any, backend: str | None):
-    """The environment running this test has both backends' dependencies, so the check is silent.
+    """With both backends' dependencies present, the check is silent.
 
     Without this the tests below would pass equally well against a check that always complains. The
     `None` case is the no-argument call the older tests make, pinning that the default parameter is
