@@ -173,9 +173,35 @@ context on every stream it is not nothing. HPACK and QPACK exist because HTTP re
 twenty headers on every request, which is not the shape of muxws traffic — but the saving is real
 where the traffic does look like that.
 
+## Measuring the cost yourself
+
+Every row above is about what the protocol does and does not carry. What the envelope costs in
+throughput is a property of your machine, not of this page, so no number is quoted here: a figure
+measured on a laptop is not a fact about the library, and a figure copied from another benchmark on
+another machine is not a comparison at all.
+
+`python demo.py --bench` from a repository checkout measures it where you are. It runs the same
+payload three ways over the same transport in the same run — a raw socket with a length prefix, one
+WebSocket message per payload with no muxws, and muxws — so the ratio has a denominator that was
+measured rather than assumed, and the two steps between the three modes separate the WebSocket's cost
+from this library's. See [Demos](/guide/demos#the-throughput-report) for the modes, the axes and the
+method.
+
+Two things it does not answer:
+
+- **The TypeScript port.** The harness is Python at both ends. The wire is the same and the
+  conformance corpus says so, but a throughput figure is a property of an implementation and a
+  runtime, and one port's number may not be quoted for the other.
+- **A link slow enough that the wire is the bottleneck.** Over loopback and over a socket file the
+  limit is CPU, which is the regime where the percentage means what it appears to mean. Where the
+  transport saturates first, all three modes score the same and the ratio says nothing — that is a
+  fact about the link, and reading it as a verdict on the envelope is the mistake the report is laid
+  out to prevent.
+
 ## See also
 
 - [Rationale](/guide/rationale) — why the layer exists at all, and what building it yourself costs
+- [Demos](/guide/demos#the-throughput-report) — the throughput harness, and what its ratio means
 - [Architecture](/guide/architecture) — the state machine this page compares against HTTP/2's
 - [Sizes & fragmentation](/guide/sizes-and-fragmentation) — the frame cap and the round-robin writer
 - [Connection lifecycle](/guide/connection-lifecycle) — `goaway`, the drain window, and the absent `settings`

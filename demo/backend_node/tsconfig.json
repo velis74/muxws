@@ -1,5 +1,5 @@
 {
-  // The node backend is Node ESM - `demo.py --backend node` spawns it under tsx - and the root config
+  // The node backend is Node ESM - `demo.py --browser node` spawns it under tsx - and the root config
   // compiles to CommonJS because that is one of the two targets the library ships. `interop/` needed
   // the same override for the same reason, and the same conclusion applies here: two configs rather
   // than one loosened one, so the library keeps being checked as the dual-target package it is.

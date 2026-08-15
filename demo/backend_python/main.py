@@ -4,8 +4,8 @@ One route, and nothing transport-specific after `accept()`. `accept()` performs 
 because it is the only party that knows which `muxws.v1.<codec>` subprotocol to select
 (WSM-CDC-026) - which is also why there is no `await websocket.accept()` anywhere in this file.
 
-`python demo.py` from the repository root starts this under uvicorn on :8020 and the Vite dev server
-on :5173. The frontend dials `/ws` through Vite's proxy.
+`python demo.py --browser` from the repository root starts this under uvicorn on :8020 and the Vite
+dev server on :5173. The frontend dials `/ws` through Vite's proxy.
 """
 
 from __future__ import annotations

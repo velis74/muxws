@@ -5,7 +5,7 @@
  * the handshake selected, because the codec is what the `muxws.v1.<codec>` name carries
  * (WSM-CDC-026/028).
  *
- * `python demo.py --backend node` starts this on :8020 and the Vite dev server on :5173, exactly as it
+ * `python demo.py --browser node` starts this on :8020 and the Vite dev server on :5173, exactly as it
  * starts the Python backend on the same port. The frontend dials `/ws` through Vite's proxy and does
  * not change by a single line - which is the whole reason this file exists.
  *

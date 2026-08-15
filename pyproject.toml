@@ -46,15 +46,16 @@ websockets = ["websockets>=14"]
 msgpack = ["msgpack>=1.0"]
 # The demo (`demo.py`, `demo/backend_python/`) is a consumer of the shipped package, not part of it: it is
 # excluded from both artefacts and nothing in the library imports it. These two are here so that
-# `pip install -e ".[demo,starlette]"` is the whole story for running it, and so that they stay out
-# of `[project] dependencies`, which WSM-PKG-002 requires to be empty.
+# `pip install -e ".[demo,starlette]"` is the whole story for running `python demo.py --browser`, and
+# so that they stay out of `[project] dependencies`, which WSM-PKG-002 requires to be empty.
 # `websockets` is not optional here even though muxws itself does not import it: uvicorn ships no
 # WebSocket protocol implementation of its own, and without one it answers **404 to every upgrade**
 # while serving ordinary HTTP perfectly - so the demo loads in the browser and only the socket fails,
 # which reads as a muxws defect and is not one.
-# All three belong to the *Python* backend. `python demo.py node` serves the same frontend from
-# `demo/backend_node/` under Node and imports none of them, which is why `missing_dependencies()` in
-# `demo.py` asks which backend before it asks what is missing.
+# All three belong to the *Python* backend. `python demo.py --browser node` serves the same frontend
+# from `demo/backend_node/` under Node and imports none of them, which is why `missing_dependencies()`
+# in `demo.py` asks which backend before it asks what is missing. The other two demos are lighter
+# still: `--uds` needs `[websockets]` alone and `--bench` starts neither uvicorn nor a browser.
 demo = ["fastapi", "uvicorn", "websockets"]
 dev = [
     "coverage",

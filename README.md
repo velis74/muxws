@@ -29,6 +29,7 @@ npm install muxws                       # optional peers: ws, @msgpack/msgpack
 | | |
 |---|---|
 | Server and client in three files | [Getting started](https://docs.velis.si/muxws/guide/getting-started) |
+| A browser, a socket file, and what the envelope costs | [Demos](https://docs.velis.si/muxws/guide/demos) |
 | Every public symbol, both languages | [API reference](https://docs.velis.si/muxws/api/) |
 | The normative rules, and the fixtures a third port is written from | [`SPEC.md`](https://github.com/velis74/muxws/blob/main/SPEC.md), [`conformance/`](https://github.com/velis74/muxws/blob/main/conformance/README.md) |
 
