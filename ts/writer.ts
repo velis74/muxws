@@ -28,7 +28,7 @@ export const CONNECTION_LANE = 0;
 /**
  * A frame on one lane could not be encoded.
  *
- * Named rather than allowed to propagate: the encode now happens inside the writer, so a codec that
+ * Named rather than allowed to propagate: the encode happens inside the writer, so a codec that
  * refuses a payload - an `ArrayBuffer` under JSON, say - would otherwise take the write loop down
  * with it, and a peer whose writer is dead while it still reports itself open is the worst possible
  * state. The lane is carried so the caller can fail exactly that stream and leave the connection
@@ -305,7 +305,7 @@ export class Writer {
     this.wake.set();
   }
 
-  /** Socket death. M5b calls exactly this, and nothing is held for a next socket (WSM-RCN-042). */
+  /** Socket death: every lane is dropped and nothing is held for a next socket (WSM-RCN-042). */
   discardAll(): void {
     this.queues.forEach((queue) => {
       queue.discard();

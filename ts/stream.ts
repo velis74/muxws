@@ -248,8 +248,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
    * @internal True between the first fragment of a *remote* opening payload and the frame that
    * completes it.
    *
-   * Explicit state, never inferred from "is an assembler running on this id": inferring it let a
-   * wrong-parity `open` be taken for a continuation of whatever reassembly happened to be running.
+   * Explicit state, never inferred from "is an assembler running on this id": inferring it takes a
+   * wrong-parity `open` for a continuation of whatever reassembly happens to be running.
    */
   opening = false;
 
@@ -278,7 +278,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /** True once the remote has sent one - the other half of the same rule. */
   private receivedAFrame = false;
 
-  /** True once `headersArrived` has been resolved; it resolves exactly once, from three places. */
+  /** True once `replyHeadersArrived` has been resolved; it resolves exactly once, from three places. */
   private headersSettled = false;
 
   /** True once the memoized promise has been settled, either way. It settles exactly once. */
@@ -443,7 +443,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
    *
    * Called for every stream-level frame the remote sends, headers or not: what makes a set of
    * headers legal is being on the remote's **first** frame, so the first frame has to be recognised
-   * even when it carries none - and recognising it is also what lets `headersArrived` settle then
+   * even when it carries none - and recognising it is also what lets `replyHeadersArrived` settle then
    * rather than waiting for a second set that the rule says can never come.
    */
   noteRemoteFrame(headers: Record<string, unknown> | null | undefined): boolean {

@@ -475,13 +475,12 @@ fixture is a silently passing suite.
 
 ## Changing the corpus
 
-1. **A failing fixture is a defect in the implementation, not in the fixture.** Nothing in M6 changes
-   peer behaviour. If a conformance fixture fails, the fix belongs to the milestone that owns the
-   rule. Do not edit a fixture to make a peer pass, and do not change a peer to suit a fixture that
-   was just written.
+1. **A failing fixture is a defect in the implementation, not in the fixture.** The fix belongs to the
+   peer that broke the rule. Do not edit a fixture to make a peer pass, and do not change a peer to
+   suit a fixture that was just written.
 2. **Both runners, one commit.** A new step kind, a new `call`, a new key: change this document and
    both runners together, or the corpus has quietly become two corpora.
-3. **The frame corpus is frozen at 1.0.** M6 adds `test_json_wire_is_frozen`, which hashes
+3. **The frame corpus is frozen at 1.0.** `test_json_wire_is_frozen` hashes
    `conformance/frames/*.json` against a committed digest, so changing the JSON wire after 1.0
    requires deliberately editing that digest. Adding a triple changes the digest; that is the point.
 4. **Both runners pin the fixture count.** Adding a sequence fixture means raising
@@ -496,35 +495,29 @@ fixture is a silently passing suite.
    has to remember separately - and it is deliberately outside the driver, because a driver that
    counted its own fixtures could report three of them as thirteen.
 
-## Known divergences from the M6 brief
+## Known divergences
 
-Recorded here so a runner author does not spend an afternoon on them. Both are reported as gaps
-rather than resolved unilaterally.
+Recorded here so a runner author does not spend an afternoon on them. The divergences from the M6
+brief - the first and third below - are reported as gaps rather than resolved unilaterally; the
+second is a reading of this schema that two processes force.
 
 - **`expect_out` vs `expect_frame` in `invalid/`.** M6 §6 says each invalid case declares
-  `expect_frame`; the fixtures written in M1 and both Python runners that read them spell it
+  `expect_frame`; the fixtures and both Python runners that read them spell it
   `expect_out` and make it a **list**, so that a case may assert an ordered sequence of outgoing
   frames or - crucially - that *nothing* went out. `expect_frame` in the singular cannot express the
   empty case without a second convention. This document describes what the runners actually read.
   Renaming is a coordinated change across the eight fixtures, `muxws/conformance_test.py` and
   `muxws/conformance_schema_test.py`; until it happens, write `expect_out`.
-- **`bytes-payload-under-binary-codec.json` used to be executed by nothing.** *Resolved.* It declares
-  `"requires_codec": "msgpack"`, and for a while both runners of record were configured with `json`
-  and skipped it while no third runner was configured with msgpack, so the fixture was a **claim
-  about WSM-CDC-008 that nothing checked** and the two "the skip set is pinned" tests turned that
-  into a green line in the report. Both runners now replay the whole sequence corpus a second time
-  under msgpack, in both role assignments, which is what WSM-CDC-007 asks for; `$bytes` is defined
-  above and implemented in both; and each runner asserts by name that no fixture requires a codec no
-  pass is configured with, so this cannot silently recur. The *cross-language* half of WSM-CDC-007 is
-  covered too, and no longer by the hand-written scenario alone: `interop/runner.py` and
-  `interop/runner.ts` carry a corpus conductor (`corpus-accept` / `corpus-dial`) that replays these
-  same files with a Python peer at one end of a real socket and a TypeScript peer at the other, in
-  both role assignments and both codecs. One process conducts, because a sequence fixture is a single
-  ordered script that drives *both* peers; the other executes the steps it is sent over a control
-  channel that is deliberately not the WebSocket under test. Two readings of the schema differ there
-  and are documented in the drivers: `inject` names the peer a message is delivered *to*, so across
-  two processes its remote is what sends it, and `settle` is read as cross-process quiescence rather
-  than as turns of one event loop, which no second process can observe.
+- **`inject` and `settle` read differently across two processes.** The cross-language half of
+  WSM-CDC-007 is `interop/runner.py` and `interop/runner.ts`, which carry a corpus conductor
+  (`corpus-accept` / `corpus-dial`) replaying these same files with a Python peer at one end of a real
+  socket and a TypeScript peer at the other, in both role assignments and both codecs. One process
+  conducts, because a sequence fixture is a single ordered script that drives *both* peers; the other
+  executes the steps it is sent over a control channel that is deliberately not the WebSocket under
+  test. Two readings of this schema differ there, and are documented in the drivers: `inject` names
+  the peer a message is delivered *to*, so across two processes its remote is what sends it, and
+  `settle` is read as cross-process quiescence rather than as turns of one event loop, which no second
+  process can observe.
 - **The WSM-TST-002 example uses raw stream ids.** The rule in the same paragraph says fixtures MUST
   refer to streams by `stream_ref` and never by a raw id; the example immediately below it writes
   `{"type": "open", "stream": 1, "end": true}` and `{"type": "open", "stream": 2}`, and omits the

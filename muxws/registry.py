@@ -1,8 +1,7 @@
 """`peer.tags` and `PeerRegistry`: finding a peer by keys the application chose (§9.5).
 
-The registry indexes; it does not watch. That distinction is the whole design, and WSM-REG-013 and
-WSM-REG-014 exist to make a plain dict provably the right choice for `tags`: writing a tag is free
-and costs no bookkeeping, and the index only moves when someone says so.
+The registry indexes; it does not watch. `tags` is a plain dict: writing a tag is free and costs no
+bookkeeping, and the index only moves when someone says so (WSM-REG-013, WSM-REG-014).
 
 The documented usage rule follows from that: **look up on keys you do not mutate, and mutate keys you
 do not look up.** A consumer needing both on one key calls `register(peer)` after each write.

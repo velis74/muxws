@@ -1,11 +1,10 @@
 /**
  * The reconnect helper - and, more importantly, that anything calls it.
  *
- * A mirror of `muxws/reconnect_test.py`. M5a shipped a writer nothing used, so the first block below
- * goes through the **real** `connect()` against a **real** `ws` server: kill the server, watch the
- * peer re-dial, replay its hello and fire `onReconnect`. A `ConnectionLoop` with perfect unit tests
- * that `connect()` never constructs is a failed milestone, and only that block can tell the
- * difference.
+ * A mirror of `muxws/reconnect_test.py`. The first block goes through the **real** `connect()` against
+ * a **real** `ws` server: kill the server, watch the peer re-dial, replay its hello and fire
+ * `onReconnect`. A `ConnectionLoop` that `connect()` never constructs passes every unit test in this
+ * file, and only that block can tell the difference.
  *
  * The blocks after it exercise the driver over `ts/transports/memory.ts`, which is where the ordering
  * rules of §7 are actually asserted. Durations are **milliseconds** here and seconds in Python (§9.3),
@@ -267,9 +266,9 @@ describe('connect() is wired to the reconnect driver', () => {
   it('re-dials on a real socket whose pong is swallowed - WSM-RCN-011', async () => {
     // The whole heartbeat path over a real socket, through the real `connect()`: a swallowed pong is
     // noticed, the socket is closed locally so `serve()` settles, the supervisor sees the loss and
-    // dials again. Every other heartbeat test here drives `Heartbeat` or `ConnectionLoop` directly,
-    // so deleting `startHeartbeat()` from the supervisor left them all green - a heartbeat nothing
-    // starts is the M5a failure mode, one milestone later.
+    // dials again. Every other heartbeat test here drives `Heartbeat` or `ConnectionLoop` directly
+    // and stays green with `startHeartbeat()` deleted from the supervisor; this is the one that
+    // fails, because a heartbeat nothing starts detects nothing.
     //
     // No muxws peer on the server side, deliberately: `serve()` echoes a `ping` verbatim
     // (WSM-CON-010), and a server that answers is the one case the heartbeat cannot detect.
@@ -399,8 +398,8 @@ describe('the backoff schedule', () => {
 
   it('uses Math.random and never a cryptographic source - WSM-RCN-005', () => {
     // Reconnect jitter exists to disperse a thundering herd, not to resist an adversary. The ping
-    // nonce in M4 is the opposite case and does use one; conflating the two is the mistake this
-    // guards against, in the direction the rule names.
+    // nonce is the opposite case and does use one; conflating the two is the mistake this guards
+    // against, in the direction the rule names.
     const source = readFileSync(join(process.cwd(), 'ts', 'reconnect.ts'), 'utf8');
     expect(source).toContain('Math.random');
     // A call site, not the word: the comment above `uniform()` names `crypto.getRandomValues` in
@@ -1053,9 +1052,9 @@ describe('the reconnect driver', () => {
     await loop.establish();
     loop.start();
 
-    // With the `settings` exchange gone, the socket-open moment and the subprotocol moment coincide,
-    // so for a peer with no hello "established" really is socket-open: the counter is reset and
-    // `isOpen` is true with no frame exchanged first.
+    // There is no `settings` exchange, so the socket-open moment and the subprotocol moment coincide:
+    // for a peer with no hello "established" really is socket-open, the counter is reset and `isOpen`
+    // is true with no frame exchanged first.
     expect(loop.attempts).toBe(0);
     expect(peer.isOpen).toBe(true);
     expect(server.dialerSockets[0].sent, 'a peer given no hello sends none').toEqual([]);

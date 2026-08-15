@@ -37,8 +37,7 @@ class SocketAdapter(Protocol):
 
         `code` defaults to 1000 and MUST NOT be 1006: that code means "closed abnormally" and a peer
         may never send it - `websockets` rejects it outright, and an adapter that swallowed the
-        rejection would leave the socket open while the peer believed it closed. That is not
-        hypothetical; it cost this library its reconnect on every fast link until M8. Idempotent:
-        closing an already-closed socket is not an error.
+        rejection would leave the socket open while the peer believed it closed. Idempotent: closing
+        an already-closed socket is not an error.
         """
         ...

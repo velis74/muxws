@@ -26,7 +26,19 @@ export default defineConfig({
       formats: ['es', 'cjs'],
       fileName: (format, name) => (format === 'cjs' ? `${name}.cjs` : `${name}.js`),
     },
-    rollupOptions: { external: ['ws', '@msgpack/msgpack'] },
+    rollupOptions: {
+      // `ws` and `@msgpack/msgpack` are optional peer dependencies the consumer installs; bundling
+      // either would duplicate it and break `instanceof` across the seam.
+      //
+      // `/^node:/` because a Vite library build resolves with browser conditions: a `node:` builtin
+      // that is not externalised is rewritten to `__vite-browser-external`, a module whose body is
+      // `module.exports = {}`. In the shipped artifact `await import('node:net')` would then yield an
+      // object with no `connect`, and every `ws+unix:` dial would die as `TypeError: n is not a
+      // function` - naming neither the url nor the transport, and not a `MuxwsError`, which
+      // WSM-ERR-016 forbids. A predicate rather than the one specifier, so the next builtin imported
+      // is covered too.
+      external: [/^node:/, 'ws', '@msgpack/msgpack'],
+    },
   },
   test: {
     coverage: { provider: 'v8', include: ['ts/**/*'], exclude: ['**/index.ts'] },

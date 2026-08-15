@@ -12,6 +12,15 @@ Two conventions worth knowing before you read a page:
 - **Limits belong to the peer that sets them.** `max_payload_bytes`, `max_concurrent_streams` and
   `error_serializer` are configured per connection, are never announced and are never negotiated.
   The other end finds out about one only from the reset it provokes.
+- **`muxws/node` re-exports the portable half of `muxws`.** `Reconnect`, `ReconnectOptions`, `Hello`,
+  `HelloOptions`, `ConnectOptions`, `backoffDelay`, `shouldRetry`, `unjitteredDelay`, `PeerRegistry`,
+  `TagValue` and `VERSION` come out of both entry points, so a Node-only consumer needs one import
+  path. `WsSocket` comes from `muxws/node` alone — nothing reachable from `muxws` may import it
+  (WSM-API-022). Everything else — the codecs, the errors, `Peer`, the frame helpers — is `muxws`
+  only, and importing `muxws` is also what registers the JSON codec.
+
+The Python package needs Python 3.10 or newer, and the `websockets` extra needs `websockets` 14 or
+newer: the `ws+unix:` dial is `websockets.asyncio.client.unix_connect`.
 
 ## The pages
 
@@ -25,7 +34,7 @@ Two conventions worth knowing before you read a page:
 | [Errors](/api/errors) | The exception tree, the nine reset codes, and how a reset becomes an exception. |
 | [Codec](/api/codec) | The codec protocol, the two codecs that ship, the registry, and the settings that select one. |
 | [Registry](/api/registry) | `PeerRegistry`: tagging live peers and looking them up again. |
-| [Transports](/api/transports) | `SocketAdapter` and every adapter that implements it, in both languages. |
+| [Transports](/api/transports) | `SocketAdapter` and every adapter that implements it, in both languages, plus the `ws+unix:` URL grammar and the `websockets` dial gates. |
 | [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, and the two callback aliases. |
 
 New to muxws? Start with the [rationale](/guide/rationale) and the

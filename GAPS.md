@@ -1123,6 +1123,32 @@ order is not a ranking.
   simply absent. It is also the only transport here that authenticates where §5.2 says it belongs and
   with nothing on the wire: the socket's permissions gate the connection, and `SO_PEERCRED` /
   `getpeereid` give the acceptor the peer's uid and gid at accept time.
+
+  Half of this shipped after the entry was written, and which half matters. What ships is a
+  WebSocket *over* AF_UNIX: `connect()` takes `ws+unix:///path/to.sock:/route` in both languages,
+  `websockets`' `unix_serve` and a `ws` server attached to an `http` server listening on a path
+  accept it, and the handshake is the one it always was — an HTTP GET and an Upgrade offering
+  `muxws.v1.<codec>`, answered 101 or 400. Not one line of adapter changed: `WebsocketsSocket` and
+  `WsSocket` are the same classes over the same four methods, `connect()`'s signature gained no
+  argument, and the URL scheme is the whole of the new public surface. The interop driver runs the
+  WSM-TST-004 script over a socket file in both role assignments (`interop/drive.sh <a> <b> unix`),
+  which is where that claim is checked rather than asserted — including the one thing neither
+  language can check alone, that the two libraries split `ws+unix://<path>:/<route>` in the same
+  place. So the authentication argument above is now available in practice and not only in
+  principle — the file's permissions gate the dial, `SO_PEERCRED` names the caller at accept time,
+  and the library is involved in neither (WSM-AUT-001..004).
+
+  What is **not** written is the framing half: a raw AF_UNIX stream with no HTTP upgrade on it at
+  all. Its value was never really about Unix sockets — the same length-prefix adapter serves the
+  stdio and the plain-TCP candidates below, which is three entries in this list for one piece of
+  work, and it is the shape that would actually test the seam, because nothing about it is a
+  WebSocket. Its cost is that it must reinvent, one at a time, everything the upgrade was carrying
+  for free: message boundaries, which is the prefix itself and the cheapest of the three; a close
+  code vocabulary, which is the second problem recorded below; and a substitute for the HTTP 400,
+  which is the first — a refusal that arrives before any application data, that the dialer can tell
+  apart from a connection which merely failed, and that therefore has to be invented rather than
+  borrowed, because WSM-CDC-022's refusal is a status line. Dialling a socket file did not make that
+  work smaller by a single line; it removed the least interesting reason for wanting it.
 - **`postMessage` / `MessagePort`** — Web Worker, SharedWorker, iframe, extension port. Message
   boundaries, ordering and duplex come free, structured clone means a codec could be close to a no-op,
   and the layer being replaced is the same hand-rolled `{ id, type }` wrapper the rationale describes.
@@ -1148,11 +1174,20 @@ carried by the WebSocket subprotocol today (`muxws.v1.<codec>`, WSM-CDC-022/027/
 transport either configures it on both ends or invents a first message, and the second option is a
 wire change. And the close path speaks in WebSocket close codes in places — WSM-RCN-011's 1000, the
 policy-violation code in WSM-CDC-028 — so an adapter over a transport with no such numbers has to
-choose a mapping, and that mapping should be stated once rather than per adapter.
+choose a mapping, and that mapping should be stated once rather than per adapter. Both of these are
+still open, and the Unix work above is the reason to say so out loud: it kept the subprotocol and
+kept the close codes, so it met neither problem, and a reader who sees "unix socket" ticked off
+somewhere would otherwise be entitled to think one of them had been answered.
 
-Not scheduled. Recorded because the claim "the adapter is the only transport-specific code" is
-currently unfalsified rather than demonstrated, and a second, non-WebSocket adapter is what would
-change that — the same argument the demo made in M8.
+Not scheduled, and the Unix work does not schedule it. Recorded because the claim "the adapter is
+the only transport-specific code" is currently unfalsified rather than demonstrated, and a second,
+non-WebSocket adapter is what would change that — the same argument the demo made in M8. Carrying
+the handshake over a socket file is not that adapter: it changed which kernel object the bytes
+crossed and nothing above it. What it is instead is evidence for a weaker claim that is still worth
+having — not that the adapter is the only place transport knowledge lives, but that for one real
+change of transport no adapter had to be touched at all, and the two ports agreed about the new URL
+without either one of them learning anything about the other. The strong claim needs a transport
+that is not a WebSocket, and there still is not one.
 
 ## muxws-m5a-fragmentation-and-writer.md — WSM-BPR-001/002, half a decision is on the record
 
@@ -1189,3 +1224,286 @@ WSM-CON-009) — which is the reason the name is reserved rather than the mechan
 knows its own queue depth (`writer.depth`), so a peer could expose it and let an application throttle
 itself. That is local observation, needs nothing on the wire, and tells a producer only about its own
 end — the far end's inability to keep up stays invisible.
+
+## Raised by the author — what fraction of the wire muxws actually delivers, unmeasured
+
+**What I needed:** the overhead this library imposes, stated as a ratio against the transport it
+runs on. The question as the author put it: if the wire is capable of 1000 MB/s, how many MB/s is
+muxws capable of?
+
+**What exists:** `muxws/throughput_test.py`, which measures frames and bytes a second over the
+in-memory transport and asserts a floor far below what the machine achieves. That file is honest
+about what it is — the codec and peer cost with no socket underneath — and it is the numerator of
+the ratio with the denominator missing. Nothing anywhere measures the same payload over the same
+machine **without** muxws in the path, so the figure it prints cannot be turned into a percentage of
+anything.
+
+**Why the missing half is the whole point.** A frames-a-second number regresses visibly and that is
+worth having, but it answers "is this slower than it was", not "what does the envelope cost". The
+second question is the one an evaluator asks before adopting a multiplexer, and answering it
+requires the baseline to be measured in the same process, on the same payload sizes, in the same
+run — a figure copied from another benchmark on another machine is not a comparison.
+
+**What the measurement has to hold still to mean anything**, and each of these is a place a naive
+harness gets a flattering number: payload size (the per-frame envelope is a fixed cost, so small
+payloads are where the ratio is worst and large ones where it disappears); codec (JSON pays
+`encode`/`decode` per frame, msgpack much less, and `WSM-CDC-008`'s bytes rule decides whether a
+copy happens); one stream against many (the writer's queues and the stream map are per-connection
+costs that only concurrency exposes); fragmentation on or off (`MAX_FRAME_BYTES` splits, and the
+splitter has been wrong about its own cost before — see the M8 entry above); and the transport
+itself, since the in-memory pair has no syscall in it at all and a unix socket, a loopback TCP
+socket and a real link are three different denominators.
+
+**What it would cost to close.** A benchmark module, not a test: the same payload driven three ways
+on one machine — raw transport with no muxws, muxws over the in-memory pair, muxws over a real
+socket — reported as MB/s and as a percentage of the raw figure, per codec and per payload size. It
+must not live in the pytest run, because a benchmark that fails on a loaded CI runner gets its
+floors lowered until it asserts nothing, which is the failure mode `throughput_test.py` was already
+written to avoid. Deferred deliberately, at the author's request, to be picked up as its own piece
+of work.
+
+**The shape it should take, decided with the author afterwards:** end to end, not in-process. Start
+a real acceptor, dial it with a real client, measure at the client. The in-memory pair cannot be the
+only subject, because what it leaves out — the syscall, the copy into the kernel, the scheduler
+putting two ends on two cores — is a large part of the answer the question is asking for. Three
+consequences follow, and each one is a way the figure goes wrong if it is skipped:
+
+- **The control runs over the same transport, in the same run.** The denominator is not "some fast
+  path" but these bytes across this socket with muxws lifted out: a bare `websockets` echo for the
+  WebSocket rows, a bare `asyncio` stream with a trivial length prefix for the Unix rows. One
+  control per transport. Without it the ratio is being estimated against a number from a different
+  machine, which is not a comparison.
+- **Two processes, not two peers in one event loop.** Both ends in one loop share one core and
+  serialise against each other, so the figure lands low and blames neither side in particular. The
+  acceptor belongs in a subprocess, the way `docs/examples/run_examples_test.py` already starts one,
+  with the client as the measuring end.
+- **The ratio only means anything where the transport is not the bottleneck.** Over loopback and
+  over a Unix socket the limit is CPU, so the percentage is exactly what was asked for: what the
+  envelope costs. Over a real link the wire saturates first and muxws scores ~100% — a flattering
+  number that says nothing about this library. Whichever rows are published have to say which regime
+  they were taken in, or the wrong one will be quoted.
+
+The matrix that falls out: transport × codec × payload size × one stream against many. Transport is
+a real axis now rather than a hypothetical one — `ws://` over loopback TCP and `ws+unix://` over a
+socket file are two denominators on the same machine, and the difference between them is the cost of
+the network stack rather than the cost of muxws, which is itself worth having on the page. If
+regression protection is wanted on top, it belongs in one coarse threshold kept apart from the
+report, not in per-row assertions that CI will grind down.
+
+## Raised by the author — what `ws+unix:` does on Windows is documented and never executed
+
+**What I needed:** evidence for the Windows paragraph the Unix-socket work put in
+`docs/guide/transports.md`, in `ts/node.ts` and in `UnixSocketsUnsupportedError`'s own docstring.
+
+**What is claimed there**, three separate statements with three different standings:
+
+1. Python refuses at the parse: `connect("ws+unix://...")` raises `UnixSocketsUnsupportedError`
+   synchronously, before any socket exists, because `hasattr(socket, "AF_UNIX")` is false. The
+   reason the check is there at all is that `websockets`' `unix_connect` imports perfectly well on
+   Windows and would otherwise fail deep in the dial with a bare `AttributeError` on
+   `loop.create_unix_connection` — naming neither the URL nor the platform, and arriving out of a
+   background reconnect attempt rather than out of the call that caused it.
+2. Node deliberately has **no** such guard, because `net.connect({ path })` opens a *named pipe* on
+   Windows rather than failing, and a guard would delete a transport that works. A POSIX-looking
+   path therefore fails there with an ordinary connect error naming the path it tried.
+3. A named-pipe URL (`ws+unix://\\.\pipe\name:/route`) cannot be expressed at all: `new URL()`
+   rejects it on every platform.
+
+**What is actually executed:** only the third. It is platform-independent, so `ts/unix.spec.ts`
+pins it on Linux. The first two are reasoning, not measurement. Every workflow in `.github/` is
+`runs-on: ubuntu-latest`, so nothing in this project has ever run on Windows — the first statement
+rests on a one-line branch whose *message and raise site* no test on that platform has seen, and the
+second rests on libuv behaviour nobody here has observed.
+
+**Why this is worse than an ordinary untested platform.** The Unix tests skip cleanly where
+`AF_UNIX` is absent, which is correct and is also the trap: a Windows run would report green while
+executing none of the transport, and the two claims above are exactly the ones a Windows reader
+would rely on. A skip that looks like a pass is the failure mode `pyproject.toml` already argues
+against for the optional extras, and it applies here with a platform in place of a dependency.
+
+**What it would cost to close.** One `windows-latest` leg in `ci.yml` running the Python and
+TypeScript suites, plus two Windows-only tests: that `connect()` raises `UnixSocketsUnsupportedError`
+with the URL in its message rather than an `AttributeError` from somewhere else, and that a Node
+dial of a POSIX-looking path fails naming the path instead of hanging. The tests are small; the leg
+is not free, and the honest risk is that it turns up unrelated pre-existing failures — path
+separators, temporary directories, line endings in the fixture comparisons — which is the real
+reason it has not been done rather than a judgement that Windows does not matter.
+
+## Raised by the author — a transport's failures were only half catchable, and the rule was written after the debt was paid
+
+**What I needed:** one answer to "what does an application catch when a dial fails". The Unix-domain-
+socket transport exposed that there were two, and that which one you got depended on the scheme in
+the URL rather than on anything about the failure.
+
+**The before-state, measured on this tree** — python 3.11.2, `websockets` 17.0.1 — before any of this
+work landed:
+
+| case                        | `ws://` dial                                          | `ws+unix://` dial              |
+|-----------------------------|-------------------------------------------------------|--------------------------------|
+| malformed URL               | `websockets.exceptions.InvalidURI` — **not** a `MuxwsError` | `UnixUrlError` — is one   |
+| optional dependency missing | bare `ImportError`                                    | bare `ImportError`             |
+| runtime cannot host it      | n/a (TCP is everywhere)                               | `UnixSocketsUnsupportedError`  |
+
+So an application wrapping `connect()` in `except MuxwsError` caught a bad `ws+unix:` URL and missed a
+bad `ws:` one, and the two Unix classes were the only muxws exceptions defined outside
+`muxws/errors.py` — an arrangement nobody had written down, which meant the next transport would
+either copy it by accident or contradict it by accident.
+
+**A second defect fell out of the same measurement, and it is the one that made the ordering
+normative.** `python -c "import asyncio, muxws; asyncio.run(muxws.connect('ws:/HTTP 400'))"` raised
+`muxws.errors.CodecMismatch`. The URL translation was happening inside the failed-dial handler, and
+that handler decides whether a failure was a refused muxws handshake by looking for a 400 in the
+exception's text — so a URL whose own characters spelled the refusal was reported as a codec
+disagreement, sending the reader to compare `MUXWS_CODEC` on two ends of a connection that had never
+been made. It is not a subtle failure mode: a refused handshake and an unparseable address are
+different things, and the handler for one must not be able to answer the other.
+
+**The decision, taken with the author.** Two shared bases in the shared error module, root-exported:
+`TransportUrlError` (`MuxwsError`, `ValueError`) for an address this transport cannot open, and
+`TransportUnsupportedError` (`MuxwsError`, `RuntimeError`) for a transport this runtime cannot provide
+at all. The dual inheritance follows the precedent the two Unix classes already set. Concrete errors
+stay in their transport's own module and are reached as
+`from muxws.transports.<transport> import <Error>` — deliberately not root-exported, because the
+adapter seam is public (WSM-API-021), third parties are expected to write adapters, and a third party
+cannot add a class to `muxws/errors.py`. A convention that required a root export would be one only
+this repository could follow. `ConnectionClosed` is the case that fixes the boundary in the other
+direction: every adapter raises it, but the `SocketAdapter` protocol *requires* it, so it is owned by
+the seam and stays shared. Ownership decides where an error lives, not who raises it.
+
+**The names, since two of them are asymmetric on purpose and a reviewer will trip over it.** Each port
+names a concrete class after the third-party library that owns *its* dial, so Python has
+`WebsocketUrlError` and `WebsocketsNotInstalledError` — singular for the URL scheme family, plural for
+the PyPI distribution — and TypeScript has `WsUrlError` and `WsNotInstalledError` after the npm
+package. `NotInstalled` rather than `Unavailable` in both, because "unavailable" read in a traceback
+out of a dial sounds like *the endpoint was unreachable*, which is transient and retryable, and this
+is neither. `UnixUrlError` is deliberately the same name in both ports, refusal for refusal, so one
+URL pasted into either configuration gets the same answer. `UnixSocketsUnsupportedError` is the same
+name in both for a *different* reason and is the one place the parallel is loose: Python raises it
+because the interpreter has no `AF_UNIX`, TypeScript because the root entry point ships no filesystem
+transport at all (WSM-API-022), and `muxws/node` never raises it on any platform. The sentence to the
+reader is identical — *this URL names a socket file and cannot be dialled from here* — which is what
+decided it; the documentation has to be precise about which entry point, and `docs/api/errors.md` is.
+
+**Why this went into SPEC.md as `WSM-ERR-016` rather than staying a convention.** Because the debt was
+paid in the same piece of work, so the rule describes the implementation instead of asking it for
+something. The `websockets` dial now translates an unparseable URL into a `TransportUrlError` subclass,
+chained `from exc`, detected before the dial and therefore out of the refusal handler's reach; a
+missing optional dependency now raises a `TransportUnsupportedError` subclass whose message names
+`pip install muxws[websockets]`; the Unix classes are reparented with their behaviour and their
+existing assertions untouched; and TypeScript mirrors the two bases as WSM-ERR-004 requires. A rule
+written the other way round — first the text, then the conformance — is the kind this repository has
+already learned to distrust: `WSM-CDC-022` stood in the specification while both ports violated it,
+from M3 until M6, with a docstring asserting the behaviour that was missing. `WSM-ERR-004` needed
+amending in the same edit, because "every port MUST mirror this
+hierarchy with classes of the same names" becomes false the moment a class is named after a Python
+distribution; it now scopes itself to the shared hierarchy and hands transport subclasses to
+`WSM-ERR-016`.
+
+**What was examined and deliberately given no class, because the failure is not reachable through a
+muxws call.** Each of these was probed with a `sys.meta_path` finder that blocks one top-level package
+and nothing else:
+
+- **`msgpack` absent.** The only route into `muxws/codecs/msgpack_.py` is the application's own
+  `from muxws.codecs.msgpack_ import MsgpackCodec`, and the import is at module scope there, so the
+  failure lands in the application's own import statement before any muxws call runs. Nothing inside
+  muxws imports it: with `MUXWS_CODEC=msgpack` and msgpack blocked, `muxws.resolve_codec()` already
+  raises `CodecNotRegistered` naming the variable, the value and the registered set, which is the
+  right diagnostic and needs no new class.
+- **`starlette` absent on the `accept()` path.** `perform_upgrade` does import it lazily, so a duck
+  object carrying `.scope` and `.client_state` does produce a bare `ModuleNotFoundError` — but the
+  only object that legitimately satisfies `_is_starlette_websocket` is a real
+  `starlette.websockets.WebSocket`, which the caller cannot be holding unless starlette imported
+  successfully in their own process. Synthetic reachability, not reachability. The same argument
+  disposes of `_is_websockets_connection`.
+- **`muxws.select_subprotocol()` with `websockets` absent.** Reachable in the literal sense; its only
+  caller is `websockets.serve(..., select_subprotocol=muxws.select_subprotocol)`, which cannot be
+  written by someone whose `import websockets` fails. Left as it is, which is the one place this
+  transport can still surface a bare `ImportError`.
+
+**One surface did not get its half of the debt paid, and the specification says so rather than
+pretending otherwise.** The `connect()` exported from `muxws` — the platform-`WebSocket` dial — still
+lets `new WebSocket(url, …)` throw straight through, so a malformed URL arrives as a `DOMException`
+named `SyntaxError` (`The URL 'nonsense' is invalid.` under jsdom, `TypeError: Invalid URL` under
+undici, both measured) and is not a `MuxwsError`. Everything else translates: Python's dial, both
+`ws+unix:` refusals, and every failure behind `muxws/node`. The reason it was left is that the fix is
+not a `try`/`catch`: jsdom throws the identical shape for a bad **subprotocol** token, so a blanket
+catch would relabel a failure that has nothing to do with the address and send the reader to re-read a
+correct URL. Conforming here means claiming the constructor's throw only when the URL is independently
+unparseable, rethrowing everything else, and keeping the platform's wording on `cause`. That is a
+day's work with two runtimes to check, not a line, and it is recorded as a known deviation in
+Appendix A and named in `docs/api/errors.md` and `docs/api/connect.md` where a reader would look for
+it. The rule was not softened to cover the gap, because a rule shaped around what happens to be
+implemented cannot later be used to ask for anything.
+
+**What remains unproven, and it is two things.**
+
+*Windows.* Everything `TransportUnsupportedError` says about `AF_UNIX` inherits the standing of the
+entry above this one: no workflow in `.github/` has ever run on Windows, so
+`UnixSocketsUnsupportedError`'s raise site and message have never been executed on the platform they
+exist for. Reparenting it changed no behaviour, which is exactly why the reparent is safe and exactly
+why it adds no evidence either.
+
+*A dependency that is present but too old.* `pyproject.toml` records the incident: with `websockets`
+older than 14 the first dial dies with
+`TypeError: BaseEventLoop.create_connection() got an unexpected keyword argument 'additional_headers'`,
+naming neither muxws nor the release that is too old. `WebsocketsNotInstalledError` does not cover it
+— the import succeeds — and demonstrating it needs a second environment rather than an import blocker,
+so no class was proposed and none should be until someone has actually stood that environment up. A
+version probe on every dial is a cost the rule does not ask for; naming the floor in the install line
+the message already carries is the cheap half, and it is what is there now.
+
+**Three things the rule required and the implementation did not do, found by reviewing the finished
+work against its own text rather than against its tests.** Each was measured before it was fixed, and
+each is now pinned by a witness that fails when the fix is reverted.
+
+- **A broken `websockets` was reported as an absent one.** `require_websockets()` translated *every*
+  `ImportError`, so a package that was installed and failed to import came back as
+  `WebsocketsNotInstalledError` with the remedy `pip install muxws[websockets]` — pip's answer to
+  which is "requirement already satisfied". Measured with a shadowing `websockets/__init__.py` whose
+  body was `import definitely_missing_pkg_xyz`:
+
+  ```
+  WebsocketsNotInstalledError: muxws needs the `websockets` package to dial a ws:, wss: or ws+unix:
+  URL, and importing it failed (No module named 'definitely_missing_pkg_xyz'); install it with
+  `pip install muxws[websockets]`
+  ```
+
+  The rule's own sentence — *an import failure that is not the dependency being absent MUST be
+  re-raised untouched* — had a TypeScript witness and no Python one, which is how the divergence
+  survived a rule written to prevent exactly it. The catch now narrows to `ModuleNotFoundError` whose
+  `name` is exactly `websockets`, and the same URL against the same shadowed package raises the
+  original `ModuleNotFoundError`. The technique already existed twenty lines away, in
+  `errors_test.py::_import_the_whole_library`, which is the uncomfortable part.
+- **The published bundle could not open a Unix socket at all.** `ts/node.ts`'s `unixConnector` is this
+  package's first runtime import of a Node builtin, and `vite.config.ts` externalised only `ws` and
+  `@msgpack/msgpack`. A Vite library build resolves with browser conditions, so `node:net` was
+  rewritten to `__vite-browser-external` — a module whose whole body is `module.exports = {}` — and
+  `const { connect } = await import('node:net')` yielded `undefined`. Against the real artifact, a
+  `ws+unix:` dial through `dist/node.js` failed with `TypeError: n is not a function`: not a
+  `MuxwsError`, naming neither the url nor the transport, which is a WSM-ERR-016 violation reached
+  without any error class being wrong. Nothing in the repository could see it — vitest,
+  `interop/drive.sh` and every spec run against `ts/` sources, and `packaging.spec.ts` only asked
+  whether `ws` and `@msgpack/msgpack` appeared. With `/^node:/` added the same script gets
+  `Error: connect ENOENT /tmp/muxws-absent.sock`, the real dial failure. The general lesson is the
+  cheap one: a rule about what reaches a caller has to be witnessed at least once against the artifact
+  a caller installs, not only against the sources every test imports.
+- **The TypeScript placement guards could not fail.** Both cited witnesses compared against hardcoded
+  name lists, so a *new* concrete transport error added to `ts/errors.ts` and root-exported passed
+  them — measured, with a `RogueUrlError` that left `ts/errors.spec.ts` and `ts/packaging.spec.ts`
+  green. The Python twin walks `MuxwsError.__subclasses__()` and caught the equivalent mutation. Both
+  TypeScript guards now walk the prototype chain of each module's runtime exports and keep the name
+  lists as the non-vacuity control, which is the shape Python's already had. Relatedly,
+  `UnixSocketsUnsupportedError` was defined in `ts/index.ts` under a comment conceding the placement
+  was an artefact of which file the change happened to own; it now lives in
+  `ts/transports/browser-socket.ts`, the module that owns the platform-`WebSocket` dial, and is
+  re-exported from `ts/index.ts`. The export surface — the half the packaging clause is about — is
+  unchanged, and so is `packaging.spec.ts`'s assertion about it.
+
+**And one portability guard that was missing on a parametrized row.** The `over-a-socket-file` case of
+`test_a_missing_websockets_package_names_the_extra_that_installs_it` carried no `@requires_af_unix`,
+although every other `ws+unix:`-touching test in that file does. `_websocket_dialer` parses the
+`ws+unix:` URL before it checks the dependency, so on a platform without `AF_UNIX` that row raises
+`UnixSocketsUnsupportedError` and the `pytest.raises(WebsocketsNotInstalledError)` fails — latent
+rather than red, because CI is `ubuntu-latest` only, which is the same blind spot the Windows entry
+above this one is about. The TCP row deliberately stays unguarded: it is the one that proves the class
+exists on a platform that cannot dial a socket file at all.

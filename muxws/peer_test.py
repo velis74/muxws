@@ -121,8 +121,7 @@ _ID_ARGUMENT_NAMES = frozenset({"id", "sid", "stream", "stream_id", "streamid"})
 #: - `Stream.__init__` is the library's own constructor, reached only with a `Peer` in hand; every
 #:   caller-facing route to a `Stream` (`open`, `notify`, `request`, and dispatch to `on_stream`)
 #:   allocates the id itself. See the note in SPEC.md's Appendix B: this is the one place the rule's
-#:   absolute wording and the implementation do not quite meet, and it is deliberately pinned rather
-#:   than left to be rediscovered.
+#:   absolute wording and the implementation do not quite meet.
 _ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION = frozenset(
     {
         ("ConnectionLost.__init__", "stream_id"),
@@ -898,9 +897,9 @@ async def test_a_throwing_on_frame_handler_does_not_break_the_connection(make_pa
     """WSM-OBS-003: an observer must not be able to break what it observes.
 
     `on_frame` is called from inside the read loop and from inside the write loop. A handler that
-    raised - a metrics counter, a debug print with a bad format string - took the read loop down with
-    it, which the peer then reports as a socket that died. The connection an application was watching
-    is ended by the watching.
+    raises - a metrics counter, a debug print with a bad format string - would take the read loop
+    down with it, which the peer then reports as a socket that died: the connection an application
+    is watching is ended by the watching.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
@@ -1116,9 +1115,9 @@ async def test_a_handler_whose_stream_died_mid_flight_ends_quietly(make_pair):
 async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(make_pair):
     """A peer of another generation - or one still using the retired 5 - must be heard, not crashed on.
 
-    Regression: converting the wire value straight to `ResetCode` raised `ValueError` out of the read
-    loop, which left `is_open` true, `on_close` unfired, and every pending await hanging against a
-    queue no writer was draining.
+    Converting the wire value straight to `ResetCode` raises `ValueError` out of the read loop,
+    which leaves `is_open` true, `on_close` unfired, and every pending await hanging against a queue
+    no writer is draining.
     """
     for wire_code in (5, 42):
         pair = make_pair()
@@ -1167,16 +1166,16 @@ async def test_a_read_loop_failure_closes_the_peer_rather_than_zombifying_it(mak
         await pair.stop()
 
 
-# --------------------------------------------------------------------------- audit regressions
+# --------------------------------------------------------------------------- hostile frames and broken hooks
 
 
 async def test_a_wrong_parity_open_cannot_pose_as_a_fragment_continuation(make_pair):
     """WSM-SID-005: parity is checked before anything else, whatever reassembly is in flight.
 
-    Regression: "is this a continuation?" was inferred from whether *some* assembler was running on
-    that id. A stream this peer opened, receiving fragmented `data`, therefore accepted an `open`
-    carrying our own parity as a continuation - dispatching a handler for a stream we opened, and
-    skipping the connection-level error the rule requires.
+    Inferring "is this a continuation?" from whether *some* assembler is running on that id lets a
+    stream this peer opened, receiving fragmented `data`, accept an `open` carrying our own parity
+    as a continuation - dispatching a handler for a stream we opened, and skipping the
+    connection-level error the rule requires.
     """
     pair = make_pair()
     handled: list[Any] = []
@@ -1206,7 +1205,7 @@ async def test_a_wrong_parity_open_cannot_pose_as_a_fragment_continuation(make_p
 
 
 async def test_a_duplicate_open_is_still_a_connection_error_mid_reassembly(make_pair):
-    """The same hole from the other side: a re-used id must not be laundered by a fragment."""
+    """The same rule from the other side: a re-used id must not be laundered by a fragment."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -1224,10 +1223,10 @@ async def test_a_duplicate_open_is_still_a_connection_error_mid_reassembly(make_
 
 
 async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connection(make_pair):
-    """Regression: a codec that could not encode a frame took the writer task down in silence.
+    """A frame the codec cannot encode fails its own stream and leaves the writer task running.
 
-    Nothing drained the queue afterwards, every later send sat in it forever, and the peer went on
-    reporting itself open - the same shape as the read-loop zombie, from the other end.
+    A writer that died on it would leave nothing draining the queue: every later send sits in it
+    forever while the peer goes on reporting itself open - the read-loop zombie from the other end.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
@@ -1735,12 +1734,11 @@ async def test_the_opening_payload_is_never_looked_at_for_routing(make_pair):
 async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_pair):
     """WSM-ERR-003: errors are raised where they are awaited, and there is nowhere else to put them.
 
-    The rule has two halves and the suite only had the first. That every shape raises is asserted
-    all over `socket_death_test.py`; that the raise cannot be *diverted* is asserted nowhere, and an
-    `on_error` hook is the single most natural thing to add to a peer that already has four hooks.
-    What it would cost is the failure this rule prevents: an error handled somewhere other than the
-    call site is an error the caller's `try` never sees, and the await either hangs or returns a
-    value that was never sent.
+    The rule has two halves. That every shape raises is asserted all over `socket_death_test.py`;
+    this is the other half - that the raise cannot be *diverted*. An `on_error` hook is the single
+    most natural thing to add to a peer that already has four hooks, and what it would cost is the
+    failure this rule prevents: an error handled somewhere other than the call site is an error the
+    caller's `try` never sees, and the await either hangs or returns a value that was never sent.
 
     So: the four hooks are named exhaustively, and the exchange below registers every one of them
     before failing a stream. They all fire, they all see the reset go past, and the exception still

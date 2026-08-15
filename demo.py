@@ -20,6 +20,12 @@ wheel and looks inside it rather than taking that on trust.
     npm install                           # both backends and the frontend
     python demo.py                        # or: python demo.py node
 
+`python demo.py --uds` runs a third thing, not part of the page: the Unix-domain-socket pair from
+`docs/examples/`, an acceptor bound to a socket file and a client dialling it as
+`ws+unix:///…/muxws.sock:/ws`. It needs only `pip install -e ".[websockets]"`, since it starts
+neither uvicorn nor a browser, and it cannot be part of the page: a page has no way to open a file
+as a socket.
+
 `[demo]` carries `websockets` deliberately: uvicorn has no WebSocket protocol implementation of its
 own and answers 404 to every upgrade without one, while serving the page perfectly - so the demo
 would load and only the socket would fail.
@@ -30,14 +36,16 @@ import contextlib
 import multiprocessing
 import os
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 #: The two backends, in the order `--help` should list them.
 BACKENDS = ("python", "node")
 
-#: Python, because it is the one that has always been here and the one every reader already has.
+#: Python, because it is the interpreter that is already running this file.
 DEFAULT_BACKEND = "python"
 
 #: What `pip install -e ".[demo,starlette]"` provides, as `(import name, why it is needed)`.
@@ -56,12 +64,10 @@ PYTHON_BACKEND_IMPORTS = (
 
 #: uvicorn implements no WebSocket protocol itself and needs one of these.
 #:
-#: This is the check that matters, and an import test of the demo's *own* imports would never have
-#: found it: nothing in this repository imports `websockets` on the demo path. Without one of these
-#: uvicorn serves the page perfectly and answers **404 to every upgrade**, logging its complaint into
-#: a server log nobody is reading - so the browser shows a muxws handshake error and every part of
-#: the diagnosis points away from the cause. That is exactly how the first reader of this demo lost
-#: an hour.
+#: Nothing in this repository imports `websockets` on the demo path, so scanning the demo's own
+#: imports does not find this one. Without one of these uvicorn serves the page perfectly and answers
+#: **404 to every upgrade**, logging its complaint into a server log nobody is reading - so the
+#: browser shows a muxws handshake error and every part of the diagnosis points away from the cause.
 #:
 #: It is *uvicorn's* gap, not the protocol's: `demo/backend_node/main.ts` builds its own
 #: `WebSocketServer`, so this check must not fire for the Node backend and send a reader to install a
@@ -78,6 +84,25 @@ NODE_BACKEND_PACKAGES = (
 )
 
 
+#: What the Unix-domain-socket demo needs, as `(import name, why it is needed)`.
+#:
+#: Two entries and not six: `--uds` starts neither FastAPI nor a browser, so demanding uvicorn, vue
+#: or `node_modules` would send a reader to install several hundred megabytes for a run that opens
+#: one file and prints five lines. `websockets` both dials and listens here.
+UDS_IMPORTS = (
+    ("websockets", "unix_serve accepts and connect() dials, both through it"),
+    ("muxws", "the library this demo exists to show; install the repository itself with -e"),
+)
+
+#: The two shipped scripts `--uds` runs, relative to `docs/examples/`.
+UDS_SERVER = "uds_server.py"
+UDS_CLIENT = "uds_client.py"
+
+#: How long the acceptor gets to bind its socket file, in seconds, and how often to look.
+UDS_STARTUP_TIMEOUT_SECONDS = 15.0
+UDS_POLL_INTERVAL_SECONDS = 0.05
+
+
 def node_package_installed(name):
     """Whether `npm install` put `name` in this repository's `node_modules`.
 
@@ -89,16 +114,29 @@ def node_package_installed(name):
     return os.path.isdir(os.path.join(root, "node_modules", name))
 
 
-def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True):
+def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False):
     """Everything the chosen backend needs and does not have, as human-readable lines.
 
     Backend-aware, because the two need almost disjoint things and demanding the other's is a lie:
     `python demo.py node` imports no Python beyond this file, and refusing to start it over an absent
-    uvicorn would send the reader to install a package that would never be loaded.
+    uvicorn would send the reader to install a package that would never be loaded. `--uds` is the
+    third such set, and the smallest: it returns early rather than falling through to the frontend
+    check below, because that run has no frontend to check for.
     """
     import importlib.util
 
     problems = []
+    if uds:
+        for module, why in UDS_IMPORTS:
+            if importlib.util.find_spec(module) is None:
+                problems.append(f"{module:12} - {why}")
+        if not hasattr(socket, "AF_UNIX"):
+            # Not a missing package and not fixable by installing one, but this is the list a reader
+            # is shown before anything starts, and a Windows reader has to learn it here rather than
+            # from a `UnixSocketsUnsupportedError` out of the client three seconds later.
+            problems.append(f"{'AF_UNIX':12} - this platform has no Unix domain sockets; the demo cannot run here")
+        return problems
+
     if backend == "node":
         for package, why in NODE_BACKEND_PACKAGES:
             if not node_package_installed(package):
@@ -128,11 +166,18 @@ def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True):
     return problems
 
 
-def check_before_starting(backend=DEFAULT_BACKEND, frontend=True):
+def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False):
     """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
-    problems = missing_dependencies(backend, frontend)
+    problems = missing_dependencies(backend, frontend, uds=uds)
     if not problems:
         return
+
+    if uds:
+        print("The Unix-socket demo cannot start. Missing:\n", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        print('\nFrom the repository root:\n\n    pip install -e ".[websockets]"\n', file=sys.stderr)
+        raise SystemExit(1)
 
     print("This demo cannot start. Missing:\n", file=sys.stderr)
     for problem in problems:
@@ -165,13 +210,18 @@ def build_parser():
             "\n"
             "The backend can be either of two: the Python one under uvicorn, or the TypeScript one\n"
             "under Node. They are ports of each other, and the frontend is byte-for-byte the same\n"
-            "against both - which is the most interesting thing this demo has to show."
+            "against both - which is the most interesting thing this demo has to show.\n"
+            "\n"
+            "`--uds` runs a different demo entirely: no browser and no port, just a daemon on a\n"
+            "socket file and a client dialling it with a ws+unix: URL. A page cannot open a file as\n"
+            "a socket, so that transport has nowhere to appear in the demo above."
         ),
         epilog=(
             "examples:\n"
             "  python demo.py            the Python backend (demo/backend_python), under uvicorn\n"
             "  python demo.py node       the TypeScript backend (demo/backend_node), under tsx\n"
             "  python demo.py --no-fe    either backend alone, for a client of your own\n"
+            "  python demo.py --uds      the socket-file demo: docs/examples/uds_{server,client}.py\n"
             "\n"
             "Ctrl-C stops the backend and the dev server together. MUXWS_DEMO_PORT moves the\n"
             "backend off 8020; the Vite proxy in demo/frontend/vite.config.ts has to be told too."
@@ -184,17 +234,22 @@ def build_parser():
         default=None,
         help="which language serves the sockets; omit it and you get python",
     )
-    # `--backend node` is the spelling this file was first specified with, and it is what the header
-    # comment of `demo/backend_node/main.ts` still tells the reader to type. The positional above is
-    # the one settled on afterwards. Accepting both costs one line and means neither of the two
-    # spellings already written down anywhere is wrong; `--help` documents one, so there is still
-    # exactly one way to learn this.
+    # A hidden alias of the positional above: the header comment of `demo/backend_node/main.ts` tells
+    # the reader to type `--backend node`, so both spellings work. `--help` documents the positional
+    # only, so there is still exactly one way to learn this.
     parser.add_argument("--backend", dest="backend_option", choices=BACKENDS, help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-fe",
         dest="frontend",
         action="store_false",
         help="start the backend alone, without the Vite dev server",
+    )
+    # A flag rather than a third value of `backend`, because it is not a language: it selects a
+    # different demo, and one that has no frontend, no port and no choice of language.
+    parser.add_argument(
+        "--uds",
+        action="store_true",
+        help="run the Unix-domain-socket demo instead: a daemon on a socket file and a client dialling it",
     )
     return parser
 
@@ -207,15 +262,23 @@ def parse_arguments(argv=None):
         # Silently preferring one would start a backend the reader did not ask for and then print a
         # frontend URL that works, so nothing about the run would look wrong.
         parser.error(f"asked for both '{arguments.backend}' and '--backend {arguments.backend_option}'; pick one")
+    if arguments.uds and (arguments.backend or arguments.backend_option):
+        # Refused rather than ignored: the socket demo is Python at both ends, so accepting `node`
+        # here would answer a request for the TypeScript port by silently running the Python one.
+        # (The TypeScript port does dial `ws+unix:` - `interop/drive.sh <a> <b> unix` runs the two
+        # against each other - but this demo is not where that is shown.)
+        parser.error("--uds runs the socket-file demo, which takes no backend argument")
+    if arguments.uds and not arguments.frontend:
+        parser.error("--uds starts no frontend, so --no-fe has nothing to turn off")
     arguments.backend = arguments.backend or arguments.backend_option or DEFAULT_BACKEND
     return arguments
 
 
 def run_fe():
     # `npm run demo:dev` is a tree - npm, a shell, and vite under it - and `fe_proc.terminate()`
-    # below reaches only *this* process. Terminating it left vite orphaned and still holding 5173:
-    # the next `python demo.py` then found the port taken, stepped to 5174, and served the reader a
-    # dev server from the previous run. Measured on this machine, not hypothetical.
+    # below reaches only *this* process. Terminating that alone orphans vite, which goes on holding
+    # 5173: the next `python demo.py` finds the port taken, steps to 5174, and serves the reader a
+    # dev server from the previous run.
     #
     # So: the tree gets its own process group, and whatever ends this function kills the group.
     # `start_new_session` also takes it out of the foreground group, which means Ctrl-C no longer
@@ -239,8 +302,7 @@ def run_fe():
             time.sleep(0.25)
     finally:
         # The group, not the process: `npm run demo:dev` is npm, a shell, npm again, a shell and
-        # vite, and signalling only the one we spawned left vite orphaned and still holding 5173 -
-        # so the next `python demo.py` served the reader a dev server from the previous run.
+        # vite, and signalling only the one we spawned leaves vite orphaned and still holding 5173.
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGTERM)
 
@@ -266,12 +328,11 @@ def run_fastapi():
 def run_node():
     """The TypeScript backend, spawned and torn down exactly the way `run_fe` spawns the dev server.
 
-    Read `run_fe`'s comments before changing anything here; they record a measured failure. `npm run`
-    is a tree - npm, a shell, tsx, node - and signalling only the process we spawned left the leaf
-    orphaned and still holding its port, so the *next* run met a server from the previous one. That
-    was vite on 5173. This one would be the backend on 8020, where the symptom is worse: the demo
-    comes up, the sockets connect, and the reader is watching a backend they did not start - possibly
-    the other language's.
+    `npm run` is a tree - npm, a shell, tsx, node - and signalling only the process we spawned leaves
+    the leaf orphaned and still holding its port, so the *next* run meets a server from the previous
+    one. Here that port is 8020, where the symptom is worse than the dev server's: the demo comes up,
+    the sockets connect, and the reader is watching a backend they did not start - possibly the other
+    language's.
 
     So: its own process group, and whatever ends this function kills the group.
     """
@@ -298,6 +359,91 @@ def run_node():
             process.wait(timeout=5)
 
 
+def example_environment():
+    """`os.environ` with **this checkout** ahead of anything installed.
+
+    Python puts the *script's* directory on `sys.path` and never the working directory, and
+    `docs/examples/` holds no package - so without this an example subprocess can only import `muxws`
+    when the interpreter happens to have a copy installed, and what it imports then is that copy
+    rather than the tree the reader is standing in. `docs/examples/run_examples_test.py` builds the
+    same environment for the same reason.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    return {**os.environ, "PYTHONPATH": os.pathsep.join([root, *filter(None, [os.environ.get("PYTHONPATH")])])}
+
+
+def wait_for_socket(path, process):
+    """Block until `path` is a socket file, or the acceptor died trying.
+
+    Polling the filesystem rather than sleeping a fixed interval, and checking the child on every
+    turn: an acceptor that exits immediately - a stale socket it refuses to unlink, a missing
+    dependency `check_before_starting` did not cover - would otherwise be waited on for the full
+    timeout and then reported as slow rather than as dead.
+    """
+    deadline = time.monotonic() + UDS_STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise SystemExit(
+                f"the acceptor exited with {process.returncode} before binding:\n{process.communicate()[0]}"
+            )
+        if os.path.exists(path):
+            return
+        time.sleep(UDS_POLL_INTERVAL_SECONDS)
+    raise SystemExit(f"the acceptor did not bind {path} within {UDS_STARTUP_TIMEOUT_SECONDS} seconds")
+
+
+def run_uds():
+    """The Unix-domain-socket demo: the shipped acceptor in a child, the shipped dialer against it.
+
+    The acceptor's output is captured rather than interleaved. Its second line is the one thing here
+    the client cannot know: `SO_PEERCRED` hands the acceptor the caller's pid, uid and gid straight
+    from the kernel, so the connection is authenticated at the upgrade with nothing on the wire.
+    Printing it after the client's output keeps the transcript in one order on every run.
+
+    Both scripts are run as subprocesses instead of being imported: they are shipped documentation
+    whose output the guide asserts byte for byte, and a reimplementation would be free to drift.
+    """
+    examples = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "examples")
+    environment = example_environment()
+
+    # A short directory on purpose: `sun_path` is capped at about 108 bytes and a longer one fails in
+    # `bind()` naming the limit but not the component to shorten.
+    with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
+        socket_path = os.path.join(directory, "muxws.sock")
+        acceptor = subprocess.Popen(  # noqa: S603 - a shipped script, run with this interpreter
+            [sys.executable, os.path.join(examples, UDS_SERVER)],
+            env={**environment, "MUXWS_SOCKET": socket_path},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            wait_for_socket(socket_path, acceptor)
+            print(f"  socket:   {socket_path}")
+            print(f"  dialled:  ws+unix://{socket_path}:/ws\n")
+            sys.stdout.flush()
+            dialer = subprocess.run(  # noqa: S603 - the same
+                [sys.executable, os.path.join(examples, UDS_CLIENT)],
+                env={**environment, "MUXWS_URL": f"ws+unix://{socket_path}:/ws"},
+                check=False,
+            )
+        finally:
+            acceptor.terminate()
+            # Bounded, then killed: an acceptor that ignores SIGTERM must not turn this into a hang,
+            # and the temporary directory above cannot be removed while it is still bound.
+            try:
+                transcript = acceptor.communicate(timeout=5)[0]
+            except subprocess.TimeoutExpired:
+                acceptor.kill()
+                transcript = acceptor.communicate()[0]
+
+    if transcript.strip():
+        print("what the acceptor saw:")
+        for line in transcript.strip().splitlines():
+            print(f"  {line}")
+    raise SystemExit(dialer.returncode)
+
+
 def run_backend(backend):
     """Whichever backend was asked for: uvicorn in this process, or Node in a group under it."""
     if backend == "node":
@@ -308,6 +454,13 @@ def run_backend(backend):
 
 if __name__ == "__main__":
     options = parse_arguments()
+
+    if options.uds:
+        check_before_starting(uds=True)
+        print("Starting the muxws Unix-socket demo...")
+        print("  transport: a socket file, dialled with the ordinary connect() and a ws+unix: URL")
+        run_uds()
+
     chosen_backend = options.backend
     check_before_starting(chosen_backend, options.frontend)
 
@@ -342,10 +495,9 @@ if __name__ == "__main__":
 
     # Flushed before anything long-running starts. Python line-buffers stdout to a terminal and
     # block-buffers it to a pipe, and `uvicorn.run` below does not return - so under
-    # `python demo.py > log` every line above sat in a buffer that SIGTERM then discarded. The lost
+    # `python demo.py > log` every line above sits in a buffer that SIGTERM then discards. The lost
     # lines include the one telling the reader the other backend exists, which is the only reason it
-    # is printed at all. Measured, not guessed: the banner was absent from a redirected run and
-    # present under `-u`.
+    # is printed at all.
     sys.stdout.flush()
 
     # None under `--no-fe`, and the teardown below reads that rather than a second flag: one thing to

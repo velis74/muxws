@@ -17,8 +17,8 @@ jobs:
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e .[dev] ruff
@@ -29,8 +29,8 @@ jobs:
   node:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       # `npm install`, not `npm ci`: package-lock.json is deliberately not committed, so that CI
@@ -45,7 +45,6 @@ jobs:
       - run: npm run build
       - run: npm run docs:build
 
-  # The interop job that used to live here is gone: it ran `drive.sh python ts main json` and its
-  # mirror, which is a strict subset of `cross-language.yml`'s `scenario` matrix - same triggers,
-  # same two role assignments, and that file also covers msgpack. Two copies of one job is two
-  # things to keep in step, and the one that ships fewer codecs is the one that rots.
+  # Interop belongs in `cross-language.yml`, which runs both role assignments over both codecs on
+  # the same triggers. A second copy here would be a strict subset of that matrix: two jobs to keep
+  # in step, and the one that ships fewer codecs is the one that rots.

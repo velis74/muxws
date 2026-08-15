@@ -618,8 +618,10 @@ environment variable is decided per deployment.
   — Node, vitest, a CommonJS consumer — every step is guarded and the default applies.
 
 `settings` is the one singleton, and it is **writable**: an application may set `settings.codec`
-during bootstrap. The value is read at connection time, never at import time, which is what keeps
-that true for anything that imports muxws early.
+during bootstrap. The environment is read once, when the module is first imported; the *attribute* is
+read afresh by every `connect()` and `accept()`, which is what makes an assignment during bootstrap
+apply to every later connection. Changing the environment variable after import changes nothing until
+`settings.reload()`.
 
 Any string is taken as configured, including the empty one. A name that resolves to no codec fails
 loudly rather than falling back.

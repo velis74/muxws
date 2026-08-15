@@ -1,10 +1,10 @@
 /**
  * The reconnect helper: backoff, heartbeat and hello replay (§7).
  *
- * A port of `muxws/reconnect.py`, structure for structure - including the ordering of the supervisor,
- * which is the whole of this milestone. Everything that differs does so because JavaScript differs:
- * there is no task cancellation, so every long wait is raced against a gate the stopper opens, and
- * durations are **milliseconds** where Python's are seconds (§9.3).
+ * A port of `muxws/reconnect.py`, structure for structure, including the ordering of the supervisor.
+ * Everything that differs does so because JavaScript differs: there is no task cancellation, so every
+ * long wait is raced against a gate the stopper opens, and durations are **milliseconds** where
+ * Python's are seconds (§9.3).
  *
  * **Dialer only.** An acceptor cannot dial and MUST NOT have one.
  *
@@ -77,8 +77,8 @@ export type RandomDraw = () => number;
 
 /**
  * `Math.random`, deliberately, with `crypto.getRandomValues` ruled out by WSM-RCN-005: reconnect
- * jitter exists to disperse a thundering herd, not to resist an adversary, and a cryptographic source
- * here would be cargo cult. (The ping nonce in M4 is the opposite case and does use one.)
+ * jitter exists to disperse a thundering herd, not to resist an adversary. The ping nonce in
+ * `lifecycle.ts` is the opposite case and does use one.
  */
 function uniform(): number {
   return Math.random() * 2 - 1;
@@ -115,9 +115,9 @@ export function shouldRetry(attempts: number, options: Reconnect): boolean {
  *
  * It resets **only when the connection is established**, where established means both of: the socket
  * is open with the subprotocol accepted (WSM-CON-030), and the hello has been acknowledged
- * (WSM-RCN-004). Resetting on socket-open is the single most common way this gets written wrong, and
- * it silently converts exponential backoff into a fixed-interval hammer against a server that accepts
- * sockets while its backend is down (WSM-INV-012).
+ * (WSM-RCN-004). Resetting on socket-open instead silently converts exponential backoff into a
+ * fixed-interval hammer against a server that accepts sockets while its backend is down
+ * (WSM-INV-012).
  */
 export class AttemptCounter {
   private attempts = 0;
@@ -224,9 +224,9 @@ function realSleep(ms: number): Promise<void> {
  *
  * JavaScript cannot cancel a pending `await`, so when `peer.close()` opens the stop gate the
  * heartbeat's loop exits while its `setTimeout` keeps running - and in Node a pending timer holds the
- * whole process open. A program that closed its peer and had nothing else to do therefore sat for the
- * rest of the ping interval before exiting: measured at 20.4 s wall against 0.4 s of CPU on the
- * default 20 000 ms, where the Python twin returns in 0.09 s.
+ * whole process open. Without the unref a program that closes its peer and has nothing else to do
+ * sits out the rest of the ping interval - twenty seconds on the default - before it exits, where the
+ * Python twin returns at once.
  *
  * Only the heartbeat unrefs, never the backoff sleep. While a socket is open the socket's own handle
  * keeps the loop alive, so releasing this timer costs nothing; while the peer is *between* sockets
@@ -519,9 +519,9 @@ export class ConnectionLoop {
     this.peer.established = true;
     // The counter is **not** reset here. It is at its initial value already - `establish()` runs
     // once, before anything can have failed - and a second reset call site is exactly what
-    // WSM-INV-012 warns about: whichever of the two a later edit made load-bearing, the other would
-    // keep every test green while backoff quietly flattened into a fixed-interval hammer. `redial()`
-    // is the one place a connection becomes established (WSM-RCN-004).
+    // WSM-INV-012 warns about: the two would mask each other, and backoff would flatten into a
+    // fixed-interval hammer. `redial()` is the one place a connection becomes established
+    // (WSM-RCN-004).
     //
     // Set as soon as the connection is established and never at death: by then `die()` has already
     // composed the `CloseReason` the application will read (WSM-RCN-040).
@@ -564,8 +564,11 @@ export class ConnectionLoop {
   // ------------------------------------------------------------------ the supervisor
 
   /**
-   * **The ordering below is the milestone.** Read it against §3 of the M5b contract before changing
-   * a line of it.
+   * Serve the current socket, then back off and re-dial until told to stop.
+   *
+   * The numbered steps below are ordered, and the order is the rule: nothing dials before the
+   * previous socket's read loop has finished, and nothing gives up before a deliberate `stop()` has
+   * been checked for.
    */
   private async supervise(): Promise<void> {
     // The first socket's heartbeat starts here rather than in `establish()`: a caller that
@@ -583,11 +586,10 @@ export class ConnectionLoop {
       //    does a helper whose attempt cap is already spent.
       if (this.stopped) return;
       if (!shouldRetry(this.counter.value, this.options)) {
-        // Unreachable with effect, and kept anyway. This branch is only entered at
-        // `maxAttempts: 0`, where `establish()` has already set `willRetry` false and the loss
-        // itself latched WSM-RCN-044's single report - so deleting `giveUp()` here leaves every
-        // test green. It stays because `muxws/reconnect.py` has the same branch and a reader
-        // diffing the two ports should find them the same shape.
+        // Reached only at `maxAttempts: 0`, where `establish()` has already set `willRetry` false
+        // and the loss itself latched WSM-RCN-044's single report. No test fails if this call is
+        // deleted - the latch suppresses its report - so it is held in place only by
+        // `muxws/reconnect.py` carrying the same branch.
         this.giveUp();
         return;
       }
@@ -712,9 +714,9 @@ export class ConnectionLoop {
    * `hello.timeoutMs`. Nothing at all when no hello is configured (WSM-RCN-024).
    *
    * It is an ordinary `open()` (WSM-RCN-021) and it goes out **before any application frame and
-   * before `onReconnect`** (WSM-RCN-023) - which is now enforced rather than merely arranged: the
-   * peer is not established across this window, so `open()` refuses for everyone else, and this call
-   * goes to `open()`'s own body instead. `fireReconnect` is two statements below the call.
+   * before `onReconnect`** (WSM-RCN-023) - enforced rather than merely arranged: the peer is not
+   * established across this window, so `open()` refuses for everyone else, and this call goes to
+   * `open()`'s own body instead. `fireReconnect` is two statements below the call.
    */
   private async performHello(): Promise<void> {
     if (!this.hello.configured) return;
@@ -798,7 +800,7 @@ async function drain(stream: Stream): Promise<void> {
 // --------------------------------------------------------------------------- connect()
 
 /**
- * `connect()`'s options, as m3 §4.5 declared them.
+ * `connect()`'s options.
  *
  * `headers` is node-only and lives on `NodeConnectOptions` in `ts/node.ts`: a browser cannot set
  * request headers on a WebSocket handshake, and offering the field there would be a lie.

@@ -17,7 +17,7 @@ The library ships five adapters:
 | `WebsocketsSocket` | Python | either | `muxws.transports.websockets_` |
 | `MemorySocket` | both | either | `muxws.transports.memory` / `muxws` |
 | `BrowserSocket` | TypeScript | dialer | `muxws` |
-| `WsSocket` | TypeScript | acceptor | `muxws/node` |
+| `WsSocket` | TypeScript | either | `muxws/node` |
 
 Authentication does not belong in any of them. It belongs at the HTTP upgrade, before `accept()` —
 a cookie, an `Authorization` header, or a bearer entry in the subprotocol list — and never in the
@@ -80,6 +80,14 @@ for an adapter.
 
 Raises: nothing itself. `receive()` implementations raise `ConnectionClosed` on socket death, and
 send implementations raise it when asked to write to a socket that is already closed.
+
+`ConnectionClosed` is the one error this protocol *mandates*, which is why it lives in the shared
+error module and not in any transport's: every adapter raises it because the contract requires it of
+every adapter. Anything else your adapter reports — an address it cannot open, a dependency it cannot
+find — is yours, and belongs in your own module as a subclass of `TransportUrlError` or
+`TransportUnsupportedError`. Both bases are exported from the package root, precisely so that an
+adapter written outside this repository can subclass them; see
+[Writing an adapter of your own](../guide/errors.md#writing-an-adapter-of-your-own).
 
 ### Example
 
@@ -548,11 +556,14 @@ The module name keeps its trailing underscore — `muxws.transports.websockets_`
 `muxws.select_subprotocol` as the library's `select_subprotocol=` hook to refuse a mismatched codec
 with HTTP 400. Doing it afterwards, on an open socket, is the "complete the handshake and close
 later" that the 400 exists to avoid. As a last resort — for a transport offering neither hook —
-`muxws.transports.websockets_.verify_negotiated(negotiated, configured)` checks an already-open
-socket and raises `CodecMismatch`; the caller then closes with `POLICY_VIOLATION` (1008), which the
-same module exports.
+[`verify_negotiated`](#verify-negotiated-python) checks an already-open socket and raises
+`CodecMismatch`.
 
 Dialling through `muxws.connect()` builds this adapter for you and there is nothing to name.
+
+It is also the adapter over a Unix domain socket, unchanged and unaware: `unix_serve` and a
+`ws+unix://` dial produce the same `websockets` connection object as their TCP counterparts, and this
+class never learns which one it got.
 
 ### Signature
 
@@ -624,6 +635,342 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## `require_websockets()` (Python)
+
+Import `websockets` and hand the module back, or raise `WebsocketsNotInstalledError` naming the extra
+that installs it. It is the gate both dial arms go through, and the only supported way to ask whether
+this process can dial without dialling.
+
+Only the package being **absent** becomes that class: a `ModuleNotFoundError` whose `name` is exactly
+`websockets`. A missing submodule or a package that fails while importing keeps its own `ImportError`.
+
+### Signature
+
+```python
+def require_websockets() -> Any: ...
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| *(none)* | — | — | Takes no arguments. |
+
+### Return
+
+`Any` — the imported `websockets` module. Typed `Any` because the module cannot be imported at
+`muxws.transports.websockets_`'s own module scope; that is what keeps the package's required runtime
+dependencies at zero.
+
+### Raises
+
+- `WebsocketsNotInstalledError` — `websockets` is not installed. A `TransportUnsupportedError`, and
+  its message carries [`INSTALL_HINT`](#install-hint-python).
+
+### Example
+
+```python
+from muxws.transports.websockets_ import require_websockets
+
+print("dialable:", require_websockets().__name__)
+```
+
+## `verify_dialable_url()` (Python)
+
+Refuse a URL `websockets` cannot dial, before anything opens a socket. `connect()` calls it once, at
+the call, so a bad address raises out of the call the caller made rather than out of a background
+reconnection.
+
+### Signature
+
+```python
+def verify_dialable_url(url: str, *, uri: str | None = None) -> None: ...
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `url` | `str` | required | The URL the caller typed. It is the one quoted in the message, and — when `uri` is `None` — the one parsed. |
+| `uri` | `str \| None` | `None` | The logical `ws://` URI a `ws+unix:` dial synthesises and hands to `unix_connect(uri=...)`. When it is given it is what gets parsed, because it is what that arm's handshake parses; the message then quotes both. Keyword-only. |
+
+### Return
+
+`None` — it returns when the URL is dialable and raises when it is not.
+
+### Raises
+
+- `WebsocketsNotInstalledError` — checked first, because the URL parser is supplied by the dependency.
+- `WebsocketUrlError` — `websockets.uri.parse_uri` rejected the string. The `InvalidURI` or
+  `ValueError` it raised is chained as `__cause__`.
+
+### Example
+
+```python
+from muxws.transports.websockets_ import verify_dialable_url, WebsocketUrlError
+
+verify_dialable_url("ws://127.0.0.1:8000/ws")
+print("ws://127.0.0.1:8000/ws is dialable")
+
+try:
+    verify_dialable_url("ws+unix:///run/api.sock:/y", uri="ws://user@/y")
+except WebsocketUrlError as exc:
+    print("refused:", exc)
+```
+
+## `verify_negotiated()` (Python)
+
+Check the subprotocol on an already-open socket. The last resort, for a transport that offers neither
+a selection hook nor a way to deny the upgrade; an acceptor that can answer 400 uses
+[`select_subprotocol`](./accept.md#select-subprotocol-python) instead.
+
+It closes nothing. What the caller does after the raise differs by caller: `connect()` closes the
+socket with `POLICY_VIOLATION` and re-raises, `accept()` lets the `CodecMismatch` out with the socket
+untouched, and `serve()` swallows it and returns, also leaving the socket open.
+
+### Signature
+
+```python
+def verify_negotiated(negotiated: str | None, configured: str) -> None: ...
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `negotiated` | `str \| None` | required | The subprotocol the handshake actually settled on. `None` means the peer selected nothing, which is refused like any other mismatch. Positional. |
+| `configured` | `str` | required | The codec name this end speaks, e.g. `"json"`. The match is against `muxws.v1.<configured>` exactly. Positional. |
+
+### Return
+
+`None` — it returns when the two agree.
+
+### Raises
+
+- `CodecMismatch` — they do not agree. Both names are logged under the `muxws.codec` logger first.
+
+### Example
+
+```python
+from muxws import CodecMismatch
+from muxws.transports.websockets_ import verify_negotiated
+
+verify_negotiated("muxws.v1.json", "json")
+print("agreed")
+
+try:
+    verify_negotiated("muxws.v1.msgpack", "json")
+except CodecMismatch as exc:
+    print("refused:", exc)
+```
+
+## `POLICY_VIOLATION` (Python)
+
+The WebSocket close code a dialer uses when the mismatch could only be found on an already-open
+socket: `1008`. Exported so a transport of your own closes with the same code muxws does.
+
+### Signature
+
+```python
+POLICY_VIOLATION = 1008
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| *(none)* | `int` | `1008` | A module constant, not a call. |
+
+### Return
+
+Nothing — it is a value.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws.transports.websockets_ import POLICY_VIOLATION
+
+print("close code:", POLICY_VIOLATION)
+```
+
+## `INSTALL_HINT` (Python)
+
+The command that installs this transport's dependency, spelled the way a reader can paste it:
+`pip install muxws[websockets]`. It is named once, here, so the remedy in
+`WebsocketsNotInstalledError`'s message cannot drift out of date.
+
+### Signature
+
+```python
+INSTALL_HINT = "pip install muxws[websockets]"
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| *(none)* | `str` | `"pip install muxws[websockets]"` | A module constant, not a call. |
+
+### Return
+
+Nothing — it is a value.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws.transports.websockets_ import INSTALL_HINT
+
+print(INSTALL_HINT)
+```
+
+## `parse_unix_url()` (Python)
+
+The `ws+unix:` URL grammar, and the whole of the Unix transport in Python: a string transformation
+with no socket in it. `connect()` calls it on **every** URL, before anything is opened, so it is the
+branch rather than a validator — a `ws:` or `wss:` URL comes back `None` and goes to
+`websockets.connect()` untouched. `connect()` resolves the codec before it gets here, so a URL this
+function refuses and a codec name that is not registered are ordered codec-first in Python; the
+browser `connect()` refuses the scheme first.
+
+The grammar is the one the `ws` npm package has dialled for years, with one correction: the URL's path
+and query are split on the **first** colon and the remainder is kept whole, where `ws` splits on every
+colon and drops what follows the second. The part in front of the colon is the file to open; the part
+behind is the HTTP request target, and it is `/` when there is no colon and when nothing follows one.
+The scheme is case-insensitive, `ws+unix:/run/api.sock:/ws` and `ws+unix:relative.sock:/ws` parse, and
+an authority — which sits before the path and so outside the split — becomes the `Host` header. The
+query is re-attached before the split, so it travels with the request target when there is a colon and
+stays part of the file name when there is not: `ws+unix:///run/api.sock?tenant=42` opens a file called
+`/run/api.sock?tenant=42`.
+
+### Signature
+
+```python
+def parse_unix_url(url: str) -> UnixTarget | None: ...
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `url` | `str` | required | Any URL `connect()` was given. Positional. |
+
+### Return
+
+`UnixTarget | None` — a `UnixTarget` for a `ws+unix:` URL, `None` for every URL whose scheme is
+neither `ws+unix:` nor `wss+unix:`, malformed ones included: judging those belongs to `websockets`.
+
+### Raises
+
+- `ValueError` — the string is one `urllib.parse.urlsplit` itself cannot read, which is an authority
+  with an unbalanced `[` (`ws://[::1`). It comes out of `urlsplit` before the scheme is looked at, so
+  it is **not** a `MuxwsError` and `except TransportUrlError` around `connect()` does not catch it.
+  Every other unreadable URL is `websockets`' to judge and comes back as `WebsocketUrlError`.
+- `UnixUrlError` — a `wss+unix:` URL, which is not a scheme muxws has; a URL naming no socket file; or
+  a request target that does not begin with `/`. The third is refused because such a target is folded
+  into the authority instead — `…/a.sock:ws` becomes `ws://localhostws`, a valid URL — so the dial
+  would open the right file, ask for `/`, and succeed against an acceptor that does not route.
+- `UnixSocketsUnsupportedError` — the interpreter has no `socket.AF_UNIX`, which means Windows. The
+  platform check runs after the `wss+unix:` refusal and before the two grammar checks.
+
+### Example
+
+```python
+from muxws.transports.unix import parse_unix_url
+
+print(parse_unix_url("ws+unix:///run/muxws/api.sock:/ws?tenant=42"))
+print(parse_unix_url("ws+unix:///run/muxws/api.sock"))
+print(parse_unix_url("ws+unix://gateway/run/muxws/api.sock:/ws"))
+print(parse_unix_url("ws://127.0.0.1:8000/ws"))
+```
+
+## `UnixTarget` (Python)
+
+What `parse_unix_url` returns: everything `unix_connect(path, uri=...)` needs, and nothing about
+muxws. Two fields, because over a filesystem socket the transport and the request really are separate
+— the file says where to connect, and the handshake is still an HTTP request that needs a target and a
+`Host`, neither of which can be derived from a path.
+
+Frozen. `connect()` parses the URL once, outside the dial closure, so every reconnection dials this
+same target rather than re-deriving it.
+
+### Signature
+
+```python
+@dataclass(frozen=True, slots=True)
+class UnixTarget:
+    path: str
+    uri: str
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `path` | `str` | required | The filesystem path of the listening socket, as written in the URL. The kernel caps it at about 108 bytes (104 on macOS), and an over-length one raises `OSError: AF_UNIX path too long`, which names neither the length nor the component to shorten. |
+| `uri` | `str` | required | `ws://<authority><target>` — the logical URL the handshake claims to be for. Its authority is the URL's own, or `localhost` when the URL has none, and it is what goes on the wire as the request line and the `Host` header. |
+
+### Return
+
+A frozen dataclass instance; `parse_unix_url` is what builds one.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws.transports.unix import parse_unix_url, UnixTarget
+
+target = parse_unix_url("ws+unix:///run/muxws/api.sock:/ws")
+assert isinstance(target, UnixTarget)
+print(target.path, "|", target.uri)
+```
+
+## `SCHEME` (Python)
+
+The scheme this transport owns: `"ws+unix"`. Compare a configured URL's scheme against it rather than
+against a literal, and note that `parse_unix_url` matches it case-insensitively, as `urlsplit` folds
+the scheme before the comparison.
+
+### Signature
+
+```python
+SCHEME = "ws+unix"
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| *(none)* | `str` | `"ws+unix"` | A module constant, not a call. |
+
+### Return
+
+Nothing — it is a value.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from urllib.parse import urlsplit
+
+from muxws.transports.unix import SCHEME
+
+print(SCHEME, "|", urlsplit("WS+UNIX:///run/muxws/api.sock:/ws").scheme == SCHEME)
+```
+
 ## `BrowserSocket`
 
 The browser half of the seam, over the platform's global `WebSocket`. It is the only file in the
@@ -661,7 +1008,7 @@ export class BrowserSocket implements SocketAdapter {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `socket` (constructor) | `WebSocket` | required | An already-constructed platform socket, open or still connecting. Its `binaryType` is set to `'arraybuffer'` here, which is what makes an inbound binary message an `ArrayBuffer` and nothing else. |
-| `url` (`connect`) | `string` | required | The `ws://` or `wss://` URL to dial. |
+| `url` (`connect`) | `string` | required | The `ws://` or `wss://` URL to dial, handed to the platform `WebSocket` constructor as it stands. The `ws+unix:` refusal belongs to `connect()` in `muxws` and not to this adapter, so `BrowserSocket.connect('ws+unix://…')` reaches that constructor and throws the platform's `DOMException` rather than `UnixSocketsUnsupportedError`. |
 | `codecName` (`connect`) | `string` | required | The codec name, offered as `muxws.v1.<codecName>` in first position. |
 | `options` (`connect`) | `BrowserSocketOptions` | `{}` | Extra subprotocol entries; see below. |
 | `code` (`close`) | `number` | `1000` | The WebSocket close code. |
@@ -775,7 +1122,7 @@ void main();
 
 ## `WsSocket`
 
-The Node acceptor's adapter, over the `ws` package. It is imported **only** by the `muxws/node`
+The Node adapter over the `ws` package, in **either** role. It is imported **only** by the `muxws/node`
 subpath: nothing reachable from `muxws` may import it, or a browser bundle pulls in a dependency a
 browser cannot run.
 
@@ -784,7 +1131,12 @@ npm install ws
 ```
 
 `accept()` and `serve()` from `muxws/node` build one for you and also verify the negotiated
-subprotocol; construct it directly only when you have already done that verification yourself.
+subprotocol; construct it directly only when you have already done that verification yourself. The
+`muxws/node` `connect()` wraps every socket it dials in one too — `ws:`, `wss:` and `ws+unix:` alike —
+so this is also the TypeScript adapter over a Unix domain socket.
+
+In TypeScript it is the one adapter without an `isClosed`; `BrowserSocket` and `MemorySocket` both
+have one, and the `SocketAdapter` port requires it of neither.
 
 ### Signature
 
@@ -864,6 +1216,10 @@ void main();
   `send_bytes`.
 - [Connect](./connect.md) and [Accept](./accept.md) — the factories that build these adapters for
   you.
-- [Errors](./errors.md) — `ConnectionClosed` and `CodecMismatch`, the two an adapter raises.
+- [Errors](./errors.md) — `ConnectionClosed` and `CodecMismatch`, the two an adapter raises, plus
+  `TransportUrlError` and `TransportUnsupportedError`, the two bases an adapter of your own subclasses.
 - [Guide: transports](../guide/transports.md) — one runnable snippet per framework, and where
   authentication belongs.
+- [Guide: Unix domain sockets](../guide/transports.md#unix-domain-sockets) — the `ws+unix:` URL
+  grammar `parse_unix_url` implements, an acceptor and a dialer on each side of a socket file, and
+  what each port does on Windows.

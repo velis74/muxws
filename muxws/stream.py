@@ -101,8 +101,8 @@ class Stream:
         self._close_cause: str | StreamReset | None = None
         self._assembler = Assembler()
         #: True between the first fragment of a *remote* opening payload and the frame that
-        #: completes it. Inferring this from the assembler instead let a wrong-parity `open` be
-        #: taken for a continuation of whatever reassembly happened to be running on that id.
+        #: completes it. Inferred from the assembler instead, a wrong-parity `open` would be taken
+        #: for a continuation of whatever reassembly happens to be running on that id.
         self._opening = False
         #: The handler task, so an incoming reset(CANCELLED) can cancel it (WSM-ERR-013).
         self.handler_task: asyncio.Task[None] | None = None

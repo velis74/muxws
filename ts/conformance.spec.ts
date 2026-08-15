@@ -1,5 +1,5 @@
 /**
- * The TypeScript conformance runner: `conformance/sequences/` and `conformance/invalid/` (M6 §3).
+ * The TypeScript conformance runner: `conformance/sequences/` and `conformance/invalid/`.
  *
  * The twin of `muxws/conformance_test.py`, reading the same files under the same schema
  * (`conformance/README.md`). If one runner needs a field the other does not read, the fixture is
@@ -18,8 +18,8 @@
  *   it is the difference between "the peers can still agree about every other stream" and "they
  *   cannot" (WSM-STM-024).
  *
- * Nothing here may change peer behaviour. A failing fixture means a rule was implemented wrongly in
- * M1-M5b; the fix belongs to the milestone that owns the rule, not to a fixture edit.
+ * Nothing here may change peer behaviour. A failing fixture means a rule is implemented wrongly; the
+ * fix belongs to the code that owns the rule, not to a fixture edit.
  */
 
 import { createHash } from 'node:crypto';
@@ -860,9 +860,10 @@ describe('conformance/sequences', () => {
   it('puts no limit and no version on the wire', async () => {
     // WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay everything and look at what actually went out.
     // There is no `settings` frame and no announced limit of any kind; the `muxws.v1.` subprotocol
-    // prefix is the only version anywhere. This replaces the retired extension-advertisement test
-    // (WSM-FRM-003). `muxws/conformance_test.py` asserts the same thing over the same corpus - an
-    // assertion one port makes and the other does not is the divergence the corpus exists to catch.
+    // prefix is the only version anywhere. There is no extension advertisement to look for either:
+    // WSM-FRM-003 is retired, because there is no `settings` frame to advertise in.
+    // `muxws/conformance_test.py` asserts the same thing over the same corpus - an assertion one port
+    // makes and the other does not is the divergence the corpus exists to catch.
     for (const [fileName, message] of await wireOfTheWholeCorpus()) {
       const envelope = JSON.parse(message) as Record<string, unknown>;
       expect(FORBIDDEN_FRAME_TYPES, `${fileName} put a ${String(envelope.type)} frame on the wire`).not.toContain(

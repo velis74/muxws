@@ -267,8 +267,8 @@ export async function start(): Promise<void> {
       // what stops N clients hammering a server the moment it comes back - but it makes this demo
       // look broken: stop the backend, wait half a minute, restart it, and the schedule has already
       // grown to 0.25, 0.5, 1, 2, 4, 8, 16, 30 s, so the client can sit for another half minute
-      // before it tries again. That is the backoff doing its job and it reads as a hang. Reported by
-      // the first person to restart the backend under a running page.
+      // before it tries again. That is the backoff doing its job, and on a page somebody is watching
+      // it reads as a hang.
       reconnect: new Reconnect({ maxDelayMs: 2_000 }),
       onStream: onPushedStream,
       onClose: onConnectionClose,
@@ -373,11 +373,11 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
 /**
  * Rows that have arrived and are not on the screen yet. **Not reactive**, deliberately.
  *
- * Writing every tick straight into `store.rows` is what froze this page at 10 ms: twenty symbols at
- * a hundred a second is two thousand reactive writes a second, each one scheduling a re-render of a
+ * Writing every tick straight into `store.rows` freezes this page at 10 ms: twenty symbols at a
+ * hundred a second is two thousand reactive writes a second, each one scheduling a re-render of a
  * grid that a display can repaint sixty times a second at best. The work is unbounded, the observable
- * output is not, and the main thread loses - to the point where the control that would have turned
- * the rate back down could not be clicked.
+ * output is not, and the main thread loses - to the point where the control that would turn the rate
+ * back down cannot be clicked.
  *
  * Nothing is dropped on the wire: every frame is received, counted, and its lateness measured, which
  * is why the diagnostics keep climbing while the board is quiet. What is coalesced is the *painting*.
@@ -529,10 +529,9 @@ export async function refreshStats(): Promise<void> {
  * Ask the backend to push faster or slower.
  *
  * The board's four-a-second default is a `sleep` in the backend's generator and says nothing about
- * what the socket can carry - but nothing on the screen said so, and the first reader took the
- * pacing for the library's speed. Turn it to 10 ms and the frames/second readout climbs by two
- * orders of magnitude while the tick-lateness line stays where it was; that is the honest answer,
- * and it is more convincing than this comment.
+ * what the socket can carry, which is what this control is on the page to show. Turn it to 10 ms and
+ * the frames/second readout climbs by two orders of magnitude while the tick-lateness line stays
+ * where it was.
  */
 export async function setTickInterval(intervalMs: number): Promise<void> {
   if (peer === null || !peer.isOpen) return;

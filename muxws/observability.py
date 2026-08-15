@@ -1,8 +1,7 @@
 """Observability types shared by the peer (§12).
 
-M5a fills this module out with the one-line `muxws.frames` logger and `on_frame` dispatch; M5b gives
-`CloseReason` its `will_retry` field. It exists already because `on_close` needs a type to hand its
-handler, and that type is one per language used for every socket loss (WSM-RCN-045).
+`CloseReason` is what `on_close` hands its handler: one type per language, used for every socket loss
+(WSM-RCN-045). `log_frame` is the one-line `muxws.frames` logger.
 """
 
 from __future__ import annotations
@@ -21,8 +20,8 @@ class CloseReason:
     code: int
     reason: str
     was_clean: bool
-    #: False only when `max_attempts` is exhausted or `close()` was called deliberately. Until the
-    #: reconnect helper lands in M5b there is nothing that retries, so it is always False here.
+    #: False only when `max_attempts` is exhausted or `close()` was called deliberately. A peer
+    #: driven without the reconnect helper never dials again, so it is always False there.
     will_retry: bool = False
 
 

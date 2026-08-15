@@ -84,7 +84,7 @@ class Lone:
     A live pair cannot test a receiver's reaction to a frame no correct sender would produce: the
     counterpart peer sees the answer, cannot account for it, and kills the connection - correctly,
     and entirely beside the point. Injecting into a peer with no counterpart is how the conformance
-    runner does it, and it is what these tests need too.
+    runner does it.
     """
 
     def __init__(self, peer: Peer, socket: MemorySocket, codec: JsonCodec) -> None:

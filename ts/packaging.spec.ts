@@ -133,9 +133,9 @@ function specifierPattern(name: string): RegExp {
  *
  * Four routes, because a package can arrive by any of them: inlined from `node_modules` (installed),
  * left as an external import (resolvable but excluded), spelled in the emitted code, or named in the
- * resolution error a build throws when the optional package is *not* installed. That last one is not
- * hypothetical - `@msgpack/msgpack` is optional precisely so a checkout may be missing it, and a
- * test that only read a successful build would go quiet on exactly that machine.
+ * resolution error a build throws when the optional package is *not* installed. `@msgpack/msgpack`
+ * is optional precisely so a checkout may be missing it, and a test that only read a successful build
+ * would go quiet on exactly that machine.
  *
  * `alsoImport` injects real imports into the entry module, which is how the two control tests below
  * mutate this assertion without editing `ts/index.ts`. The imports are bound and re-exported, or
@@ -229,6 +229,154 @@ describe('the browser entry point (WSM-PKG-003)', () => {
   );
 });
 
+describe("the shipped build's externals (WSM-ERR-016)", () => {
+  /**
+   * Build `ts/node.ts` the way `npm run build` does, and report what the artifact says about `node:net`.
+   *
+   * The externals list is read out of the real `vite.config.ts` rather than restated here, because a
+   * restated copy is a second source of truth that cannot go red when the shipped one changes - which
+   * is precisely the failure this test exists for. Everything else is `bundleFacts`' recipe: an
+   * in-memory `es` lib build, so no plugin writes a file and the run costs no artifacts.
+   *
+   * A Vite library build resolves with **browser** conditions, so a `node:` builtin that is not
+   * externalised is silently swapped for `__vite-browser-external`, a module whose body is
+   * `module.exports = {}`. `await import('node:net')` then yields an object with no `connect`, and a
+   * consumer's `ws+unix:` dial dies as `TypeError: n is not a function`.
+   */
+  async function shippedNodeBundle(): Promise<{
+    code: string;
+    failure: string;
+  }> {
+    // A variable specifier for the same reason `VITE_SPECIFIER` is, and one more: `vite.config.ts`
+    // sits outside `tsconfig.json`'s `include` and is written as ESM, so a literal
+    // `import('../vite.config')` would drag it into `tsc --noEmit`'s programme and fail on
+    // `import.meta` (TS1343) and on Vite's `exports`-only types (TS2307). The config is data here,
+    // not a typed dependency.
+    const CONFIG_SPECIFIER = '../vite.config';
+    const shipped = ((await import(CONFIG_SPECIFIER)) as { default: unknown }).default as {
+      build?: { rollupOptions?: { external?: unknown } };
+    };
+    const external = shipped.build?.rollupOptions?.external;
+    expect(external, 'the shipped config must declare an externals list for this test to read').toBeDefined();
+
+    try {
+      const { build } = (await import(VITE_SPECIFIER)) as ViteModule;
+      const result = await build({
+        root: ROOT,
+        configFile: false,
+        logLevel: 'silent',
+        build: {
+          write: false,
+          minify: false,
+          target: 'es2020',
+          lib: {
+            entry: resolve(ROOT, 'ts/node.ts'),
+            formats: ['es'],
+            fileName: () => 'externals-probe.js',
+          },
+          rollupOptions: { external },
+        },
+      });
+      const output = Array.isArray(result) ? result[0] : result;
+      const code = output.output
+        .filter((piece) => piece.type === 'chunk')
+        .map((chunk) => chunk.code)
+        .join('\n');
+      return { code, failure: '' };
+    } catch (error) {
+      return {
+        code: '',
+        failure: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  it('leaves node:net a real import, so the unix dial has a socket to open', { timeout: 60_000 }, async () => {
+    const { code, failure } = await shippedNodeBundle();
+    expect(failure, 'the node bundle must build at all').toBe('');
+    // Non-vacuity: an empty chunk would satisfy the `not.toContain` below without having bundled
+    // anything. `unixConnector` is the only reason this entry point touches a builtin at all.
+    expect(code).toContain('unixConnector');
+    expect(code, 'node:net must survive as a specifier the runtime resolves').toMatch(
+      /import\s*\(\s*['"]node:net['"]\s*\)/,
+    );
+    expect(code, 'a browser stub here makes every ws+unix: dial a bare TypeError').not.toContain(
+      '__vite-browser-external',
+    );
+  });
+});
+
+describe('where an error class is reachable from - WSM-ERR-016', () => {
+  /**
+   * The two shared bases, and the concrete class of every transport, by the entry point that owns it.
+   *
+   * Read from the **runtime** surface rather than from the source: a class can arrive at an entry
+   * point through a re-export chain three modules long, and what a consumer can import is what the
+   * module object has, not what one file happens to spell. This file's other tests read source
+   * because `import type` is erased before runtime; here the opposite is true, and erasure is not a
+   * risk because an error class is a value or it is nothing.
+   */
+  const ROOT_ONLY = ['TransportUrlError', 'TransportUnsupportedError'];
+  const ROOT_TRANSPORT = ['UnixSocketsUnsupportedError'];
+  const NODE_TRANSPORT = ['UnixUrlError', 'WsUrlError', 'WsNotInstalledError'];
+
+  it('keeps the two bases at the root and each concrete class behind its own entry point', async () => {
+    const root = Object.keys(await import('./index'));
+    const node = Object.keys(await import('./node'));
+
+    // The bases are at the root because an application must be able to write
+    // `instanceof TransportUrlError` without importing the transport that threw - and in a browser
+    // build it *cannot* import it, because `muxws/node` reaches for `ws` (WSM-API-022).
+    ROOT_ONLY.forEach((name) => expect(root, `${name} must be exported from the package root`).toContain(name));
+    // `UnixSocketsUnsupportedError` is the concrete class of the transport the root entry point ships
+    // - the platform `WebSocket`, which cannot open a socket file - so the root is exactly where it
+    // belongs, and `muxws/node`, whose unix dial works, must not carry it at all.
+    ROOT_TRANSPORT.forEach((name) => {
+      expect(root, `${name} belongs to the entry point that refuses the url`).toContain(name);
+      expect(node, `${name} names a refusal muxws/node never makes`).not.toContain(name);
+    });
+    // And the three `muxws/node` owns are reached as `from 'muxws/node'` and from nowhere else. This
+    // is the half of the rule a third-party adapter has to be able to follow: it cannot add a class to
+    // `ts/errors.ts`, so the convention must not require a root export (WSM-API-021).
+    NODE_TRANSPORT.forEach((name) => {
+      expect(node, `${name} must be exported from muxws/node`).toContain(name);
+      expect(root, `${name} must not be reachable from the package root`).not.toContain(name);
+    });
+  });
+
+  it('lets each entry point export only the concrete classes its own transports own', async () => {
+    // The enumerative half, and the one the three lists above cannot be: a *new* concrete class added
+    // to an entry point is invisible to a name list, which is how a rule quietly stops being enforced.
+    // This asks the prototype chain instead - anything an entry point exports that extends either base
+    // is a concrete transport error - and then checks the answer against the list of transports that
+    // entry point actually ships. Python's twin recurses through `MuxwsError.__subclasses__()` for the
+    // same reason (`errors_test.py::test_the_transport_bases_are_root_exported_and_their_subclasses_are_not`).
+    const { TransportUrlError, TransportUnsupportedError } = await import('./errors');
+
+    function concreteErrorsIn(namespace: Record<string, unknown>): string[] {
+      return Object.entries(namespace)
+        .filter(
+          ([, value]) =>
+            typeof value === 'function' &&
+            value !== TransportUrlError &&
+            value !== TransportUnsupportedError &&
+            (Object.prototype.isPrototypeOf.call(TransportUrlError, value) ||
+              Object.prototype.isPrototypeOf.call(TransportUnsupportedError, value)),
+        )
+        .map(([name]) => name)
+        .sort();
+    }
+
+    expect(concreteErrorsIn(await import('./index'))).toEqual([...ROOT_TRANSPORT].sort());
+    expect(concreteErrorsIn(await import('./node'))).toEqual([...NODE_TRANSPORT].sort());
+    // Non-vacuity: a detector that saw nothing would satisfy both equalities if the lists were empty,
+    // and they are not - but it would also satisfy them if `isPrototypeOf` were the wrong test, so the
+    // bases themselves are checked to be excluded by identity rather than by never having matched.
+    expect(concreteErrorsIn({ TransportUrlError, TransportUnsupportedError })).toEqual([]);
+    expect(concreteErrorsIn({ probe: class extends TransportUrlError {} })).toEqual(['probe']);
+  });
+});
+
 describe('the library imports nothing above it in the stack - WSM-INV-001', () => {
   // Read from the SOURCE, deliberately, and this is the whole point of the test. The bundle
   // assertions above prove what a build *emits*, and `import type` is erased before anything is
@@ -247,9 +395,9 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
   /**
    * Every module specifier a file imports, type-only imports included.
    *
-   * Comments are stripped first. The first draft of this walker did not strip them and reported
-   * three offenders that were sentences - a doc-comment containing the words "from 'gone'" reads
-   * exactly like an import to a regex that spans lines. The control below now carries that case.
+   * Comments are stripped first: a doc-comment containing the words "from 'gone'" reads exactly like
+   * an import to a regex that spans lines, and would be reported as a dependency of the file. The
+   * control below carries that case.
    */
   function importsOf(source: string): string[] {
     const code = withoutComments(source);
@@ -303,7 +451,7 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
 
   it('sees a type-only import, which is what a runtime witness cannot', () => {
     // The control. Without it the two assertions above pass equally well against a walker that reads
-    // nothing at all, and a test that cannot fail is the failure this project has paid for four times.
+    // nothing at all, which is a test that cannot fail.
     const source = [
       "/** A doc comment that says the stream is gone, from 'nowhere', and mentions import too. */",
       "import type { WebSocket } from 'ws';",
@@ -313,8 +461,7 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
       '',
     ].join('\n');
     // Both halves matter: the type-only import must be SEEN, and neither the doc comment nor the
-    // commented-out import may be. The first draft of this walker failed the second half and
-    // reported three sentences as dependencies.
+    // commented-out import may be counted as one.
     expect(importsOf(source)).toEqual(['ws', './peer', './side-effect']);
   });
 });

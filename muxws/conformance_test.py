@@ -1,4 +1,4 @@
-"""The Python conformance runner: `conformance/sequences/` and `conformance/invalid/` (M6 §3).
+"""The Python conformance runner: `conformance/sequences/` and `conformance/invalid/`.
 
 `ts/conformance.spec.ts` is this file's twin and reads the same files, under the same schema
 (`conformance/README.md`). If one runner needs a field the other does not read, the fixture is wrong.
@@ -16,8 +16,8 @@ Two corpora, two shapes of proof:
   the difference between "the peers can still agree about every other stream" and "they cannot"
   (WSM-STM-024).
 
-Nothing here may change peer behaviour. A failing fixture means a rule was implemented wrongly in
-M1-M5b; the fix belongs to the milestone that owns the rule, not to a fixture edit.
+Nothing here may change peer behaviour. A failing fixture means a rule is implemented wrongly; the
+fix belongs in the implementation of that rule, not in an edit to the fixture.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ REQUIRED_INVALID_CASES = frozenset(
     }
 )
 
-#: The freeze (M6 §5). sha256 over `conformance/frames/`, sorted by file name, each file contributing
+#: The freeze. sha256 over `conformance/frames/`, sorted by file name, each file contributing
 #: `name`, a NUL, its bytes, a NUL. `ts/conformance.spec.ts` recomputes the same digest from the same
 #: bytes and reads **this** literal out of this file, so there is exactly one checked-in digest and a
 #: port that reads a different corpus fails. Changing the JSON wire after 1.0 means editing the line
@@ -652,7 +652,7 @@ def test_both_runners_collect_the_same_number_of_fixtures():
 
     Read out of the TypeScript source rather than asserted twice in parallel, because two independent
     constants drift silently - which is the whole failure mode `conformance/README.md` exists to
-    prevent (M6 §8).
+    prevent.
     """
     source = (ROOT / "ts" / "conformance.spec.ts").read_text(encoding="utf-8")
     for name, mine in (
@@ -682,9 +682,9 @@ async def test_no_limit_and_no_version_appears_on_the_wire():
     """WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay everything and look at what actually went out.
 
     There is no `settings` frame and no announced limit of any kind; the `muxws.v1.` subprotocol
-    prefix is the only version anywhere. This replaces the retired extension-advertisement test
-    (WSM-FRM-003), and it reads the **envelope on the wire** rather than a decoded `Frame`, which
-    would have dropped the offending key before the assertion ever saw it.
+    prefix is the only version anywhere; WSM-FRM-003 is retired, because there is no `settings` frame
+    to advertise in. The **envelope on the wire** is what is read, not a decoded `Frame`, which would
+    drop the offending key before the assertion ever saw it.
     """
     for name, message in await _wire_of_the_whole_corpus():
         envelope = json.loads(message)
@@ -799,7 +799,7 @@ def corpus_digest() -> str:
 
 
 def test_json_wire_is_frozen():
-    """The freeze is a test, not a promise (M6 §5).
+    """The freeze is a test, not a promise.
 
     The JSON wire form is frozen at 1.0. Adding or changing a triple changes this digest - that is
     the point: the change is then a deliberate edit of the line above, in the same commit, rather

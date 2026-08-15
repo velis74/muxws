@@ -49,8 +49,8 @@ export default defineConfig({
           ],
         },
       ],
-      // The API pages in the order §5 of the M7 brief lists them: the two ways a connection starts,
-      // then the two objects an application holds, then everything a connection is configured with.
+      // The API pages in reading order: the two ways a connection starts, then the two objects an
+      // application holds, then everything a connection is configured with.
       '/api/': [
         {
           text: 'API Reference',

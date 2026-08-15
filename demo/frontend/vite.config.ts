@@ -20,7 +20,7 @@ export default defineConfig({
     // carry on. `demo.py` has already printed 5173 by then and cannot un-print it, so the reader
     // opens a port this run is not serving - which, if the thing holding 5173 is a dev server left
     // over from an earlier run, is a *stale muxws demo* that looks live and answers nothing new.
-    // Measured, not hypothetical. Failing to start is the honest outcome.
+    // Failing to start is the honest outcome.
     strictPort: true,
     proxy: {
       // `ws: true` is the whole of it, and it is the one line in this demo most likely to be

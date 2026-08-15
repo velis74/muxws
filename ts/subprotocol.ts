@@ -62,10 +62,10 @@ export function select(offered: readonly string[], configured: string): string |
   if (entry === wanted) return wanted;
 
   // Through the logger rather than straight to `console`, which is how the Python twin spells it
-  // (`logging.getLogger("muxws.codec").error`). A raw `console.error` was the same line with the
-  // level control removed: an application embedding this port could not turn it down, while the same
-  // application in Python could, and the shim in `observability.ts` exists precisely to close that
-  // gap. It still reaches `console.error` at the default level, so the diagnostic is unchanged.
+  // (`logging.getLogger("muxws.codec").error`). A raw `console.error` is the same line with the level
+  // control removed: an application embedding this port could not turn it down where the same
+  // application in Python can, and closing that gap is what the shim in `observability.ts` is for.
+  // The line still reaches `console.error` at the default level.
   logger.error(
     `muxws refusing the upgrade: the dialer offered ${describe(offered, entry)}, this acceptor is ` +
       `configured for '${configured}'. Set MUXWS_CODEC here or VITE_MUXWS_CODEC / MUXWS_CODEC ` +

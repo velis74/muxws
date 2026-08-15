@@ -401,7 +401,7 @@ describe('the awaitable handle', () => {
       const stream = pair.dialer.open({ q: 1 });
       await pair.settle();
       // The answer arrived before anyone asked. Leaving the promise pending here is the spinner that
-      // never stops which WSM-INV-011 names; it was a real hang in the Python port until it was fixed.
+      // never stops which WSM-INV-011 names.
       await expect(stream.result()).rejects.toThrow(ProtocolError);
     } finally {
       await pair.stop();
@@ -794,7 +794,7 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     try {
       const stream = pair.dialer.open({ q: 'export' }, { end: true });
       // The ordering is the whole feature: a consumer that learns the content type only after the
-      // body has started has learned it too late. `headersArrived` settles on the frame that carried
+      // body has started has learned it too late. `replyHeadersArrived` settles on the frame that carried
       // them, which arrived before the one carrying the payload.
       await stream.replyHeadersArrived;
       expect(stream.replyHeaders).toEqual({ 'content-type': 'text/csv' });

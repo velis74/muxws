@@ -34,7 +34,15 @@ dependencies = []
 
 [project.optional-dependencies]
 starlette = ["starlette>=0.37"]
-websockets = ["websockets>=12"]
+# 14, not 12, and the two releases in between are not a rounding error. `muxws/api.py` dials with
+# `websockets.connect(..., additional_headers=...)`, and the top-level `connect` was an alias for
+# `websockets.legacy.client.connect` until 14.0 moved it to `websockets.asyncio.client`. The legacy
+# one spells that argument `extra_headers` and forwards anything it does not recognise straight to
+# the event loop, so under 12 or 13 the *first* dial dies with `TypeError:
+# BaseEventLoop.create_connection() got an unexpected keyword argument 'additional_headers'` - an
+# error that names neither muxws nor the release that is too old. The `ws+unix:` arm imports
+# `unix_connect` from `websockets.asyncio.client`, which needs 13, so the TCP path sets the floor.
+websockets = ["websockets>=14"]
 msgpack = ["msgpack>=1.0"]
 # The demo (`demo.py`, `demo/backend_python/`) is a consumer of the shipped package, not part of it: it is
 # excluded from both artefacts and nothing in the library imports it. These two are here so that
@@ -43,8 +51,7 @@ msgpack = ["msgpack>=1.0"]
 # `websockets` is not optional here even though muxws itself does not import it: uvicorn ships no
 # WebSocket protocol implementation of its own, and without one it answers **404 to every upgrade**
 # while serving ordinary HTTP perfectly - so the demo loads in the browser and only the socket fails,
-# which reads as a muxws defect and is not one. Reported by the first person to run the demo, whose
-# environment had this extra and nothing else.
+# which reads as a muxws defect and is not one.
 # All three belong to the *Python* backend. `python demo.py node` serves the same frontend from
 # `demo/backend_node/` under Node and imports none of them, which is why `missing_dependencies()` in
 # `demo.py` asks which backend before it asks what is missing.
@@ -92,12 +99,11 @@ additional_files = ["ts/version.ts"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["muxws"]
-# The wheel is the artefact a consumer actually installs, and until this existed it carried the whole
-# test suite, `conftest.py`, and `__pycache__` full of bytecode from a developer's machine. `python -m
-# build` hid it by building the wheel *from* the sdist, whose own exclude list is below - so the
-# defect was invisible to every check that did not install the wheel and look inside the package.
-# Tests are not part of the library: shipping them means a consumer downloads them, and a
-# package-level `conftest.py` is a file pytest can be made to notice.
+# The wheel is the artefact a consumer actually installs, and it needs its own exclude list: the
+# sdist's list below governs the sdist only, and `python -m build` builds the wheel *from* the sdist,
+# so only installing the wheel and looking inside the package shows what it carries. Tests are not
+# part of the library: shipping them means a consumer downloads them, and a package-level
+# `conftest.py` is a file pytest can be made to notice.
 exclude = ["**/*_test.py", "**/conftest.py", "**/__pycache__"]
 
 [tool.hatch.build.targets.sdist]
@@ -115,7 +121,14 @@ exclude = [
 # `docs/examples` is here because leaving it out meant `run_examples_test.py` never ran: it holds the
 # end-to-end checks that the shipped examples still print what the guide says they print, and a test
 # nothing collects is weaker than a test that skips - a skip at least says so.
-testpaths = ["muxws", "docs/examples"]
+#
+# `demo` for the same reason: `demo/entry_point_test.py` and `demo/backend_python/handlers_test.py`
+# sit under neither of the two entries above, and this list is the whole of what pytest collects.
+# They pass in about a second and load nothing the `dev` extra does not already provide. Coverage is
+# unaffected - `[tool.coverage.run]` omits `demo/*`
+# deliberately, since the demo is a consumer of the library and counting it would inflate the
+# library's own figure.
+testpaths = ["muxws", "docs/examples", "demo"]
 python_files = ["*_test.py"]
 asyncio_mode = "auto"
 

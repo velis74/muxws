@@ -11,7 +11,7 @@ import logging
 
 from typing import Any
 
-from muxws.errors import ConnectionClosed
+from muxws.errors import ConnectionClosed, TransportUnsupportedError, TransportUrlError
 from muxws.subprotocol import find_offer, PREFIX, select
 
 logger = logging.getLogger("muxws.codec")
@@ -19,6 +19,109 @@ logger = logging.getLogger("muxws.codec")
 #: The WebSocket close code for a policy violation, used when a transport offers no handshake hook
 #: at all and the mismatch can only be discovered on an already-open socket (WSM-CDC-028).
 POLICY_VIOLATION = 1008
+
+#: The extra that installs this transport's dependency, spelled the way a reader can paste it. Named
+#: once, here, because the whole value of `WebsocketsNotInstalledError` over a bare `ImportError` is
+#: that it carries the remedy, and a remedy that drifts out of date is worse than none (WSM-ERR-016).
+INSTALL_HINT = "pip install muxws[websockets]"
+
+
+class WebsocketUrlError(TransportUrlError):
+    """A `ws:`/`wss:` URL the `websockets` library cannot turn into something to dial.
+
+    No hostname (`ws:/nohost`), a scheme that is neither `ws` nor `wss`, a port that is not an
+    integer, or a string that is not a URL at all. It is a `TransportUrlError` - and so a
+    `MuxwsError` and a `ValueError` - so that one `except MuxwsError` around `connect()` catches an
+    unusable URL whichever scheme it names (WSM-ERR-016).
+
+    The library's own diagnostic is not replaced, only framed: it is quoted in the message and the
+    original exception is chained with `from exc`, because `websockets` says *which* part of the URL
+    it objected to and this class does not.
+    """
+
+
+class WebsocketsNotInstalledError(TransportUnsupportedError):
+    """`connect()` was called and `import websockets` failed; the message names the extra.
+
+    One class for both dial arms: a `ws://` dial and a `ws+unix://` dial fail on the identical
+    `import websockets`, because it is the identical dependency.
+
+    `NotInstalled` rather than `Unavailable`: "unavailable" in a traceback out of a dial reads as a
+    transient endpoint failure a caller may retry, and this is a permanent local condition no retry
+    and no different URL can fix. That is also why the base is `TransportUnsupportedError` (a
+    `RuntimeError`) and not `TransportUrlError`.
+
+    Only the package being absent becomes this class. A `websockets` that is present but broken keeps
+    its own `ImportError` - see `require_websockets`, and the same narrowing in
+    `ts/node.ts::WsNotInstalledError`.
+    """
+
+
+def require_websockets() -> Any:
+    """Import `websockets`, or raise `WebsocketsNotInstalledError` naming the extra.
+
+    The gate for both dial arms, and why this module has no module-scope `import websockets`: the
+    package has zero required runtime dependencies (WSM-PKG-002), so the absence can only be detected
+    where it is needed and reported as a muxws error that says what to install (WSM-ERR-016).
+
+    Called from `verify_dialable_url` before the URL is parsed, because the URL parser is supplied by
+    the dependency: a caller with neither gets the failure that blocks the other, rather than an
+    `ImportError` out of the middle of a URL check.
+
+    Only the package actually being absent becomes this class. `ModuleNotFoundError` with `name`
+    exactly `"websockets"` is the one shape that means absent; a missing *sub*module (`name` of
+    `"websockets.asyncio"`) or a plain `ImportError` means the package was found and something inside
+    it failed, and answering that with `pip install muxws[websockets]` would hide the only message
+    naming the real fault. `ts/node.ts::requireWs` narrows the same way on `ERR_MODULE_NOT_FOUND`.
+    """
+    try:
+        import websockets
+    except ImportError as exc:
+        if not isinstance(exc, ModuleNotFoundError) or exc.name != "websockets":
+            raise
+        raise WebsocketsNotInstalledError(
+            f"muxws needs the `websockets` package to dial a ws:, wss: or ws+unix: URL, and importing "
+            f"it failed ({exc}); install it with `{INSTALL_HINT}`"
+        ) from exc
+    return websockets
+
+
+def verify_dialable_url(url: str, *, uri: str | None = None) -> None:
+    """Refuse a URL `websockets` cannot dial, before anything opens a socket.
+
+    `uri` is the *logical* `ws://` URL a `ws+unix:` dial synthesises and hands to
+    `unix_connect(uri=...)`; it is what that arm's handshake actually parses, so it is what gets
+    checked. For a TCP dial there is nothing to synthesise and `url` is checked as it stands. Both
+    arms go through here because both arms parse a URL with the same parser from the same package.
+
+    Called outside `connect()`'s dial closure, never inside the closure's `except`. That handler
+    translates a refused upgrade into `CodecMismatch` (WSM-CDC-022/024) by reading a 400 out of the
+    exception, and its string fallback matches `HTTP 400` anywhere in the message - including in an
+    `InvalidURI` that is merely quoting the URL back, so `connect("ws:/HTTP 400")` would be reported
+    as a codec mismatch on a connection that was never made. An unparseable URL never reaches the
+    closure, and no real refusal changes: a real 400 requires a dial that reached a server, which
+    requires a URL that parsed (WSM-ERR-016).
+
+    `parse_uri` raises `InvalidURI` for a scheme or hostname it rejects and a plain `ValueError` out
+    of `urllib.parse` for a port that is not an integer; `InvalidURI` is not a `ValueError`, so
+    catching either alone misses half the shapes. Catching `ValueError` this broadly is safe only
+    because nothing but URL parsing runs inside the `try` - the same catch inside the dial's handler
+    would also see a `ValueError` raised while building headers.
+    """
+    require_websockets()
+
+    from websockets.exceptions import InvalidURI
+    from websockets.uri import parse_uri
+
+    dialable = url if uri is None else uri
+    try:
+        parse_uri(dialable)
+    except (InvalidURI, ValueError) as exc:
+        if uri is None:
+            raise WebsocketUrlError(f"{url!r} is not a URL this transport can dial: {exc}") from exc
+        raise WebsocketUrlError(
+            f"{url!r} is not a URL this transport can dial: the handshake it would send is for {uri!r}, and {exc}"
+        ) from exc
 
 
 class WebsocketsSocket:
@@ -109,4 +212,15 @@ def verify_negotiated(negotiated: str | None, configured: str) -> None:
         raise mismatch_error(configured)
 
 
-__all__ = ["POLICY_VIOLATION", "WebsocketsSocket", "find_offer", "select_subprotocol", "verify_negotiated"]
+__all__ = [
+    "INSTALL_HINT",
+    "POLICY_VIOLATION",
+    "WebsocketUrlError",
+    "WebsocketsNotInstalledError",
+    "WebsocketsSocket",
+    "find_offer",
+    "require_websockets",
+    "select_subprotocol",
+    "verify_dialable_url",
+    "verify_negotiated",
+]

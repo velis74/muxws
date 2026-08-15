@@ -23,6 +23,12 @@ Two things are worth knowing before the tables:
   `select_subprotocol` (Python, `websockets`), `accept()` (Python, Starlette) and
   `refuseMismatchedUpgrade` (TypeScript, `ws`) exist to do.
 
+An acceptor on a Unix domain socket is an ordinary acceptor. In Python it is
+`websockets.asyncio.server.unix_serve(handler, path, select_subprotocol=muxws.select_subprotocol)`;
+in Node it is a `WebSocketServer` attached to an `http.Server` that listens on a socket file. Both
+hand these functions the same connection object a TCP listener does, and nothing on this page changes
+— see [Unix domain sockets](/guide/transports#unix-domain-sockets) for the two runnable acceptors.
+
 ## `accept()` (Python)
 
 Accept an inbound connection and return a peer that is **not yet serving**: nothing is read from the
@@ -64,8 +70,10 @@ hello to wait for), but its read loop is not running: call `peer.on_stream(...)`
 - `CodecNotRegistered` — the configured codec name was never registered. Raised before the socket is
   touched.
 - `CodecMismatch` — the dialer's offer does not carry `muxws.v1.<this codec>`. For a Starlette socket
-  the ASGI 400 has already gone out when this is raised; for a `websockets` connection the socket is
-  still open and the caller closes it with 1008.
+  the ASGI 400 has already gone out when this is raised. For a `websockets` connection nothing has
+  been sent and nothing is closed: the check runs on an already-open socket, and closing it is the
+  caller's job. An acceptor that installs `select_subprotocol` refuses the mismatch at the handshake
+  instead and never reaches this.
 - `ProtocolError` — the Starlette socket had already been accepted by the application (muxws performs
   the upgrade itself), or the object is neither a `SocketAdapter` nor a socket muxws knows how to
   upgrade, or `max_frame_bytes` is too small to hold an envelope plus one unit of payload.
@@ -128,12 +136,15 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 ### Raises
 
 - `CodecNotRegistered` — the configured codec name was never registered.
-- `ProtocolError` — the socket is not one muxws can adapt, or was already accepted.
+- `ProtocolError` — the socket is not one muxws can adapt, was already accepted, or `max_frame_bytes`
+  is too small to hold an envelope plus one unit of payload.
 - `TypeError` — an unknown keyword in `**peer_options`.
 
-It deliberately **swallows** two: `CodecMismatch`, because the 400 has already gone out and there is
-no peer left to talk to, and `ConnectionClosed`, because a socket that ends is how this function is
-supposed to finish rather than a failure to report up into the application's route.
+It **swallows** two and returns instead. `CodecMismatch`: there is no peer, and raising would put a
+traceback in the application's route for an ordinary misconfiguration. Where the socket was a
+Starlette one the 400 has already gone out; where it was a `websockets` connection nothing was sent
+and nothing was closed, so that socket is still open and still the application's to close.
+`ConnectionClosed`: a socket that ends is how this function is supposed to finish.
 
 ### Example
 
@@ -182,6 +193,13 @@ up front.
 The refusal is **raised, not returned**. Returning `None` here would answer 101 with no
 `Sec-WebSocket-Protocol` header and leave the mismatch to be discovered on an already-open socket;
 raising `NegotiationError` is what `websockets` turns into the HTTP 400 the protocol asks for.
+
+It is a thin wrapper over `muxws.subprotocol`, whose public names are the pieces every hook in either
+port is built from: `PREFIX` (`"muxws.v1."`), `offer(codec_name, extra=None)` for the list a dialer
+sends, `select(offered, configured)` for the entry an acceptor picks or `None` to refuse,
+`find_offer(offered)` for the single `muxws.v1.*` entry in an offer, `generation_of(entry)` for the
+generation number in one, and `mismatch_error(configured)` for the `CodecMismatch` a dialer composes
+for itself. TypeScript exports `PREFIX` and `select` from `muxws`; the rest are internal there.
 
 ### Signature
 
@@ -247,6 +265,10 @@ asyncio.run(main())
 Wrap an accepted `ws` connection in a peer. The connection has already handshaken by the time `ws`
 hands it over, so the subprotocol is verified on the open socket and the socket is closed with 1008
 if it disagrees.
+
+It takes a `ws` `WebSocket` and nothing else — it reads `socket.protocol` and wraps the argument in a
+`WsSocket`. Python's `accept()` also takes anything already implementing `SocketAdapter`; the
+TypeScript way to use an adapter of your own is `new Peer(adapter, { codec, isDialer: false })`.
 
 There is no browser `accept()`: a browser cannot accept a WebSocket.
 
@@ -326,13 +348,15 @@ export async function serve(socket: NodeWebSocket, options: AcceptOptions & { ha
 
 ### Return
 
-`Promise<void>` — resolves when the socket closes. Unlike Python's `serve()`, this one does **not**
-swallow anything: a `CodecMismatch` from `accept()` and a read-loop failure both reject.
+`Promise<void>` — resolves when the socket closes, and also resolves on a `CodecMismatch`, which it
+swallows exactly as Python's `serve()` does. `accept()` has closed the socket with 1008 by then, so
+there is nothing left to do with it, and rejecting inside a `ws` connection handler surfaces as an
+unhandled rejection that takes the process down.
 
 ### Raises
 
-Rejects with everything `accept()` rejects with (`CodecNotRegistered`, `CodecMismatch`,
-`ProtocolError`), plus whatever `peer.serve()` fails with - a read loop that dies takes the peer down
+Rejects with everything `accept()` rejects with **except** `CodecMismatch`: `CodecNotRegistered`,
+`ProtocolError`, plus whatever `peer.serve()` fails with - a read loop that dies takes the peer down
 first and then rejects with the same error.
 
 ### Example
@@ -449,7 +473,8 @@ which case `ws` selects nothing.
 
 ### Raises
 
-Raises: nothing. A mismatch is reported by the return value and logged to the console by `select`.
+Raises: nothing. A mismatch is reported by the return value and logged by `select` through the muxws
+logger, at error level, so `logger.level` can turn it down.
 
 ### Example
 
@@ -549,8 +574,10 @@ no muxws entry at all are one answer, because muxws never negotiates a fallback.
 
 ### Raises
 
-Raises: nothing. A refusal is a `null` return plus one `console.error` naming what was offered, what is
-configured, and which environment variable to change.
+Raises: nothing. A refusal is a `null` return plus one error-level line through the muxws
+[`logger`](./types.md#logger-and-loglevel-typescript), naming what was offered, what is configured,
+and which environment variable to change. It reaches `console.error` at the default level and is
+silenced by lowering `logger.level`.
 
 ### Example
 

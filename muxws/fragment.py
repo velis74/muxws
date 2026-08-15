@@ -1,7 +1,7 @@
 """Fragmentation: the splitter and the assembler, as pure functions (§4).
 
-Nothing here touches a socket. The send path wires the splitter in at M5a; M1 proves it correct in
-isolation, which is what WSM-FRG-015 asks for.
+Nothing here touches a socket: the splitter and the assembler are pure functions of their arguments,
+which is what WSM-FRG-015 asks for.
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ def _largest_fitting_count(
 def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> list[Frame]:
     """Every fragment at once. `iter_fragments` is the same computation, one slice at a time.
 
-    Kept because the pure-function tests and the conformance corpus want the whole list, and because
-    a caller with a small payload should not have to think about generators.
+    The pure-function tests and the conformance corpus want the whole list, and a caller with a small
+    payload should not have to think about generators.
     """
     return list(iter_fragments(frame, cap, codec))
 
@@ -197,10 +197,9 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
         # MUST end with a fragment carrying `more: false`, even if that fragment carries no bytes.
         # Skipped when the answer is already known: the encoded frame carries the remaining payload
         # plus an envelope plus whatever the codec's escaping adds, so it is never *shorter* than the
-        # remainder itself. If the remainder alone is over the cap, encoding it only to be told so
-        # renders the whole rest of the payload for nothing - and does it again on every pass, which
-        # is quadratic in payload size. This changes no boundary: it declines to ask a question whose
-        # answer cannot be yes.
+        # remainder itself. Encoding a remainder that is already over the cap renders the whole rest
+        # of the payload for nothing, and does it again on every pass, which is quadratic in payload
+        # size.
         if total - position <= cap:
             tail = _fragment_frame(frame, encoded[position:], first=emitted == 0, last=True)
             if encoded_length(codec.encode(tail)) <= cap:
@@ -250,7 +249,7 @@ class Assembler:
     def byte_length(self) -> int:
         """Bytes accumulated so far.
 
-        M5a enforces `max_payload_bytes` against this **as fragments arrive** rather than after
+        `max_payload_bytes` is enforced against this **as fragments arrive** rather than after
         reassembly (WSM-FRG-032): a receiver that assembles a payload in order to measure it has
         already spent what the limit was protecting.
         """

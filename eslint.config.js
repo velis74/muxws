@@ -56,8 +56,8 @@ export default [
   {
     // `interop/` is Node ESM and has its own tsconfig, because the root one compiles to CommonJS and
     // rejects `import.meta` (TS1343). The typed rules need to be told where its programme lives, or
-    // they refuse to parse the file at all - which is how ~1700 lines of load-bearing WSM-CDC-007
-    // machinery went unlinted until M7.
+    // they refuse to parse the file at all - and a directory the typed rules cannot parse is
+    // silently unlinted.
     files: ['interop/**/*.ts'],
     languageOptions: { parserOptions: { project: './interop/tsconfig.json' } },
   },

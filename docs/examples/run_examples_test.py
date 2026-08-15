@@ -1,8 +1,9 @@
 """Runs the shipped Python examples and checks them against the output the guide prints.
 
 The guide's expected-output blocks are not prose here: they are the fixture. `documented_output`
-reads them out of `docs/guide/getting-started.md`, so an example whose behaviour drifts from the page
-fails in CI rather than in a reader's terminal.
+reads them out of the page it is given - `docs/guide/getting-started.md` for the quick start,
+`docs/guide/transports.md` for the Unix-socket pair - so an example whose behaviour drifts from the
+page fails in CI rather than in a reader's terminal.
 """
 
 import importlib.util
@@ -11,11 +12,13 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,6 +26,7 @@ EXAMPLES = Path(__file__).resolve().parent
 DOCS = EXAMPLES.parent
 REPOSITORY = DOCS.parent
 GETTING_STARTED = DOCS / "guide" / "getting-started.md"
+TRANSPORTS = DOCS / "guide" / "transports.md"
 API = DOCS / "api"
 
 #: How long to wait for an example server to start listening, in seconds.
@@ -61,14 +65,23 @@ needs_acceptor = pytest.mark.skipif(
     reason="the quick-start acceptor is a FastAPI app under uvicorn; install fastapi and uvicorn to run it",
 )
 
+#: The Unix-socket pair needs neither fastapi nor uvicorn - its acceptor is `websockets.unix_serve` -
+#: but it does need a kernel with `AF_UNIX`, which Windows has not got. Reusing `needs_acceptor` here
+#: would skip the pair on every checkout without fastapi and say nothing about why.
+MISSING_WEBSOCKETS = importlib.util.find_spec("websockets") is None
+needs_unix_sockets = pytest.mark.skipif(
+    MISSING_WEBSOCKETS or not hasattr(socket, "AF_UNIX"),
+    reason="the Unix-socket pair needs the websockets library and an AF_UNIX kernel",
+)
 
-def documented_output(name: str) -> str:
-    """The exact block `getting-started.md` prints for `name`."""
-    text = GETTING_STARTED.read_text(encoding="utf-8")
+
+def documented_output(name: str, page: Path = GETTING_STARTED) -> str:
+    """The exact block `page` prints for `name`."""
+    text = page.read_text(encoding="utf-8")
     for match in EXPECTED_OUTPUT.finditer(text):
         if match.group("name") == name:
             return match.group("body")
-    pytest.fail(f"getting-started.md has no <!-- expected-output: {name} --> block")
+    pytest.fail(f"{page.name} has no <!-- expected-output: {name} --> block")
 
 
 def free_port() -> int:
@@ -78,17 +91,24 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def wait_until_listening(port: int, process: subprocess.Popen[str]) -> None:
+def wait_until_listening(family: int, address: Any, process: subprocess.Popen[str], what: str) -> None:
+    """Poll `address` until the server accepts a connection there, or say why it never did.
+
+    Connecting is the readiness test rather than looking at the address, because for a socket **file**
+    the file exists from `bind()` and only starts accepting at `listen()` - a probe that stopped at
+    `os.path.exists` would hand the client a socket that answers `ECONNREFUSED`. `connect_ex` reports
+    both of those states as a non-zero errno, so one loop covers the port case and the file case.
+    """
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
             pytest.fail(f"the example server exited with {process.returncode}: {process.communicate()[1]}")
-        with closing(socket.socket()) as probe:
+        with closing(socket.socket(family)) as probe:
             probe.settimeout(POLL_INTERVAL_SECONDS)
-            if probe.connect_ex(("127.0.0.1", port)) == 0:
+            if probe.connect_ex(address) == 0:
                 return
         time.sleep(POLL_INTERVAL_SECONDS)
-    pytest.fail(f"the example server did not listen on port {port} within {STARTUP_TIMEOUT_SECONDS} seconds")
+    pytest.fail(f"the example server did not start accepting on {what} within {STARTUP_TIMEOUT_SECONDS} seconds")
 
 
 @contextmanager
@@ -104,7 +124,7 @@ def example_server(script: str) -> Iterator[str]:
         text=True,
     )
     try:
-        wait_until_listening(port, process)
+        wait_until_listening(socket.AF_INET, ("127.0.0.1", port), process, f"port {port}")
         yield f"ws://127.0.0.1:{port}/ws"
     finally:
         process.terminate()
@@ -113,6 +133,44 @@ def example_server(script: str) -> Iterator[str]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
+
+
+@contextmanager
+def example_server_on_a_socket_file(script: str) -> Iterator[str]:
+    """Start one of the example servers on a socket **file** and yield the `ws+unix://` URL to dial.
+
+    A sibling of `example_server` rather than a flag on it: the two differ in the variable they set,
+    the address they probe and the URL they build.
+
+    The directory is short on purpose. A Unix socket path goes into `sockaddr_un.sun_path`, which is
+    about 108 bytes on Linux and less elsewhere, and pytest's own `tmp_path` is long enough to cross
+    that on a normal machine. The length is measured here so that a checkout with a long `TMPDIR`
+    skips with the number in the message, rather than dying inside a subprocess' `bind()` with an
+    `OSError: AF_UNIX path too long` that names no length and no component.
+    """
+    with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
+        path = Path(directory) / "s.sock"
+        measured = len(os.fsencode(path))
+        if measured > 100:
+            pytest.skip(f"the temporary socket path is {measured} bytes, too near the ~108-byte sun_path limit")
+        process = subprocess.Popen(  # noqa: S603 - a fixed script, run with this interpreter
+            [sys.executable, str(EXAMPLES / script)],
+            cwd=str(REPOSITORY),
+            env={**EXAMPLE_ENV, "MUXWS_SOCKET": str(path)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            wait_until_listening(socket.AF_UNIX, str(path), process, str(path))
+            yield f"ws+unix://{path}:/ws"
+        finally:
+            process.terminate()
+            try:
+                process.communicate(timeout=SHUTDOWN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
 
 
 def run_client(script: str, url: str) -> str:
@@ -149,6 +207,19 @@ def test_reconnecting_client_runs_end_to_end() -> None:
     """`hello=` and `reconnect=` against an acceptor with no reconnect-specific code at all."""
     with example_server("quickstart_server.py") as url:
         assert run_client("reconnect_client.py", url) == documented_output("reconnect")
+
+
+@needs_unix_sockets
+def test_the_unix_socket_pair_runs_end_to_end() -> None:
+    """`connect()` over `ws+unix://` reaches a `unix_serve` acceptor, with no muxws code in between.
+
+    The assertion is the whole feature: the client is the public `connect()` and nothing else, the URL
+    is the only thing that changed, and what comes out is the quick start's own output over a socket
+    file. A dial that silently fell back to TCP, or a URL parse that split the path on the wrong colon,
+    cannot produce these lines.
+    """
+    with example_server_on_a_socket_file("uds_server.py") as url:
+        assert run_client("uds_client.py", url) == documented_output("unix-socket", TRANSPORTS)
 
 
 def api_examples() -> list[tuple[str, str]]:

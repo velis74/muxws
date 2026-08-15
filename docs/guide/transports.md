@@ -157,12 +157,17 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Needs `pip install "muxws[websockets]"`. It dials any of the acceptors on this page.
+Needs `pip install "muxws[websockets]"`. It dials any of the acceptors on this page. Without it the
+first `connect()` raises `muxws.transports.websockets_.WebsocketsNotInstalledError`, whose message is
+that install line.
 
 `connect()` is the `websockets` dialer — there is no second Python dialer and no adapter to choose. It
 offers `muxws.v1.<codec>` first in its subprotocol list, verifies what came back, and hands the
 connection to a `Peer` that is already serving. Extra subprotocol entries of your own go in
-`subprotocols=[...]`, appended after the muxws one, and the acceptor ignores every one of them.
+`subprotocols=[...]`, appended after the muxws one, and the acceptor ignores every one of them. The URL
+is the only thing that selects the socket underneath it: a `ws+unix://` URL dials a socket file through
+this same function, with the same handshake and the same options — see
+[Unix domain sockets](#unix-domain-sockets).
 
 Remember that it **raises if the first attempt fails**, whatever `reconnect=` says. See
 [Reconnect](/guide/reconnect#the-first-thing-it-does-not-do).
@@ -201,6 +206,9 @@ answers that push `reset(REFUSED, "no on_stream handler")`. The same applies to 
 A browser cannot set request headers on a WebSocket handshake, so there is no `headers` option here.
 Credentials travel as a cookie, in the URL, or as an extra subprotocol entry — see below.
 
+It cannot open a filesystem socket either, so this `connect()` rejects a `ws+unix:` URL immediately and
+says to use `muxws/node`. See [Unix domain sockets](#unix-domain-sockets).
+
 ## Node `ws` acceptor, via `muxws/node`
 
 ```ts
@@ -226,7 +234,10 @@ server.on('connection', (socket) => {
 ```
 
 Needs `npm install muxws ws`. `ws` is an optional peer dependency, reached only from this subpath, so
-a browser bundle never sees it.
+a browser bundle never sees it. It is imported dynamically and only on the dial path, so a process
+that only accepts connections runs without it; a process that dials without it gets
+`WsNotInstalledError` from `muxws/node` — a `TransportUnsupportedError` whose message is `npm install
+ws`.
 
 Three things this snippet is carrying:
 
@@ -253,6 +264,209 @@ hook is the first thing to check.
 
 **`accept()` if you want the peer.** `serve` is `accept` plus a handler plus the read loop;
 `accept(socket, options)` gives you the `Peer` to tag and register instead.
+
+## Unix domain sockets
+
+A muxws connection can be dialled over a socket **file** instead of a TCP port. It is the same
+WebSocket: the same HTTP GET + Upgrade, the same `muxws.v1.<codec>` subprotocol answered 101 or 400,
+carried by the same `WebsocketsSocket` and `WsSocket` adapters. No frame changes, no close code
+changes, no new argument to `connect()`. The URL is the whole of the difference:
+
+```text
+ws+unix:///run/muxws/api.sock:/ws
+          └────────┬────────┘ └┬┘
+              socket file     request target
+```
+
+Take the URL's path, query included, and split it on the **first** colon. What is in front is the
+filesystem path to open; what is behind is the HTTP request target that goes into the `GET` line of the
+upgrade, and it must begin with `/`. Both ports refuse a target that does not, before any socket is
+touched: an unrooted target folds into the authority instead, so `…api.sock:ws` becomes
+`ws://localhostws`, and the dial opens the right file and asks for `/` with a `Host` nobody chose.
+Against an acceptor that does not route on the request target — `unix_serve`, or a `WebSocketServer`
+with no `path` — that handshake **succeeds**, so the misdial connects rather than failing.
+
+With no colon at all, or a trailing colon and nothing after it, the request target is `/`. The query
+is part of the string that gets split, so it travels with the target when a colon precedes it —
+`ws+unix:///run/muxws/api.sock:/ws?tenant=42` opens that file and asks for `/ws?tenant=42` — and is
+part of the *filename* when there is none. An authority may sit between the `//` and the path: it
+becomes the `Host` header and nothing else, and with no authority the header is `localhost`. The
+scheme is case-insensitive, and a single slash — `ws+unix:/run/muxws/api.sock:/ws` — parses the same
+way as the usual two.
+
+There is no `wss+unix://`. A socket file is unreachable from another machine and has no host name for
+a certificate to be checked against, so what protects it is its directory's permissions, not TLS;
+dialling the scheme is a `UnixUrlError` rather than a silent downgrade to plaintext.
+
+The dialer is the public `connect()`, unchanged:
+
+<<< @/examples/uds_client.py
+
+The acceptor is `websockets.asyncio.server.unix_serve` with the same `select_subprotocol` hook the TCP
+acceptor installs, and the same `accept()` afterwards:
+
+<<< @/examples/uds_server.py
+
+Both need `pip install "muxws[websockets]"`. Start the acceptor, run the dialer, and the dialer prints:
+
+::: tip Running the pair without two terminals
+`python demo.py --uds` from the repository root starts this acceptor on a socket file in a temporary
+directory, runs this dialer against it, and cleans both up. It runs these two files rather than a copy
+of them.
+:::
+
+<!-- expected-output: unix-socket -->
+
+```text
+greeting: hello over a unix socket
+chunk 1 of 3
+chunk 2 of 3
+chunk 3 of 3
+ping: answered
+```
+
+Those are the quick start's two call shapes — one unary request, one streamed response — over a socket
+file instead of a port, with a heartbeat added at the end to show that a `ping` frame travels the same
+way.
+
+**The Node acceptor is `{ server }` rather than `{ port }`.** `ws` cannot bind a socket file itself, so
+an `http.Server` binds it and the `WebSocketServer` attaches to that server's upgrade event.
+`refuseMismatchedUpgrade` wraps `shouldHandle` either way, so the HTTP 400 on a codec mismatch survives
+the change of attachment:
+
+```ts
+import { statSync, unlinkSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { connect as netConnect } from 'node:net';
+import { WebSocketServer } from 'ws';
+
+// Still required: the main entry point is what registers the JSON codec, and `muxws/node` does not.
+import 'muxws';
+import { handleProtocols, refuseMismatchedUpgrade, serve } from 'muxws/node';
+import type { Stream } from 'muxws';
+
+const SOCKET = process.env.MUXWS_SOCKET ?? '/tmp/muxws.sock';
+
+async function onStream(payload: unknown, stream: Stream): Promise<void> {
+  await stream.reply({ echo: payload });
+}
+
+/**
+ * Remove the socket file only if it is the corpse a killed run left behind.
+ *
+ * A socket file outlives the process that bound it, so the next `listen()` gets EADDRINUSE until
+ * somebody removes it. Unlinking unconditionally would take the address from an acceptor that is
+ * alive and serving, and a path that is not a socket must never be unlinked by this process at all:
+ * refuse anything that is not a socket, probe the rest, unlink only what refuses the probe.
+ */
+async function clearStaleSocket(path: string): Promise<void> {
+  let info;
+  try {
+    info = statSync(path);
+  } catch {
+    return; // Nothing there, which is the ordinary case.
+  }
+  if (!info.isSocket()) throw new Error(`${path} exists and is not a socket file; refusing to remove it`);
+
+  const alive = await new Promise<boolean>((resolve) => {
+    const probe = netConnect(path);
+    probe.on('connect', () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.on('error', () => resolve(false));
+  });
+  if (alive) throw new Error(`${path} already has an acceptor listening on it`);
+  unlinkSync(path);
+}
+
+await clearStaleSocket(SOCKET);
+
+const httpServer = createServer();
+const server = refuseMismatchedUpgrade(new WebSocketServer({ server: httpServer, handleProtocols }));
+
+server.on('connection', (socket) => {
+  void serve(socket, { handler: onStream }).catch((error: unknown) => {
+    console.error('connection ended', error);
+  });
+});
+
+// SIGINT's default action kills the process without running `close()`, which is what leaves a
+// socket file behind for the block above to clean up next time.
+process.on('SIGINT', () => {
+  httpServer.close(() => process.exit(0));
+});
+
+// Listen on the HTTP server, not on the WebSocketServer: only the `http.Server` has a `listen()` to
+// bind the path with.
+httpServer.listen(SOCKET, () => {
+  console.log(`listening on ${SOCKET}`);
+});
+```
+
+**The Node dialer is the same `connect()` too.** The URL goes in as it stands:
+
+```ts
+import 'muxws';
+import { connect } from 'muxws/node';
+
+const peer = await connect('ws+unix:///tmp/muxws.sock:/ws');
+console.log(await peer.request({ say: 'hello' }, { timeoutMs: 5000 })); // milliseconds
+await peer.close();
+```
+
+**The first-colon split is muxws's own.** `ws` has dialled `ws+unix:` for years, but it splits the
+path on *every* colon and keeps the second field: handed the URL whole, it would dial
+`ws+unix:///run/api.sock:/ws:v2` as the target `/ws` and
+`ws+unix:///run/api.sock:/ws?since=2026-08-14T10:00:00Z` as `/ws?since=2026-08-14T10`, while the same
+two URLs in Python ask for the whole target. Neither end can see that happen — the acceptor routes on
+the target it was handed and the dialer never learns it was cut — so `muxws/node` performs the split
+itself and hands `ws` an ordinary `ws:` URL plus a connector that opens the file. `ws` is still what
+dials, and everything after the split is `ws`'s: the offer, the events, the HTTP 400.
+
+The browser entry point is the one place this scheme is refused rather than dialled: neither a browser
+nor Node's global `WebSocket` can open a filesystem socket, so `connect()` from `muxws` rejects a
+`ws+unix:` URL up front with a `UnixSocketsUnsupportedError` naming `muxws/node`. It is a
+`TransportUnsupportedError`: the URL is good, and what has to change is the entry point doing the
+dialling.
+
+**On POSIX, both ports name the same three refusals the same way.** A `ws+unix:` URL with a request
+target that does not begin with `/`, one naming no socket file, and `wss+unix:` are all `UnixUrlError` —
+`from muxws.transports.unix import UnixUrlError` in Python, `import { UnixUrlError } from 'muxws/node'`
+in TypeScript. Both are `TransportUrlError`s, so an application that does not want to import a
+transport module to catch its failures writes `except TransportUrlError` / `instanceof
+TransportUrlError` and gets a bad address over *any* transport, `ws://` included. See
+[Errors](/guide/errors#errors-a-transport-reports-and-the-two-you-catch).
+
+**What this transport buys, that no other one does, is who is calling.** The socket file has an owner,
+a group and a mode, so the kernel decides who may open the connection at all before a single byte of
+HTTP is written — put the socket in a directory only the intended callers can traverse and the
+question is settled by `chmod`. Once a connection is open, `SO_PEERCRED` on Linux hands the acceptor
+the caller's pid, uid and gid straight from the kernel: a credential the process on the other end
+cannot forge and which never travels over the connection.
+That is authentication happening exactly where [Where authentication belongs](#where-authentication-belongs)
+says it does — at the upgrade, before `accept()` — with nothing on the wire and no cookie, header or
+token to rotate. `uds_server.py` above reads it on Linux and prints `unavailable on this platform`
+elsewhere: macOS and the BSDs have `getpeereid()`, which gives the uid and the gid but not the pid
+and which CPython does not expose, and Node's standard library exposes neither call. On those the
+file's permissions are the whole of the gate.
+
+**Two limits worth knowing before you deploy one.** A socket path is copied into `sockaddr_un.sun_path`,
+which is about 108 bytes on Linux and smaller on some other systems, so keep the directory short and
+the basename shorter. An overrun is not silent — CPython raises `OSError: AF_UNIX path too long` and
+libuv returns `EINVAL` quoting the whole path — but neither message says which component to shorten,
+and a path assembled from a long `TMPDIR` is the usual way to cross the line without meaning to.
+
+And `AF_UNIX` does not exist on Windows, where the two ports answer differently. Python refuses:
+`connect()` raises `muxws.transports.unix.UnixSocketsUnsupportedError` — a `TransportUnsupportedError`,
+so a `MuxwsError` and a `RuntimeError` both — from the URL parse, before any socket is touched, and
+therefore before the first attempt, so it can never resurface from a background reconnection. That
+check runs ahead of the two shape checks, so a bad request target and a URL naming no socket file are
+`UnixSocketsUnsupportedError` there as well; only `wss+unix:` stays a `UnixUrlError` on every platform.
+`muxws/node` has nothing equivalent to raise: `net.connect({ path })` opens a *named pipe* on Windows
+instead of failing, so the call is meaningful there — but no `ws+unix:` URL can address one, because
+`new URL()` rejects the backslashes in `\\.\pipe\name` on every platform, this one included. A Windows
+dial of a POSIX-looking path therefore fails with a connect error naming the path it tried.
 
 ## In-memory, for tests
 
@@ -358,7 +572,9 @@ Two obligations that are not visible in the signatures:
   declared `binary` flag and never by sniffing what it is about to send. An adapter that collapsed both
   into one polymorphic `send` would work until a codec's declaration and its output disagreed.
 
-Pass an instance to `accept()`, which takes anything already implementing the port as it is.
+In Python, pass an instance to `accept()`, which takes anything already implementing the port as it
+is. In TypeScript, `accept()` takes a `ws` connection and wraps it in `WsSocket`, so an adapter of
+your own is handed straight to the peer: `new Peer(adapter, { codec, isDialer: false })`.
 
 ## See also
 

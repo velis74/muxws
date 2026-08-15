@@ -10,7 +10,8 @@ const codec = new JsonCodec();
 
 /**
  * The same payloads the Python suite sweeps, spelled identically, so that a boundary disagreement
- * between the ports shows up as a failing test rather than as a cross-language surprise in M6.
+ * between the ports shows up as a failing test here rather than as corruption on a cross-language
+ * connection.
  */
 const PAYLOADS: Record<string, unknown> = {
   ascii: { body: 'abcdefghij'.repeat(400) },
@@ -217,9 +218,9 @@ describe('Assembler', () => {
 
 describe('the binary path', () => {
   /**
-   * A toy binary codec, so the byte-boundary half of the splitter has something to exercise. The
-   * real one is msgpack and arrives in M6; `latin-1` round-trips any byte sequence one-to-one, which
-   * is all the envelope needs.
+   * A toy binary codec, so the byte-boundary half of the splitter has something to exercise without
+   * pulling msgpack in. `latin-1` round-trips any byte sequence one-to-one, which is all the envelope
+   * needs.
    */
   class BinaryJsonCodec implements Codec {
     readonly name = 'binary-json';
@@ -310,10 +311,10 @@ describe('cross-language boundaries', () => {
 
 describe('sequence termination', () => {
   /**
-   * Regression. Trailers larger than the reservation used to make the closing frame too big at
-   * every slice point, so the loop emitted middle fragments until the payload ran out and then
-   * stopped - leaving a sequence with no terminator. The receiver's assembler never fires, the
-   * payload never reaches the application, and nothing anywhere reports an error.
+   * A splitter that sizes its slices against the middle envelope alone cannot terminate a sequence
+   * whose trailers are larger than that: the closing frame is over cap at every slice point, so the
+   * loop emits middle fragments until the payload runs out and then stops. The receiver's assembler
+   * never fires, the payload never reaches the application, and nothing anywhere reports an error.
    */
   it('always ends with a fragment carrying more:false - WSM-FRG-020/030', () => {
     const trailers = { checksum: 'd'.repeat(130) };

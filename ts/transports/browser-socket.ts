@@ -9,7 +9,7 @@
  * which is how the peer learns the connection died.
  */
 
-import { CodecMismatch, ConnectionClosed, ProtocolError } from '../errors';
+import { CodecMismatch, ConnectionClosed, ProtocolError, TransportUnsupportedError } from '../errors';
 import { logger } from '../observability';
 import { PREFIX, mismatchError, offer } from '../subprotocol';
 
@@ -25,6 +25,32 @@ const CLOSED = 3;
  * discovered on an already-open socket (WSM-CDC-028, D1). Mirrors `websockets_.POLICY_VIOLATION`.
  */
 export const POLICY_VIOLATION = 1008;
+
+/**
+ * A `ws+unix:` url handed to the transport that has no filesystem to reach (WSM-ERR-016).
+ *
+ * The concrete `TransportUnsupportedError` of the platform-`WebSocket` transport, and the only one it
+ * has. It is defined here, in the module that owns the dial, and re-exported by `ts/index.ts`, which
+ * is WSM-ERR-016's placement clause: `import { UnixSocketsUnsupportedError } from 'muxws'` is what a
+ * consumer writes, and `muxws/node` does not carry the name at all - that subpath's unix dial works.
+ *
+ * It shares the name of `muxws.transports.unix.UnixSocketsUnsupportedError`: the sentence to the
+ * reader is the same one - *this url names a socket file and cannot be dialled from here* - and only
+ * the reason underneath differs. Python has no `AF_UNIX` on the interpreter it is running on; this
+ * build has no filesystem transport at all, because WSM-API-022 keeps `ws` out of anything a browser
+ * can load. Both are permanent local conditions no retyped url can fix, which is why this is not a
+ * `TransportUrlError`: the url is correct, and `muxws/node` dials it.
+ *
+ * The throw site is `refuseUnixScheme` in `ts/index.ts` rather than a method here, because the scheme
+ * has to be refused *before* `connect()` resolves a codec: this class is about a url that will never
+ * become a socket, and `BrowserSocket.connect` is only ever handed urls that might.
+ */
+export class UnixSocketsUnsupportedError extends TransportUnsupportedError {
+  constructor(message?: string, options: { cause?: unknown } = {}) {
+    super(message, options);
+    this.name = 'UnixSocketsUnsupportedError';
+  }
+}
 
 /** What travels on the wire once the codec has encoded a frame. */
 type Message = string | ArrayBuffer;
@@ -47,17 +73,15 @@ interface Waiter {
  * The socket never opened, and a browser cannot say why.
  *
  * A refused handshake and an unreachable server are **the same events** here: `error` then `close`
- * with code 1006 and no reason, because the HTTP status and body are not exposed to JavaScript. The
- * previous message asserted the acceptor had refused the codec, which is one of the two possibilities
- * and reads as a diagnosis. Against a dev-server proxy pointing at a port nothing serves - the demo's
- * own failure mode when the backend is not up - it sent the reader looking at codec configuration
- * that was never wrong.
+ * with code 1006 and no reason, because the HTTP status and body are not exposed to JavaScript. A
+ * message asserting that the acceptor refused the codec would name one of the two possibilities and
+ * read as a diagnosis - against a dev-server proxy pointing at a port nothing serves, it sends the
+ * reader looking at codec configuration that was never wrong. This one names both causes and puts the
+ * reachable one first, which is the one a reader can check in a second.
  *
  * `CodecMismatch` is still the class: WSM-CDC-024 requires a refused handshake to surface it and
  * forbids a bare connection failure, and this is exactly the case the rule was written for - the
- * dialer composes the diagnostic itself *because* the browser cannot read the rejection. What changes
- * is that the message now names both causes and puts the reachable one first, since that is the one a
- * reader can check in a second.
+ * dialer composes the diagnostic itself *because* the browser cannot read the rejection.
  */
 function unopenedError(configured: string, url: string): CodecMismatch {
   return new CodecMismatch(

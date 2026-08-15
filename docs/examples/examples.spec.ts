@@ -53,11 +53,10 @@ const PYTHON_ENV: NodeJS.ProcessEnv = {
 /**
  * Whether the example servers can actually run - asked the way they are actually started.
  *
- * `cwd` is a directory with no `muxws` in it, deliberately. The previous form ran `python -c` from
- * the repository root, where `sys.path[0]` is the working directory and `./muxws/` therefore imports
- * cleanly - so the probe passed on every checkout while the servers, run as scripts from
- * `docs/examples/`, could not import a thing. A guard that answers a different question from the one
- * it is guarding does not skip: it lets the suite fail somewhere else, which is what it did.
+ * `cwd` is a directory with no `muxws` in it, deliberately: from the repository root `sys.path[0]`
+ * makes `./muxws/` import cleanly, so the probe would pass on every checkout while the servers, run
+ * as scripts from `docs/examples/`, import nothing. A guard that answers a different question from
+ * the one it is guarding does not skip - it lets the suite fail somewhere else.
  */
 const pythonReady =
   spawnSync(PYTHON, ['-c', 'import muxws, fastapi, uvicorn'], {

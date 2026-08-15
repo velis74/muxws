@@ -1,6 +1,6 @@
 """The demo's backend against the in-memory transport.
 
-A demo with no tests rots into a screenshot. The one that carries the milestone is
+A demo with no tests rots into a screenshot. The headline is
 `test_ticks_keep_flowing_during_an_export`: the panel is the demonstration, this is the proof, and it
 is written against `on_frame`'s record rather than against anything on a screen so that it fails if
 the round-robin writer is ever replaced by a FIFO.
@@ -26,17 +26,11 @@ from muxws.transports.memory import memory_pair, MemorySocket
 class Wire:
     """A browser and a backend, wired to each other, with the demo's real handler on the acceptor.
 
-    Over a plain `MemorySocket`, deliberately. Until M8 this fixture wrapped both ends in a
-    `PacedSocket` that slept in proportion to frame size, because `Peer._write_loop` had no
-    suspension of its own: a send that completed without yielding let the writer drain a whole
-    megabyte in one run of the task, nothing else was scheduled to enqueue, and the rotation had a
-    single lane to rotate over. The double supplied the yield the transport did not, so this test was
-    green for a reason the running demo could not reproduce - measured against uvicorn on loopback,
-    the export's fragments arrived back to back with no tick between them.
-
-    That was reported rather than worked around, and then fixed in `muxws/peer.py`: the write loop now
-    takes one event-loop turn per frame. The double is gone with the defect, and the property is
-    observed over the same transport every other test uses (WSM-INV-004).
+    Over a plain `MemorySocket`, and that is what makes WSM-INV-004 observable here: `Peer._write_loop`
+    takes one event-loop turn per frame, so the rotation has lanes to rotate over without the
+    transport supplying any suspension of its own. A socket double that slept in proportion to frame
+    size would supply that yield instead, and the interleaving asserted below would then be the
+    double's rather than the writer's.
     """
 
     def __init__(self, dialer: Peer, acceptor: Peer, service: MarketService, sockets: list[MemorySocket]) -> None:
@@ -45,7 +39,7 @@ class Wire:
         self.service = service
         self.sockets = sockets
         #: Every frame the *browser* saw, in arrival order. WSM-OBS-003's hook is the only witness
-        #: this milestone's headline is allowed to use.
+        #: the headline test below uses.
         self.seen: list[tuple[str, Frame, int]] = []
         #: What the browser knows about the market, and it knows nothing the socket did not tell it
         #: (D1). Filled by the pushed streams alone.
@@ -259,11 +253,11 @@ async def test_every_action_answers() -> None:
 async def test_the_rate_action_changes_how_often_the_board_pushes() -> None:
     """The pacing is the demo's and not the library's, and a reader has to be able to prove that.
 
-    `TICK_INTERVAL` is a `sleep` in the generator. Measured over the same transport this test uses,
-    a peer pair moves ~25,000 frames a second across twenty streams (`muxws/throughput_test.py`),
-    while the board's default asks for eighty - so the number on the screen was being read as a
-    ceiling when it is a choice. This asserts the choice is reachable, and that it is bounded: zero
-    would turn the generator into a busy loop that starves the loop it sends on.
+    `TICK_INTERVAL` is a `sleep` in the generator. Over the same transport this test uses, a peer pair
+    moves ~25,000 frames a second across twenty streams (`muxws/throughput_test.py`), while the
+    board's default asks for eighty - the rate on the screen is a choice, not a ceiling. This asserts
+    the choice is reachable, and that it is bounded: zero would turn the generator into a busy loop
+    that starves the loop it sends on.
     """
     async with market_wire() as wire:
         answer = await wire.dialer.request({"action": "rate", "interval_ms": 10})

@@ -1,6 +1,6 @@
 """Schema checks over the shared corpus.
 
-M1 writes `conformance/invalid/` and proves it well-formed; **M2 executes it**. A fixture that has
+This module proves the fixtures well-formed; `conformance_test.py` executes them. A fixture that has
 quietly lost a field, or a required case that has quietly disappeared, would otherwise show up as a
 suite that passes by testing nothing.
 """
@@ -99,14 +99,10 @@ def test_frame_fixtures_are_name_frame_wire_triples(path: Path):
     for case in corpus:
         assert set(case) == {"name", "frame", "json_wire"}
         assert "type" in case["frame"]
-        # Shape only: the pinned wire parses to an object carrying the same frame type. This used to
-        # attempt `parsed == frame` as well, with the type check as an `or` fallback - and the
-        # fallback is true for every well-formed triple, so the comparison beside it could never fail
-        # the test. It read as proof of round-tripping while proving nothing.
-        #
-        # The semantic check is `decode(json_wire) == frame`, and it belongs where the codec is: this
-        # module asserts that a fixture is *well-formed*, `conformance_test.py` asserts that it is
-        # *true* (WSM-TST-001, WSM-CDC-005).
+        # Shape only: the pinned wire parses to an object carrying the same frame type. The semantic
+        # check is `decode(json_wire) == frame`, and it belongs where the codec is: this module
+        # asserts that a fixture is *well-formed*, `conformance_test.py` asserts that it is *true*
+        # (WSM-TST-001, WSM-CDC-005).
         wire = json.loads(case["json_wire"])
         assert isinstance(wire, dict)
         assert wire["type"] == case["frame"]["type"]

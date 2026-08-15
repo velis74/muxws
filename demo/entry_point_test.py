@@ -4,7 +4,7 @@ Every dependency the demo needs fails *late* and somewhere other than where the 
 `fastapi` is an ImportError inside a child process nobody is watching. A missing `websockets` is the
 worst of them: uvicorn serves the page perfectly and answers 404 to every upgrade, so the browser
 shows a muxws handshake error and every part of the diagnosis points away from the package that is
-not installed. That happened to the first person to run this demo.
+not installed.
 
 Declaring `websockets` in the `[demo]` extra is the primary fix and is asserted by
 `muxws/packaging_test.py::test_the_demo_extra_can_actually_serve_a_websocket`. This is the second
@@ -34,9 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def entry_point() -> Any:
     """`demo.py` loaded by path.
 
-    By path because `demo.py` and the `demo/` package share a name and Python resolves the package -
-    so this file cannot be reached by an ordinary import at all, which is exactly why nothing tested
-    it until now.
+    By path because `demo.py` and the `demo/` package share a name and Python resolves the package,
+    so this file cannot be reached by an ordinary import at all.
     """
     spec = importlib.util.spec_from_file_location("demo_entry_point", ROOT / "demo.py")
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
@@ -44,20 +43,31 @@ def entry_point() -> Any:
     return module
 
 
+@pytest.fixture(autouse=True)
+def node_modules_present(entry_point: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts from an installed `node_modules`, whether the machine has one or not.
+
+    The Python CI job installs the `dev` extra and never runs `npm install`, so reading the real
+    directory would make half of this file depend on which job it ran in. The tests about a
+    *missing* package replace this with their own stub.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: True)
+
+
 @pytest.mark.parametrize("backend", ["python", "node", None])
 def test_a_complete_environment_reports_nothing_missing(entry_point: Any, backend: str | None):
-    """The environment running this test has both backends' dependencies, so the check is silent.
+    """With both backends' dependencies present, the check is silent.
 
     Without this the tests below would pass equally well against a check that always complains. The
-    `None` case is the no-argument call the older tests make, pinning that the default parameter is
-    the Python backend rather than "check everything".
+    `None` case is the no-argument call, pinning that the default parameter is the Python backend
+    rather than "check everything".
     """
     problems = entry_point.missing_dependencies() if backend is None else entry_point.missing_dependencies(backend)
     assert problems == []
 
 
 def test_a_missing_websocket_implementation_is_named(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
-    """The one an import check of the demo's own imports could never have found.
+    """The one an import check of the demo's own imports cannot find.
 
     Nothing in this repository imports `websockets` on the demo path - it is uvicorn's, at runtime,
     and invisible to anything that walks our imports. So the check has to know to look for it.
@@ -180,7 +190,7 @@ def test_the_frontend_is_demanded_by_both_backends(entry_point: Any, monkeypatch
 
 
 def test_the_default_backend_is_python(entry_point: Any):
-    """The backend that has always been here, so `python demo.py` keeps meaning what it meant."""
+    """`python demo.py` with no argument serves the sockets from Python."""
     assert entry_point.parse_arguments([]).backend == "python"
 
 
@@ -273,3 +283,67 @@ def test_the_node_backend_still_needs_npm_install_under_no_fe(entry_point: Any, 
     problems = entry_point.missing_dependencies("node", False)
     assert problems, "the node backend cannot run without node_modules and the check said nothing"
     assert not any("frontend" in problem for problem in problems), problems
+
+
+def test_uds_is_a_mode_of_its_own_and_not_a_third_backend(entry_point: Any):
+    """`--uds` selects a different demo, so it must not be reachable as a value of `backend`.
+
+    The two are not variants of one run: the socket demo has no frontend, no port and no choice of
+    language, so a third `BACKENDS` entry would answer "which language serves the sockets" with a
+    mode that does not serve them.
+    """
+    assert entry_point.parse_arguments([]).uds is False
+    assert entry_point.parse_arguments(["--uds"]).uds is True
+    assert "uds" not in entry_point.BACKENDS
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Answering a request for the TypeScript port by silently running the Python one is the
+        # failure this refusal exists for; the socket demo is Python at both ends.
+        (["node", "--uds"], "no backend argument"),
+        (["python", "--uds"], "no backend argument"),
+        (["--backend", "node", "--uds"], "no backend argument"),
+        # Not an error worth being clever about, but silence here would leave a reader believing they
+        # had turned something off.
+        (["--uds", "--no-fe"], "nothing to turn off"),
+    ],
+)
+def test_uds_refuses_the_arguments_that_cannot_mean_anything(
+    entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str], expected: str
+):
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.parse_arguments(argv)
+    assert refusal.value.code == 2
+    assert expected in capsys.readouterr().err
+
+
+def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
+    entry_point: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """It starts neither uvicorn nor a dev server, so demanding either would be a lie.
+
+    The check is also where a Windows reader is told before anything starts: an absent `AF_UNIX` is
+    not a missing package and no install fixes it, but it belongs in the same list rather than three
+    seconds later inside the client.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
+
+    assert entry_point.missing_dependencies(uds=True) == [], (
+        "the socket demo was refused over dependencies it never loads"
+    )
+
+    # `raising=False` so this reads the same on a machine that has no `AF_UNIX` to remove, which is
+    # the very platform the branch is about.
+    monkeypatch.delattr(entry_point.socket, "AF_UNIX", raising=False)
+    problems = entry_point.missing_dependencies(uds=True)
+    assert len(problems) == 1
+    assert "AF_UNIX" in problems[0]
+
+
+def test_help_names_the_socket_demo_and_where_its_two_scripts_live(entry_point: Any):
+    """A reader who does not know the mode exists will not type `--uds`, so `--help` has to say it."""
+    text = entry_point.build_parser().format_help()
+    for expected in ("--uds", "socket file", "docs/examples/uds_"):
+        assert expected in text, expected

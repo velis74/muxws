@@ -64,8 +64,8 @@ def _uniform() -> float:
     """A draw in [-1, 1).
 
     `random`, deliberately, with `secrets` ruled out by WSM-RCN-005: reconnect jitter exists to
-    disperse a thundering herd, not to resist an adversary, and a cryptographic source here would be
-    cargo cult. (The ping nonce in M4 is the opposite case and does use `secrets`.)
+    disperse a thundering herd, not to resist an adversary. The ping nonce in `lifecycle.py` is the
+    opposite case and does use `secrets`.
     """
     return random.uniform(-1.0, 1.0)  # noqa: S311 - reconnect jitter is not security-sensitive
 
@@ -101,9 +101,9 @@ class AttemptCounter:
 
     It resets **only when the connection is established**, where established means both of: the
     socket is open with the subprotocol accepted (WSM-CON-030), and the hello has been acknowledged
-    (WSM-RCN-004). Resetting on socket-open is the single most common way this gets written wrong,
-    and it silently converts exponential backoff into a fixed-interval hammer against a server that
-    accepts sockets while its backend is down (WSM-INV-012).
+    (WSM-RCN-004). Resetting on socket-open instead silently converts exponential backoff into a
+    fixed-interval hammer against a server that accepts sockets while its backend is down
+    (WSM-INV-012).
     """
 
     __slots__ = ("_attempts",)
@@ -122,8 +122,8 @@ class AttemptCounter:
     def established(self) -> None:
         """Called from exactly one place, `ConnectionLoop._adopt`, and only there.
 
-        A second caller is the failure WSM-INV-012 describes: the two would mask each other, every
-        test would stay green, and the delay sequence would silently stop growing.
+        A second caller is the failure WSM-INV-012 describes: the two would mask each other and the
+        delay sequence would silently stop growing.
         """
         self._attempts = 0
 
@@ -264,9 +264,9 @@ Dial = Callable[[], Awaitable["SocketAdapter"]]
 class ConnectionLoop:
     """The reconnect driver. **Dialer only** - an acceptor cannot dial (§3).
 
-    Everything the loop remembers between connections is the attempt counter (WSM-RCN-001). The
-    ordering below is the whole of the milestone, and the one point where the counter resets is the
-    single thing most easily got wrong (WSM-RCN-004/WSM-INV-012).
+    Everything the loop remembers between connections is the attempt counter (WSM-RCN-001), and it
+    resets at exactly one point: an established connection, socket **and** hello acknowledgement
+    (WSM-RCN-004/WSM-INV-012).
     """
 
     def __init__(
@@ -355,9 +355,8 @@ class ConnectionLoop:
             raise
         # The counter is not reset here. It is at its initial value already - `establish()` runs once,
         # before anything can have failed - and a second reset call site is exactly what WSM-INV-012
-        # warns about: whichever of the two a later edit made load-bearing, the other would keep every
-        # test green while backoff quietly flattened into a fixed-interval hammer. `_adopt()` is the
-        # one place a connection becomes established (WSM-RCN-004).
+        # warns about: the two would mask each other, and backoff would flatten into a fixed-interval
+        # hammer. `_adopt()` is the one place a connection becomes established (WSM-RCN-004).
         self._peer._established = True
         self._peer._will_retry = should_retry(0, self._options)
 
@@ -391,12 +390,10 @@ class ConnectionLoop:
             # nothing else. Asking the helper here is also what makes `max_attempts=0` fire
             # WSM-RCN-044's single `will_retry=False` close rather than returning in silence.
             if not should_retry(self._counter.value, self._options):
-                # Unreachable with effect, and kept anyway. This branch is only entered at
-                # `max_attempts=0`, where `establish()` has already set `will_retry` false and the
-                # loss itself latched WSM-RCN-044's single report - so deleting `_give_up()` here
-                # leaves every test green. It stays because `ts/reconnect.ts` has the same branch and
-                # a reader diffing the two ports should find them the same shape; a future change to
-                # the latch could also make it load-bearing again without anyone noticing it had gone.
+                # Entered only at `max_attempts=0`, where `establish()` has already set `will_retry`
+                # false and the loss itself latched WSM-RCN-044's single report. No test fails if
+                # this call is deleted - the latch suppresses its report - so it is held in place
+                # only by `ts/reconnect.ts` carrying the same branch.
                 self._give_up()
                 return
             if await self._redial():
@@ -529,8 +526,7 @@ class ConnectionLoop:
         hello = self._hello
         if not hello.configured:
             # A peer given no hello sends none and is established as soon as the socket is
-            # (WSM-RCN-024/WSM-CON-030): with the `settings` exchange gone there is nothing else to
-            # wait for.
+            # (WSM-RCN-024/WSM-CON-030); there is nothing else to wait for.
             return
 
         # `_allocate_and_enqueue` rather than `open()`, because `open()`'s guard is exactly what this

@@ -5,7 +5,7 @@
  * (WSM-FRG-016), which is why every decision here - the reservation, the codepoint cursor, the
  * binary search - is made the same way and in the same order as it is there.
  *
- * Nothing here touches a socket. The send path wires the splitter in at M5a.
+ * Nothing here touches a socket.
  */
 
 import type { Codec } from './codec';
@@ -216,9 +216,7 @@ export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, code
     // an envelope plus whatever the codec's escaping adds, so it is never *shorter* than the
     // remainder itself. If the remainder alone is over the cap, encoding it only to be told so
     // renders the whole rest of the payload for nothing - and does it again on every pass, which is
-    // quadratic in payload size. This changes no boundary: it declines to ask a question whose answer
-    // cannot be yes. Measured in Python, where the twin of this line took a 1.2 MB payload from 42 MB
-    // of rendering down to 25 MB.
+    // quadratic in payload size.
     if (total - position <= cap) {
       const tail = fragmentFrame(frame, sliceUnits(units, position, total - position), { first, last: true });
       if (encodedLength(codec.encode(tail)) <= cap) {
@@ -265,7 +263,7 @@ export class Assembler {
   /**
    * Bytes accumulated so far.
    *
-   * M5a enforces `maxPayloadBytes` against this **as fragments arrive** rather than after
+   * `maxPayloadBytes` is enforced against this **as fragments arrive** rather than after
    * reassembly (WSM-FRG-032): a receiver that assembles a payload in order to measure it has
    * already spent what the limit was protecting.
    */

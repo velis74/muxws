@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to a type chec
 logger = logging.getLogger("muxws.frames")
 
 #: Three lowercase hex characters, drawn once per process. A log correlation id is not
-#: security-sensitive, so `random` is right here and `secrets` would be cargo cult.
+#: security-sensitive, so `random` is right here.
 _PROCESS_PREFIX = f"{random.getrandbits(12):03x}"  # noqa: S311
 #: Never rewound, and never consulted for reuse: two connections under one name read as one
 #: connection in a log, which is the failure WSM-API-009 exists to prevent.
@@ -209,8 +209,7 @@ class Peer:
     def _fire_reconnect(self, attempt: int) -> None:
         # Isolated, because this runs on the supervisor's own task: an application handler that
         # raised would unwind into the reconnect loop and stop it for good, and the next socket loss
-        # would never be dialled out of (WSM-RCN-011/030). A library whose reconnect loop can be
-        # killed by an application's logging call is not a reconnect loop.
+        # would never be dialled out of (WSM-RCN-011/030).
         for handler in self._reconnect_handlers:
             try:
                 handler(attempt, self)
@@ -230,8 +229,8 @@ class Peer:
         The guard and the allocation are separate methods because the reconnect helper's hello is the
         one stream that goes out while `is_open` is still false - it is what *makes* the connection
         established (WSM-RCN-004/043) - and it takes `_allocate_and_enqueue` directly. The guard is
-        not parameterised for it: an `open(..., ignore_the_guard=True)` on the public method is one
-        misread argument away from an application frame preceding the hello (WSM-RCN-023).
+        not parameterised: nothing reaching the public method can bypass it and precede the hello
+        (WSM-RCN-023).
         """
         self._raise_if_unopenable()
         return self._allocate_and_enqueue(payload, headers=headers, end=end)
@@ -355,25 +354,20 @@ class Peer:
                 # Nothing else in this loop is guaranteed to suspend. `next_frame()` returns without
                 # awaiting when there is work, and `send_text` on a socket whose buffer has room -
                 # uvicorn on loopback, and `MemorySocket` always - completes without yielding either.
-                # So the loop drains every queued frame, and every fragment of a megabyte, in one
-                # uninterrupted run of this task. No other task runs; nothing else can enqueue; and
-                # the round-robin has exactly one lane to rotate between. The writer is correct and
-                # it is simply never asked.
-                #
-                # Measured before this line existed: a 400 kB export produced seven fragments with
-                # **zero** frames of any other stream between the first and the last, against a
-                # ticker enqueueing on every turn. The guarantee held only on links slow enough that
-                # backpressure supplied the missing suspension - which is why it survived to 1.0:
-                # every test transport and localhost are the fastest links there are.
+                # Without this line the loop drains every queued frame, and every fragment of a
+                # megabyte, in one uninterrupted run of this task: no other task runs, nothing else
+                # can enqueue, and the round-robin has exactly one lane to rotate between. The
+                # interleaving would then rest on backpressure supplying the missing suspension, so
+                # it would hold on a slow link and fail on a fast one.
                 await asyncio.sleep(0)
             except ConnectionClosed:
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                # A codec that cannot encode this frame - a bytes payload under JSON, say - used to
-                # take the writer task down with it. Nothing then drained the queue, every later
-                # send sat in it forever, and the peer went on reporting itself open.
+                # A codec that cannot encode this frame - a bytes payload under JSON, say - must not
+                # take the writer task down with it: nothing would drain the queue, every later send
+                # would sit in it forever, and the peer would go on reporting itself open.
                 logger.exception("muxws conn=%s could not send a %s frame", self.id, frame.type)
                 self._fail_unsendable(frame, exc)
 
@@ -517,9 +511,6 @@ class Peer:
         """
         # `_has_a_socket`, not `is_open`: a ping asks whether there is a wire to put a frame on, and
         # the hello window makes `is_open` false while the socket is perfectly alive (WSM-RCN-043).
-        # The heartbeat is the caller that matters and it only runs on an established connection, so
-        # the behaviour is unchanged - what goes away is a public call succeeding on a peer that
-        # reports `is_open is False`.
         if not self._has_a_socket:
             raise ConnectionLost("cannot ping a peer that is between sockets")
 
@@ -607,10 +598,10 @@ class Peer:
         while self._streams and loop.time() < deadline:
             # A real pause, not `sleep(0)`. Every stream open here belongs to the application and
             # ends when the application ends it, so a zero-delay poll spins the CPU flat out for the
-            # whole window - ten seconds of it at the default. That is not theoretical: a peer that
-            # *pushes* holds streams it opened itself, so a server closing a connection with a live
-            # subscription burned the window at 100% and starved the very tasks that would have
-            # ended those streams (WSM-CON-024). 5 ms costs a close at most 5 ms of extra latency.
+            # whole window - ten seconds of it at the default. A peer that *pushes* holds streams it
+            # opened itself, so a server closing a connection with a live subscription would spend
+            # that window at 100% and starve the very tasks that end those streams (WSM-CON-024).
+            # 5 ms costs a close at most 5 ms of extra latency.
             await asyncio.sleep(0.005)
         # Whatever is still live at the deadline takes the socket-death path: it fails locally and
         # nothing is sent for it, because the socket is about to be gone.
@@ -679,8 +670,8 @@ class Peer:
 
         if frame.fragment is not None:
             stream._opening = True
-            # A fragmented *open* is the same memory exposure as a fragmented *data*, and was the one
-            # path into this peer that no cap watched.
+            # A fragmented *open* is the same memory exposure as a fragmented *data*, and is held to
+            # the same cap.
             if not await self._within_payload_cap(stream, frame):
                 return True
             payload = stream._assembler.feed(frame, self._codec)
@@ -853,8 +844,8 @@ class Peer:
         """WSM-FRG-032/WSM-INV-017: reject **on the crossing fragment**, not after reassembly.
 
         Bounding memory is the limit's whole purpose. A receiver that assembles the payload in order
-        to measure it has already spent everything the limit existed to protect, and the partial
-        buffer is dropped in the same step for the same reason (M5a decision 1).
+        to measure it has already spent everything the limit exists to protect, and the partial
+        buffer is dropped in the same step for the same reason.
         """
         incoming = encoded_length(frame.fragment) if frame.fragment is not None else 0
         if stream._assembler.byte_length + incoming <= self._max_payload_bytes:
@@ -923,7 +914,7 @@ class Peer:
         # happens when the socket dies underneath an outstanding ping - which is the ordinary case
         # for a heartbeat-driven peer, once per reconnect, for the life of the process.
         self._ping_started.clear()
-        # Nothing is held for a next socket (WSM-RCN-042); M5b calls exactly this one method.
+        # Nothing is held for a next socket (WSM-RCN-042).
         self._writer.discard_all()
         for stream in list(self._streams.values()):
             stream._fail(
@@ -973,8 +964,7 @@ class Peer:
         `tags` is deliberately **not** cleared here, and this method is the only place it could be.
         WSM-RCN-033 is a statement about the *acceptor*, where a reconnect is a whole new `Peer` and
         there is nothing to carry forward; only a dialer ever adopts a socket, and a dialer's tags are
-        indexed by nothing. WSM-INV-014 states the rule without that qualification, which is why this
-        is written down rather than assumed.
+        indexed by nothing. WSM-INV-014 states the rule without that qualification.
 
         The connection id advances, so a log shows the reconnect as a new `conn=` rather than as one
         continuous connection (WSM-API-009).

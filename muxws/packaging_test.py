@@ -61,9 +61,9 @@ def _tables(text: str) -> dict[str, dict[str, Any]]:
     """`{table name: {key: value}}` for the handful of keys WSM-PKG-001/002 are about.
 
     Not `tomllib`: `requires-python` is `>=3.10` and CI runs the suite on 3.10, where `tomllib` does
-    not exist and `tomli` is not a dev dependency (and `pyproject.toml` belongs to another change).
-    A skip on the oldest supported interpreter would silently retire both rules exactly where a
-    packaging mistake is most likely, so the reader is written out instead.
+    not exist and `tomli` is not a dev dependency. A skip on the oldest supported interpreter would
+    silently retire both rules exactly where a packaging mistake is most likely, so the reader is
+    written out instead.
 
     Every value these tests read - a list of strings, a string - is also a Python literal, so
     `ast.literal_eval` is the whole parser. A value that is not (`authors`, `license`: TOML inline
@@ -328,9 +328,9 @@ def test_the_demo_adds_no_runtime_dependency(pyproject: dict[str, dict[str, Any]
     assert npm_manifest["files"] == ["dist/*"]
     assert "demo/frontend" in npm_manifest["workspaces"], "demo.py runs the dev server through it"
 
-    # Read while it exists rather than required to: this test's job is the root manifest, and it
-    # must not start failing because the frontend has not landed yet. Once it has, every package it
-    # names is checked against the root, which is where a stray `npm install --save` would put it.
+    # Read if present rather than required: this test's job is the root manifest, so an absent
+    # frontend is not a failure here. When it is present, every package it names is checked against
+    # the root, which is where a stray `npm install --save` would put it.
     frontend: dict[str, Any] = {}
     if DEMO_FRONTEND_JSON.is_file():
         frontend = json.loads(DEMO_FRONTEND_JSON.read_text(encoding="utf-8"))
@@ -567,11 +567,10 @@ def test_the_import_walker_sees_what_it_is_trusted_to_see():
 def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts: tuple[Path, Path]):
     """A consumer installs the wheel, so the wheel is what has to be right.
 
-    This was found by installing the artefact rather than by reading a manifest, and it was wrong:
-    the wheel carried every `*_test.py`, `conftest.py`, and `__pycache__` full of bytecode compiled
-    on a developer's machine. `[tool.hatch.build.targets.sdist]` had the exclude list and the wheel
-    target did not, and `python -m build` hid it completely by building the wheel *from* the sdist -
-    so the only way to see it was to install the wheel and look inside the installed package.
+    Read from the built artefact rather than from `pyproject.toml`: `[tool.hatch.build.targets.wheel]`
+    needs its own `exclude`, because the sdist's list governs the sdist only, and `python -m build`
+    builds the wheel *from* the sdist, so a wheel built that way looks clean whether or not that list
+    is there. Installing the wheel and looking inside the package is the only check that sees it.
 
     Tests are not part of the library. A consumer downloading them is the small half; a package-level
     `conftest.py` sitting on the import path is the half that can change how someone else's pytest
@@ -596,20 +595,17 @@ def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts:
 
 
 def test_the_demo_extra_can_actually_serve_a_websocket(pyproject: dict[str, Any]):
-    """`pip install -e ".[demo,starlette]"` has to be the whole story, and it was not.
+    """`pip install -e ".[demo,starlette]"` has to be the whole story of running the demo.
 
     uvicorn ships no WebSocket protocol implementation of its own. Without `websockets` or `wsproto`
     it serves ordinary HTTP perfectly and answers **404 to every upgrade**, logging
-    "No supported WebSocket library detected" where nobody is looking. So the demo loads in the
+    "No supported WebSocket library detected" where nobody is looking. The demo then loads in the
     browser, the page renders, and only the socket fails - and because a browser is never shown the
     HTTP status, the dialer reports the one thing it can name, which is a codec mismatch.
 
-    That is what the first person to run this demo saw, and every part of the diagnosis pointed away
-    from the cause: the codec was right, the proxy was right, the handshake code was right.
-
-    Asserted against the manifest and not against the environment, because the environment running
-    this test has `[dev]`, which carries `websockets` for other reasons entirely - which is exactly
-    why the gap survived being tested here.
+    Asserted against the manifest and not against the environment: the environment running this test
+    has `[dev]`, which carries `websockets` for other reasons entirely, so a working socket here says
+    nothing about what the `demo` extra installs.
     """
     demo = pyproject["project.optional-dependencies"]["demo"]
 

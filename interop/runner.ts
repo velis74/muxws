@@ -1,18 +1,28 @@
 /**
- * The TypeScript half of the live cross-language interop matrix (M6 section 7, tests 19-22).
+ * The TypeScript half of the live cross-language interop matrix.
  *
  * Run as an acceptor:         node --import tsx interop/runner.ts accept <port>
+ * Accept on a socket file:    node --import tsx interop/runner.ts accept-unix <path>
  * Run the WSM-TST-004 script: node --import tsx interop/runner.ts dial ws://127.0.0.1:<port>
+ *      ... over a socket file: node --import tsx interop/runner.ts dial ws+unix://<path>:/ws
  * Run the WSM-TST-005 script: node --import tsx interop/runner.ts reconnect-dial ws://127.0.0.1:<port>
  * Serve the corpus:           node --import tsx interop/runner.ts corpus-accept <control-port>
  * Conduct the corpus:         node --import tsx interop/runner.ts corpus-dial 127.0.0.1:<control-port>
  *
- * The same four entry points exist in `interop/runner.py`, and `interop/drive.sh` pairs them in both
+ * The same entry points exist in `interop/runner.py`, and `interop/drive.sh` pairs them in both
  * role assignments, so a rule one port implements differently from the other shows up as a named
  * failure rather than as a hang.
+ *
+ * `dial` takes a URL and nothing else, which is why the Unix pairing needs no dialling mode of its
+ * own: `ws+unix:///path/to.sock:/route` is the whole of the difference, and the same script that
+ * runs over TCP runs over a socket file with the string changed. The one cross-language risk in
+ * that URL is that the two ports must split it identically - pathname-and-search up to the
+ * **first** colon is the filesystem path, the rest is the HTTP request target - and no
+ * single-language test can witness an agreement between two parsers.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
+import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { createServer, connect as connectTcp, type Socket as TcpSocket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +31,9 @@ import { WebSocket, WebSocketServer } from 'ws';
 
 // Imported through the public entry points, exactly as an application would. `ts/index.ts` is what
 // registers the JSON codec (WSM-CDC-004), because a codec module must never register itself
-// (WSM-CDC-014); reaching past it into `ts/codec` gives an empty registry - which is the correct
-// behaviour, and was the first thing this script got wrong. The dialer comes from `ts/node`, so the
-// reconnect driver under test here is the one a node application actually gets.
+// (WSM-CDC-014); reaching past it into `ts/codec` gives an empty registry, which is the correct
+// behaviour. The dialer comes from `ts/node`, so the reconnect driver under test here is the one a
+// node application actually gets.
 // `offer` builds the subprotocol list and is the library's own business, so it is not exported
 // from the package root (a consumer needs `PREFIX`, not the machinery). The interop driver is
 // in-repo and reaches for the module directly.
@@ -243,6 +253,48 @@ async function drip(stream: Stream, state: ConnectionState): Promise<void> {
   }
 }
 
+/**
+ * One accepted connection, whatever carried it - a TCP socket or a socket file.
+ *
+ * Hoisted out of `acceptForever` rather than nested in it, and that is the whole claim the Unix
+ * pairing makes: `acceptForeverOnSocketFile` below registers this same listener, so the two
+ * acceptors differ in the line that binds and in nothing else. A UDS acceptor carrying its own copy
+ * of this handler could pass while the transport-agnostic path was broken, which is the failure the
+ * matrix exists to catch rather than to reproduce (WSM-API-021).
+ */
+function serveConnection(socket: WebSocket, request: IncomingMessage): void {
+  void (async () => {
+    // The HTTP request target this connection arrived on. Reported because it is the half of the
+    // `ws+unix://<path>:/route` grammar that reaching the socket does not prove: the socket file is
+    // the address, neither acceptor routes on the target, so a dialer that dropped the target and
+    // sent `/`, or built it from the URL's pathname and left the query string behind, would connect
+    // and pass every assertion in the script. The driver compares this line against the route it
+    // put in the URL, which is the only place the two languages' parsers meet each other.
+    emit({ event: 'accepted', target: request.url ?? null });
+    const peer = await accept(socket);
+    const state: ConnectionState = { dripSent: 0, dripStopped: false, shutdown: null };
+    let seenOpen = false;
+
+    // Report the first inbound `open` of this connection, re-encoded. This is where WSM-TST-005's
+    // "byte-identical hello" is checked from the *other* language: the driver compares this line
+    // across the two acceptor processes, so the comparison is made by the port that had to accept
+    // the replay rather than by the one that sent it. Being the *first* open is itself
+    // WSM-RCN-023 - nothing may precede the hello.
+    peer.onFrame((direction, frame) => {
+      if (direction === 'rx' && frame.type === 'open' && !seenOpen) {
+        seenOpen = true;
+        emit({ event: 'first-open', encoding: encodingOf(frame) });
+      }
+    });
+    peer.onStream(makeHandler(peer, state));
+    // A dialer that walks away leaves the read loop reporting the close; that is this connection
+    // ending, not this process failing.
+    await peer.serve().catch((error: unknown) => {
+      if (!(error instanceof ConnectionLost)) throw error;
+    });
+  })();
+}
+
 async function acceptForever(port: number): Promise<void> {
   // Both hooks, because `handleProtocols` alone answers 101 to a codec this acceptor does not speak
   // (WSM-CDC-022). The cross-language matrix is the only place a *foreign* dialer ever meets this
@@ -250,36 +302,46 @@ async function acceptForever(port: number): Promise<void> {
   // leave the one shape CI exists to witness untested.
   const server = refuseMismatchedUpgrade(new WebSocketServer({ port, host: '127.0.0.1', handleProtocols }));
 
-  server.on('connection', (socket) => {
-    void (async () => {
-      const peer = await accept(socket);
-      const state: ConnectionState = { dripSent: 0, dripStopped: false, shutdown: null };
-      let seenOpen = false;
-
-      // Report the first inbound `open` of this connection, re-encoded. This is where WSM-TST-005's
-      // "byte-identical hello" is checked from the *other* language: the driver compares this line
-      // across the two acceptor processes, so the comparison is made by the port that had to accept
-      // the replay rather than by the one that sent it. Being the *first* open is itself
-      // WSM-RCN-023 - nothing may precede the hello.
-      peer.onFrame((direction, frame) => {
-        if (direction === 'rx' && frame.type === 'open' && !seenOpen) {
-          seenOpen = true;
-          emit({ event: 'first-open', encoding: encodingOf(frame) });
-        }
-      });
-      peer.onStream(makeHandler(peer, state));
-      // A dialer that walks away leaves the read loop reporting the close; that is this connection
-      // ending, not this process failing.
-      await peer.serve().catch((error: unknown) => {
-        if (!(error instanceof ConnectionLost)) throw error;
-      });
-    })();
-  });
+  server.on('connection', serveConnection);
 
   await new Promise<void>((resolve) => server.on('listening', () => resolve()));
   const address = server.address();
   const bound = typeof address === 'object' && address !== null ? address.port : port;
   emit({ role: 'ts-acceptor', port: bound, codec: settings.codec });
+  await new Promise(() => undefined);
+}
+
+/**
+ * The same acceptor on a socket **file**, for the Unix half of WSM-TST-004.
+ *
+ * `WebSocketServer({ port })` owns an HTTP server it creates itself and has nowhere to put a path,
+ * so the socket file needs one built here and attached with `{ server }`. `refuseMismatchedUpgrade`
+ * wraps `shouldHandle`, which the attached form still calls, so a dialer offering a codec this
+ * process does not speak meets the same HTTP 400 it would over TCP and still has to turn it into
+ * `CodecMismatch` (WSM-CDC-022/024). That is the point of running the matrix over this transport at
+ * all: the only thing that changed is which kernel object the handshake travelled over, and the
+ * driver proves it by running the unmodified WSM-TST-004 script across it.
+ *
+ * The driver's readiness signal is the `path=` line below rather than a `port=` one - a socket file
+ * exists between `bind` and `listen`, so a driver that waited for the file would race the listen.
+ */
+async function acceptForeverOnSocketFile(path: string): Promise<void> {
+  // `platform`, not a failed bind: on Windows `listen(path)` opens a *named pipe* under some
+  // spellings and fails with an opaque errno under others, and either answer to a driver asking for
+  // an AF_UNIX pairing is worse than this line.
+  if (process.platform === 'win32') {
+    throw new Error('this platform has no AF_UNIX, so the unix scenario cannot run here');
+  }
+  const httpServer = createHttpServer();
+  const server = refuseMismatchedUpgrade(new WebSocketServer({ server: httpServer, handleProtocols }));
+
+  server.on('connection', serveConnection);
+
+  // The HTTP server is the one to wait on because it is the only one that can bind a path: a
+  // `WebSocketServer` attached to a server has no `listen()` of its own. It does re-emit the
+  // attached server's `listening`, so either object would answer - only one of them can be asked.
+  await new Promise<void>((resolve) => httpServer.listen(path, () => resolve()));
+  emit({ role: 'ts-acceptor', path, codec: settings.codec });
   await new Promise(() => undefined);
 }
 
@@ -1305,10 +1367,9 @@ class Control {
    *
    * In one process that is guaranteed by turn ordering. Across two it is a race, and waiting for the
    * acknowledgement is the way to lose it: the goaway is written before the ack, so both are in
-   * flight towards the dialer and which arrives first is a coin toss - which is exactly how this
-   * fixture failed here first. Sending and moving on gives the local `open()` a head start of a full
-   * round trip, and gives the acceptor the control message one event-loop turn before the open it
-   * must exclude from `last_stream`.
+   * flight towards the dialer and which arrives first is a coin toss. Sending and moving on gives the
+   * local `open()` a head start of a full round trip, and gives the acceptor the control message one
+   * event-loop turn before the open it must exclude from `last_stream`.
    */
   async dispatch(message: Record<string, unknown>): Promise<void> {
     await this.collect();
@@ -1714,6 +1775,8 @@ async function main(): Promise<void> {
   await configureCodec();
   if (mode === 'accept') {
     await acceptForever(Number(argument));
+  } else if (mode === 'accept-unix') {
+    await acceptForeverOnSocketFile(argument);
   } else if (mode === 'dial') {
     await dial(argument);
     await finish();
@@ -1727,7 +1790,7 @@ async function main(): Promise<void> {
     await finish();
   } else {
     console.error(
-      'usage: runner.ts accept <port> | dial <url> | reconnect-dial <url> | ' +
+      'usage: runner.ts accept <port> | accept-unix <path> | dial <url> | reconnect-dial <url> | ' +
         'corpus-accept <port> | corpus-dial <host:port>',
     );
     process.exit(1);

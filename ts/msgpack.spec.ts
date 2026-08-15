@@ -256,7 +256,7 @@ describe('the msgpack subpath', () => {
 
   it('contains no registration call at module scope - WSM-CDC-014', async () => {
     // The structural half, and the one that cannot be fooled by import timing: it reads the file.
-    // The twin of `registry_test.py`'s AST check, and of M6's done-when grep.
+    // The twin of `registry_test.py`'s AST check.
     const source = await readFile(join(SOURCE_DIR, 'msgpack.ts'), 'utf8');
     expect(source).not.toMatch(/^\s*registerCodec\(/m);
     // Comments stripped first - the module's own doc comment says what the application must call,

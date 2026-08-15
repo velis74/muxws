@@ -1,8 +1,8 @@
 """`connect`, `accept` and `serve` - the module-level factories (§9.3).
 
-The codec is resolved **before** any socket is touched. Putting the lookup after the upgrade is the
-single most likely wrong implementation of WSM-CDC-016, and it is what makes a misconfigured
-deployment fail as a puzzling decode error on the tenth frame rather than as a named startup error.
+The codec is resolved **before** any socket is touched (WSM-CDC-016). Resolving it after the upgrade
+makes a misconfigured deployment fail as a decode error on the tenth frame rather than as a named
+startup error.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from muxws.peer import ErrorSerializer, Peer, StreamHandler
 from muxws.reconnect import ConnectionLoop, Hello, Reconnect
 from muxws.subprotocol import mismatch_error, offer, PREFIX
 from muxws.transports import SocketAdapter
+from muxws.transports.unix import parse_unix_url
+from muxws.transports.websockets_ import verify_dialable_url
 
 
 def resolve_codec(override: Codec | None = None) -> Codec:
@@ -52,6 +54,11 @@ async def connect(
     on_reconnect: Callable[[int, Any], None] | None = None,
 ) -> Peer:
     """Dial `url` and return a serving peer.
+
+    `url` is `ws://`, `wss://`, or `ws+unix:///path/to.sock:/route` for a Unix domain socket. The
+    third is the same handshake as the first two - an HTTP upgrade offering `muxws.v1.<codec>`,
+    answered 101 or 400 - carried over a file instead of a port, and every parameter below means
+    exactly what it means over TCP.
 
     Raises if the **first** attempt fails, with the underlying error, whatever `reconnect` says
     (WSM-RCN-006). Reconnection applies to connections that were established and then lost; a peer
@@ -119,18 +126,52 @@ def _websocket_dialer(
     the first connection did not (WSM-CDC-016/020).
     """
     offered = offer(resolved.name, subprotocols)
+    # Parsed here rather than inside `dial()`, for the same reason the offered list is built here: a
+    # malformed `ws+unix:` URL, a `wss+unix:` one and a platform without AF_UNIX all raise out of
+    # `connect()` synchronously, before any socket is touched, and every reconnect dials the same
+    # socket file because there is nothing left to re-derive.
+    unix = parse_unix_url(url)
+    # After the parse, because `parse_unix_url` is stdlib-only: a malformed `ws+unix:` URL is a
+    # `UnixUrlError` even where `websockets` is absent, which is correct, since installing it would
+    # not make that URL dialable. `verify_dialable_url` then checks the dependency before the URL,
+    # because the URL parser is supplied by the dependency.
+    #
+    # Both are outside `dial()`, out of reach of the `except` below: that handler answers a refused
+    # upgrade with `CodecMismatch` (WSM-CDC-022/024) and its string fallback matches `HTTP 400` in the
+    # prose of an `InvalidURI` quoting the URL back, so `connect("ws:/HTTP 400")` would be reported as
+    # a codec mismatch on a connection that was never made (WSM-ERR-016).
+    verify_dialable_url(url, uri=unix.uri if unix is not None else None)
 
     async def dial() -> SocketAdapter:
         import websockets
 
         from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
 
+        # Both arms share one `try`: the `except` below is the 400 -> `CodecMismatch` translation
+        # WSM-CDC-022/024 requires, and a Unix dial in a `try` of its own would not get it.
         try:
-            connection = await websockets.connect(
-                url,
-                subprotocols=offered,  # type: ignore[arg-type]
-                additional_headers=headers,
-            )
+            if unix is None:
+                connection = await websockets.connect(
+                    url,
+                    subprotocols=offered,  # type: ignore[arg-type]
+                    additional_headers=headers,
+                )
+            else:
+                # Imported in the branch that uses it, so a TCP dial pays nothing for a submodule it
+                # will never call. `websockets.asyncio` is what the top-level `connect` above already
+                # resolves to at the manifest's floor, so this is a cost, not an availability, choice.
+                from websockets.asyncio.client import unix_connect
+
+                # `uri=` is the *logical* URL: the handshake is still HTTP and still needs a request
+                # target and a `Host`, and neither can be guessed from a filesystem path. Every other
+                # argument is the one the TCP arm passes, which is what keeps the subprotocol offer,
+                # the credential headers and everything below this block transport-agnostic.
+                connection = await unix_connect(
+                    unix.path,
+                    uri=unix.uri,
+                    subprotocols=offered,  # type: ignore[arg-type]
+                    additional_headers=headers,
+                )
         except Exception as exc:
             if _looks_like_a_refused_handshake(exc):
                 raise mismatch_error(resolved.name) from exc
@@ -158,9 +199,9 @@ def _looks_like_a_refused_handshake(exc: BaseException) -> bool:
     """A 400 on the upgrade is a refused muxws handshake, to be reported as `CodecMismatch`.
 
     The status comes from `InvalidStatus.response`, never from the message. `"400" in str(exc)` also
-    matches the `OSError` for a connection refused on **port** 400, and matching a status code out of
-    prose is what let a cross-language dial - where the message wording differs - miss a real refusal
-    entirely (WSM-CDC-024). The string branch survives only as a fallback for a `websockets` release
+    matches the `OSError` for a connection refused on **port** 400, and a status matched out of prose
+    misses a real refusal wherever the wording differs, as it does between the two ports
+    (WSM-CDC-024). The string branch survives only as a fallback for a `websockets` release
     that reports the status without attaching the response, and is narrowed to the phrase it uses.
     """
     from websockets.exceptions import InvalidStatus
@@ -204,8 +245,8 @@ async def _adapt(socket: Any, codec_name: str) -> SocketAdapter:
 
     The framework checks come **before** the `SocketAdapter` one. `SocketAdapter` is a
     `runtime_checkable` Protocol, and `isinstance` against one of those tests only that the four
-    method *names* exist - which Starlette's `WebSocket` happens to satisfy. Checking it first meant
-    a Starlette socket was taken as an already-adapted one and the upgrade never happened, which
+    method *names* exist - which Starlette's `WebSocket` happens to satisfy. Checking it first takes a
+    Starlette socket for an already-adapted one and skips the upgrade entirely, a failure that
     surfaces only against a real ASGI server.
     """
     if _is_starlette_websocket(socket):

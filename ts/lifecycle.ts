@@ -10,8 +10,7 @@
  * work finish.
  *
  * There is no `settings` frame anywhere in this project (WSM-CON-031), so there is no value object
- * here holding an announced/effective pair and no ack bookkeeping. If you are looking for one, it was
- * deleted from the protocol.
+ * here holding an announced/effective pair and no ack bookkeeping.
  */
 
 /**
@@ -26,8 +25,8 @@ export const MAX_STREAM_ID = 2 ** 31 - 1;
  *
  * `crypto.getRandomValues` rather than `Math.random`, for the same reason Python reaches for
  * `secrets` rather than `random` here: this one is cheap and there is no reason to make a nonce
- * guessable. (The reconnect jitter in M5b is the opposite case and deliberately uses `Math.random`,
- * as does the connection id in `peer.ts`.) The function is a Web Crypto global, so it exists in a
+ * guessable. (The reconnect jitter is the opposite case and uses `Math.random`, as does the
+ * connection id in `peer.ts`.) The function is a Web Crypto global, so it exists in a
  * browser and in Node alike and pulls in no dependency (WSM-PKG-003). It is reached through
  * `globalThis` because the shared eslint configuration does not list it as a global, and a
  * `no-undef` disable comment would suppress more than the one name it is about.
