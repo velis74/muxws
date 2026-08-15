@@ -276,7 +276,7 @@ async def test_a_reconnect_clears_the_dead_sockets_exhaustion_shutdown(make_pair
 
 
 async def test_the_writer_queues_are_discarded_on_death(make_pair):
-    """M5a exposed `discard_all()` for exactly this, and M5b is what calls it."""
+    """A dead socket's writer queues are discarded: nothing queued for it reaches the next one."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()

@@ -239,8 +239,8 @@ if [ "$SCENARIO" = main ] || [ "$SCENARIO" = unix ]; then
       fail "the $ACCEPTOR acceptor reported no request target; this driver cannot check the URL split"
     fi
     # Anchored at the front and unquoted from the ends, rather than "everything after the colon":
-    # the target itself contains one, and a greedy match reported `2` for `/ws?probe=1:2` - the
-    # driver failing a pair that had agreed perfectly, which is the worst kind of red.
+    # the target itself contains one, so a greedy match reads `/ws?probe=1:2` as `2` and fails a pair
+    # that agreed perfectly.
     TARGET="$(printf '%s' "$REPORTED_TARGET" | sed -E 's/^"target": *//; s/^"//; s/"$//')"
     if [ "$TARGET" != "$UNIX_ROUTE" ]; then
       fail "the $ACCEPTOR acceptor saw request target '$TARGET'; the $DIALER dialer was given '$UNIX_ROUTE'"

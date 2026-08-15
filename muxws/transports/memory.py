@@ -1,7 +1,7 @@
 """Two socket adapters wired to each other, with no socket anywhere.
 
-Shipped in the package rather than the test tree because M5b's reconnect tests and M6's sequence
-runner both need it (D2).
+Part of the installed package rather than the test tree: the conformance runner and any application
+test that wants a peer pair without a listening socket import it as public API.
 """
 
 from __future__ import annotations

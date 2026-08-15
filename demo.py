@@ -45,7 +45,7 @@ import time
 #: The two backends, in the order `--help` should list them.
 BACKENDS = ("python", "node")
 
-#: Python, because it is the one that has always been here and the one every reader already has.
+#: Python, because it is the interpreter that is already running this file.
 DEFAULT_BACKEND = "python"
 
 #: What `pip install -e ".[demo,starlette]"` provides, as `(import name, why it is needed)`.
@@ -64,12 +64,10 @@ PYTHON_BACKEND_IMPORTS = (
 
 #: uvicorn implements no WebSocket protocol itself and needs one of these.
 #:
-#: This is the check that matters, and an import test of the demo's *own* imports would never have
-#: found it: nothing in this repository imports `websockets` on the demo path. Without one of these
-#: uvicorn serves the page perfectly and answers **404 to every upgrade**, logging its complaint into
-#: a server log nobody is reading - so the browser shows a muxws handshake error and every part of
-#: the diagnosis points away from the cause. That is exactly how the first reader of this demo lost
-#: an hour.
+#: Nothing in this repository imports `websockets` on the demo path, so scanning the demo's own
+#: imports does not find this one. Without one of these uvicorn serves the page perfectly and answers
+#: **404 to every upgrade**, logging its complaint into a server log nobody is reading - so the
+#: browser shows a muxws handshake error and every part of the diagnosis points away from the cause.
 #:
 #: It is *uvicorn's* gap, not the protocol's: `demo/backend_node/main.ts` builds its own
 #: `WebSocketServer`, so this check must not fire for the Node backend and send a reader to install a
@@ -236,11 +234,9 @@ def build_parser():
         default=None,
         help="which language serves the sockets; omit it and you get python",
     )
-    # `--backend node` is the spelling this file was first specified with, and it is what the header
-    # comment of `demo/backend_node/main.ts` still tells the reader to type. The positional above is
-    # the one settled on afterwards. Accepting both costs one line and means neither of the two
-    # spellings already written down anywhere is wrong; `--help` documents one, so there is still
-    # exactly one way to learn this.
+    # A hidden alias of the positional above: the header comment of `demo/backend_node/main.ts` tells
+    # the reader to type `--backend node`, so both spellings work. `--help` documents the positional
+    # only, so there is still exactly one way to learn this.
     parser.add_argument("--backend", dest="backend_option", choices=BACKENDS, help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-fe",
@@ -280,9 +276,9 @@ def parse_arguments(argv=None):
 
 def run_fe():
     # `npm run demo:dev` is a tree - npm, a shell, and vite under it - and `fe_proc.terminate()`
-    # below reaches only *this* process. Terminating it left vite orphaned and still holding 5173:
-    # the next `python demo.py` then found the port taken, stepped to 5174, and served the reader a
-    # dev server from the previous run. Measured on this machine, not hypothetical.
+    # below reaches only *this* process. Terminating that alone orphans vite, which goes on holding
+    # 5173: the next `python demo.py` finds the port taken, steps to 5174, and serves the reader a
+    # dev server from the previous run.
     #
     # So: the tree gets its own process group, and whatever ends this function kills the group.
     # `start_new_session` also takes it out of the foreground group, which means Ctrl-C no longer
@@ -306,8 +302,7 @@ def run_fe():
             time.sleep(0.25)
     finally:
         # The group, not the process: `npm run demo:dev` is npm, a shell, npm again, a shell and
-        # vite, and signalling only the one we spawned left vite orphaned and still holding 5173 -
-        # so the next `python demo.py` served the reader a dev server from the previous run.
+        # vite, and signalling only the one we spawned leaves vite orphaned and still holding 5173.
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, signal.SIGTERM)
 
@@ -333,12 +328,11 @@ def run_fastapi():
 def run_node():
     """The TypeScript backend, spawned and torn down exactly the way `run_fe` spawns the dev server.
 
-    Read `run_fe`'s comments before changing anything here; they record a measured failure. `npm run`
-    is a tree - npm, a shell, tsx, node - and signalling only the process we spawned left the leaf
-    orphaned and still holding its port, so the *next* run met a server from the previous one. That
-    was vite on 5173. This one would be the backend on 8020, where the symptom is worse: the demo
-    comes up, the sockets connect, and the reader is watching a backend they did not start - possibly
-    the other language's.
+    `npm run` is a tree - npm, a shell, tsx, node - and signalling only the process we spawned leaves
+    the leaf orphaned and still holding its port, so the *next* run meets a server from the previous
+    one. Here that port is 8020, where the symptom is worse than the dev server's: the demo comes up,
+    the sockets connect, and the reader is watching a backend they did not start - possibly the other
+    language's.
 
     So: its own process group, and whatever ends this function kills the group.
     """
@@ -383,7 +377,7 @@ def wait_for_socket(path, process):
 
     Polling the filesystem rather than sleeping a fixed interval, and checking the child on every
     turn: an acceptor that exits immediately - a stale socket it refuses to unlink, a missing
-    dependency this file's own check somehow let through - would otherwise be waited on for the full
+    dependency `check_before_starting` did not cover - would otherwise be waited on for the full
     timeout and then reported as slow rather than as dead.
     """
     deadline = time.monotonic() + UDS_STARTUP_TIMEOUT_SECONDS
@@ -501,10 +495,9 @@ if __name__ == "__main__":
 
     # Flushed before anything long-running starts. Python line-buffers stdout to a terminal and
     # block-buffers it to a pipe, and `uvicorn.run` below does not return - so under
-    # `python demo.py > log` every line above sat in a buffer that SIGTERM then discarded. The lost
+    # `python demo.py > log` every line above sits in a buffer that SIGTERM then discards. The lost
     # lines include the one telling the reader the other backend exists, which is the only reason it
-    # is printed at all. Measured, not guessed: the banner was absent from a redirected run and
-    # present under `-u`.
+    # is printed at all.
     sys.stdout.flush()
 
     # None under `--no-fe`, and the teardown below reads that rather than a second flag: one thing to

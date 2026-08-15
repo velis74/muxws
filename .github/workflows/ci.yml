@@ -45,7 +45,6 @@ jobs:
       - run: npm run build
       - run: npm run docs:build
 
-  # The interop job that used to live here is gone: it ran `drive.sh python ts main json` and its
-  # mirror, which is a strict subset of `cross-language.yml`'s `scenario` matrix - same triggers,
-  # same two role assignments, and that file also covers msgpack. Two copies of one job is two
-  # things to keep in step, and the one that ships fewer codecs is the one that rots.
+  # Interop belongs in `cross-language.yml`, which runs both role assignments over both codecs on
+  # the same triggers. A second copy here would be a strict subset of that matrix: two jobs to keep
+  # in step, and the one that ships fewer codecs is the one that rots.

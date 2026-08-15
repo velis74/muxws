@@ -1,4 +1,4 @@
-"""The Python half of the documentation checker (M7, brief §7 tests 3 and 4).
+"""The Python half of the documentation checker.
 
 `docs/check-docs.mjs` enumerates the TypeScript surface, which node can import. This module is the
 mirror for Python, and it does the one thing node cannot: it resolves each documented signature to
@@ -189,7 +189,7 @@ def _all_api_text() -> str:
 
 
 # ------------------------------------------------------------------------------------------------
-# Test 3 - coverage
+# Coverage - every public symbol has an entry
 # ------------------------------------------------------------------------------------------------
 
 
@@ -254,7 +254,7 @@ def test_every_public_python_symbol_is_documented() -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# Test 4 - documented signatures against inspect.signature
+# Accuracy - documented signatures against inspect.signature
 # ------------------------------------------------------------------------------------------------
 
 

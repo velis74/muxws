@@ -1,15 +1,12 @@
 """Random legal API sequences against a live pair, asserting the invariants that hold for all of them.
 
-Every other test in this suite enumerates. `stream_test.py` walks all forty-five cells of the state
-table one at a time; `conformance/sequences/` scripts thirteen exchanges someone thought of. Both are
-worth having and neither can find the thing nobody thought of, which on this project's evidence is
-where the defects were: the writer that never interleaved, the socket closed with a code the library
-rejected, the handshake that answered 101. Each of those was legal in every step and wrong in the
-sequence.
+The rest of the suite enumerates: `stream_test.py` walks all forty-five cells of the state table one
+at a time, `conformance/sequences/` scripts thirteen written-down exchanges. Neither reaches an
+ordering nobody wrote down, and a sequence can be legal in every step and wrong as a whole.
 
 So this drives *random* sequences of ordinary calls and asserts only what must be true of **any** of
-them. It is not a replacement for the enumerated tests - it cannot say which rule broke - but it can
-say that something did, and it explores orderings no one wrote down.
+them. It cannot say which rule broke, only that something did, so it stands beside the enumerated
+tests rather than replacing them.
 
 Seeds are fixed and listed, so a failure is reproducible: the seed that failed is in the assertion
 message, and adding it to `SEEDS` turns a chance discovery into a permanent regression test.
@@ -142,11 +139,10 @@ async def test_a_random_legal_sequence_upholds_every_invariant(seed: int, make_p
 async def test_a_random_sequence_then_socket_death_fails_everything_and_sends_nothing(seed: int, make_pair):
     """The same sequences, ended by the socket dying under them.
 
-    The first test cannot witness the code-9 invariant and this one exists because of that: reset code
-    `CONNECTION_CLOSED` is synthesised *locally* when a socket dies, so a sequence that never dies
-    never produces one, and an assertion that it never reached the wire passes against a library that
-    would happily send it. Proven: removing the guard in `_sendable_reset_code` leaves the first test
-    green and fails this one.
+    Reset code `CONNECTION_CLOSED` is synthesised *locally* when a socket dies, so a sequence that
+    never dies never produces one and the test above asserts its absence from the wire vacuously. Only
+    a run in which the socket does die separates a library that never sends code 9 from one that
+    would: removing the guard in `_sendable_reset_code` leaves the test above green and fails this one.
 
     What must hold after the socket goes, whatever the ordering that preceded it: every stream that
     was live ends up closed and failed with `ConnectionLost`, nothing new can be started, and no frame

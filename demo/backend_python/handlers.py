@@ -175,11 +175,11 @@ class MarketService:
     async def _rate(self, peer: Peer, payload: dict[str, Any], stream: Stream) -> None:
         """Change how often each pushed stream carries a price.
 
-        This exists because the demo's pacing was read as the library's speed - reasonably, since
-        nothing on the screen said otherwise. `TICK_INTERVAL` is a `sleep` in the generator below and
-        has nothing to do with what the transport can carry: measured over the in-memory transport,
-        one peer pair moves ~25,000 frames a second across twenty concurrent streams
-        (`muxws/throughput_test.py`), and the board's default asks for eighty.
+        The demo's pacing is not the library's speed, and this control is what lets a reader see the
+        difference. `TICK_INTERVAL` is a `sleep` in the generator below and has nothing to do with
+        what the transport can carry: over the in-memory transport one peer pair moves ~25,000 frames
+        a second across twenty concurrent streams (`muxws/throughput_test.py`), and the board's
+        default asks for eighty.
 
         The floor is 1 ms rather than zero. At zero the generator becomes a busy loop that starves
         the very event loop it needs to send on, which would demonstrate the opposite of the point.

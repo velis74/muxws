@@ -51,8 +51,7 @@ msgpack = ["msgpack>=1.0"]
 # `websockets` is not optional here even though muxws itself does not import it: uvicorn ships no
 # WebSocket protocol implementation of its own, and without one it answers **404 to every upgrade**
 # while serving ordinary HTTP perfectly - so the demo loads in the browser and only the socket fails,
-# which reads as a muxws defect and is not one. Reported by the first person to run the demo, whose
-# environment had this extra and nothing else.
+# which reads as a muxws defect and is not one.
 # All three belong to the *Python* backend. `python demo.py node` serves the same frontend from
 # `demo/backend_node/` under Node and imports none of them, which is why `missing_dependencies()` in
 # `demo.py` asks which backend before it asks what is missing.
@@ -100,12 +99,11 @@ additional_files = ["ts/version.ts"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["muxws"]
-# The wheel is the artefact a consumer actually installs, and until this existed it carried the whole
-# test suite, `conftest.py`, and `__pycache__` full of bytecode from a developer's machine. `python -m
-# build` hid it by building the wheel *from* the sdist, whose own exclude list is below - so the
-# defect was invisible to every check that did not install the wheel and look inside the package.
-# Tests are not part of the library: shipping them means a consumer downloads them, and a
-# package-level `conftest.py` is a file pytest can be made to notice.
+# The wheel is the artefact a consumer actually installs, and it needs its own exclude list: the
+# sdist's list below governs the sdist only, and `python -m build` builds the wheel *from* the sdist,
+# so only installing the wheel and looking inside the package shows what it carries. Tests are not
+# part of the library: shipping them means a consumer downloads them, and a package-level
+# `conftest.py` is a file pytest can be made to notice.
 exclude = ["**/*_test.py", "**/conftest.py", "**/__pycache__"]
 
 [tool.hatch.build.targets.sdist]

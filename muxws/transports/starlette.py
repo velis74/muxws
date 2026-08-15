@@ -1,8 +1,8 @@
 """Starlette / FastAPI acceptor.
 
-Imports `starlette` inside the module so the package keeps zero required runtime dependencies
-(WSM-PKG-002): installing muxws does not install a web framework, and importing this module is how
-an application says it wants one.
+Imports `starlette` inside the functions that need it, so the package keeps zero required runtime
+dependencies (WSM-PKG-002): installing muxws does not install a web framework, and importing this
+module is how an application says it wants one.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class StarletteSocket:
         raise ProtocolError(f"unexpected websocket message {message['type']!r}")
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        """The one place this adapter does more than forward, hence the only override worth a note.
+        """Close this side, tolerating a socket that is already disconnected.
 
         Starlette raises on a second close, so the state is checked first: the protocol requires
         `close` to be idempotent, and the peer legitimately closes a socket the client has already
@@ -59,7 +59,7 @@ class StarletteSocket:
 
 
 async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
-    """Accept the upgrade, or **deny** it with HTTP 400 (WSM-CDC-022/026, M3 D1).
+    """Accept the upgrade, or **deny** it with HTTP 400 (WSM-CDC-022/026).
 
     `accept()` performs the WebSocket accept itself because it is the only party that knows which
     subprotocol to select; an application that accepted first has taken that decision away.

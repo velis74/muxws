@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The documentation completeness checker (muxws M7, brief §7 checks 1, 2, 8, 9 and 10).
+ * The documentation completeness checker.
  *
  * Run it with `npm run docs:check`. It exits non-zero, naming every offence, when any of the five
  * checks below fails. It reads the source of truth rather than a snapshot of it, so a symbol added

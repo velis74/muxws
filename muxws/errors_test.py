@@ -277,12 +277,11 @@ def test_connection_closed_carries_the_socket_close_details():
 def test_nothing_in_the_error_hierarchy_carries_a_status_code():
     """WSM-ERR-007: muxws maps exceptions to nothing. Reset codes are not status codes.
 
-    The rule reads like a truism until you notice what it is aimed at: a library sitting under a web
-    framework is one convenience away from `RemoteError.status_code = 500`, and once one exists every
-    caller writes against it and the reset table becomes a second, worse HTTP. The three numbers
-    below are the ones anybody would reach for first, and none of them is a `ResetCode` - the
-    numbering was chosen so that the two vocabularies cannot be confused, and 5 being a hole in it
-    (WSM-STM-022) is the only gap there is.
+    What the rule is aimed at: a library sitting under a web framework is one convenience away from
+    `RemoteError.status_code = 500`, and once one exists every caller writes against it and the reset
+    table becomes a second, worse HTTP. The numbers below are the ones anybody would reach for first,
+    and none of them is a `ResetCode`: the two vocabularies do not overlap, and 5 (WSM-STM-022) is the
+    only hole in the reset table.
 
     The serializer is the other place a mapping would appear, because it is the one thing that turns
     a local exception into something structured for the wire. WSM-ERR-006 fixes its two keys.

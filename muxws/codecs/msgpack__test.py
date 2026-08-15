@@ -252,7 +252,7 @@ def test_msgpack_codec_does_not_register_itself_on_import():
     # Importing it a second time must not register it either - and in Python an import that already
     # happened is a no-op, so the registry check above cannot see a module-scope call on its own.
     # Reading where the call is written is what actually decides it, exactly as `registry_test.py`
-    # does for the JSON codec and as M6's done-when checklist does with grep.
+    # does for the JSON codec.
     tree = ast.parse(inspect.getsource(module))
     module_scope_calls = [
         node
@@ -277,10 +277,9 @@ def test_no_dynamic_import_machinery_in_the_codec_module():
     # The names above catch the machinery that is spelled out; this catches the one that is not, and
     # it is the likelier violation - the honest reason to reach for it is "let the suite pass without
     # the extra installed". A guarded import indents its `import` under `try:`, and a lazy import
-    # indents it inside a function, so `col_offset` is the whole tell and no literal a reader thinks
-    # to forbid matches either. (`"try:\nimport"` was the literal written here first, and it can
-    # never match: the import that follows `try:` is indented.) Both spellings turn WSM-INV-015's
-    # loud startup failure into a deployment that believes it is running msgpack and is not.
+    # indents it inside a function, so `col_offset` is the whole tell: no forbidden literal can match
+    # either spelling, because the import that follows `try:` is itself indented. Both turn
+    # WSM-INV-015's loud startup failure into a deployment that believes it runs msgpack and does not.
     nested = [
         node
         for node in ast.walk(ast.parse(source))

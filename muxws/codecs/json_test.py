@@ -99,12 +99,12 @@ def test_unencodable_non_bytes_value_is_refused_too(codec: JsonCodec):
 def test_number_forms_that_the_two_ports_spell_differently(
     value: float | int, python_form: str, javascript_form: str, codec: JsonCodec
 ):
-    """Pins the known WSM-FRG-016 divergence so it stays known, and cannot silently widen.
+    """Pins the known WSM-FRG-016 divergence so it cannot silently widen.
 
     Fragment boundaries are cut over the encoded payload, so any value the two ports spell
     differently is cut differently by them. That is invisible on the wire - the sender chooses the
     cuts and the receiver only concatenates - but it bounds what the shared boundary corpus may
-    contain, and a future reader deserves the list rather than a surprise. See GAPS.md.
+    contain. See GAPS.md.
     """
     assert codec.encode_payload(value) == python_form
     assert python_form != javascript_form

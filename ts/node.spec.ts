@@ -5,8 +5,8 @@
  * is an **HTTP request**. That is not ceremony: a status code is the whole of what WSM-CDC-022 asks
  * for, and no dial in this language can see one - `connect()` recovers through the WSM-CDC-028 check
  * on the already-open socket and reports `CodecMismatch` whether the acceptor answered 400 or
- * 101-with-no-subprotocol. That blind spot is how an acceptor answering 101 passed three milestones
- * of green suites in both languages.
+ * 101-with-no-subprotocol. An acceptor that completes the handshake it should have refused is
+ * therefore invisible to every test that does not read the status off the wire itself.
  *
  * The rest of `ts/node.ts` is exercised through `ts/reconnect.spec.ts`, which dials it for real.
  */
@@ -201,9 +201,9 @@ describe('handleProtocols alone cannot refuse, which is why the second hook exis
       expect(status).toBe(101);
       expect(protocol).toBeUndefined();
 
-      // And the last resort that has been carrying this all along: the dialer finds the mismatch on
-      // the already-open socket and closes it with the policy-violation code (WSM-CDC-028). It is
-      // why every in-language test still passed, and it is not a substitute for the 400.
+      // And the last resort underneath it: the dialer finds the mismatch on the already-open socket
+      // and closes it with the policy-violation code (WSM-CDC-028). That is why an in-language dial
+      // cannot tell this 101 from a correct 400, and it is not a substitute for the 400.
       const caught = await connect(acceptor.url, { codec: msgpackish() }).then(
         () => null,
         (error: unknown) => error,
@@ -232,7 +232,7 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
   });
 
   it('raises CodecMismatch rather than a bare connection failure, and exchanges no frame', async () => {
-    // The frame count is the negative witness the rule has always named and nothing has asserted.
+    // The frame count is the negative witness the rule names: a refused handshake exchanges nothing.
     // Both peers would live in this process, so the `muxws.frames` logger sees every frame either of
     // them sends or receives, and `hello` guarantees there would be one to see: a dialer that got a
     // socket puts its hello on the wire immediately (WSM-RCN-021).
@@ -313,9 +313,8 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
     ['a port whose number contains 400', 14_000],
     // ...and `/\b400\b/`, which looks careful, matches this one: `connect ECONNREFUSED
     // 127.0.0.1:400`. Both send the reader off to check MUXWS_CODEC on both ends of a connection
-    // where nothing is listening at all, which is not what WSM-CDC-024 is about. Only the second
-    // port has teeth against the form this module actually shipped, so it is the one to keep if a
-    // machine somewhere ever answers on 400 and this has to be re-thought.
+    // where nothing is listening at all, which is not what WSM-CDC-024 is about. The second port is
+    // the sharper of the two, and the one to keep if a machine somewhere ever answers on 400.
     ['a port whose number is 400', 400],
   ])('leaves an acceptor that is simply not running as its own error - %s', async (_name, port) => {
     const caught = await connect(`ws://127.0.0.1:${port}`).then(
@@ -391,7 +390,7 @@ describe('serve() reports a refused handshake by returning, not by rejecting', (
     // By the time `CodecMismatch` is raised the refusal has already gone out as HTTP 400
     // (WSM-CDC-022) and already been logged with both codec names (WSM-CDC-029). Rejecting again
     // adds no diagnostic - and in Node it adds an unhandled rejection inside a `ws` connection
-    // handler, which is how `interop/runner.ts`'s acceptor died during M6.
+    // handler, which takes the acceptor's whole process down.
     //
     // A stand-in rather than a live server: `accept()` reads exactly two things off the socket on
     // this path, and standing up a `ws` server that negotiates the wrong subprotocol on purpose

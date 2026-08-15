@@ -283,7 +283,8 @@ describe('ping and pong', () => {
   });
 
   it('raises on a ping timeout without killing the connection', async () => {
-    // The call fails; the connection is untouched. M5b turns this into liveness detection.
+    // The call fails; the connection is untouched, which is what lets liveness detection be built on
+    // top of it.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();
@@ -303,9 +304,9 @@ describe('ping and pong', () => {
   });
 
   it('never uses native websocket ping frames', async () => {
-    // WSM-CON-011, and the one test in the brief's §7 marked TypeScript-only: browsers do not expose
-    // control frames to JavaScript, so liveness has to be built out of ordinary messages. The witness
-    // is that `sendText`/`sendBytes` are the only send paths taken and the port offers no other.
+    // WSM-CON-011, and TypeScript-only: browsers do not expose control frames to JavaScript, so
+    // liveness has to be built out of ordinary messages. The witness is that `sendText`/`sendBytes`
+    // are the only send paths taken and the port offers no other.
     const pair = makePair();
     pair.start();
     const socket = pair.dialerSocket;
@@ -355,7 +356,7 @@ describe('ping and pong', () => {
   });
 
   it('produces a nonce that is not guessable', () => {
-    // `crypto.getRandomValues`, not `Math.random`: the reconnect jitter in M5b is the opposite case.
+    // `crypto.getRandomValues`, not `Math.random`: the reconnect jitter is the opposite case.
     const nonces = new Set(Array.from({ length: 50 }, () => newNonce()));
     expect(nonces.size).toBe(50);
     [...nonces].forEach((nonce) => {
@@ -548,8 +549,8 @@ describe('goaway', () => {
   });
 
   it('sends goaway, drains and closes when ids run out - WSM-SID-007', async () => {
-    // The rule asks for four things, not one. Refusing to open again is the easy quarter; the
-    // goaway, the drain and the close were all missing until a test asked for them.
+    // The rule asks for four things, not one: refusing to open again, and then the goaway, the drain
+    // and the close, all of which a peer that only refused would skip.
     expect(MAX_STREAM_ID).toBe(2 ** 31 - 1);
 
     const pair = makePair();

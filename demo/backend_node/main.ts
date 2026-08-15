@@ -102,9 +102,9 @@ export function startServer(port: number = PORT): WebSocketServer {
   });
   // A failed `listen` arrives as an `error` event, and an *unhandled* one takes the process down with
   // a stack trace whose top frame is `node:net:2324` - which names neither the port nor the cause.
-  // The reader who hits this is nearly always the one with a demo still running in another terminal,
-  // and `demo.py` records that exact failure for vite on 5173; uvicorn answers the same mistake with
-  // one readable line, so the Node backend says it too rather than failing worse than its twin.
+  // EADDRINUSE is the common one, and it usually means another demo backend is still running in
+  // another terminal; uvicorn answers that mistake with one readable line, so this backend does too
+  // rather than failing worse than its twin.
   //
   // `exitCode` rather than `process.exit()`: stderr is a pipe under the launcher and an immediate exit
   // can truncate the very line this exists to print. With no listening socket there is nothing left to

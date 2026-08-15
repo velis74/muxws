@@ -495,8 +495,8 @@ async def test_max_attempts_of_zero_gives_up_at_the_first_loss_without_dialling(
     """WSM-RCN-044: a cap of zero is a peer that never retries, and it must still say so.
 
     The dial decision is `should_retry(counter, options)` and nothing else. Keying it on
-    `peer._will_retry` - a field on the peer that anything at all can write - made the rule something
-    a stray assignment could turn off, and made a cap of zero return in silence.
+    `peer._will_retry` - a field on the peer that anything at all can write - would make the rule
+    something a stray assignment turns off, and would make a cap of zero return in silence.
     """
     closes: list[Any] = []
     given_up = asyncio.Event()
@@ -903,10 +903,9 @@ async def test_a_reset_hello_raises_the_reset_itself(dialable_server: DialableSe
 async def test_no_hello_means_established_at_subprotocol_accept(dialable_server: DialableServer):
     """WSM-RCN-024/WSM-CON-030: a peer given no hello sends none, and is established at once.
 
-    With the `settings` exchange gone there is nothing left to wait for, so for such a peer
-    "established" really is socket-open with the subprotocol accepted. The snapshot is taken *inside*
-    `on_reconnect`, because a moment later the application's own traffic would make an empty wire
-    unprovable.
+    There is no `settings` exchange to wait for, so for such a peer "established" really is
+    socket-open with the subprotocol accepted. The snapshot is taken *inside* `on_reconnect`,
+    because a moment later the application's own traffic would make an empty wire unprovable.
     """
     snapshots: list[dict[str, Any]] = []
     again = asyncio.Event()
@@ -1063,8 +1062,8 @@ def _camel(name: str) -> str:
 async def test_connect_wires_the_driver_to_a_real_socket():
     """`connect()` builds the driver, or nothing in the library reconnects at all.
 
-    A `ConnectionLoop` with perfect unit tests that `connect()` never constructs is a failed
-    milestone, so this goes through the real public entry point against a real `websockets` server:
+    A `ConnectionLoop` with perfect unit tests that `connect()` never constructs reconnects nothing,
+    so this goes through the real public entry point against a real `websockets` server:
     the connection is killed from the server side, the peer dials again on its own, replays the
     hello it captured at `connect()` (WSM-RCN-020) and fires `on_reconnect` after the acknowledgement
     and not before (WSM-RCN-030).
@@ -1166,12 +1165,12 @@ async def test_connect_registers_its_handlers_before_the_hello_goes_out():
 async def test_a_swallowed_pong_on_a_real_socket_re_dials():
     """WSM-RCN-011: the heartbeat's local close must be a code a peer is allowed to send.
 
-    The in-memory rig cannot catch this and never could: `MemorySocket.close` throws the code away.
-    A real `websockets` connection does not - it validates it - and 1006 is reserved for "the
-    connection dropped without a close frame", so sending it raises. The exception was swallowed one
-    line later, the socket stayed open, the read loop stayed parked inside `receive()`, `serve()`
-    never returned, and the supervisor waited for a loss it was never told about: no backoff, no
-    re-dial, and a peer that reported itself closed forever.
+    The in-memory rig cannot catch this: `MemorySocket.close` throws the code away. A real
+    `websockets` connection validates it, and 1006 is reserved for "the connection dropped without a
+    close frame", so sending it raises. An exception swallowed there leaves the socket open, the
+    read loop parked inside `receive()`, `serve()` never returning, and the supervisor waiting for a
+    loss it was never told about: no backoff, no re-dial, and a peer that reports itself closed
+    forever.
 
     Hence a **real** server with the heartbeat **enabled**, answering nothing. Nothing here waits on
     a TCP timeout: the whole detection budget is `ping_interval + ping_timeout`.
@@ -1348,10 +1347,10 @@ async def test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade()
     """WSM-AUT-003, the library half: re-authentication is re-dialling, and nothing else.
 
     The rule's other half binds the deploying application and cannot be tested - muxws does not know
-    what a credential is. What *is* testable, and until now was not, is the claim the rule makes about
-    this library: the dial callable closes over the headers it was given, so every attempt presents
-    the same credential at a **fresh HTTP upgrade**, and there is no second, in-band path by which a
-    reconnecting peer could re-authenticate.
+    what a credential is. What *is* testable is the claim the rule makes about this library: the dial
+    callable closes over the headers it was given, so every attempt presents the same credential at a
+    **fresh HTTP upgrade**, and there is no second, in-band path by which a reconnecting peer could
+    re-authenticate.
 
     Asserted at the upgrade rather than through a peer, because that is where a credential travels: a
     test that watched frames could not tell a header that was sent from one that was dropped.

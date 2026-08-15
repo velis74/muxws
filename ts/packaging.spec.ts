@@ -133,9 +133,9 @@ function specifierPattern(name: string): RegExp {
  *
  * Four routes, because a package can arrive by any of them: inlined from `node_modules` (installed),
  * left as an external import (resolvable but excluded), spelled in the emitted code, or named in the
- * resolution error a build throws when the optional package is *not* installed. That last one is not
- * hypothetical - `@msgpack/msgpack` is optional precisely so a checkout may be missing it, and a
- * test that only read a successful build would go quiet on exactly that machine.
+ * resolution error a build throws when the optional package is *not* installed. `@msgpack/msgpack`
+ * is optional precisely so a checkout may be missing it, and a test that only read a successful build
+ * would go quiet on exactly that machine.
  *
  * `alsoImport` injects real imports into the entry module, which is how the two control tests below
  * mutate this assertion without editing `ts/index.ts`. The imports are bound and re-exported, or
@@ -395,9 +395,9 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
   /**
    * Every module specifier a file imports, type-only imports included.
    *
-   * Comments are stripped first. The first draft of this walker did not strip them and reported
-   * three offenders that were sentences - a doc-comment containing the words "from 'gone'" reads
-   * exactly like an import to a regex that spans lines. The control below now carries that case.
+   * Comments are stripped first: a doc-comment containing the words "from 'gone'" reads exactly like
+   * an import to a regex that spans lines, and would be reported as a dependency of the file. The
+   * control below carries that case.
    */
   function importsOf(source: string): string[] {
     const code = withoutComments(source);
@@ -451,7 +451,7 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
 
   it('sees a type-only import, which is what a runtime witness cannot', () => {
     // The control. Without it the two assertions above pass equally well against a walker that reads
-    // nothing at all, and a test that cannot fail is the failure this project has paid for four times.
+    // nothing at all, which is a test that cannot fail.
     const source = [
       "/** A doc comment that says the stream is gone, from 'nowhere', and mentions import too. */",
       "import type { WebSocket } from 'ws';",
@@ -461,8 +461,7 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
       '',
     ].join('\n');
     // Both halves matter: the type-only import must be SEEN, and neither the doc comment nor the
-    // commented-out import may be. The first draft of this walker failed the second half and
-    // reported three sentences as dependencies.
+    // commented-out import may be counted as one.
     expect(importsOf(source)).toEqual(['ws', './peer', './side-effect']);
   });
 });

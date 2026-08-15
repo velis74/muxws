@@ -43,9 +43,8 @@ describe('the v1 frame set', () => {
    *
    * A membership check cannot fail for a type that should not be there, and the two facts most worth
    * policing are absences: there is no `end` frame type (WSM-FRM-012) and no trailers frame type
-   * (WSM-FRM-013). Both are flags on `data`, and both were deliberate - a `V1_FRAME_TYPES` that grew
-   * an `end` entry would satisfy every membership assertion in this file and still be a different
-   * protocol.
+   * (WSM-FRM-013). Both are flags on `data` - a `V1_FRAME_TYPES` that grew an `end` entry would
+   * satisfy every membership assertion in this file and still be a different protocol.
    */
   const SECTION_2_3 = ['open', 'data', 'reset', 'ping', 'pong', 'goaway'];
 
@@ -56,8 +55,8 @@ describe('the v1 frame set', () => {
 
   it('has no end frame type and no trailers frame type - WSM-FRM-012/WSM-FRM-013', () => {
     // Named individually as well as by the equality above, so a failure says which absence broke.
-    // `window_update` is reserved and unimplemented (WSM-BPR-001) and `settings` was deleted rather
-    // than deferred (WSM-CON-031); neither may appear in the set a v1 peer sends from.
+    // `window_update` is reserved and unimplemented (WSM-BPR-001) and there is no `settings` frame
+    // (WSM-CON-031); neither may appear in the set a v1 peer sends from.
     ['end', 'trailers', 'window_update', 'settings', 'headers', 'ack'].forEach((absent) => {
       expect(V1_FRAME_TYPES.has(absent), `${absent} must not be a v1 frame type`).toBe(false);
     });

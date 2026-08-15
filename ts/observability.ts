@@ -3,8 +3,7 @@
  *
  * A mirror of `muxws/observability.py`. Python gets its logger from the standard library and merely
  * names it; TypeScript has no logging module it may depend on - the browser entry point has zero
- * runtime dependencies (WSM-PKG-003) - so the level-filtered `console` shim that used to live in
- * `ts/peer.ts` moves here, which is what its own comment said M5a would do with it.
+ * runtime dependencies (WSM-PKG-003) - so the level-filtered `console` shim lives here.
  */
 
 import type { Frame } from './frames';
@@ -24,8 +23,8 @@ const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, e
  * port that spammed every frame to the console by default would not be mirroring it.
  *
  * @internal Exported so a test can raise the level the way `caplog.at_level` does in Python, and so
- * an application can turn frame logging on. Re-exported from `ts/peer.ts` for the call sites that
- * already import it from there; it is a seam, not public API.
+ * an application can turn frame logging on. Re-exported from `ts/peer.ts`; it is a seam, not public
+ * API.
  */
 export const logger = {
   level: 'warn' as LogLevel,
@@ -54,8 +53,8 @@ export interface CloseReason {
   readonly reason: string;
   readonly wasClean: boolean;
   /**
-   * False only when `maxAttempts` is exhausted or `close()` was called deliberately. Until the
-   * reconnect helper lands in M5b there is nothing that retries, so it is always false here.
+   * False only when `maxAttempts` is exhausted or `close()` was called deliberately. A peer driven
+   * without the reconnect helper never dials again, so it is always false there.
    */
   readonly willRetry: boolean;
 }

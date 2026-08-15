@@ -97,8 +97,8 @@ async def _upgrade(url: str, offered: str) -> tuple[int, dict[str, str]]:
     No muxws peer can be the witness for WSM-CDC-022. The rule is entirely about *which status code*
     comes back, and a dial in this language never sees one: `connect()` recovers through the
     WSM-CDC-028 check on the open socket and reports `CodecMismatch` whether the acceptor answered
-    400 or 101-with-no-subprotocol. That blind spot is exactly how an acceptor answering 101 passed
-    three milestones of green suites, so the request is spoken here at the HTTP level instead.
+    400 or 101-with-no-subprotocol. An acceptor answering 101 is therefore invisible to any test that
+    dials it, so the request is spoken here at the HTTP level instead.
     """
     parts = urlsplit(url)
     host, port = parts.hostname or "127.0.0.1", parts.port or 80
@@ -214,10 +214,10 @@ async def test_mismatched_codecs_reject_handshake(
 ):
     """WSM-CDC-022/024 **(spec)**: refused at the handshake, and no frame is exchanged.
 
-    The frame count is the negative witness the rule has always named and nothing has ever asserted.
-    Both peers would live in this process, so the `muxws.frames` logger sees every frame either of
-    them sends or receives, and `hello=` guarantees there would be one to see: a dialer that got a
-    socket puts its hello on the wire immediately (WSM-RCN-021).
+    The frame count is the negative witness the rule names. Both peers live in this process, so the
+    `muxws.frames` logger sees every frame either of them sends or receives, and `hello=` guarantees
+    there would be one to see: a dialer that got a socket puts its hello on the wire immediately
+    (WSM-RCN-021).
 
     The last assertion is the other half of WSM-ERR-016's layering: a real refusal reaches a server,
     so its URL parsed, so the check ahead of the dial let it through. A URL check that claimed a
@@ -251,8 +251,8 @@ async def test_a_101_that_negotiated_something_else_is_caught_on_the_open_socket
     This acceptor selects the application's own entry instead of the muxws one, and `websockets`
     completes the handshake because that value *was* offered (WSM-CDC-021). Nothing about the
     upgrade looks wrong from the dialer's side, so the check on the already-open socket is all there
-    is - and it is the only route a browser ever has. It is not a substitute for the 400: it is what
-    made the missing 400 invisible for three milestones.
+    is - and it is the only route a browser ever has. It is not a substitute for the 400: it reports
+    a mismatch either way, which is what makes an acceptor's missing 400 invisible from here.
     """
 
     def select_the_wrong_one(_connection: Any, _subprotocols: list[str]) -> str:
@@ -289,8 +289,7 @@ async def test_an_unreachable_acceptor_is_not_reported_as_a_codec_mismatch():
     """
     port = _a_closed_port_whose_number_contains_400()
 
-    # `CodecMismatch` is not an `OSError`, so naming the expected type here is the whole assertion:
-    # the old heuristic raised `CodecMismatch` and this line failed.
+    # `CodecMismatch` is not an `OSError`, so naming the expected type here is the whole assertion.
     with pytest.raises(ConnectionRefusedError):
         await muxws.connect(f"ws://127.0.0.1:{port}")
 
@@ -532,7 +531,7 @@ async def test_a_mismatched_codec_over_a_unix_socket_reaches_the_caller_as_a_cod
     translation lives in one `except` around the dial. A Unix dial written in a `try` of its own
     still connects, still gets its 400, and still raises - as `InvalidStatus`, a `websockets` type
     naming a status code, to an application that was told to catch `CodecMismatch`. Nothing else in
-    the suite goes red when that happens, which is why this test exists.
+    the suite goes red when that happens.
 
     The empty frame log is the stronger of the two assertions, exactly as in the TCP twin: `hello=`
     guarantees a dialer that got a socket would have put something on the wire immediately.
@@ -769,7 +768,7 @@ class _BreakWebsockets:
     interrupted install or a version skew inside the package really produces: the package is found and
     executing its `__init__` reaches for something that is gone. `_RefuseWebsockets` raises for the
     same statement with `name="websockets"`, and those two names are the only thing telling the two
-    situations apart, which is exactly why this test exists.
+    situations apart.
     """
 
     def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
@@ -837,9 +836,7 @@ async def test_a_missing_websockets_package_names_the_extra_that_installs_it(
 
     A bare `ModuleNotFoundError: No module named 'websockets'` out of a `connect()` names neither the
     library that needed it nor the command that fixes it, and it is not a `MuxwsError`, so an
-    application that handles every muxws failure in one place sees it as a crash. GAPS.md records the
-    same shape one layer down: an install with no WebSocket implementation answered every upgrade 404
-    and was read as a muxws defect for want of a message naming the package.
+    application that handles every muxws failure in one place sees it as a crash.
 
     Both arms are here because they share the dependency and must therefore share the class: a
     `ws+unix:` dial fails on the identical `import websockets` a `ws://` dial does, and inventing a

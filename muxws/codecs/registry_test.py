@@ -43,7 +43,7 @@ def test_codec_module_does_not_register_itself_on_import():
     observed by importing one and inspecting the registry, because in Python importing
     `muxws.codecs.json_` necessarily executes `muxws/__init__.py` first - and that file registers
     JSON deliberately, as WSM-CDC-004 requires it to. The two rules are only separable by looking at
-    where the call is written, which is also how M6's done-when checks it. See GAPS.md.
+    where the call is written, which is what this reads the source for. See GAPS.md.
     """
     import muxws.codecs.json_ as json_module
 

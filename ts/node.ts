@@ -286,7 +286,7 @@ export interface NodeConnectOptions extends ConnectOptions {
 }
 
 /**
- * Dial `url` over the `ws` package and return a serving peer (m3 §4.5).
+ * Dial `url` over the `ws` package and return a serving peer.
  *
  * The node twin of `connect()` in `ts/index.ts`, and the same contract: it throws if the **first**
  * attempt fails, with the underlying error, whatever `reconnect` says (WSM-RCN-006/WSM-INV-018).
@@ -385,9 +385,9 @@ async function dialWs(url: string, codecName: string, options: NodeConnectOption
       request.destroy();
       response.destroy();
       // `res.statusCode` is the only place `ws` hands the refusal over as a number. The message the
-      // `error` path carries is prose, and reading a status out of prose is what let a
-      // cross-language dial - where the wording differs, and once did not contain "400" at all -
-      // miss a real refusal and surface a bare connection failure (WSM-CDC-024).
+      // `error` path carries is prose, whose wording differs between peers and need not contain
+      // "400" at all, so reading a status out of it misses a real refusal from a cross-language
+      // acceptor and surfaces a bare connection failure where WSM-CDC-024 requires `CodecMismatch`.
       reject(
         response.statusCode === REFUSED
           ? mismatchError(codecName)
@@ -525,8 +525,7 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
  * Python and the reason the two ports agree here. By the time it is raised the refusal has already
  * been answered on the wire with HTTP 400 (WSM-CDC-022) and already logged with both codec names
  * (WSM-CDC-029), so rejecting again reports nothing new - and in Node it reports it as an unhandled
- * rejection out of a `ws` connection handler, which takes the whole process down. That is not
- * hypothetical: it is how `interop/runner.ts`'s acceptor died during M6.
+ * rejection out of a `ws` connection handler, which takes the whole process down.
  */
 export async function serve(socket: NodeWebSocket, options: AcceptOptions & { handler: StreamHandler }): Promise<void> {
   const { handler, ...rest } = options;

@@ -1,8 +1,7 @@
 """muxws - multiplexed, cancellable, bidirectional streams over one WebSocket.
 
-The three backoff helpers are exported together or not at all: `backoff_delay`, `unjittered_delay`
-and `should_retry` are one schedule seen from three sides, and an operator computing "when will it
-try again" needs all three. Exporting one of them was arbitrary.
+`backoff_delay`, `unjittered_delay` and `should_retry` are one schedule seen from three sides and are
+exported together: an operator computing "when will it try again" needs all three.
 """
 
 from muxws.api import accept, connect, resolve_codec, select_subprotocol, serve

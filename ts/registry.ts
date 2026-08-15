@@ -35,7 +35,7 @@ export class PeerRegistry {
    *
    * Two levels rather than one string key: `('a', 1)` and `('a1', undefined)` concatenate to the same
    * characters, and a registry that confused them would answer `peersFor({ a: 1 })` with a peer that
-   * never carried that tag. A value that is not indexable never reaches here at all, so a
+   * never carried that tag. A value that is not indexable never reaches here at all, so an
    * object-valued tag costs nothing whatever.
    */
   private readonly index = new Map<string, Map<TagValue, Set<Peer>>>();

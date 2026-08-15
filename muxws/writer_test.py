@@ -130,7 +130,7 @@ async def test_no_fifo_of_frames_exists_in_the_send_path():
 
 
 async def test_discard_all_leaves_nothing_for_a_next_socket(writer: Writer):
-    """WSM-RCN-042/WSM-INV-010: M5b calls this, and nothing may survive it."""
+    """WSM-RCN-042/WSM-INV-010: connection loss calls this, and nothing may survive it."""
     writer.enqueue(Frame("data", stream=1, payload=_big()))
     writer.enqueue(Frame("data", stream=3, payload={"n": 1}))
     writer._rotate()
@@ -186,7 +186,7 @@ async def test_a_stream_queue_holds_one_prepared_fragment(codec: JsonCodec):
 
 
 async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(make_pair):
-    """WSM-INV-004 on a **fast** socket, which is where it was not true.
+    """WSM-INV-004 on a **fast** socket, which is the only link that can test it.
 
     The round-robin is only worth having if another stream can get a frame into the writer while a
     large payload is going out. Nothing in `_write_loop` is guaranteed to suspend: `next_frame()`
@@ -195,10 +195,9 @@ async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(mak
     deliberate turn per frame the loop drains a whole megabyte in one uninterrupted run, no other
     task runs, nothing else can enqueue, and the rotation has exactly one lane to choose from.
 
-    Measured before the fix: seven fragments, **zero** frames of any other stream between the first
-    and the last, against a producer enqueueing on every turn. The guarantee held only on links slow
-    enough that backpressure supplied the missing suspension - which is why it survived to 1.0, since
-    every test transport and localhost are the fastest links there are.
+    On a link slow enough that backpressure supplies the missing suspension the guarantee holds
+    either way, so a slow transport proves nothing here; every test transport and localhost are the
+    fastest links there are, which is what makes this the place the rule is provable.
     """
     pair = make_pair()
     pair.acceptor.on_stream(lambda _payload, _stream: None)

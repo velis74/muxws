@@ -32,7 +32,7 @@ CONNECTION_LANE = 0
 class LaneEncodingError(Exception):
     """A frame on one lane could not be encoded.
 
-    Named rather than allowed to propagate: the encode now happens inside the writer, so a codec that
+    Named rather than allowed to propagate: the encode happens inside the writer, so a codec that
     refuses a payload - bytes under JSON, say - would otherwise take the write loop down with it, and
     a peer whose writer is dead while it still reports itself open is the worst possible state. The
     lane is carried so the caller can fail exactly that stream and leave the connection working.
@@ -229,7 +229,7 @@ class Writer:
         self._wake.set()
 
     def discard_all(self) -> None:
-        """Socket death. M5b calls exactly this, and nothing is held for a next socket (WSM-RCN-042)."""
+        """Socket death: everything queued is dropped and nothing is held for a next socket (WSM-RCN-042)."""
         for queue in self._queues.values():
             queue.discard()
         self._queues.clear()

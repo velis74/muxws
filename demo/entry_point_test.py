@@ -4,7 +4,7 @@ Every dependency the demo needs fails *late* and somewhere other than where the 
 `fastapi` is an ImportError inside a child process nobody is watching. A missing `websockets` is the
 worst of them: uvicorn serves the page perfectly and answers 404 to every upgrade, so the browser
 shows a muxws handshake error and every part of the diagnosis points away from the package that is
-not installed. That happened to the first person to run this demo.
+not installed.
 
 Declaring `websockets` in the `[demo]` extra is the primary fix and is asserted by
 `muxws/packaging_test.py::test_the_demo_extra_can_actually_serve_a_websocket`. This is the second
@@ -34,9 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def entry_point() -> Any:
     """`demo.py` loaded by path.
 
-    By path because `demo.py` and the `demo/` package share a name and Python resolves the package -
-    so this file cannot be reached by an ordinary import at all, which is exactly why nothing tested
-    it until now.
+    By path because `demo.py` and the `demo/` package share a name and Python resolves the package,
+    so this file cannot be reached by an ordinary import at all.
     """
     spec = importlib.util.spec_from_file_location("demo_entry_point", ROOT / "demo.py")
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
@@ -60,15 +59,15 @@ def test_a_complete_environment_reports_nothing_missing(entry_point: Any, backen
     """With both backends' dependencies present, the check is silent.
 
     Without this the tests below would pass equally well against a check that always complains. The
-    `None` case is the no-argument call the older tests make, pinning that the default parameter is
-    the Python backend rather than "check everything".
+    `None` case is the no-argument call, pinning that the default parameter is the Python backend
+    rather than "check everything".
     """
     problems = entry_point.missing_dependencies() if backend is None else entry_point.missing_dependencies(backend)
     assert problems == []
 
 
 def test_a_missing_websocket_implementation_is_named(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
-    """The one an import check of the demo's own imports could never have found.
+    """The one an import check of the demo's own imports cannot find.
 
     Nothing in this repository imports `websockets` on the demo path - it is uvicorn's, at runtime,
     and invisible to anything that walks our imports. So the check has to know to look for it.
@@ -191,7 +190,7 @@ def test_the_frontend_is_demanded_by_both_backends(entry_point: Any, monkeypatch
 
 
 def test_the_default_backend_is_python(entry_point: Any):
-    """The backend that has always been here, so `python demo.py` keeps meaning what it meant."""
+    """`python demo.py` with no argument serves the sockets from Python."""
     assert entry_point.parse_arguments([]).backend == "python"
 
 

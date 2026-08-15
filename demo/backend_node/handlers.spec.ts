@@ -1,10 +1,10 @@
 /**
  * The node backend against the in-memory transport - the twin of `demo/backend_python/handlers_test.py`.
  *
- * A demo with no tests rots into a screenshot. The one that carries the milestone is
- * `ticks keep flowing during an export`: the panel is the demonstration, this is the proof, and it is
- * written against `onFrame`'s record rather than against anything on a screen so that it fails if the
- * round-robin writer is ever replaced by a FIFO.
+ * A demo with no tests rots into a screenshot. The headline is
+ * `keeps the ticks flowing while a megabyte goes out`: the panel is the demonstration, this is the
+ * proof, and it is written against `onFrame`'s record rather than against anything on a screen so
+ * that it fails if the round-robin writer is ever replaced by a FIFO.
  *
  * It is a twin and not a translation. Where the two ports differ - a `break` out of a `for await` that
  * TypeScript *does* observe, `closed` being a promise, a signal standing in for task cancellation -
@@ -89,10 +89,10 @@ function pause(ms: number): Promise<void> {
 /**
  * A browser and a backend, wired to each other, with the demo's real handler on the acceptor.
  *
- * Over a plain `MemorySocket`, deliberately - the same transport every other test in this repository
- * uses. The Python twin explains at length why it is allowed to be: the write loop takes one
- * event-loop turn per frame, so the rotation has something to rotate over without a paced double
- * supplying the yield the transport does not (WSM-INV-004).
+ * Over a plain `MemorySocket` - the same transport every other test in this repository uses, and that
+ * is what makes WSM-INV-004 observable here: the write loop takes one event-loop turn per frame, so
+ * the rotation has something to rotate over without a paced socket double supplying a yield the
+ * transport does not.
  */
 class Wire {
   readonly dialer: Peer;
@@ -102,8 +102,8 @@ class Wire {
   readonly service: MarketService;
 
   /**
-   * Every frame the *browser* saw, in arrival order. WSM-OBS-003's hook is the only witness this
-   * milestone's headline is allowed to use.
+   * Every frame the *browser* saw, in arrival order. WSM-OBS-003's hook is the only witness the
+   * headline test below uses.
    */
   readonly seen: Seen[] = [];
 
@@ -245,9 +245,9 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
   //
   // One millisecond per symbol rather than the Python twin's five, and the reason is the *producers*
   // rather than the writer. A tick lane can only take its turn if it has something in it, and a lane
-  // fed by a `setTimeout` is empty for as long as the timer runs late - which, on a loaded machine
-  // running the whole suite in parallel workers, was long enough for three export fragments to go out
-  // with nothing between them. That is a starved producer being reported as a FIFO writer. At one
+  // fed by a `setTimeout` is empty for as long as the timer runs late - on a loaded machine running
+  // the whole suite in parallel workers, long enough for several export fragments to go out with
+  // nothing between them, which reads as a FIFO writer when it is a starved producer. At one
   // millisecond every lane always has a frame waiting, so what the assertion below measures is the
   // rotation and only the rotation.
   await marketWire({ tickIntervalMs: 1 }, async (wire) => {
@@ -404,8 +404,8 @@ it('stops the generator when the browser cancels a history', async () => {
   // whole of what makes this test bite *this* port. The signal is the only thing standing in for task
   // cancellation here, and a handler that never looked at it would still stop - one delay later, when
   // its next `send` met a stream the browser had already reset. At five milliseconds those two are
-  // indistinguishable, and a handler that ignored `stream.signal` outright passed. Measured below
-  // against a window far shorter than the delay, only the handler that watches the signal can answer
+  // indistinguishable and a handler that ignored `stream.signal` outright would pass. Against the
+  // window below - far shorter than the delay - only the handler that watches the signal can answer
   // in time, which is exactly the claim `history`'s doc comment makes.
   const historyDelayMs = 250;
   await marketWire({ tickIntervalMs: 500, historyDelayMs }, async (wire) => {

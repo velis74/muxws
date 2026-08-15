@@ -1,8 +1,8 @@
 /**
  * Two socket adapters wired to each other, with no socket anywhere.
  *
- * Mirrors `muxws/transports/memory.py`. Shipped in the package rather than the test tree because
- * M5b's reconnect tests and M6's sequence runner both need it (D2).
+ * Mirrors `muxws/transports/memory.py`. Shipped in the package rather than the test tree because the
+ * reconnect tests and the conformance sequence runner both need it (D2).
  */
 
 import { ConnectionClosed } from '../errors';

@@ -733,14 +733,14 @@ async def test_stream_repr_names_its_state(pair: Pair):
     assert repr(stream) == f"<Stream {stream.id} open>"
 
 
-# --------------------------------------------------------------------------- audit regressions
+# --------------------------------------------------------------------------- cancelled awaits, unsendable codes
 
 
 async def test_cancelling_an_await_sends_reset_cancelled(make_pair):
-    """WSM-ERR-014, the half the iteration test never reached.
+    """WSM-ERR-014 for the awaiting shapes, not only for `async for`.
 
-    The rule names `await stream.result()` explicitly. Only `async for` used to honour it, so a
-    consumer that walked away from an await left the remote producing for nobody.
+    The rule names `await stream.result()` explicitly: a consumer that walks away from an await
+    must not leave the remote producing for nobody.
     """
     for shape in ("result", "await"):
         pair = make_pair()

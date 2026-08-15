@@ -7,15 +7,9 @@
   number that proves it is not the picture but `interleaved` - tick frames that landed *between* the
   export's first and last fragment (WSM-INV-004).
 
-  Read a zero carefully rather than as a verdict on the writer. Measured against this backend under
-  uvicorn on loopback, `interleaved` is **0**: eighteen fragments back to back in ~320 ms. The writer
-  is not the cause and a FIFO is not what you are looking at - `Peer._write_loop` has no suspension
-  point of its own, so on a transport whose send completes without yielding it drains every queued
-  frame in one uninterrupted run of the task and the rotation only ever has one lane to choose
-  between. One `await asyncio.sleep(0)` per frame in that loop takes the same measurement to 20.
-  Reported against `muxws/peer.py` rather than compensated for here: this panel prints what it
-  counted, and a demo that massaged the number would have destroyed the only finding it was in a
-  position to make.
+  The panel prints what it counted and never a number arranged to look right: `interleaved` is the
+  one figure here that a FIFO writer cannot produce, so a demo that massaged it would be witnessing
+  nothing at all.
 -->
 <template>
   <v-card>

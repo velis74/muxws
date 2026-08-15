@@ -6,8 +6,7 @@ before anything else. What it adds is a defined *end*: liveness that does not de
 control frames a browser cannot see, and a shutdown that lets in-flight work finish.
 
 There is no `settings` frame anywhere in this project (WSM-CON-031), so there is no value object
-here holding an announced/effective pair and no ack bookkeeping. If you are looking for one, it was
-deleted from the protocol.
+here holding an announced/effective pair and no ack bookkeeping.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ def new_nonce() -> str:
     """A ping nonce.
 
     `secrets` rather than `random`: this one is cheap and there is no reason to make a nonce
-    guessable. (The reconnect jitter in M5b is the opposite case and deliberately uses `random`.)
+    guessable. The reconnect jitter in `reconnect.py` is the opposite case and uses `random`.
     """
     return secrets.token_hex(8)
 

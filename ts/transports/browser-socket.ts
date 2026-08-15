@@ -73,17 +73,15 @@ interface Waiter {
  * The socket never opened, and a browser cannot say why.
  *
  * A refused handshake and an unreachable server are **the same events** here: `error` then `close`
- * with code 1006 and no reason, because the HTTP status and body are not exposed to JavaScript. The
- * previous message asserted the acceptor had refused the codec, which is one of the two possibilities
- * and reads as a diagnosis. Against a dev-server proxy pointing at a port nothing serves - the demo's
- * own failure mode when the backend is not up - it sent the reader looking at codec configuration
- * that was never wrong.
+ * with code 1006 and no reason, because the HTTP status and body are not exposed to JavaScript. A
+ * message asserting that the acceptor refused the codec would name one of the two possibilities and
+ * read as a diagnosis - against a dev-server proxy pointing at a port nothing serves, it sends the
+ * reader looking at codec configuration that was never wrong. This one names both causes and puts the
+ * reachable one first, which is the one a reader can check in a second.
  *
  * `CodecMismatch` is still the class: WSM-CDC-024 requires a refused handshake to surface it and
  * forbids a bare connection failure, and this is exactly the case the rule was written for - the
- * dialer composes the diagnostic itself *because* the browser cannot read the rejection. What changes
- * is that the message now names both causes and puts the reachable one first, since that is the one a
- * reader can check in a second.
+ * dialer composes the diagnostic itself *because* the browser cannot read the rejection.
  */
 function unopenedError(configured: string, url: string): CodecMismatch {
   return new CodecMismatch(

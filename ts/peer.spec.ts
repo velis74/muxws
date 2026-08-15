@@ -8,7 +8,7 @@
  */
 
 // `describe`/`it`/`expect` are configured as globals; `vi` is imported because the shared eslint
-// config does not know it as one, and a `no-undef` error per spy is not worth the three characters.
+// config does not know it as one.
 import { vi } from 'vitest';
 
 import { type Codec, JsonCodec } from './codec';
@@ -148,10 +148,10 @@ interface PeerInternals {
   nextId: number;
   highestLocalOpen: number;
   highestRemoteOpen: number;
-  /** M5a's writer, so a test can see what the peer is still holding for a socket that is gone. */
+  /** The writer, so a test can see what the peer is still holding for a socket that is gone. */
   writer: { depth: number; lanes: number };
   dispatch(frame: Frame): Promise<boolean>;
-  /** M5b's socket-death fan-out and the socket a reconnected `Peer` takes next. */
+  /** The socket-death fan-out, and the socket a reconnected `Peer` takes next. */
   adoptSocket(socket: SocketAdapter): void;
   die(cause: ConnectionClosed): void;
   willRetry: boolean;
@@ -516,10 +516,9 @@ describe('dispatch', () => {
     });
     pair.start();
 
-    // Python raises `muxws.frames` to INFO with `caplog.at_level`; M5a gave the TypeScript shim the
-    // same seam, so the "logged once" half is assertable here rather than only in Python. Below
-    // 'info' the single `logger.info` call in `dispatch` reaches no console at all and the count
-    // would be zero for a reason that has nothing to do with the peer.
+    // Python raises `muxws.frames` to INFO with `caplog.at_level`; `logger.level` is the same seam.
+    // Below 'info' the single `logger.info` call in `dispatch` reaches no console at all and the
+    // count would be zero for a reason that has nothing to do with the peer.
     const level = logger.level;
     logger.level = 'info';
     const before = pair.sentBy('acceptor').length;
@@ -850,9 +849,9 @@ const DEATH_SHAPES: Record<string, { run: (rig: Rig) => Promise<void>; expected:
 
 describe('socket death', () => {
   it('names the shape that hung rather than timing out anonymously - WSM-INV-011', async () => {
-    // The safety net below is the point of the next test, so it is itself tested. A `within` that
+    // The next test fails by hang detection, so its safety net is itself tested. A `within` that
     // silently awaited forever would turn "a shape hung" into a vitest timeout naming only the file,
-    // which is the anonymous failure the brief rules out.
+    // which is the anonymous failure WSM-INV-011 is about.
     const never = new Promise<never>(() => undefined);
     const caught = await rejection(within('iterate', never, 10));
 
@@ -1074,10 +1073,9 @@ describe('socket death', () => {
   });
 
   it("discards the writer's queues when the socket dies - WSM-RCN-042/WSM-INV-010", async () => {
-    // M5a shipped `discardAll()` and M5b is what calls it. `ts/writer.spec.ts` proves the method
-    // empties the queues when it is called, which is a different claim from proving that socket death
-    // reaches it - and until this test, deleting the call from `die()` would have failed nothing
-    // anywhere. That is exactly the failure M5a shipped once already.
+    // `ts/writer.spec.ts` proves `discardAll()` empties the queues when it is called, which is a
+    // different claim from proving that socket death reaches it. This is the test that fails if the
+    // call is deleted from `die()`.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1440,8 +1438,8 @@ describe('edges', () => {
 
   it('resets the stream but not the peer on an unknown reset code', async () => {
     // A peer of another generation - or one still using the retired 5 - must be heard, not crashed on.
-    // Regression: converting the wire value straight to a `ResetCode` threw out of the read loop,
-    // which left `isOpen` true, `onClose` unfired, and every pending await hanging.
+    // Converting the wire value straight to a `ResetCode` throws out of the read loop, which leaves
+    // `isOpen` true, `onClose` unfired, and every pending await hanging.
     for (const wireCode of [5, 42]) {
       const pair = makePair();
       pair.acceptor.onStream(hold);
@@ -1485,12 +1483,12 @@ describe('edges', () => {
   });
 });
 
-// --------------------------------------------------------------------------- audit regressions
+// --------------------------------------------------------------------------- hostile frames and broken hooks
 
 describe('audit regressions', () => {
   it('does not let a wrong-parity open pose as a fragment continuation - WSM-SID-005', async () => {
-    // Regression: "is this a continuation?" was inferred from whether *some* assembler was running on
-    // that id. A stream this peer opened, receiving fragmented `data`, therefore accepted an `open`
+    // "Is this a continuation?" must not be inferred from whether *some* assembler is running on that
+    // id. A stream this peer opened and is receiving fragmented `data` on would then accept an `open`
     // carrying our own parity as a continuation - dispatching a handler for a stream we opened, and
     // skipping the connection-level error the rule requires.
     const pair = makePair();
@@ -1530,8 +1528,8 @@ describe('audit regressions', () => {
   });
 
   it("fails an unencodable frame's stream without wedging the connection", async () => {
-    // Regression: a codec that could not encode a frame took the writer down in silence. Nothing
-    // drained the queue afterwards, every later send sat in it forever, and the peer went on
+    // A codec that cannot encode a frame must not take the writer down with it: nothing would drain
+    // the queue afterwards, every later send would sit in it forever, and the peer would go on
     // reporting itself open - the same shape as the read-loop zombie, from the other end.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
@@ -1657,10 +1655,10 @@ describe("open()'s overloads", () => {
   });
 
   it('takes zero mandatory arguments and defaults payload to null - WSM-API-003', async () => {
-    // A promise made to every caller and, until this test, checked by nothing. `open()` on its own is
-    // the one-line push shape from section 5.1's call-shapes note; a required argument would break it
-    // at the call site, and a payload defaulting to *absent* rather than `null` would put a
-    // different frame on the wire from Python's `payload=None` - the two ports must agree.
+    // `open()` on its own is the one-line push shape from section 5.1's call-shapes note; a required
+    // argument would break it at the call site, and a payload defaulting to *absent* rather than
+    // `null` would put a different frame on the wire from Python's `payload=None` - the two ports
+    // must agree.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -2032,9 +2030,9 @@ class BinaryJsonCodec implements Codec {
 describe('the frame logger', () => {
   /**
    * The mirror of Python's `caplog.at_level` half of `test_unknown_frame_type_is_ignored` and
-   * `test_payload_contents_never_appear_in_a_log_record`. Both were previously asserted only by
-   * their negative half - nothing went out, nothing reached the console - because the level was a
-   * module-private constant starting at 'warn' and no seam existed to raise it.
+   * `test_payload_contents_never_appear_in_a_log_record`. `logger.level` is the seam that makes the
+   * positive half assertable: it starts at 'warn', below which neither line reaches a console at all,
+   * and the negative half alone - nothing went out, nothing was written - would hold either way.
    */
   it('logs an unknown frame type exactly once when the level allows it - WSM-FRM-002', async () => {
     const original = logger.level;

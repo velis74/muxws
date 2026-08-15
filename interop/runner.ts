@@ -1,5 +1,5 @@
 /**
- * The TypeScript half of the live cross-language interop matrix (M6 section 7, tests 19-22).
+ * The TypeScript half of the live cross-language interop matrix.
  *
  * Run as an acceptor:         node --import tsx interop/runner.ts accept <port>
  * Accept on a socket file:    node --import tsx interop/runner.ts accept-unix <path>
@@ -31,9 +31,9 @@ import { WebSocket, WebSocketServer } from 'ws';
 
 // Imported through the public entry points, exactly as an application would. `ts/index.ts` is what
 // registers the JSON codec (WSM-CDC-004), because a codec module must never register itself
-// (WSM-CDC-014); reaching past it into `ts/codec` gives an empty registry - which is the correct
-// behaviour, and was the first thing this script got wrong. The dialer comes from `ts/node`, so the
-// reconnect driver under test here is the one a node application actually gets.
+// (WSM-CDC-014); reaching past it into `ts/codec` gives an empty registry, which is the correct
+// behaviour. The dialer comes from `ts/node`, so the reconnect driver under test here is the one a
+// node application actually gets.
 // `offer` builds the subprotocol list and is the library's own business, so it is not exported
 // from the package root (a consumer needs `PREFIX`, not the machinery). The interop driver is
 // in-repo and reaches for the module directly.
@@ -1367,10 +1367,9 @@ class Control {
    *
    * In one process that is guaranteed by turn ordering. Across two it is a race, and waiting for the
    * acknowledgement is the way to lose it: the goaway is written before the ack, so both are in
-   * flight towards the dialer and which arrives first is a coin toss - which is exactly how this
-   * fixture failed here first. Sending and moving on gives the local `open()` a head start of a full
-   * round trip, and gives the acceptor the control message one event-loop turn before the open it
-   * must exclude from `last_stream`.
+   * flight towards the dialer and which arrives first is a coin toss. Sending and moving on gives the
+   * local `open()` a head start of a full round trip, and gives the acceptor the control message one
+   * event-loop turn before the open it must exclude from `last_stream`.
    */
   async dispatch(message: Record<string, unknown>): Promise<void> {
     await this.collect();

@@ -145,7 +145,7 @@ def test_assembler_round_trips_every_corpus_payload(name: str, codec: JsonCodec)
 
 
 def test_assembler_tracks_accumulated_bytes_before_reassembly(codec: JsonCodec):
-    """M5a enforces max_payload_bytes against this as fragments arrive (WSM-FRG-032)."""
+    """The receiver enforces max_payload_bytes against this as fragments arrive (WSM-FRG-032)."""
     parts = split_frame(Frame("data", stream=1, payload=PAYLOADS["ascii"]), 256, codec)
     assembler = Assembler()
     seen = 0
@@ -221,9 +221,9 @@ def test_corpus_payloads_survive_a_small_cap(case: dict[str, Any], codec: JsonCo
 class _BinaryJsonCodec:
     """A toy binary codec, so the byte-boundary half of the splitter has something to exercise.
 
-    The real binary codec is msgpack and arrives in M6; this one exists only to prove that
-    `_take` slices bytes at byte boundaries and that `binary` is declared rather than inferred.
-    `latin-1` round-trips any byte sequence one-to-one, which is all the envelope needs.
+    The real binary codec is msgpack; this one exists only to prove that `_take` slices bytes at
+    byte boundaries and that `binary` is declared rather than inferred. `latin-1` round-trips any
+    byte sequence one-to-one, which is all the envelope needs.
     """
 
     name = "binary-json"
@@ -283,10 +283,10 @@ def test_both_ports_agree_on_fragment_boundaries(case: dict[str, Any], codec: Js
 def test_a_fragment_sequence_always_terminates(codec: JsonCodec):
     """WSM-FRG-020/030: the last fragment must carry `more: false`, even if it carries no bytes.
 
-    Regression. Trailers larger than the reservation used to make the closing frame too big at every
-    slice point, so the loop emitted middle fragments until the payload ran out and then stopped -
-    leaving a sequence with no terminator. The receiver's assembler never fires, the payload never
-    reaches the application, and nothing anywhere reports an error.
+    Trailers larger than the reservation make the closing frame too big at every slice point. A loop
+    that answered that by emitting middle fragments until the payload ran out would leave a sequence
+    with no terminator: the receiver's assembler never fires, the payload never reaches the
+    application, and nothing anywhere reports an error.
     """
     frame = Frame("data", stream=1, payload={"body": "x" * 900}, end=True, trailers={"checksum": "d" * 130})
     parts = split_frame(frame, 256, codec)
@@ -320,7 +320,7 @@ def test_the_closing_fragment_may_be_empty(codec: JsonCodec):
 
 
 def test_how_much_encoding_one_megabyte_costs():
-    """A measurement kept as a test, because the number is the finding.
+    """What splitting a megabyte costs the sender, pinned as a ceiling.
 
     `iter_fragments` asks the codec "does the rest fit?" on every pass, and the reservation
     `min(512, cap // 2)` is short of what JSON escaping needs often enough that the binary search in
@@ -330,19 +330,11 @@ def test_how_much_encoding_one_megabyte_costs():
     synchronous: it blocks the event loop, which is the same latency WSM-INV-004 exists to prevent
     arriving by another road.
 
-    Measured here: 373 encodes for 23 fragments, rendering 25 MB for a 1.2 MB payload. It was 42 MB
-    until the tail probe learned to skip the question it already knows the answer to - the encoded
-    frame is never shorter than the remainder it carries, so a remainder over the cap cannot fit and
-    need not be rendered to prove it. That change is boundary-preserving by construction and the
-    frozen corpus confirms it.
-
-    What is left is the binary search, and it may **not** be fixed the obvious way. It runs on nearly
-    every fragment because the reservation `min(512, cap // 2)` is far short of what JSON-inside-JSON
-    escaping costs: 64 KiB of JSON text carries thousands of quotes, each becoming two bytes. But the
-    reservation decides the boundary whenever its first guess *fits* - the search only runs when it
-    does not - so a better guess would cut in different places. Fragment boundaries are frozen
-    (WSM-FRG-016 requires both ports to cut identically, and `conformance/frames/` pins where), which
-    makes this a generation concern and not an optimisation.
+    The reservation may not simply be raised to make the search rare. It decides the boundary
+    whenever its first guess *fits* - the search runs only when it does not - so a larger guess cuts
+    in different places, and fragment boundaries are frozen: WSM-FRG-016 requires both ports to cut
+    identically and `conformance/frames/` pins where. Changing the cost here is a generation
+    concern, not an optimisation.
 
     The ceiling is a ceiling, not the value, so this records the cost without tripping on every
     unrelated change.

@@ -1,13 +1,11 @@
-"""What the send path actually costs, measured rather than claimed.
+"""What the send path costs: frames a second through the codec and the peer, printed on every run.
 
-The demo paces itself at four ticks a second per symbol so a reader can follow one row, and the first
-person to run it reasonably read that as the library's speed. It is not: it is an
-`asyncio.sleep(0.25)` in the demo's own generator.
+The demo's four ticks a second per symbol is an `asyncio.sleep(0.25)` in its own generator, so it says
+nothing about this path's ceiling.
 
-These record the real ceiling. They assert a **floor far below** what the machine achieves, so they
-document the number without becoming a benchmark that fails on a loaded CI runner - the point is that
-the figure is measured on every run and printed when it regresses catastrophically, not that it is
-pinned.
+Each assertion is a **floor far below** what a machine achieves, so the figure is reported on every
+run and caught when it regresses catastrophically, without the rate itself being pinned to a number a
+loaded runner would miss.
 """
 
 from __future__ import annotations
@@ -23,9 +21,8 @@ from muxws.frames import Frame
 async def _drain_until(done: Callable[[], bool], *, limit: float = 30.0) -> None:
     """Turn the loop until everything sent has arrived.
 
-    A fixed number of `sleep(0)` turns is what the other tests use and it is wrong here: the count is
-    the measurement, so a wait that runs out mid-flight reports a throughput figure for a run that
-    never finished - which is exactly how the first version of this file under-reported by 60%.
+    The wait is on arrival, not on a fixed number of `sleep(0)` turns: the count is the measurement,
+    so a wait that ends mid-flight reports the throughput of a run that never finished.
     """
     deadline = time.perf_counter() + limit
     while not done() and time.perf_counter() < deadline:

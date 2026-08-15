@@ -1,4 +1,4 @@
-"""The Python half of the live cross-language interop matrix (M6 §7, tests 19-22).
+"""The Python half of the live cross-language interop matrix.
 
 Run as an acceptor:          python interop/runner.py accept <port>
 Accept on a socket file:     python interop/runner.py accept-unix <path>
@@ -343,9 +343,9 @@ async def run_tst_004(peer: muxws.Peer, journal: Journal, pushes: list[Any], *, 
     # those would pass against a port that answered each stream to completion before starting the
     # next.
     #
-    # What this does NOT catch, said plainly because the comment used to claim otherwise: removing
-    # the round-robin writer entirely leaves this assertion passing. It is satisfied by the export
-    # handler's own pauses, not by the writer's rotation. WSM-FRG-019's real witnesses are
+    # What this does NOT catch, said plainly: removing the round-robin writer entirely leaves this
+    # assertion passing. It is satisfied by the export handler's own pauses, not by the writer's
+    # rotation. WSM-FRG-019's real witnesses are
     # `writer_test.py::test_round_robin_selects_across_streams_not_fifo` and the
     # `small-frame-overtakes-a-fragmented-payload` fixture, both of which do fail; this one proves
     # the weaker and still-useful thing that the two ports do not serialise streams end to end. The
@@ -1124,10 +1124,9 @@ class Control:
 
         In one process that is guaranteed by turn ordering. Across two it is a race, and waiting for
         the acknowledgement is the way to lose it: the goaway is written before the ack, so both are
-        in flight towards the dialer and which arrives first is a coin toss - which is exactly how
-        this fixture failed here first. Sending and moving on gives the local `open()` a head start
-        of a full round trip, and gives the acceptor the control message one event-loop turn before
-        the open it must exclude from `last_stream`.
+        in flight towards the dialer and which arrives first is a coin toss. Sending and moving on
+        gives the local `open()` a head start of a full round trip, and gives the acceptor the control
+        message one event-loop turn before the open it must exclude from `last_stream`.
         """
         await self._collect()
         self._send(message)

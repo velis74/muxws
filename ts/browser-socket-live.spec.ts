@@ -1,28 +1,19 @@
 /**
  * `BrowserSocket` against a WebSocket implementation that is not ours.
  *
- * Every other test of this adapter drives a `MockWebSocket` written in the same file as the
- * assertions - and a double that agrees with the code under test is not evidence, it is a restatement.
- * `BrowserSocket` is the browser half of the transport seam (WSM-API-021) and until this file existed
- * it had never touched a real WebSocket at all: not the readyState transitions, not the event
- * ordering, not the subprotocol the server actually echoed back.
+ * `BrowserSocket` is the browser half of the transport seam (WSM-API-021). Every other test of this
+ * adapter drives a `MockWebSocket` written in the same file as the assertions, and a double that
+ * agrees with the code under test cannot witness the readyState transitions, the event ordering or
+ * the subprotocol a server actually echoes back.
  *
  * Node's global `WebSocket` is a WHATWG implementation written by other people, and it is the same
  * API surface a browser exposes: `new WebSocket(url, protocols)`, `addEventListener`, `readyState`,
- * `protocol`, `close(code, reason)`. That is not Chrome - the browser gap this project cannot close
- * from a terminal is real and stays recorded - but it is the difference between "tested against a
- * mock" and "tested against someone else's implementation of the spec".
- *
- * **What this file is worth, stated honestly.** Three mutations were tried against both this file and
- * `transports/browser-socket.spec.ts` - a malformed subprotocol offer, a dropped `close` listener, and
- * a bare `Error` where WSM-CDC-024 requires `CodecMismatch`. The mock spec caught all three, and one
- * of them this file did not. **No mutation was found that only this file catches**, so it earns its
- * place on a different argument: it is the only test in which the WebSocket, the server, the
- * handshake and the HTTP 400 refusal are all somebody else's code. It would fail if the mock's
- * assumptions about event ordering, `readyState` or subprotocol negotiation were wrong, and no
- * mutation of *our* source can demonstrate that, because the mock and the library agree by
- * construction. That is a categorical assurance, not a sharper one - and it is worth less than a
- * mutation-proven test, which is why it is written down here rather than implied.
+ * `protocol`, `close(code, reason)`. It is not Chrome - the browser gap stays recorded in GAPS.md -
+ * but here the WebSocket, the server, the handshake and the HTTP 400 refusal are all somebody else's
+ * code, so this file fails if the mock's assumptions about event ordering, `readyState` or
+ * subprotocol negotiation are wrong. That is a categorical assurance rather than a sharper one: no
+ * mutation of this library's own source distinguishes it from the mock spec, because the mock and the
+ * library agree by construction.
  */
 
 import type { AddressInfo } from 'node:net';
@@ -84,11 +75,10 @@ describe('BrowserSocket against a real WebSocket', () => {
     // browser cannot read that status, which is exactly why the dialer composes the diagnostic from
     // the codec it offered rather than from anything the server said.
     //
-    // The refusal is logged by the acceptor because WSM-CDC-029 requires it, and this test is the one
-    // place that provokes a real one - so the level is dropped here rather than in a setup file,
-    // exactly as the ILL-C cells do in `ts/stream.spec.ts`. Every other spec that reaches this line
-    // silences it by spying on `console.error`, which this file deliberately does not do: the whole
-    // point here is that nothing in the path is a double.
+    // The acceptor logs the refusal because WSM-CDC-029 requires it, and this is the one place that
+    // provokes a real one - so the level is dropped here rather than in a setup file, as the ILL-C
+    // cells do in `ts/stream.spec.ts`. Silencing it by spying on `console.error`, which every other
+    // spec reaching this line does, would put a double in a path that deliberately has none.
     const level = logger.level;
     logger.level = 'silent';
     try {
@@ -114,14 +104,13 @@ describe('BrowserSocket against a real WebSocket', () => {
 
 describe('an unreachable acceptor is not diagnosed as a codec mismatch', () => {
   it('names both causes, and the reachable one first', async () => {
-    // The demo's own failure mode, reported by its first reader: a dev-server proxy pointing at a
-    // port nothing serves. In a browser this is indistinguishable from a refused handshake - `error`
-    // then `close` with 1006, no status, no body - and the old message asserted the acceptor had
-    // refused the codec, which sent the reader to check configuration that was never wrong.
+    // A dev-server proxy pointing at a port nothing serves is, in a browser, indistinguishable from a
+    // refused handshake: `error` then `close` with 1006, no status, no body. A message that asserted
+    // the acceptor had refused the codec would send the reader to check configuration that is not
+    // wrong.
     //
-    // The class stays `CodecMismatch` (WSM-CDC-024 requires it for a refused handshake and forbids a
-    // bare connection failure, and this is the case that rule was written for). The message is what
-    // had to change.
+    // The class is `CodecMismatch` either way: WSM-CDC-024 requires it for a refused handshake and
+    // forbids a bare connection failure. Only the message can carry the ambiguity.
     const dead = 'ws://127.0.0.1:9/ws'; // discard port: reachable stack, nothing accepting
     const failure = await BrowserSocket.connect(dead, 'json').then(
       () => null,
@@ -133,7 +122,7 @@ describe('an unreachable acceptor is not diagnosed as a codec mismatch', () => {
     expect(message, 'the address a reader would check is not in the message').toContain('127.0.0.1:9');
     expect(message, 'the reachable cause is not named').toMatch(/nothing is listening/);
     expect(message, 'the codec cause is not named either - both must be').toMatch(/codec/);
-    // The overclaim that started this: a flat assertion that the acceptor refused the codec.
+    // The overclaim this forbids: a flat assertion that the acceptor refused the codec.
     expect(message, 'the message still diagnoses a cause it cannot know').not.toMatch(
       /^the acceptor refused the muxws handshake/,
     );

@@ -224,9 +224,9 @@ describe('a stream queue', () => {
 
 describe('the peer actually uses the writer', () => {
   /**
-   * The gap this closes: ts/writer.ts landed with 13 passing tests while ts/peer.ts still sent
-   * through a FIFO of its own, so the rotation - the entire point of M5a - was not on the send path
-   * at all. Testing the writer in isolation cannot notice that.
+   * The rotation has to be on the peer's send path, not merely implemented in `ts/writer.ts`: a peer
+   * that queued its own frames FIFO would pass every test above and still serialise the streams.
+   * Only an end-to-end run observes which of the two orders reaches the socket.
    */
   it('interleaves a small frame with a fragmenting one, end to end - WSM-INV-004', async () => {
     const codec = new JsonCodec();
@@ -266,10 +266,9 @@ describe('WSM-INV-004 on a fast socket', () => {
   it('yields per frame, so the rotation has something to rotate between', async () => {
     // The round-robin is only worth having if another stream can get a frame into the writer while a
     // large payload is going out. `await` on a promise that is already resolved drains the microtask
-    // queue but never lets a timer run, and a memory socket resolves immediately - so a producer
-    // driven by setTimeout, which is what a real ticking backend looks like, gets no turn at all
-    // until the export is finished. The Python port had exactly this defect and was measured at
-    // seven fragments with zero other frames between them.
+    // queue but never lets a timer run, and a memory socket resolves immediately - so a send loop
+    // that only awaits the socket gives a producer driven by setTimeout, which is what a real ticking
+    // backend looks like, no turn at all until the export is finished.
     const [left, right] = memoryPair();
     const dialer = new Peer(left, { codec, isDialer: true });
     const acceptor = new Peer(right, { codec, isDialer: false });

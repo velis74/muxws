@@ -1,11 +1,10 @@
 <!--
   What the reader is looking at, and why each panel is on the screen.
 
-  The first person to run this demo said, reasonably: "it works, but I do not know what I am looking
-  at." A market board explains itself as a market board and explains nothing about the transport,
-  which is the only reason it exists.
+  A market board explains itself as a market board and explains nothing about the transport, which is
+  the only reason this dialog exists.
 
-  So this is not a tour of the UI. Every section answers three questions in the same order - what you
+  It is not a tour of the UI. Every section answers three questions in the same order - what you
   see, what it proves, and **what it would look like if muxws were broken** - because the third is the
   only one a running screen can answer better than the documentation site can. `docs/guide/` explains
   the mechanisms; this explains what to watch.
@@ -58,9 +57,7 @@
           should say some number of tick frames arrived <em>between</em> the export's first and last fragment.
         </p>
         <p class="text-body-2 text-medium-emphasis mb-0">
-          If muxws sent that megabyte as one uninterrupted run, the count would be zero and the line would spike. That
-          is not hypothetical: it was true of this library until the demo was built, and building this panel is how it
-          was found.
+          If muxws sent that megabyte as one uninterrupted run, the count would be zero and the line would spike.
         </p>
       </v-card-text>
 

@@ -292,9 +292,9 @@ export class MarketService {
   /**
    * Change how often each pushed stream carries a price.
    *
-   * This exists because the demo's pacing was read as the library's speed - reasonably, since nothing
-   * on the screen said otherwise. The interval is a `sleep` in the generator below and has nothing to
-   * do with what the transport can carry.
+   * The demo's pacing is not the library's speed, and this control is what lets a reader see the
+   * difference. The interval is a `sleep` in the generator below and has nothing to do with what the
+   * transport can carry.
    *
    * The floor is 1 ms rather than zero. At zero the generator becomes a busy loop that starves the very
    * event loop it needs to send on, which would demonstrate the opposite of the point.

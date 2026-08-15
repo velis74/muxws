@@ -1,6 +1,6 @@
 /**
- * Subpath export `muxws/msgpack`: the second codec, and the honest proof that the codec seam built
- * in M1 is a seam (WSM-CDC-006/007/008).
+ * Subpath export `muxws/msgpack`: the second codec, and the proof that the codec seam is a seam
+ * (WSM-CDC-006/007/008).
  *
  * `@msgpack/msgpack` is an **optional peer dependency** reachable only through this subpath
  * (WSM-PKG-003), which is the whole of the selection: the browser entry point never imports this

@@ -126,7 +126,7 @@ async def test_ping_returns_round_trip_time_in_seconds(make_pair):
 
 
 async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
-    """The call fails; the connection is untouched. M5b turns this into liveness detection."""
+    """The call fails; the connection is untouched. A lost pong is a failed ping, not a dead peer."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -185,7 +185,7 @@ async def test_pings_are_keyed_by_nonce_not_by_order(make_pair):
 
 
 def test_a_nonce_is_not_guessable():
-    """`secrets`, not `random`: the reconnect jitter in M5b is the opposite case."""
+    """`secrets`, not `random`: a nonce a peer can predict can be echoed without a round trip."""
     nonces = {new_nonce() for _ in range(50)}
     assert len(nonces) == 50
     assert all(re.fullmatch(r"[0-9a-f]{16}", nonce) for nonce in nonces)
@@ -400,7 +400,7 @@ async def test_id_exhaustion_sends_goaway_drains_and_closes(make_pair):
 
     Refusing to open again is the easy quarter. The rule also requires the exhausting peer to send
     `goaway`, let in-flight streams drain, and then close - none of which `open()` can do by
-    returning, and all of which were missing until this test asked for them.
+    returning.
     """
     assert MAX_STREAM_ID == 2**31 - 1
 

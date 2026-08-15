@@ -7,17 +7,16 @@ import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
 import { BrowserSocket, UnixSocketsUnsupportedError } from './transports/browser-socket';
 
 /**
- * Dial `url` and return a serving peer (m3 §4.5).
+ * Dial `url` and return a serving peer.
  *
  * Throws if the **first** attempt fails, with the underlying error, whatever `reconnect` says
  * (WSM-RCN-006/WSM-INV-018). Reconnection applies to connections that were established and then
  * lost; a peer that retried its first dial forever would turn a typo in the URL into silence, and
  * the caller would hold something that looks alive and never will be.
  *
- * The codec is resolved **before** any socket is touched. Putting the lookup after the upgrade is
- * the single most likely wrong implementation of WSM-CDC-016, and it is what makes a misconfigured
- * deployment fail as a puzzling decode error on the tenth frame rather than as a named startup
- * error.
+ * The codec is resolved **before** any socket is touched (WSM-CDC-016): a lookup after the upgrade
+ * makes a misconfigured deployment fail as a puzzling decode error on the tenth frame rather than as
+ * a named startup error.
  */
 export async function connect(url: string, options: ConnectOptions = {}): Promise<Peer> {
   // Before the codec, and therefore before everything: a url this entry point can never dial is not

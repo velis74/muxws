@@ -1,8 +1,8 @@
 """`connect`, `accept` and `serve` - the module-level factories (§9.3).
 
-The codec is resolved **before** any socket is touched. Putting the lookup after the upgrade is the
-single most likely wrong implementation of WSM-CDC-016, and it is what makes a misconfigured
-deployment fail as a puzzling decode error on the tenth frame rather than as a named startup error.
+The codec is resolved **before** any socket is touched (WSM-CDC-016). Resolving it after the upgrade
+makes a misconfigured deployment fail as a decode error on the tenth frame rather than as a named
+startup error.
 """
 
 from __future__ import annotations
@@ -199,9 +199,9 @@ def _looks_like_a_refused_handshake(exc: BaseException) -> bool:
     """A 400 on the upgrade is a refused muxws handshake, to be reported as `CodecMismatch`.
 
     The status comes from `InvalidStatus.response`, never from the message. `"400" in str(exc)` also
-    matches the `OSError` for a connection refused on **port** 400, and matching a status code out of
-    prose is what let a cross-language dial - where the message wording differs - miss a real refusal
-    entirely (WSM-CDC-024). The string branch survives only as a fallback for a `websockets` release
+    matches the `OSError` for a connection refused on **port** 400, and a status matched out of prose
+    misses a real refusal wherever the wording differs, as it does between the two ports
+    (WSM-CDC-024). The string branch survives only as a fallback for a `websockets` release
     that reports the status without attaching the response, and is narrowed to the phrase it uses.
     """
     from websockets.exceptions import InvalidStatus
@@ -245,8 +245,8 @@ async def _adapt(socket: Any, codec_name: str) -> SocketAdapter:
 
     The framework checks come **before** the `SocketAdapter` one. `SocketAdapter` is a
     `runtime_checkable` Protocol, and `isinstance` against one of those tests only that the four
-    method *names* exist - which Starlette's `WebSocket` happens to satisfy. Checking it first meant
-    a Starlette socket was taken as an already-adapted one and the upgrade never happened, which
+    method *names* exist - which Starlette's `WebSocket` happens to satisfy. Checking it first takes a
+    Starlette socket for an already-adapted one and skips the upgrade entirely, a failure that
     surfaces only against a real ASGI server.
     """
     if _is_starlette_websocket(socket):

@@ -26,8 +26,8 @@ import { Stream, StreamState } from './stream';
 import type { SocketAdapter } from './transports';
 import { CONNECTION_LANE, LaneEncodingError, Writer } from './writer';
 
-// The log seam moved to `ts/observability.ts` at M5a, where the frame line lives; it is re-exported
-// here because every call site that had one imported it from this module.
+// The log seam lives in `ts/observability.ts`, beside the frame line it filters; it is re-exported
+// here for the call sites that import it from this module.
 export { logger };
 export type { CloseReason };
 
@@ -35,7 +35,7 @@ export type { CloseReason };
 
 /**
  * Three lowercase hex characters, drawn once per module load. A log correlation id is not
- * security-sensitive, so `Math.random` is right here and `crypto.getRandomValues` would be cargo cult.
+ * security-sensitive, so `Math.random` is right here.
  */
 const PROCESS_PREFIX = Math.floor(Math.random() * 0x1000)
   .toString(16)
@@ -55,7 +55,7 @@ export type StreamHandler = (payload: any, stream: Stream) => void | Promise<voi
 /** Turns a handler's failure into a payload for the `reset(APPLICATION_ERROR)` frame (WSM-ERR-006). */
 export type ErrorSerializer = (error: unknown) => unknown;
 
-/** `open()`'s options. It carries no `timeoutMs` in any milestone (WSM-API-018). */
+/** `open()`'s options. There is no `timeoutMs` among them: `open()` does not wait (WSM-API-018). */
 export interface OpenOptions {
   payload?: unknown;
   headers?: Record<string, unknown>;
@@ -122,7 +122,6 @@ export function defaultErrorSerializer(error: unknown): unknown {
 
 // --------------------------------------------------------------------------- small helpers
 
-/** Python's `str(exc)`. */
 /**
  * One macrotask turn, so tasks that are not promises get to run.
  *
@@ -131,8 +130,7 @@ export function defaultErrorSerializer(error: unknown): unknown {
  * resolves its send immediately too, so awaiting them only drains the **microtask** queue. A producer
  * driven by a timer or by an inbound socket message is a **macrotask** and gets no turn at all - so
  * the loop sends every fragment of a megabyte in one run, nothing else can enqueue, and the
- * round-robin has exactly one lane to rotate between. Measured before this existed: seven fragments
- * with zero frames of any other stream between the first and the last.
+ * round-robin has exactly one lane to rotate between.
  *
  * `MessageChannel` rather than `setTimeout(0)`: browsers clamp nested timers to 4 ms after a few
  * levels, which on a per-frame yield would cap this peer at a few hundred frames a second. Node's
@@ -157,6 +155,7 @@ const yieldToOtherTasks: () => Promise<void> = (() => {
   return () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 })();
 
+/** Python's `str(exc)`. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -253,12 +252,6 @@ function monotonicNowMs(): number {
 /** The sentinel a deadline rejects with; never an `Error`, so it cannot be confused with one. */
 const DEADLINE_EXPIRED: unique symbol = Symbol('DEADLINE_EXPIRED');
 
-/**
- * A minimal unbounded async queue: `put` never blocks, `get` waits.
- *
- * TypeScript has no `asyncio.Queue`, and the outbound queue is the one place the peer needs one.
- */
-
 // --------------------------------------------------------------------------- the peer
 
 /**
@@ -301,10 +294,12 @@ export class Peer {
   /** WSM-STM-036. Local, unannounced, and counted over the remote's opens alone (WSM-STM-037). */
   private readonly maxConcurrentStreams: number;
 
-  /** The dialer allocates odd ids, the acceptor even ones (WSM-SID-002). */
   /**
-   * @internal The next id this peer will allocate. Public so a test can drive the allocator to the
-   * end of the id space without waiting for two billion opens; nothing in the library writes it.
+   * @internal The next id this peer will allocate: the dialer allocates odd ids and the acceptor even
+   * ones (WSM-SID-002).
+   *
+   * Public so a test can drive the allocator to the end of the id space without waiting for two
+   * billion opens; nothing in the library writes it.
    */
   nextId: number;
 
@@ -725,7 +720,7 @@ export class Peer {
         frame = await this.writer.nextFrame();
       } catch (error) {
         if (error instanceof LaneEncodingError) {
-          // The encode now happens inside the writer, so a codec that refuses a payload would
+          // The encode happens inside the writer, so a codec that refuses a payload would
           // otherwise take the write loop down with it - and a peer whose writer is dead while it
           // still reports itself open is the worst possible state. The lane is carried so exactly
           // one stream fails and the connection keeps working.
@@ -852,9 +847,8 @@ export class Peer {
       try {
         keepGoing = await this.dispatch(frame);
       } catch (error) {
-        // Every pending await would hang, `onClose` would never fire, and `open()` would keep
-        // succeeding into a queue nobody drains. An unknown reset code off the wire used to land
-        // here; it does not any more, and neither may anything else.
+        // Nothing may escape `dispatch` alive: every pending await would hang, `onClose` would never
+        // fire, and `open()` would keep succeeding into a queue nobody drains.
         logger.error(`muxws conn=${this.id} read loop failed on a ${frame.type} frame`, error);
         const detail = errorMessage(error);
         this.die(new ConnectionClosed(`read loop failed: ${detail}`, { code: 1011, reason: detail }));
@@ -931,9 +925,8 @@ export class Peer {
   async ping(timeoutMs: number = DEFAULT_PING_TIMEOUT_MS): Promise<number> {
     // `hasASocket`, not `isOpen`: a ping asks whether there is a wire to put a frame on, and the
     // hello window makes `isOpen` false while the socket is perfectly alive (WSM-RCN-043). The
-    // heartbeat is the caller that matters and it only runs on an established connection, so the
-    // behaviour is unchanged - what goes away is a public call succeeding on a peer that reports
-    // `isOpen === false`.
+    // heartbeat only ever pings an established connection; this guard is what keeps a ping from
+    // being attempted between sockets, where there is nothing to put the frame on.
     if (!this.hasASocket) throw new ConnectionLost('cannot ping a peer that is between sockets');
 
     const nonce = newNonce();
@@ -951,8 +944,8 @@ export class Peer {
       return await Promise.race([waiting, deadline]);
     } catch (error) {
       if (error !== DEADLINE_EXPIRED) throw error;
-      // A lost pong is not a lost connection: the call fails and the connection is untouched. M5b is
-      // where a run of them becomes liveness detection.
+      // A lost pong is not a lost connection: the call fails and the connection is untouched. Turning
+      // a missed pong into a verdict on the socket is the heartbeat's job (WSM-RCN-011).
       this.pings.giveUp(nonce);
       this.pingStarted.delete(nonce);
       throw new ConnectionClosed(`no pong within ${timeoutMs}ms`, { code: 1006 });
@@ -1070,9 +1063,9 @@ export class Peer {
       return false;
     }
 
-    // Explicit state, never inferred from "is an assembler running on that id": inferring it let a
-    // wrong-parity `open` pose as the continuation of whatever reassembly happened to be running
-    // there, and ran a handler for a stream this peer had opened itself (WSM-STM-031).
+    // Explicit state, never inferred from "is an assembler running on that id": inferring it lets a
+    // wrong-parity `open` pose as the continuation of whatever reassembly happens to be running
+    // there, and runs a handler for a stream this peer opened itself (WSM-STM-031).
     const existing = this.liveStreams.get(streamId);
     if (existing !== undefined && existing.opening && hasFragment(frame)) {
       return this.continueOpen(existing, frame);
@@ -1112,8 +1105,8 @@ export class Peer {
 
     if (hasFragment(frame)) {
       stream.opening = true;
-      // A fragmented *open* is the same memory exposure as a fragmented *data*, and was the one path
-      // into this peer that no cap watched.
+      // A fragmented *open* is the same memory exposure as a fragmented *data*, so the same cap
+      // watches it (WSM-FRG-032).
       if (!this.withinPayloadCap(stream, frame)) return true;
       const payload = stream.assembler.feed(frame, this.codec);
       if (isAbsent(payload)) return true;
@@ -1334,9 +1327,8 @@ export class Peer {
    *
    * Bounding memory is the limit's whole purpose. A receiver that assembles the payload in order to
    * measure it has already spent everything the limit existed to protect, and the partial buffer is
-   * dropped in the same step for the same reason (M5a decision 1) - `resetStream` fails the stream,
-   * and `Stream.fail` resets its assembler, but the buffer is released here first so the order does
-   * not depend on that.
+   * dropped in the same step for the same reason - `resetStream` fails the stream, and `Stream.fail`
+   * resets its assembler, but the buffer is released here first so the order does not depend on that.
    */
   private withinPayloadCap(stream: Stream, frame: Frame): boolean {
     const incoming = hasFragment(frame) ? encodedLength(frame.fragment as string | ArrayBuffer) : 0;

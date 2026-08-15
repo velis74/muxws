@@ -284,10 +284,7 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   is one an acceptor can race a pushed stream against (WSM-STM-033).
   Test: `peer_test.py::test_the_public_api_is_async_exactly_where_the_rule_says`, which compares the
   partition by equality in **both** directions — the enumeration above is the whole rule, so a list
-  that only checked the named members would leave the "everything else" half unasserted. The
-  enumeration was completed in the M8 audit: it previously named seven calls and "every `Stream` send
-  method", which read literally made the shipped `result()`, `cancel()` and `reset()` violations of a
-  rule they were required by. No behaviour changed; the rule now says what 1.0 does.
+  that only checked the named members would leave the "everything else" half unasserted.
 - **WSM-API-009** `peer.id` MUST be a short random prefix minted **once per process** plus a
   monotonic **per-connection** counter, rendered `<prefix>-<counter>` (e.g. `a3f-17`). An id MUST NOT
   be reused or duplicated within a process; across processes only the prefix may coincide. Reuse is
@@ -482,11 +479,11 @@ one-shot push is `open(end)` with nothing awaited. Durations are **seconds as fl
   `refuseMismatchedUpgrade` wraps `shouldHandle`, which is the hook that can abort an upgrade with a
   status.
 
-  This clause is here because its absence caused the failure. The rule named only Python's hook, so
-  both ports shipped an acceptor that answered HTTP 101 where WSM-CDC-022 requires 400, and did so for
-  three milestones. Nothing caught it: every test dialled with the same language's dialer, which
-  recovers through WSM-CDC-028 and raises `CodecMismatch` anyway, so the *outcome* was right in the
-  only configuration ever exercised. A cross-language dial is where it showed.
+  Both hooks are named because a port that installs only the selecting one answers HTTP 101 where
+  WSM-CDC-022 requires 400, and no test written in that port's own language can see it: a dial from
+  the same language recovers through WSM-CDC-028 and raises `CodecMismatch` anyway, so the *outcome*
+  is right in the only configuration a single-language suite exercises. A cross-language dial
+  (WSM-TST-004) is where the difference shows.
 - **WSM-CDC-028** Where a transport offers neither hook, the peer MUST verify the negotiated
   subprotocol on the already-open socket and close it with the WebSocket policy-violation close code.
 - **WSM-CDC-029** The acceptor MUST log the same failure at refusal time, naming the offered codec,
@@ -993,9 +990,8 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   drops produce three byte-identical hellos, `on_reconnect` fires after each acknowledgement and
   never before, and an application registering no `on_reconnect` handler still ends up with a peer
   the server can find in its registry.
-- **WSM-RCN-028** This id carried one MUST and one recommendation in a single breath, and the
-  recommendation was being read as an unmet obligation on the library. They are separated here. The
-  id is not renumbered and neither clause is weakened; only the subject of each is now stated.
+- **WSM-RCN-028** Two clauses with two different subjects, stated separately because only one of them
+  is the library's.
   **On the library (a MUST, and witnessable):** muxws MUST NOT mint or store a tab identity. It has
   no notion of a tab id, a session id or a client id; it touches no browser storage API; and the
   `hello` that would carry one is opaque payload it never inspects and replays byte-for-byte
@@ -1215,7 +1211,7 @@ wearing its name.
 | `WSM-ERR-001` | `StreamRefused` and `StreamLimit` as sibling classes | there is no `StreamLimit` | WSM-ERR-002, WSM-API-004 |
 | `WSM-INV-007` | `STREAM_LIMIT` must not be reported as `REFUSED` | retired with WSM-STM-022 | WSM-INV-007's replacement text, WSM-STM-036 |
 
-Two tests named in earlier drafts are deliberately **not written**:
+Two tests these retirements might be read to require are deliberately **not written**:
 `test_unadvertised_extension_is_never_sent` (WSM-FRM-003) and anything asserting a `StreamLimit`
 class (WSM-ERR-001). The suites instead assert the absence:
 `errors_test.py::test_no_stream_limit_class_exists`,
@@ -1289,74 +1285,53 @@ grep -rl "WSM-STM-036" --include='*_test.py' --include='*.spec.ts' \
   muxws ts demo docs interop
 ```
 
-Three things a naive grep gets wrong, and the third of them made the previous edition of Appendix B
-wrong in two places.
+Three things a naive grep gets wrong.
 
 1. Tests cite combined ids (`WSM-API-006/007`, `WSM-RCN-041/WSM-STM-014`), so `WSM-API-007` must be
    searched for as a bare number after a family prefix too.
 2. Some rules are witnessed by a fixture rather than by a citation, in which case the fixture file
    name is the thing to search for under `conformance/`.
 3. **Test files are not only under `muxws/` and `ts/`.** They are also under `demo/backend_python/` and
-   `docs/examples/`. The grep in the previous edition named `muxws ts` and nothing else, and so
-   reported `WSM-FRG-010` as uncited when `demo/backend_python/handlers_test.py` names it twice. Search the
-   repository, not two directories of it.
+   `docs/examples/` — `WSM-FRG-010`, for one, is named twice in
+   `demo/backend_python/handlers_test.py` and nowhere under `muxws/`. Search the repository, not two
+   directories of it.
 
 ## Appendix B — the honesty list
 
 **What this list is.** Every rule in §5 is meant to be held by something that can fail. This appendix
 records, for each rule that is *not* held by an ordinary citing test, what does hold it and how
-strongly — because "no test" and "unenforced" are different claims, and the previous edition
-conflated them. It is a snapshot; refresh it by running Appendix A's grep over every id.
+strongly — "no test" and "unenforced" are different claims. It is a snapshot; refresh it by running
+Appendix A's grep over every id.
 
-**Why it is worth maintaining.** Three times in this project a rule was written, cited, believed and
-silently false, and each was found by an audit or by a consumer rather than by the suite:
-`WSM-RCN-011` (a close code no in-memory transport can carry), `WSM-CDC-022` (a status code invisible
-to every peer-level test), `WSM-INV-004` (a writer that was correct and was never asked). The shape
-is always the same — **the rig could not see the thing the rule is about** — so an entry here that
-says "witnessed" is worth only as much as the mutation that was shown to kill the witness. Where a
-witness was added in the M8 audit, the mutation that proves it can fail is given with it.
+**Why it is worth maintaining.** A rule can be written, cited, believed and silently false whenever
+**the rig cannot see the thing the rule is about**: `WSM-RCN-011` is a close code no in-memory
+transport can carry, `WSM-CDC-022` a status code invisible to every peer-level test, `WSM-INV-004` a
+writer that is correct and is never asked. So an entry here that says "witnessed" is worth only as
+much as the mutation that kills the witness, and the mutation is given with it.
 
 ### The count
 
-Of the **218** individually numbered rules in §5:
-
-| | rules with no citing test |
-|---|---|
-| before the M8 audit | **36** |
-| after it | **20** |
-| after `WSM-AUT-003` was witnessed | **19** |
+Of the **218** individually numbered rules in §5, **19** have no citing test.
 
 Of those 19: **fourteen** are exercised by a test that simply does not name them; **one**
 (`WSM-PKG-004`) is enforced by the linters; **two** (`WSM-TST-004`, `WSM-TST-005`) by a CI job; and
 **two** (`WSM-RCN-025`, `WSM-RCN-028`) are rules whose library half is held by a differently-named
 test and whose other half binds the deploying application rather than muxws.
 
-**Every rule in this document now has a witness of some kind**, and the kind is named for each. That
-is a weaker claim than "everything is tested" and it is the one worth making: fourteen of the
-nineteen would survive a rename of the test that holds them without anyone noticing, and the two CI
-jobs are falsifiable only for the codecs their matrix enumerates.
-
-Narrowed further: the previous edition's *"no witness at all"* table held **19** ids and now holds
-**none**. Fifteen gained a citing test in the M8 audit (`WSM-CDC-007` among them, which had one all
-along); `WSM-PKG-004` is held by the linters; `WSM-RCN-025` and `WSM-RCN-028` are split rules whose
-library half an existing test holds; and `WSM-AUT-003` was the last, closed by reading the
-`Authorization` header at the upgrade across three dials rather than by watching frames.
-
-Two corrections to the previous snapshot, both of which made this document overstate its own
-ignorance: `WSM-CDC-007` was cited all along in `muxws/conformance_test.py` and
-`ts/conformance.spec.ts`, and `WSM-FRG-010` in `demo/backend_python/handlers_test.py`. The second was missed
-because of Appendix A's under-scoped grep; the first was simply an error.
+**Every rule in this document has a witness of some kind**, and the kind is named for each. That is a
+weaker claim than "everything is tested" and it is the one worth making: fourteen of the nineteen
+would survive a rename of the test that holds them without anyone noticing, and the two CI jobs are
+falsifiable only for the codecs their matrix enumerates.
 
 ### Retired — no test is owed
 
 §6: `WSM-CON-001` (standing for `-001`…`-008`) and `WSM-STM-022`. Their consequences are asserted by
 the absence tests listed in §6.
 
-### Witnessed by a test written for this rule (added in the M8 audit)
+### Witnessed by a test written for this rule
 
-Each row names the rule, the test, and **the mutation that was applied to the frozen library to prove
-the test can fail.** Every mutation below was run; every one produced a failure; the library was
-restored after each. A row without a demonstrated mutation does not belong in this table.
+Each row names the rule, the test, and **the mutation that makes that test fail.** A row without a
+demonstrated mutation does not belong in this table.
 
 | Rule | Test | Mutation that makes it fail |
 |---|---|---|
@@ -1367,7 +1342,7 @@ restored after each. A row without a demonstrated mutation does not belong in th
 | `WSM-ERR-003` | `peer_test.py::test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site` | a `Peer.on_error` hook added — fails on the exhaustive hook-name set. The rule's force is that there is nowhere to divert an error *to*; see *bounded witnesses* for what this test does not prove. |
 | `WSM-ERR-007` | `errors_test.py::test_nothing_in_the_error_hierarchy_carries_a_status_code` | (a) `RemoteError.status_code = 500`; (b) `default_error_serializer` grows a `"status": 500` key. Both caught. |
 | `WSM-ERR-010` | `peer_test.py::test_request_arms_no_deadline_unless_it_is_given_one`; `ts/peer.spec.ts` *"has no default request timeout"* | (a) `timeout: float \| None = 30.0` on `Peer.request` — caught by the signature half; (b) `_collect_unary` substituting `30.0` for `None` with the signature left alone — caught by the `asyncio.wait_for` spy, with `timeout=0.02` as the control that proves the spy fires at all. The two halves are independently live. TypeScript counts `setTimeout` calls and is killed by a default in either `collectUnary` or `resolveCall`. |
-| `WSM-ERR-016` | `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`, `::test_the_transport_bases_are_root_exported_and_their_subclasses_are_not`; `transports/websockets_test.py::test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error`, `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`, `::test_a_missing_websockets_package_names_the_extra_that_installs_it`, `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`; `transports/unix_test.py::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`; `ts/errors.spec.ts` *"defines no concrete transport error, because each one belongs to its transport"*; `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports own"*, *"leaves node:net a real import, so the unix dial has a socket to open"* | Four, each killing a different half, each run against the finished tree in a scratch copy and each restored after. (a) `class WebsocketUrlError(MuxwsError, ValueError)` — reparented off the base, behaviour byte-for-byte identical: caught **only** by the subclass walk, which is why that test enumerates by importing every shipped module and recursing through `MuxwsError.__subclasses__()` rather than grepping for a base name, and why it asserts a floor on the modules it imported and names all four concrete classes as a control. (b) `"WebsocketUrlError"` added to `muxws.__all__` and to the import block — caught **only** by the export test. (c) the `verify_dialable_url(...)` line deleted from `_websocket_dialer`, so `websockets`' own `InvalidURI` reaches the caller: 12 of 32 tests in `websockets_test.py` fail. (d) the finer version of (c), and the one the layering clause is for: `require_websockets()` left where it is and only the URL parse moved *inside* `dial()`'s `except`, one line beneath `_looks_like_a_refused_handshake`. Every URL in the suite still ends up a `TransportUrlError` and exactly one test fails — `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`, where `ws:/HTTP 400` comes back as `CodecMismatch`. That is the measured defect this rule was written for, and it is invisible to every other witness. Applying (a) to `UnixUrlError` instead fails the walk **and** `transports/unix_test.py::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`, while `::test_both_refusals_are_catchable_as_muxws_errors_and_as_what_they_are` stays green — it asserts the `MuxwsError`/`ValueError` pair, which the reparent preserves. The older test holds the pre-WSM-ERR-016 contract and the newer one holds this rule; neither is redundant and neither should be deleted as such. Three more were added when the rule's own witnesses were audited, each for a clause that had none. (e) `except ImportError` in `require_websockets` widened back to translating every import failure: caught only by `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`, and measured against a real shadowing `websockets/__init__.py` before the narrowing existed — a package that *was* installed came back as `WebsocketsNotInstalledError` telling the reader to install it. (f) a concrete `RogueUrlError` appended to `ts/errors.ts` and root-exported from `ts/index.ts`: the name-listed guards saw nothing, and both enumerative walks — `ts/errors.spec.ts` *"defines no concrete transport error…"* and `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports own"* — now fail on it, which is why they read the prototype chain and keep the name lists only as the non-vacuity control. (g) `/^node:/` removed from `vite.config.ts`'s externals: caught only by *"leaves node:net a real import, so the unix dial has a socket to open"*. That one is the reason a source-level witness was not enough — vitest, `interop/drive.sh` and every spec run against `ts/`, and the defect existed only in the artifact `npm run build` emits, where `node:net` had been swapped for Vite's empty browser stub and every `ws+unix:` dial through the published package died as `TypeError: n is not a function`, which is neither a `MuxwsError` nor a sentence naming the url. |
+| `WSM-ERR-016` | `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`, `::test_the_transport_bases_are_root_exported_and_their_subclasses_are_not`; `transports/websockets_test.py::test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error`, `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`, `::test_a_missing_websockets_package_names_the_extra_that_installs_it`, `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`; `transports/unix_test.py::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`; `ts/errors.spec.ts` *"defines no concrete transport error, because each one belongs to its transport"*; `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports own"*, *"leaves node:net a real import, so the unix dial has a socket to open"* | Four, each killing a different half. (a) `class WebsocketUrlError(MuxwsError, ValueError)` — reparented off the base, behaviour byte-for-byte identical: caught **only** by the subclass walk, which is why that test enumerates by importing every shipped module and recursing through `MuxwsError.__subclasses__()` rather than grepping for a base name, and why it asserts a floor on the modules it imported and names all four concrete classes as a control. (b) `"WebsocketUrlError"` added to `muxws.__all__` and to the import block — caught **only** by the export test. (c) the `verify_dialable_url(...)` line deleted from `_websocket_dialer`, so `websockets`' own `InvalidURI` reaches the caller: 12 of 32 tests in `websockets_test.py` fail. (d) the finer version of (c), and the one the layering clause is for: `require_websockets()` left where it is and only the URL parse moved *inside* `dial()`'s `except`, one line beneath `_looks_like_a_refused_handshake`. Every URL in the suite still ends up a `TransportUrlError` and exactly one test fails — `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`, where `ws:/HTTP 400` comes back as `CodecMismatch`. That is the defect this rule exists to prevent, and it is invisible to every other witness. Applying (a) to `UnixUrlError` instead fails the walk **and** `transports/unix_test.py::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`, while `::test_both_refusals_are_catchable_as_muxws_errors_and_as_what_they_are` stays green — it asserts the `MuxwsError`/`ValueError` pair, which the reparent preserves. The older test holds the pre-WSM-ERR-016 contract and the newer one holds this rule; neither is redundant and neither should be deleted as such. Three more cover a clause each. (e) `except ImportError` in `require_websockets` widened to translating every import failure: caught only by `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`, and reproducible against a shadowing `websockets/__init__.py` — a package that *is* installed then comes back as `WebsocketsNotInstalledError` telling the reader to install it. (f) a concrete `RogueUrlError` appended to `ts/errors.ts` and root-exported from `ts/index.ts`: the name-listed guards saw nothing, and both enumerative walks — `ts/errors.spec.ts` *"defines no concrete transport error…"* and `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports own"* — now fail on it, which is why they read the prototype chain and keep the name lists only as the non-vacuity control. (g) `/^node:/` removed from `vite.config.ts`'s externals: caught only by *"leaves node:net a real import, so the unix dial has a socket to open"*. That one is why a source-level witness is not enough: vitest, `interop/drive.sh` and every spec run against `ts/`, while the defect lives only in the artifact `npm run build` emits, where `node:net` becomes Vite's empty browser stub and every `ws+unix:` dial through the published package dies as `TypeError: n is not a function`, which is neither a `MuxwsError` nor a sentence naming the url. |
 | `WSM-FRM-006`, `WSM-INV-016` | `peer_test.py::test_a_payload_spelled_like_an_envelope_is_carried_and_never_read`, `::test_an_envelope_lookalike_payload_survives_being_fragmented`; `ts/peer.spec.ts` *"defines no vocabulary inside payload"* | (a) the sender lifts `end` out of the payload — caught twice over, by the subscript recorder and by the envelope assertions; (b) a *discarded* read `_ = payload["kind"]` — caught by the recorder alone; (c) on the fragmented path, the receiver peeks inside a fragment for `"type":"reset"` and resets; (d) the reassembler merges a nested `payload` key into the envelope. In TypeScript, `toMapping` deleting `payload.kind` in place, and the receiver acting on `payload.type`. |
 | `WSM-FRM-012`, `-013` | `frames_test.py::test_v1_frame_types_is_exactly_the_six_of_the_specification`, `::test_end_and_trailers_are_flags_and_not_frame_types`; `ts/frames.spec.ts` `describe('the v1 frame set')`; `ts/peer.spec.ts` *"puts only the six v1 frame types on the wire"* | adding `end` and `trailers` to `V1_FRAME_TYPES`; removing `goaway` from it; and `toMapping` spelling a trailer-bearing frame as `{"type":"trailers"}`. All three caught. Asserted by **set equality**, never by membership — every prior reference to this constant asked whether a type it already had was in it, which a seventh member satisfies just as well. |
 | `WSM-INV-001` | `packaging_test.py::test_no_library_module_imports_anything_above_it_in_the_stack`, `::test_every_third_party_import_is_an_extra_and_lives_only_in_its_own_module`, `::test_the_import_walker_sees_what_it_is_trusted_to_see` | (a) a `TYPE_CHECKING`-only `from fastapi import WebSocket` in `stream.py`; (b) a lazy `import httpx` inside a `Peer` method; (c) `import msgpack` in `writer.py`. All three caught. An AST walk, not a subprocess import-blocker, because the rule names the type-checking-only annotation explicitly and a runtime blocker structurally cannot see one. The third test is the control: a walker that found no modules would make the other two vacuously green. |
@@ -1395,13 +1370,13 @@ oversight in others; either way the witness exists and is named here.
 
 ### Non-test witnesses
 
-Real enforcement, by something other than a test. Each was run against a deliberate violation and
-each rejected it; none of them is a promise.
+Real enforcement, by something other than a test. Each rejects a deliberate violation; none of them
+is a promise.
 
 | Rule | What enforces it | Verified by |
 |---|---|---|
 | `WSM-PKG-004` | `eslint` and `ruff`, via `npm run lint:ci` and `ruff check .` | In a scratch tree using this repository's own `eslint.config.js` and `pyproject.toml`: `ts/streamState.ts` → `Filename is not in kebab case. Rename it to 'stream-state.ts'` (`unicorn/filename-case`); a double-quoted TypeScript string → `prettier/prettier`; a 153-column line → `vue/max-len`. On the Python side a single-quoted string → `Q000` and a 136-column line → `E501`. Renaming the file to `stream-state.ts` passes. **All three clauses of the rule are enforced** — it is a witness, but a lint job rather than a test, and a lint job does not run in `pytest`. |
-| `WSM-API-003` (the "zero mandatory arguments" half) | `tsc --noEmit`, via `npm run lint:ci` | `?` is erased at runtime and `Function.length` is 2 either way, so vitest cannot see this half in TypeScript. Changing the overload to `open<T>(payload: unknown, …)` produces `ts/peer.spec.ts(1668,32): error TS2554: Expected 1-2 arguments, but got 0` — the type-checker fails at the new test's own bare `pair.dialer.open()`. The witness is the call site; the checker is the thing that reads it. |
+| `WSM-API-003` (the "zero mandatory arguments" half) | `tsc --noEmit`, via `npm run lint:ci` | `?` is erased at runtime and `Function.length` is 2 either way, so vitest cannot see this half in TypeScript. Changing the overload to `open<T>(payload: unknown, …)` produces `ts/peer.spec.ts(1668,32): error TS2554: Expected 1-2 arguments, but got 0` — the type-checker fails at the test's own bare `pair.dialer.open()`. The witness is the call site; the checker is the thing that reads it. |
 | `WSM-TST-004` | the `cross-language` workflow's `scenario` jobs (`interop/drive.sh <acceptor> <dialer>`, both role assignments × both codecs) | a job, not a test |
 | `WSM-TST-005` | the `cross-language` workflow's `reconnect` job (`interop/drive.sh <acceptor> <dialer> reconnect`, both role assignments) | a job, not a test |
 | `WSM-CDC-007` (for the codecs it names) | the same workflow, plus `conformance_test.py::test_sequence_corpus_replays_under_msgpack` and `::test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere` | `interop/drive.sh python ts corpus json 12` passes locally and fails on each of three deliberate breaks: `PREFIX = "muxws.v9."` in `subprotocol.py` (`Unexpected server response: 400` — the pair genuinely cannot form and the job says so), a wrong pinned fixture count, and a codec pinned to `msgpack` for a JSON-configured run. **But see the gap below: this witnesses two codecs, not the rule's quantifier.** |
@@ -1451,11 +1426,10 @@ matrix leg exists for it, and nothing in either suite asserts the *set* of shipp
 must agree with a YAML file under `.github/`, which is why it is recorded here rather than guessed
 at.
 
-### Bounded witnesses — what the new tests still cannot see
+### Bounded witnesses — what these witnesses cannot see
 
 A witness that is believed to prove more than it does is the failure mode this appendix exists for,
-so the limits found while verifying the M8 additions are recorded rather than left to be
-rediscovered.
+so each witness's limits are recorded rather than left to be rediscovered.
 
 - **`peer_test.py::test_an_envelope_lookalike_payload_survives_being_fragmented` compares against the
   object it handed to the library.** A library that consumed a reserved key by deleting it from the
@@ -1483,10 +1457,8 @@ rediscovered.
 ### One-port citations
 
 A grep that finds a citation says nothing about *which* port it was found in, and for a handful of
-rules that turns out to matter. **Twenty-five rules are now cited in one language only** — eighteen in
-Python, seven in TypeScript. That is up from seventeen before the M8 audit, and the increase is the
-audit's own doing: five of the rules it newly witnessed were witnessed in Python alone. They are
-listed below rather than left for the next grep to rediscover.
+rules that turns out to matter. **Twenty-five rules are cited in one language only** — eighteen in
+Python, seven in TypeScript. They are listed below rather than left for the next grep to rediscover.
 
 *One-port by nature — no gap.* `WSM-API-017`, `WSM-PKG-002` are Python-language rules;
 `WSM-API-015`, `WSM-API-020`, `WSM-API-022`, `WSM-CDC-015` are TypeScript-shaped. `WSM-STM-022` is
@@ -1513,8 +1485,8 @@ retired and owes nothing.
   partly structural — `ws` completes the handshake before the handler runs, which is why
   `WSM-CDC-027` exists and is tested — but `ts/node.ts` still exports `accept(socket)` and has no
   equivalent assertion.
-- **`WSM-API-008`, `WSM-AUT-004`, `WSM-ERR-003`, `WSM-ERR-007`, `WSM-INV-001` were witnessed in Python
-  in the M8 audit and nowhere else.** Four of them are writable in TypeScript essentially as written.
+- **`WSM-API-008`, `WSM-AUT-004`, `WSM-ERR-003`, `WSM-ERR-007`, `WSM-INV-001` are witnessed in Python
+  and nowhere else.** Four of them are writable in TypeScript essentially as written.
   `WSM-INV-001` is the one worth a note: `ts/packaging.spec.ts` already asserts that the entry point
   imports nothing optional, with controls, but it does so by *running* the import — and an
   `import type` is erased before it runs, exactly as a Python `if TYPE_CHECKING:` block is invisible
@@ -1588,21 +1560,19 @@ and the whole Python suite still passes. The corpus triple named
 fixture asserts that the splitter *produces* it, because the boundary corpus splits a `data` frame
 only. A reset's reason is what reaches a human in a log, so the gap is worth closing.
 
-**How an acceptor refuses is now asserted, and the shape of the hole is worth keeping.** Until M6 both
-reference acceptors answered **HTTP 101 with no `Sec-WebSocket-Protocol` header** and closed
-afterwards, which WSM-CDC-022 forbids: `websockets`' `select_subprotocol` hook and `ws`'s
-`handleProtocols` both treat "no selection" as "no subprotocol", not as "refuse the upgrade". Every
-test dialled with the *same language's* dialer, which recovers via WSM-CDC-028's post-handshake check
-and raises `CodecMismatch`, so both suites stayed green through three milestones; a cross-language
-dial does not, and surfaced `ws`'s bare `Error: Server sent no subprotocol` instead — precisely what
-WSM-CDC-024 forbids. The witness had to be an **HTTP request**, because a status code is invisible to
-every peer-level test and to the whole conformance corpus. It is now one:
-`transports/websockets_test.py` and `ts/node.spec.ts` each speak the upgrade by hand and assert the
-status, that no subprotocol came back, and that the connection handler was never reached. Python
-raises `NegotiationError` out of the hook (an `InvalidHandshake`, which `websockets` answers 400);
-`ws` needs a second hook, `refuseMismatchedUpgrade`, because `handleProtocols` cannot refuse — a
-`ws` acceptor that installs only the first one still violates WSM-CDC-022, and WSM-CDC-027 names no
-hook for it.
+**How an acceptor refuses is asserted only by an HTTP request, and nothing smaller can see it.**
+`websockets`' `select_subprotocol` hook and `ws`'s `handleProtocols` both treat "no selection" as "no
+subprotocol" rather than as "refuse the upgrade", so an acceptor resting on either alone answers
+**HTTP 101 with no `Sec-WebSocket-Protocol` header** and closes afterwards, which WSM-CDC-022 forbids.
+A dial from the *same language* recovers via WSM-CDC-028's post-handshake check and raises
+`CodecMismatch`, so a single-language suite stays green; a cross-language dial does not, and surfaces
+`ws`'s bare `Error: Server sent no subprotocol` instead — precisely what WSM-CDC-024 forbids. A status
+code is invisible to every peer-level test and to the whole conformance corpus, so the witness is an
+HTTP request: `transports/websockets_test.py` and `ts/node.spec.ts` each speak the upgrade by hand and
+assert the status, that no subprotocol came back, and that the connection handler was never reached.
+Python raises `NegotiationError` out of the hook (an `InvalidHandshake`, which `websockets` answers
+400); `ws` needs a second hook, `refuseMismatchedUpgrade`, because `handleProtocols` cannot refuse,
+and a `ws` acceptor that installs only the first one still violates WSM-CDC-022 (WSM-CDC-027).
 
 **Nothing asserts that the two ports render the same log line.** §5.10's `reason=` differs between
 them — `repr()` against `JSON.stringify` — and each port's own test asserts its own spelling, so the
