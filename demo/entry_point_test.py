@@ -1,4 +1,8 @@
-"""`python demo.py` picks a backend and refuses to start with a list of what to install.
+"""`python demo.py` picks a demo and refuses to start with a list of what to install.
+
+There are three demos and one flag each, so the command line's first job is to say which one this run
+is. A bare `python demo.py` is the help and nothing else; every argument that belongs to one demo is
+refused on the others, because a flag accepted and ignored reads as a flag obeyed.
 
 Every dependency the demo needs fails *late* and somewhere other than where the cause is. A missing
 `fastapi` is an ImportError inside a child process nobody is watching. A missing `websockets` is the
@@ -12,10 +16,11 @@ half: a declared dependency is not an installed one, and the reader who installe
 `muxws` from PyPI rather than the repository, gets told which rather than debugging a handshake.
 
 Since there are two backends there is a second way for that check to be wrong, and it is the friendly
-direction: demanding what the *other* backend needs. `python demo.py node` imports no fastapi, no
-uvicorn and no `websockets` at all, so a check that still asked for them would stop a run that was
-about to work and send the reader to install three packages nothing would load. Half the tests below
-exist to pin that, and the rest pin the command line that chooses between the two.
+direction: demanding what the *other* backend needs. `python demo.py --browser node` imports no
+fastapi, no uvicorn and no `websockets` at all, so a check that still asked for them would stop a run
+that was about to work and send the reader to install three packages nothing would load. Half the
+tests below exist to pin that, and the rest pin the command line that chooses the demo and, within
+`--browser`, the backend.
 """
 
 from __future__ import annotations
@@ -189,29 +194,122 @@ def test_the_frontend_is_demanded_by_both_backends(entry_point: Any, monkeypatch
         assert any("npm install" in problem for problem in problems), backend
 
 
-def test_the_default_backend_is_python(entry_point: Any):
-    """`python demo.py` with no argument serves the sockets from Python."""
-    assert entry_point.parse_arguments([]).backend == "python"
+def test_a_bare_invocation_prints_the_help_and_exits_zero(entry_point: Any, capsys: pytest.CaptureFixture[str]):
+    """`python demo.py` starts nothing, because no one of the three demos is the obvious one.
+
+    Exit 0 on stdout rather than exit 2 on stderr: naming no demo is the question the help answers,
+    not a mistake, and a reader who piped the output would not find it in stderr.
+    """
+    with pytest.raises(SystemExit) as ended:
+        entry_point.parse_arguments([])
+
+    assert ended.value.code == 0
+    printed = capsys.readouterr()
+    assert printed.err == ""
+    for flag in ("--browser", "--uds", "--bench"):
+        assert flag in printed.out, flag
+
+
+@pytest.mark.parametrize("flag", ["--browser", "--uds", "--bench"])
+def test_each_flag_selects_its_own_demo_and_leaves_the_others_alone(entry_point: Any, flag: str):
+    """One flag, one demo: the entry point branches on these three and must never see two set."""
+    arguments = entry_point.parse_arguments([flag])
+    selected = {name for name in ("browser", "uds", "bench") if getattr(arguments, name)}
+    assert selected == {flag.removeprefix("--")}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--browser", "--uds"],
+        ["--browser", "--bench"],
+        ["--uds", "--bench"],
+        ["--browser", "--uds", "--bench"],
+    ],
+)
+def test_two_demos_in_one_command_are_refused(entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str]):
+    """They are three separate programs sharing a launcher, and one run can only be one of them.
+
+    Refused rather than ordered by precedence: a reader who typed two would otherwise watch one demo
+    run and have nothing to tell them the other was dropped.
+    """
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.parse_arguments(argv)
+    assert refusal.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        ([], "python"),
-        (["python"], "python"),
-        (["node"], "node"),
-        # The spelling `demo/backend_node/main.ts` tells the reader to type, kept working on purpose.
-        (["--backend", "node"], "node"),
-        (["--backend", "python"], "python"),
+        (["node"], "needs --browser"),
+        (["--backend", "node"], "needs --browser"),
+        (["--no-fe"], "needs --browser"),
+        (["--bench", "node"], "no backend argument"),
+        (["--bench", "--backend", "python"], "no backend argument"),
+        (["--bench", "--no-fe"], "nothing to turn off"),
+    ],
+)
+def test_the_browser_demos_arguments_are_refused_everywhere_else(
+    entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str], expected: str
+):
+    """A language and a dev server are `--browser`'s, and neither of the other two demos has either.
+
+    With no demo named at all these are refused too, rather than taken as a request for the browser
+    demo: `python demo.py node` would then be the one command line that starts something.
+    """
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.parse_arguments(argv)
+    assert refusal.value.code == 2
+    assert expected in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["--full"], ["--browser", "--full"], ["--uds", "--full"]])
+def test_full_is_refused_by_every_demo_but_bench(entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str]):
+    """`--full` widens a measurement matrix, and only one of the three demos has one."""
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.parse_arguments(argv)
+    assert refusal.value.code == 2
+    assert "--bench" in capsys.readouterr().err
+
+
+def test_bench_runs_a_trimmed_matrix_unless_full_says_otherwise(entry_point: Any):
+    """`--full` is the only thing the entry point tells the measurement, so it has to arrive intact."""
+    assert entry_point.parse_arguments(["--bench"]).full is False
+    assert entry_point.parse_arguments(["--bench", "--full"]).full is True
+
+
+def test_the_default_backend_is_python(entry_point: Any):
+    """`--browser` with no language named serves the sockets from Python."""
+    assert entry_point.parse_arguments(["--browser"]).backend == "python"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--browser"], "python"),
+        (["--browser", "python"], "python"),
+        (["--browser", "node"], "node"),
+        # The second accepted spelling, kept working on purpose.
+        (["--browser", "--backend", "node"], "node"),
+        (["--browser", "--backend", "python"], "python"),
         # Both, agreeing, is not a mistake worth refusing.
-        (["node", "--backend", "node"], "node"),
+        (["--browser", "node", "--backend", "node"], "node"),
     ],
 )
 def test_the_backend_argument_accepts_what_it_should(entry_point: Any, argv: list[str], expected: str):
     assert entry_point.parse_arguments(argv).backend == expected
 
 
-@pytest.mark.parametrize("argv", [["ruby"], ["--backend", "ruby"], ["Node"], ["node", "python"]])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--browser", "ruby"],
+        ["--browser", "--backend", "ruby"],
+        ["--browser", "Node"],
+        ["--browser", "node", "python"],
+    ],
+)
 def test_an_unknown_backend_is_refused_rather_than_defaulted(entry_point: Any, argv: list[str]):
     """Silently falling back to python would start a backend the reader did not ask for.
 
@@ -227,7 +325,7 @@ def test_an_unknown_backend_is_refused_rather_than_defaulted(entry_point: Any, a
 def test_asking_for_both_backends_at_once_is_refused(entry_point: Any, capsys: pytest.CaptureFixture[str]):
     """Two spellings of one choice are accepted; two *different* choices are not."""
     with pytest.raises(SystemExit):
-        entry_point.parse_arguments(["node", "--backend", "python"])
+        entry_point.parse_arguments(["--browser", "node", "--backend", "python"])
     assert "pick one" in capsys.readouterr().err
 
 
@@ -239,7 +337,7 @@ def test_help_names_both_backends_and_reads_as_prose(entry_point: Any):
     one is or where to look at it.
     """
     text = entry_point.build_parser().format_help()
-    for expected in ("demo/backend_python", "demo/backend_node", "uvicorn", "tsx", "python demo.py node"):
+    for expected in ("demo/backend_python", "demo/backend_node", "uvicorn", "tsx", "python demo.py --browser node"):
         assert expected in text, expected
     # The hidden alias stays hidden: one documented spelling, or the help becomes the parameter dump
     # it was written not to be.
@@ -248,16 +346,16 @@ def test_help_names_both_backends_and_reads_as_prose(entry_point: Any):
 
 def test_the_frontend_runs_unless_no_fe_says_otherwise(entry_point: Any):
     """`--no-fe` starts the backend alone, for a reader driving it with a client of their own."""
-    assert entry_point.parse_arguments([]).frontend is True
-    assert entry_point.parse_arguments(["node"]).frontend is True
-    assert entry_point.parse_arguments(["--no-fe"]).frontend is False
-    assert entry_point.parse_arguments(["node", "--no-fe"]).frontend is False
+    assert entry_point.parse_arguments(["--browser"]).frontend is True
+    assert entry_point.parse_arguments(["--browser", "node"]).frontend is True
+    assert entry_point.parse_arguments(["--browser", "--no-fe"]).frontend is False
+    assert entry_point.parse_arguments(["--browser", "node", "--no-fe"]).frontend is False
 
 
 def test_no_fe_does_not_demand_the_frontend_dependencies(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
     """Refusing to start over something this run will never load is the lie the check exists to avoid.
 
-    It is the same reasoning that makes the check backend-aware: `python demo.py node` is not told to
+    It is the same reasoning that makes the check backend-aware: `--browser node` is not told to
     install uvicorn, and `--no-fe` is not told to install several hundred megabytes of `node_modules`
     for a dev server it was explicitly asked not to start.
     """
@@ -292,7 +390,7 @@ def test_uds_is_a_mode_of_its_own_and_not_a_third_backend(entry_point: Any):
     language, so a third `BACKENDS` entry would answer "which language serves the sockets" with a
     mode that does not serve them.
     """
-    assert entry_point.parse_arguments([]).uds is False
+    assert entry_point.parse_arguments(["--browser"]).uds is False
     assert entry_point.parse_arguments(["--uds"]).uds is True
     assert "uds" not in entry_point.BACKENDS
 
@@ -342,8 +440,46 @@ def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
     assert "AF_UNIX" in problems[0]
 
 
+def test_the_measurement_asks_for_websockets_before_it_starts_measuring(
+    entry_point: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """`--bench` is checked like the demos that start a server, and asks for neither msgpack nor AF_UNIX.
+
+    Every cell is a pair of child processes, so a `websockets` that is not installed surfaces as an
+    ImportError inside one of them after the first cells have already been measured. The two the
+    matrix works around are not in the list: msgpack cells and unix cells are skipped with a note
+    naming them, which is a smaller answer than refusing to measure the rest.
+    """
+    monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
+    monkeypatch.delattr(entry_point.socket, "AF_UNIX", raising=False)
+
+    assert entry_point.missing_dependencies(bench=True) == [], (
+        "the measurement was refused over something it skips or never loads"
+    )
+
+    monkeypatch.setattr(entry_point, "BENCH_IMPORTS", (("no_such_module", "invented for this test"),))
+    problems = entry_point.missing_dependencies(bench=True)
+    assert len(problems) == 1
+    assert "no_such_module" in problems[0]
+
+    with pytest.raises(SystemExit) as refusal:
+        entry_point.check_before_starting(bench=True)
+    assert refusal.value.code == 1
+
+
 def test_help_names_the_socket_demo_and_where_its_two_scripts_live(entry_point: Any):
     """A reader who does not know the mode exists will not type `--uds`, so `--help` has to say it."""
     text = entry_point.build_parser().format_help()
     for expected in ("--uds", "socket file", "docs/examples/uds_"):
+        assert expected in text, expected
+
+
+def test_help_names_the_measurement_and_what_it_compares(entry_point: Any):
+    """The help is the whole of a bare run, so a reader meets `--bench` there or not at all.
+
+    Naming the three modes rather than only the flag: "throughput" alone reads as another frame count,
+    and the reason to run this one is that two of the three carry the payload with muxws taken out.
+    """
+    text = entry_point.build_parser().format_help()
+    for expected in ("--bench", "raw socket", "raw WebSocket", "--full"):
         assert expected in text, expected

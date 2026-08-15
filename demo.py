@@ -1,9 +1,10 @@
-"""One entry point for the demo: `python demo.py` starts both halves.
+"""One entry point for three demos, one flag each. `python demo.py` prints the help and starts nothing.
 
-There are two backends and one frontend. `python demo.py` serves the sockets from Python and
-`python demo.py node` serves them from TypeScript on Node, and **the frontend does not change by a
-single line between them** - that is the whole reason the second one exists. If a Vue application
-cannot tell which language answered, the wire really is the contract.
+`--browser` is the one with a page. There are two backends and one frontend: `python demo.py
+--browser` serves the sockets from Python and `python demo.py --browser node` serves them from
+TypeScript on Node, and **the frontend does not change by a single line between them** - that is the
+whole reason the second one exists. If a Vue application cannot tell which language answered, the
+wire really is the contract.
 
 The Vite dev server runs in a daemon child process; the backend runs in this process when it is
 uvicorn and in a child process group of its own when it is Node - so a single Ctrl-C stops the set
@@ -18,13 +19,18 @@ wheel and looks inside it rather than taking that on trust.
 
     pip install -e ".[demo,starlette]"    # the Python backend only
     npm install                           # both backends and the frontend
-    python demo.py                        # or: python demo.py node
+    python demo.py --browser              # or: python demo.py --browser node
 
-`python demo.py --uds` runs a third thing, not part of the page: the Unix-domain-socket pair from
-`docs/examples/`, an acceptor bound to a socket file and a client dialling it as
-`ws+unix:///…/muxws.sock:/ws`. It needs only `pip install -e ".[websockets]"`, since it starts
-neither uvicorn nor a browser, and it cannot be part of the page: a page has no way to open a file
-as a socket.
+`python demo.py --uds` runs the Unix-domain-socket pair from `docs/examples/`: an acceptor bound to
+a socket file and a client dialling it as `ws+unix:///…/muxws.sock:/ws`. It needs only
+`pip install -e ".[websockets]"`, since it starts neither uvicorn nor a browser, and it cannot be
+part of the page: a page has no way to open a file as a socket.
+
+`python demo.py --bench` carries one payload three ways over one transport - a raw socket, a raw
+WebSocket, and muxws - and prints what each one moves per second. `muxws/throughput_test.py` reports
+frames a second with nothing to divide by; the raw socket is that denominator and the raw WebSocket
+is the step between the two, so the envelope's cost comes out as a percentage of what the transport
+can carry rather than as a number on its own.
 
 `[demo]` carries `websockets` deliberately: uvicorn has no WebSocket protocol implementation of its
 own and answers 404 to every upgrade without one, while serving the page perfectly - so the demo
@@ -50,7 +56,7 @@ DEFAULT_BACKEND = "python"
 
 #: What `pip install -e ".[demo,starlette]"` provides, as `(import name, why it is needed)`.
 #:
-#: The **Python backend's** list and nobody else's: `python demo.py node` loads not one of these.
+#: The **Python backend's** list and nobody else's: `--browser node` loads not one of these.
 #:
 #: Checked before anything starts, because every one of these fails *late* and in a way that points
 #: somewhere else. A missing `fastapi` is an ImportError from inside a child process nobody is
@@ -94,6 +100,17 @@ UDS_IMPORTS = (
     ("muxws", "the library this demo exists to show; install the repository itself with -e"),
 )
 
+#: What the throughput measurement needs, as `(import name, why it is needed)`.
+#:
+#: Two, and msgpack is not one of them: its cells are skipped with a note saying so, which is a
+#: better answer than refusing to measure the rest. `websockets` is not optional in the same way -
+#: two of the three modes are nothing without it, and every cell runs in a pair of child processes,
+#: so its absence surfaces as an ImportError inside a child after the first cells have been measured.
+BENCH_IMPORTS = (
+    ("websockets", "both WebSocket modes dial and accept through it"),
+    ("muxws", "the library this demo exists to show; install the repository itself with -e"),
+)
+
 #: The two shipped scripts `--uds` runs, relative to `docs/examples/`.
 UDS_SERVER = "uds_server.py"
 UDS_CLIENT = "uds_client.py"
@@ -114,26 +131,29 @@ def node_package_installed(name):
     return os.path.isdir(os.path.join(root, "node_modules", name))
 
 
-def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False):
-    """Everything the chosen backend needs and does not have, as human-readable lines.
+def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False, bench=False):
+    """Everything the chosen demo needs and does not have, as human-readable lines.
 
     Backend-aware, because the two need almost disjoint things and demanding the other's is a lie:
-    `python demo.py node` imports no Python beyond this file, and refusing to start it over an absent
-    uvicorn would send the reader to install a package that would never be loaded. `--uds` is the
-    third such set, and the smallest: it returns early rather than falling through to the frontend
-    check below, because that run has no frontend to check for.
+    `--browser node` imports no Python beyond this file, and refusing to start it over an absent
+    uvicorn would send the reader to install a package that would never be loaded. `--uds` and
+    `--bench` are the third and fourth such sets, and the smallest: both return early rather than
+    falling through to the frontend check below, because neither run has a frontend to check for.
     """
     import importlib.util
 
     problems = []
-    if uds:
-        for module, why in UDS_IMPORTS:
+    if uds or bench:
+        for module, why in UDS_IMPORTS if uds else BENCH_IMPORTS:
             if importlib.util.find_spec(module) is None:
                 problems.append(f"{module:12} - {why}")
-        if not hasattr(socket, "AF_UNIX"):
+        if uds and not hasattr(socket, "AF_UNIX"):
             # Not a missing package and not fixable by installing one, but this is the list a reader
             # is shown before anything starts, and a Windows reader has to learn it here rather than
             # from a `UnixSocketsUnsupportedError` out of the client three seconds later.
+            #
+            # Not asked of `--bench`, which measures the unix cells if it can and prints a note
+            # naming them as skipped if it cannot: the tcp half of that table is still a measurement.
             problems.append(f"{'AF_UNIX':12} - this platform has no Unix domain sockets; the demo cannot run here")
         return problems
 
@@ -166,14 +186,15 @@ def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False):
     return problems
 
 
-def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False):
+def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False, bench=False):
     """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
-    problems = missing_dependencies(backend, frontend, uds=uds)
+    problems = missing_dependencies(backend, frontend, uds=uds, bench=bench)
     if not problems:
         return
 
-    if uds:
-        print("The Unix-socket demo cannot start. Missing:\n", file=sys.stderr)
+    if uds or bench:
+        headline = "The Unix-socket demo" if uds else "The measurement"
+        print(f"{headline} cannot start. Missing:\n", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         print('\nFrom the repository root:\n\n    pip install -e ".[websockets]"\n', file=sys.stderr)
@@ -197,80 +218,127 @@ def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False):
 
 
 def build_parser():
-    """The command line, written to be read as prose: two words, one of which is optional."""
+    """The command line: one flag per demo, and a help page that says what each of the three shows."""
     parser = argparse.ArgumentParser(
         prog="python demo.py",
         # Raw, so these paragraphs survive as paragraphs. argparse's default formatter reflows
         # everything into one block, which is how a description becomes a parameter dump.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Start the muxws demo: a Vue application on http://127.0.0.1:5173 and, behind it, a\n"
-            "backend on :8020 pushing twenty live tick streams, a 1500-level depth book and a\n"
-            "million-byte export down one WebSocket, all at once and all cancellable.\n"
+            "Three demos of muxws, one flag each. With no flag this help is the whole of the run.\n"
             "\n"
-            "The backend can be either of two: the Python one under uvicorn, or the TypeScript one\n"
-            "under Node. They are ports of each other, and the frontend is byte-for-byte the same\n"
-            "against both - which is the most interesting thing this demo has to show.\n"
+            "--browser  a Vue application on http://127.0.0.1:5173 and, behind it, a backend on\n"
+            "           :8020 pushing twenty live tick streams, a 1500-level depth book and a\n"
+            "           million-byte export down one WebSocket, all at once and all cancellable.\n"
+            "           The backend is either of two: the Python one under uvicorn, or the\n"
+            "           TypeScript one under Node. They are ports of each other, and the frontend\n"
+            "           is byte-for-byte the same against both - which is the most interesting\n"
+            "           thing this demo has to show.\n"
             "\n"
-            "`--uds` runs a different demo entirely: no browser and no port, just a daemon on a\n"
-            "socket file and a client dialling it with a ws+unix: URL. A page cannot open a file as\n"
-            "a socket, so that transport has nowhere to appear in the demo above."
+            "--uds      no browser and no port: a daemon on a socket file and a client dialling it\n"
+            "           with a ws+unix: URL. A page cannot open a file as a socket, so that\n"
+            "           transport has nowhere to appear in the demo above.\n"
+            "\n"
+            "--bench    one payload carried three ways - a raw socket, a raw WebSocket, muxws -\n"
+            "           over loopback and a socket file, so what the envelope costs is a\n"
+            "           percentage of what this machine can do rather than a bare frame count."
         ),
         epilog=(
             "examples:\n"
-            "  python demo.py            the Python backend (demo/backend_python), under uvicorn\n"
-            "  python demo.py node       the TypeScript backend (demo/backend_node), under tsx\n"
-            "  python demo.py --no-fe    either backend alone, for a client of your own\n"
-            "  python demo.py --uds      the socket-file demo: docs/examples/uds_{server,client}.py\n"
+            "  python demo.py --browser          the Python backend (demo/backend_python), uvicorn\n"
+            "  python demo.py --browser node     the TypeScript backend (demo/backend_node), tsx\n"
+            "  python demo.py --browser --no-fe  either backend alone, for a client of your own\n"
+            "  python demo.py --uds              the socket-file pair: docs/examples/uds_*.py\n"
+            "  python demo.py --bench            the throughput report: json, one stream\n"
+            "  python demo.py --bench --full     msgpack and twenty concurrent streams as well\n"
             "\n"
             "Ctrl-C stops the backend and the dev server together. MUXWS_DEMO_PORT moves the\n"
             "backend off 8020; the Vite proxy in demo/frontend/vite.config.ts has to be told too."
         ),
+    )
+    # Exactly one demo per run, and argparse refuses the pairs by name. Nothing here has a default:
+    # a run that names no demo prints the help rather than starting whichever one came first.
+    demos = parser.add_mutually_exclusive_group()
+    demos.add_argument(
+        "--browser",
+        action="store_true",
+        help="the Vue application and a backend behind it, on :5173 and :8020",
+    )
+    demos.add_argument(
+        "--uds",
+        action="store_true",
+        help="the Unix-domain-socket pair: a daemon on a socket file and a client dialling it",
+    )
+    demos.add_argument(
+        "--bench",
+        action="store_true",
+        help="measure a raw socket, a raw WebSocket and muxws against the same payload",
     )
     parser.add_argument(
         "backend",
         nargs="?",
         choices=BACKENDS,
         default=None,
-        help="which language serves the sockets; omit it and you get python",
+        help="which language serves --browser's sockets; omit it and you get python",
     )
-    # A hidden alias of the positional above: the header comment of `demo/backend_node/main.ts` tells
-    # the reader to type `--backend node`, so both spellings work. `--help` documents the positional
-    # only, so there is still exactly one way to learn this.
+    # A second accepted spelling of the positional above. `--help` documents the positional only, so
+    # there is still exactly one way to learn this.
     parser.add_argument("--backend", dest="backend_option", choices=BACKENDS, help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-fe",
         dest="frontend",
         action="store_false",
-        help="start the backend alone, without the Vite dev server",
+        help="with --browser: start the backend alone, without the Vite dev server",
     )
-    # A flag rather than a third value of `backend`, because it is not a language: it selects a
-    # different demo, and one that has no frontend, no port and no choice of language.
     parser.add_argument(
-        "--uds",
+        "--full",
         action="store_true",
-        help="run the Unix-domain-socket demo instead: a daemon on a socket file and a client dialling it",
+        help="with --bench: every codec, payload and stream count rather than the trimmed default",
     )
     return parser
 
 
 def parse_arguments(argv=None):
-    """`argv` parsed, with `backend` resolved to one of `BACKENDS` and never to None."""
+    """`argv` parsed, with `backend` resolved to one of `BACKENDS` and never to None.
+
+    A bare command line is not a run: it prints the help and exits 0. Every other combination that
+    cannot mean anything is refused by name, because the alternative is a flag that reads as having
+    been obeyed - `--no-fe` accepted on a demo that starts no frontend leaves a reader believing they
+    turned something off.
+    """
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    named_backend = arguments.backend or arguments.backend_option
+
     if arguments.backend and arguments.backend_option and arguments.backend != arguments.backend_option:
         # Silently preferring one would start a backend the reader did not ask for and then print a
         # frontend URL that works, so nothing about the run would look wrong.
         parser.error(f"asked for both '{arguments.backend}' and '--backend {arguments.backend_option}'; pick one")
-    if arguments.uds and (arguments.backend or arguments.backend_option):
-        # Refused rather than ignored: the socket demo is Python at both ends, so accepting `node`
-        # here would answer a request for the TypeScript port by silently running the Python one.
-        # (The TypeScript port does dial `ws+unix:` - `interop/drive.sh <a> <b> unix` runs the two
-        # against each other - but this demo is not where that is shown.)
-        parser.error("--uds runs the socket-file demo, which takes no backend argument")
-    if arguments.uds and not arguments.frontend:
-        parser.error("--uds starts no frontend, so --no-fe has nothing to turn off")
-    arguments.backend = arguments.backend or arguments.backend_option or DEFAULT_BACKEND
+
+    if arguments.uds or arguments.bench:
+        # Refused rather than ignored: both are Python at both ends, so accepting `node` here would
+        # answer a request for the TypeScript port by silently running the Python one. (The
+        # TypeScript port does dial `ws+unix:` - `interop/drive.sh <a> <b> unix` runs the two against
+        # each other - but neither of these demos is where that is shown.)
+        demo = "--uds runs the socket-file demo" if arguments.uds else "--bench measures the transports directly"
+        if named_backend:
+            parser.error(f"{demo}, which takes no backend argument")
+        if not arguments.frontend:
+            parser.error(f"{demo} and starts no frontend, so --no-fe has nothing to turn off")
+    elif not arguments.browser:
+        if named_backend:
+            parser.error("a backend argument names which language serves the page, so it needs --browser")
+        if not arguments.frontend:
+            parser.error("--no-fe turns off the page's dev server, so it needs --browser")
+
+    if arguments.full and not arguments.bench:
+        parser.error("--full widens the measurement matrix, so it needs --bench")
+
+    if not (arguments.browser or arguments.uds or arguments.bench):
+        parser.print_help()
+        raise SystemExit(0)
+
+    arguments.backend = named_backend or DEFAULT_BACKEND
     return arguments
 
 
@@ -312,7 +380,7 @@ def run_fastapi():
     # extra. WSM-PKG-002 says `pip install muxws` pulls in nothing at all, and this file is shipped
     # source that ruff lints beside the library - a module-scope import here is the shape of the
     # mistake that rule exists to prevent, even though hatch never puts this file in a wheel.
-    # It is also what makes `python demo.py node` runnable with no uvicorn installed at all.
+    # It is also what makes `--browser node` runnable with no uvicorn installed at all.
     import uvicorn
 
     # `reload=False`: the reloader replaces this process with a supervisor and a fresh worker, and
@@ -444,6 +512,32 @@ def run_uds():
     raise SystemExit(dialer.returncode)
 
 
+def run_bench(full=False):
+    """The throughput matrix, measured and then printed as one report.
+
+    `demo/bench/` is imported here rather than at module scope for the reason `run_fastapi` imports
+    uvicorn inside itself: this file is linted beside the library and shipped as source, and the two
+    demos above must not pay for a package they never use.
+
+    The measuring is the package's; this function chooses nothing about it beyond `--full`.
+    """
+    from demo.bench import format_report, run_matrix
+
+    # On stderr, so `python demo.py --bench > report.txt` keeps the report alone in the file. Every
+    # cell is a pair of processes measured for a fixed wall-clock budget, so the run is silent for as
+    # long as the matrix takes and a reader has no other way to tell it apart from a hang.
+    print("Measuring. The report prints when the last cell has finished.", file=sys.stderr)
+    try:
+        results, round_trips, notes = run_matrix(full=full)
+    except KeyboardInterrupt:
+        # The one demo of the three whose ordinary exit is Ctrl-C: it prints nothing for the minutes
+        # the matrix takes, and a stack out of `subprocess.run` reads as a crash in the tool. The
+        # cells already measured are not printed - a table missing whichever rows the interrupt
+        # landed between is a table a reader would compare against a whole one.
+        raise SystemExit("Stopped. Nothing was reported: the matrix was not finished.") from None
+    print(format_report(results, round_trips, notes))
+
+
 def run_backend(backend):
     """Whichever backend was asked for: uvicorn in this process, or Node in a group under it."""
     if backend == "node":
@@ -461,6 +555,11 @@ if __name__ == "__main__":
         print("  transport: a socket file, dialled with the ordinary connect() and a ws+unix: URL")
         run_uds()
 
+    if options.bench:
+        check_before_starting(bench=True)
+        run_bench(options.full)
+        raise SystemExit(0)
+
     chosen_backend = options.backend
     check_before_starting(chosen_backend, options.frontend)
 
@@ -473,7 +572,7 @@ if __name__ == "__main__":
         # tests the claim this demo exists to make: that the frontend cannot tell them apart. It is
         # the most interesting thing here and it is invisible until someone runs the other one.
         print("Using the Python backend (the default).")
-        print("Run `python demo.py node` for the equivalent backend in TypeScript on Node.")
+        print("Run `python demo.py --browser node` for the equivalent backend in TypeScript on Node.")
 
     print("Starting the muxws demo...")
     if chosen_backend == "node":
