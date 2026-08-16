@@ -2,7 +2,7 @@
  * Fragmentation: the splitter and the assembler, as pure functions (§4).
  *
  * A line-for-line mirror of `muxws/fragment.py`. The two ports must cut at the *same* boundaries
- * (WSM-FRG-016), which is why every decision here - the reservation, the codepoint cursor, the
+ * (WSM-FRG-016), which is why every decision here - the reservation, the codepoint boundary, the
  * binary search - is made the same way and in the same order as it is there.
  *
  * Nothing here touches a socket.
@@ -21,6 +21,14 @@ import { ABSENT, type Frame } from './frames';
 export const MAX_FRAME_BYTES = 65_536;
 
 const TEXT_ENCODER = new TextEncoder();
+/**
+ * Both options are load-bearing for a decoder that reads a *slice of a payload* rather than a
+ * document. `ignoreBOM: true` keeps a leading U+FEFF: the default strips one, so a fragment
+ * beginning with that codepoint would arrive one character short and the two ports would carry
+ * different payloads (WSM-FRG-016). `fatal: true` makes a cut inside a multi-byte sequence throw
+ * instead of yielding U+FFFD, which is what `bytes.decode("utf-8")` does in the Python port.
+ */
+const TEXT_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Byte length of an encoded message: UTF-8 for text, buffer length for bytes.
@@ -40,38 +48,75 @@ function reservation(cap: number): number {
 }
 
 /**
- * The encoded payload as a list of indivisible units: whole Unicode codepoints for text, bytes for
- * a binary codec (WSM-FRG-012).
+ * The encoded payload as bytes, plus whether cuts into it have to respect codepoint boundaries.
  *
- * Splitting a JavaScript string by UTF-16 index would cut surrogate pairs in half and disagree with
- * Python, whose strings are already sequences of codepoints. Spreading the string is what makes the
- * two ports index the same units.
+ * Both codec families slice the same array; only the indivisible unit differs (WSM-FRG-012). Text is
+ * encoded once, here, and every offset from then on is a byte offset into that encoding, which is
+ * the index space the two ports agree on (WSM-FRG-016). Indexing a JavaScript string directly would
+ * index UTF-16 code units instead, which cuts surrogate pairs in half and matches neither the bytes
+ * on the wire nor the other port.
+ *
+ * A text codec's encoded payload has to be well-formed Unicode. `TextEncoder` writes U+FFFD where an
+ * unpaired surrogate stands, so the fragments carry the replacement; the Python port cannot encode
+ * such a payload at all. `JsonCodec` escapes lone surrogates to ASCII and never reaches this.
  */
-function unitsOf(encoded: string | ArrayBuffer): string[] | Uint8Array {
-  if (typeof encoded === 'string') return [...encoded];
-  return new Uint8Array(encoded);
+export interface Encoded {
+  bytes: Uint8Array;
+  text: boolean;
+}
+
+function encodedForm(encoded: string | ArrayBuffer): Encoded {
+  if (typeof encoded === 'string') return { bytes: TEXT_ENCODER.encode(encoded), text: true };
+  return { bytes: new Uint8Array(encoded), text: false };
 }
 
 /** Rebuild a slice of `units` in the codec's own representation. */
-function sliceUnits(units: string[] | Uint8Array, start: number, count: number): string | ArrayBuffer {
-  if (Array.isArray(units)) return units.slice(start, start + count).join('');
-  const slice = units.slice(start, start + count);
-  return slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength) as ArrayBuffer;
+function sliceUnits(units: Encoded, start: number, count: number): string | ArrayBuffer {
+  if (units.text) return TEXT_DECODER.decode(units.bytes.subarray(start, start + count));
+  return units.bytes.slice(start, start + count).buffer as ArrayBuffer;
 }
 
-/** How many units at `start` fit into `budget` **bytes**, always at least one. */
-function unitsWithinBudget(units: string[] | Uint8Array, start: number, budget: number): number {
-  if (!Array.isArray(units)) return Math.max(1, Math.min(budget, units.length - start));
+/** A UTF-8 continuation byte: the second, third or fourth byte of a multi-byte sequence. */
+function isContinuation(byte: number): boolean {
+  return (byte & 0xc0) === 0x80;
+}
 
-  let taken = 0;
-  let count = 0;
-  for (let index = start; index < units.length; index += 1) {
-    const width = TEXT_ENCODER.encode(units[index]).length;
-    if (taken + width > budget) break;
-    taken += width;
-    count += 1;
+/**
+ * The largest cut at or before `start + limit` bytes that the codec can represent.
+ *
+ * Under a text codec the slice sits in the envelope as a value of the codec's own type system - a
+ * JSON string - and half a codepoint has no representation in one. WebSocket continuation frames
+ * would carry a split codepoint, but muxws does not use them: a continuation sequence holds the
+ * socket until the message ends, which is the head-of-line blocking the library exists to prevent
+ * (WSM-INV-004). So a cut landing inside a multi-byte sequence walks backwards until it does not.
+ * UTF-8 is self-synchronising, which bounds that walk at three steps.
+ *
+ * Returns 0 when nothing fits: `limit` is narrower than the codepoint at `start`, or `start` is
+ * already the end of the encoding.
+ *
+ * Exported for the spec, which asserts the boundary rule on the primitive the splitter itself calls;
+ * the Python port's tests reach `_floor_boundary` the same way.
+ */
+export function boundaryWithin(units: Encoded, start: number, limit: number): number {
+  let cut = Math.min(start + limit, units.bytes.length);
+  if (units.text) {
+    while (cut > start && cut < units.bytes.length && isContinuation(units.bytes[cut])) cut -= 1;
   }
-  return Math.max(1, count);
+  return cut - start;
+}
+
+/** The width in bytes of the one indivisible unit at `start`: a byte, or a whole codepoint. */
+function firstUnitWidth(units: Encoded, start: number): number {
+  let cut = start + 1;
+  if (units.text) {
+    while (cut < units.bytes.length && isContinuation(units.bytes[cut])) cut += 1;
+  }
+  return cut - start;
+}
+
+/** How many bytes at `start` fit into `budget`, always at least one indivisible unit. */
+function unitsWithinBudget(units: Encoded, start: number, budget: number): number {
+  return boundaryWithin(units, start, budget) || firstUnitWidth(units, start);
 }
 
 /**
@@ -119,15 +164,21 @@ function floorError(cap: number): ProtocolError {
 }
 
 /**
- * Largest number of units at `position` whose non-final fragment frame still fits under `cap`.
+ * Largest slice at `position` whose non-final fragment frame still fits under `cap`, in bytes.
  *
  * The verify-and-re-split half of WSM-FRG-014, as a **binary search**: it terminates in
  * log2(ceiling) encodes, and - more importantly - it is exactly reproducible, so this port and the
- * Python one cut at the same boundary (WSM-FRG-016). Returns 0 when not even one unit fits.
+ * Python one cut at the same boundary (WSM-FRG-016). The search bisects byte limits and floors each
+ * probe onto a boundary the codec can represent, so what it counts and what it cuts are the same
+ * quantity: a wider byte limit never yields a narrower slice, and a slice that does not fit is never
+ * a prefix of one that does.
+ *
+ * Returns 0 when not even one unit fits - the probes below the first unit's width all floor back to
+ * an empty slice, which fits and records nothing.
  */
 function largestFittingCount(
   source: Frame,
-  units: string[] | Uint8Array,
+  units: Encoded,
   position: number,
   ceiling: number,
   options: { first: boolean; cap: number; codec: Codec },
@@ -137,9 +188,10 @@ function largestFittingCount(
   let best = 0;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const probe = fragmentFrame(source, sliceUnits(units, position, middle), { first: options.first, last: false });
+    const count = boundaryWithin(units, position, middle);
+    const probe = fragmentFrame(source, sliceUnits(units, position, count), { first: options.first, last: false });
     if (encodedLength(options.codec.encode(probe)) <= options.cap) {
-      best = middle;
+      best = count;
       low = middle + 1;
     } else {
       high = middle - 1;
@@ -198,9 +250,8 @@ export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, code
     );
   }
 
-  const encoded = codec.encodePayload(frame.payload);
-  const units = unitsOf(encoded);
-  const total = units.length;
+  const units = encodedForm(codec.encodePayload(frame.payload));
+  const total = units.bytes.length;
   const budget = Math.max(1, cap - reservation(cap));
 
   let position = 0;
