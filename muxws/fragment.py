@@ -36,26 +36,39 @@ def _reservation(cap: int) -> int:
     return min(512, cap // 2)
 
 
-def _take(encoded: str | bytes, start: int, budget: int) -> tuple[str | bytes, int]:
-    """Take at most `budget` **bytes** from `encoded` at `start`, on a boundary the codec can represent.
+def _floor_boundary(data: bytes, cut: int, *, text: bool) -> int:
+    """Move `cut` back to the nearest offset in `data` a fragment may end on.
 
-    For text that means whole Unicode codepoints (WSM-FRG-012): a slice point landing inside a
-    multi-byte sequence moves backwards. Iterating a Python `str` yields codepoints directly; the
-    TypeScript port iterates with a codepoint cursor for the same reason, so that a surrogate pair is
-    never split and both ports agree on every boundary (WSM-FRG-016).
+    Under a text codec that is a UTF-8 codepoint boundary (WSM-FRG-012). The slice does not travel as
+    bytes: it sits inside the fragment's own envelope as a value of the codec's type system, and half
+    a codepoint has no representation in a JSON string. WebSocket's continuation frames would carry a
+    split codepoint happily, but muxws does not use them - a continuation sequence holds the socket
+    until the message ends, which is the head-of-line blocking the library exists to prevent
+    (WSM-INV-004). So every fragment is a whole message and every slice is whole codepoints, in both
+    ports (WSM-FRG-016).
+
+    At most three steps back: UTF-8 is self-synchronising, a continuation byte being exactly
+    `0b10xxxxxx`. Under a binary codec the unit is the byte and every offset is already a boundary.
     """
-    if isinstance(encoded, str):
-        taken = 0
-        index = start
-        while index < len(encoded):
-            width = len(encoded[index].encode("utf-8"))
-            if taken + width > budget:
-                break
-            taken += width
-            index += 1
-        return encoded[start:index], index
-    end = min(start + budget, len(encoded))
-    return encoded[start:end], end
+    if text:
+        while 0 < cut < len(data) and data[cut] & 0xC0 == 0x80:
+            cut -= 1
+    return cut
+
+
+def _next_boundary(data: bytes, start: int, *, text: bool) -> int:
+    """The first offset above `start` a fragment may end on: one codepoint on, or one byte on."""
+    cut = start + 1
+    if text:
+        while cut < len(data) and data[cut] & 0xC0 == 0x80:
+            cut += 1
+    return cut
+
+
+def _chunk(data: bytes, start: int, stop: int, *, text: bool) -> str | bytes:
+    """The fragment payload for a byte range. A text codec's `fragment` field carries `str`."""
+    piece = data[start:stop]
+    return piece.decode("utf-8") if text else piece
 
 
 def _fragment_frame(
@@ -109,31 +122,36 @@ def _closing_floor_error(cap: int) -> ProtocolError:
 
 def _largest_fitting_count(
     source: Frame,
-    encoded: str | bytes,
+    data: bytes,
     position: int,
     ceiling: int,
     *,
+    text: bool,
     first: bool,
     cap: int,
     codec: Codec,
 ) -> int:
-    """Largest number of units at `position` whose non-final fragment frame still fits under `cap`.
+    """Largest slice at `position` whose non-final fragment frame still fits under `cap`, in bytes.
 
     This is the verify-and-re-split half of WSM-FRG-014, and it is a **binary search** rather than a
     guess-and-shrink loop for two reasons. It terminates in log2(ceiling) encodes instead of however
     many rounds a multiplier happens to need - a payload of control characters under JSON expands
     enough that a proportional guess converges too slowly to be bounded honestly. And it is exactly
-    reproducible: both ports run the same search over the same encoded form and therefore cut at the
-    same boundary, which is what WSM-FRG-016 requires.
+    reproducible: both ports run the same search over the same encoded form, in the same order, and
+    therefore cut at the same boundary, which is what WSM-FRG-016 requires. The search bisects byte
+    limits and floors each probe onto a boundary the codec can represent, so what it counts and what
+    it cuts are the same quantity.
 
-    Returns 0 when not even one unit fits.
+    Returns 0 when not even one unit fits - the probes below the first unit's width all floor back to
+    an empty slice, which fits and records nothing.
     """
     low, high, best = 1, ceiling, 0
     while low <= high:
         middle = (low + high) // 2
-        probe = _fragment_frame(source, encoded[position : position + middle], first=first, last=False)
+        count = _floor_boundary(data, min(position + middle, len(data)), text=text) - position
+        probe = _fragment_frame(source, _chunk(data, position, position + count, text=text), first=first, last=False)
         if encoded_length(codec.encode(probe)) <= cap:
-            best = middle
+            best = count
             low = middle + 1
         else:
             high = middle - 1
@@ -184,11 +202,17 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
             f"headers are never fragmented (WSM-FRG-021)"
         )
 
+    # Encoded to UTF-8 once, then sliced as bytes: every offset below is a byte offset and every
+    # budget a byte budget, so the loop measures the quantity it is budgeting for directly. A text
+    # payload goes back into the frame as `str`, which is what `_chunk` decodes each slice for.
     encoded = codec.encode_payload(frame.payload)
+    text = isinstance(encoded, str)
+    data = encoded.encode("utf-8") if text else encoded
+
     budget = max(1, cap - _reservation(cap))
     position = 0
     emitted = 0
-    total = len(encoded)
+    total = len(data)
 
     while True:
         # Everything left, as the closing fragment? `end` and `trailers` ride only this one, so it is
@@ -201,7 +225,7 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
         # of the payload for nothing, and does it again on every pass, which is quadratic in payload
         # size.
         if total - position <= cap:
-            tail = _fragment_frame(frame, encoded[position:], first=emitted == 0, last=True)
+            tail = _fragment_frame(frame, _chunk(data, position, total, text=text), first=emitted == 0, last=True)
             if encoded_length(codec.encode(tail)) <= cap:
                 yield tail
                 return
@@ -209,18 +233,26 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
         if position >= total:
             raise _closing_floor_error(cap)
 
-        # Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013)...
-        _, reserved_end = _take(encoded, position, budget)
-        count = max(1, reserved_end - position)
-        candidate = _fragment_frame(frame, encoded[position : position + count], first=emitted == 0, last=False)
+        # Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013), floored onto a
+        # boundary, and never onto `position` itself - a fragment carrying nothing leaves the loop no
+        # way forward, so a first unit wider than the budget is taken whole and cut back below.
+        end = _floor_boundary(data, min(position + budget, total), text=text)
+        if end == position:
+            end = _next_boundary(data, position, text=text)
+        count = end - position
+        candidate = _fragment_frame(frame, _chunk(data, position, end, text=text), first=emitted == 0, last=False)
 
         # ...then verify, and re-split if the reservation guessed low (WSM-FRG-014). The reservation
         # is a per-codec hint; this is the guarantee.
         if encoded_length(codec.encode(candidate)) > cap:
-            count = _largest_fitting_count(frame, encoded, position, count, first=emitted == 0, cap=cap, codec=codec)
+            count = _largest_fitting_count(
+                frame, data, position, count, text=text, first=emitted == 0, cap=cap, codec=codec
+            )
             if count == 0:
                 raise _floor_error(cap)
-            candidate = _fragment_frame(frame, encoded[position : position + count], first=emitted == 0, last=False)
+            candidate = _fragment_frame(
+                frame, _chunk(data, position, position + count, text=text), first=emitted == 0, last=False
+            )
 
         yield candidate
         emitted += 1
