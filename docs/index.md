@@ -4,6 +4,9 @@ layout: home
 hero:
   name: muxws
   text: One WebSocket, as many conversations as you need
+  image:
+    src: /muxws-icon.svg
+    alt: muxws
   tagline: Either end can start one. Any one of them can be cancelled on its own. A large payload never holds up a small one. It is the layer you would otherwise write again and again in every project.
   actions:
     - theme: brand

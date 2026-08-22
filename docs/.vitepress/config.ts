@@ -7,7 +7,9 @@ export default defineConfig({
   // published site. It is excluded here rather than moved so the briefs stay next to the code they
   // describe. See GAPS.md, G-2.
   srcExclude: ['design/**'],
+  head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/muxws-icon.svg' }]],
   themeConfig: {
+    logo: '/muxws-icon.svg',
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Guide', link: '/guide/rationale' },

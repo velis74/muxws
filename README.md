@@ -1,4 +1,4 @@
-# muxws
+# <img src="muxws-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> muxws
 
 **HTTP/2 and HTTP/3 stream semantics over a WebSocket.** Many independent, cancellable, bidirectional streams on
 one socket, either end able to open one - the model HTTP/2 and HTTP/3 already settled, without needing
