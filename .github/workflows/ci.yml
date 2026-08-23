@@ -24,7 +24,14 @@ jobs:
       - run: pip install -e .[dev] ruff
       - run: ruff check .
       - run: ruff format --check .
-      - run: pytest --cov=muxws
+      - run: pytest --cov=muxws --cov-report=json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.json
+        # The incremental coverage check grades one revision, so uploading from every matrix leg
+        # would just overwrite the same artifact with an identical file.
+        if: matrix.python-version == '3.13'
 
   node:
     runs-on: ubuntu-latest
@@ -44,6 +51,48 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run docs:build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-coverage
+          path: coverage/coverage-final.json
+        if: github.event_name == 'pull_request'
+
+  coverage:
+    name: Incremental coverage check
+    runs-on: ubuntu-latest
+    needs: [python, node]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-coverage'
+          merge-multiple: true
+
+      - name: Incremental coverage check
+        uses: velis74/incremental-coverage-check@v3
+        with:
+          coverage-files: |
+            coverage.json
+            coverage-final.json
+          # demo/, docs/ and interop/ are runnable examples and cross-language harnesses, not
+          # library code - neither pytest (scoped to muxws/) nor vitest (scoped to ts/) measures
+          # them, so grading them here would fail every PR that touches one on "no coverage data".
+          extra-ignore-patterns: |
+            demo/**
+            demo.py
+            docs/**
+            interop/**
+          log-level: INFO
+          base-ref: ${{ github.base_ref }}
+          head-ref: HEAD
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pr-number: ${{ github.event.pull_request.number }}
 
   # Interop belongs in `cross-language.yml`, which runs both role assignments over both codecs on
   # the same triggers. A second copy here would be a strict subset of that matrix: two jobs to keep
