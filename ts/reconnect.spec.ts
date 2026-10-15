@@ -1530,3 +1530,47 @@ function makeDeliberate(): [Promise<CloseReason>] {
   void peer.close({ drainMs: 50 });
   return [reported];
 }
+
+describe('header interceptors across a reconnect', () => {
+  it('keeps both registrations on the Peer and leaves the hello alone - WSM-API-026/027', async () => {
+    // The hello comparison is on the encoded messages, as in WSM-RCN-027's own test: an interceptor
+    // that reached the hello would make the replay differ from the first one.
+    const server = new FakeServer();
+    server.handler = async (_payload, stream) => {
+      await stream.sendHeaders({ 'served-by': server.acceptors.length });
+    };
+    const peer = dialerOver(await server.dial());
+    const reconnects: number[] = [];
+    peer.onReconnect((attempt) => reconnects.push(attempt));
+    const answered: Record<string, unknown>[] = [];
+
+    const loop = new ConnectionLoop(peer, server.dial, {
+      options: new Reconnect({ initialDelayMs: 10, jitter: 0 }),
+      hello: new Hello({ payload: { session: 'abc' } }),
+      sleep: instantSleep([]),
+      draw: () => 0,
+      pingIntervalMs: 0,
+    });
+    cleanups.push(() => void loop.stop());
+    await loop.establish();
+    peer.interceptOpen((headers) => {
+      headers.conn = 'session-abc';
+    });
+    peer.interceptIncomingHeaders((headers) => {
+      answered.push({ ...headers });
+    });
+    loop.start();
+
+    server.drop();
+    await until(() => reconnects.length === 1, 3000, 'the reconnect');
+    const stream = peer.open({ after: 'reconnect' }, { end: true });
+    await stream.closed;
+
+    expect(stream.headers).toEqual({ conn: 'session-abc' });
+    expect(framesOn(server.dialerSockets[1])[1].headers).toEqual({ conn: 'session-abc' });
+    expect(server.firstMessageOn(1), 'the hello replays byte for byte').toBe(server.firstMessageOn(0));
+    expect(framesOn(server.dialerSockets[1])[0].headers).toBeUndefined();
+    expect(answered.at(-1)).toEqual({ 'served-by': 2 });
+    await loop.stop();
+  });
+});

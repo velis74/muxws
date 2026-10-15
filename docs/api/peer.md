@@ -1165,6 +1165,285 @@ await new Promise<void>((resolve) => setTimeout(resolve, 50));
 await dialer.close({ drainMs: 100 });
 ```
 
+## `peer.intercept_open()` (Python)
+
+Register an interceptor for the headers of every stream this peer opens. `open()`, `notify()` and
+`request()` call it synchronously, after the `ConnectionLost` / `ConnectionGoingAway` checks and before
+a stream id is allocated.
+
+The interceptor is called as `(headers, payload)`. `headers` is a fresh `dict` holding a shallow copy
+of the caller's `headers=` (empty when none were passed); the interceptor adds, replaces or deletes
+keys by mutating it, and the dict as the last interceptor left it becomes the `open` frame's headers
+and `stream.headers`. The caller's own dict is never modified, and changes made to the interceptor's
+dict after `open()` returned do not reach the frame. When the caller passed no headers and the
+interceptors left the dict empty, the frame carries no `headers` field.
+
+Interceptors run in registration order; registering one function twice is two registrations. They
+belong to the `Peer`, so a dialer keeps them across reconnects. The reconnect helper's hello does not
+pass through them, and neither do the answering side's leading headers (`send_headers()`,
+`headers=` on `send()` / `end()` / `reply()`).
+
+### Signature
+
+```python
+def intercept_open(self, interceptor: OpenInterceptor) -> Callable[[], None]:
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `interceptor` | [`OpenInterceptor`](./types.md#openinterceptor) | required | Called `(headers, payload)` inside every `open()`. Must be synchronous; its return value is ignored. |
+
+### Return
+
+`Callable[[], None]` — removes this registration. A second call does nothing.
+
+### Raises
+
+Registration raises nothing. During `open()`:
+
+- whatever the interceptor raises, unchanged. No later interceptor runs, no stream id is allocated and
+  nothing is sent; `notify()` and `request()` raise it from their await.
+- `TypeError` — the interceptor returned an awaitable (a coroutine is closed first), or the
+  interceptors left a key that is not a `str`.
+
+### Example
+
+```python
+import asyncio
+import contextvars
+
+from muxws import JsonCodec, Peer, Stream
+from muxws.transports.memory import memory_pair
+
+current_trace: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_trace", default=None)
+
+
+async def main() -> None:
+    left, right = memory_pair()
+    codec = JsonCodec()
+    dialer = Peer(left, codec=codec, is_dialer=True)
+    acceptor = Peer(right, codec=codec, is_dialer=False)
+
+    def add_trace(headers: dict, _payload: object) -> None:
+        trace = current_trace.get()
+        if trace is not None:
+            headers.setdefault("trace", trace)
+
+    unregister = dialer.intercept_open(add_trace)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.reply(dict(stream.headers))
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    current_trace.set("t-42")
+    print(await dialer.request("first", timeout=5.0))  # {'trace': 't-42'}
+    unregister()
+    print(await dialer.request("second", timeout=5.0))  # {}
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `peer.interceptOpen()` (TypeScript)
+
+Register an interceptor for the headers of every stream this peer opens. `open()`, `notify()` and
+`request()` call it synchronously, after the `ConnectionLost` / `ConnectionGoingAway` checks and before
+a stream id is allocated. Semantics are those of the Python entry above: a fresh shallow copy of the
+caller's `headers` (an empty object when none were passed) mutated in place, registration order,
+kept across reconnects, not applied to the hello or to the answering side's leading headers, and no
+`headers` field on the frame when the caller passed none and the interceptors added none.
+
+### Signature
+
+```ts
+interceptOpen(interceptor: OpenInterceptor): () => void;
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `interceptor` | [`OpenInterceptor`](./types.md#openinterceptor) | required | Called `(headers, payload)` inside every `open()`. Must be synchronous; its return value is ignored. |
+
+### Return
+
+`() => void` — removes this registration. A second call does nothing.
+
+### Raises
+
+Registration throws nothing. During `open()`:
+
+- whatever the interceptor throws, unchanged. No later interceptor runs, no stream id is allocated and
+  nothing is sent; `notify()` and `request()` reject with it.
+- `TypeError` — the interceptor returned a thenable (an `async` function, for one), or the
+  interceptors left a symbol key.
+
+### Example
+
+```ts
+import { JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+let currentTrace: string | null = 't-42';
+const unregister = dialer.interceptOpen((headers) => {
+  if (currentTrace !== null && headers.trace === undefined) headers.trace = currentTrace;
+});
+
+acceptor.onStream(async (_payload: unknown, stream: Stream) => stream.reply({ ...stream.headers }));
+
+void dialer.serve();
+void acceptor.serve();
+
+console.log(await dialer.request('first', { timeoutMs: 5000 })); // { trace: 't-42' }
+unregister();
+currentTrace = null;
+console.log(await dialer.request('second', { timeoutMs: 5000 })); // {}
+await dialer.close({ drainMs: 100 });
+```
+
+## `peer.intercept_incoming_headers()` (Python)
+
+Register an interceptor for the leading headers the remote sends. It is called exactly once per
+stream, synchronously inside the read loop, when the remote's first frame on that stream arrives:
+
+- on a stream the **remote** opened, its `open` (the first fragment of a fragmented one), before the
+  `on_stream` handler is invoked. `stream.local` is false and the headers are `stream.headers`.
+- on a stream **this** peer opened, the remote's first `data`, before that frame's payload reaches
+  the stream. `stream.local` is true and the headers are `stream.reply_headers`.
+
+`headers` is a read-only `MappingProxyType`, empty when the frame carried none. A `reset` is not an
+answer and calls no interceptor; neither does a stream that closes unanswered, nor an `open` refused
+for the concurrency limit. Interceptors run in registration order and are kept across reconnects.
+
+### Signature
+
+```python
+def intercept_incoming_headers(self, interceptor: IncomingHeadersInterceptor) -> Callable[[], None]:
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `interceptor` | [`IncomingHeadersInterceptor`](./types.md#incomingheadersinterceptor) | required | Called `(headers, stream)` once per stream. Must be synchronous; its return value is ignored. It runs inside the read loop, so it should be fast. |
+
+### Return
+
+`Callable[[], None]` — removes this registration. A second call does nothing.
+
+### Raises
+
+Raises: nothing. An interceptor that raises, or returns an awaitable (a coroutine is closed without
+running), is logged on `muxws.frames`; the remaining interceptors still run, and the frame, the stream
+and the connection carry on unchanged.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import JsonCodec, Peer, Stream
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    left, right = memory_pair()
+    codec = JsonCodec()
+    dialer = Peer(left, codec=codec, is_dialer=True)
+    acceptor = Peer(right, codec=codec, is_dialer=False)
+
+    def show(headers, stream: Stream) -> None:
+        side = "reply" if stream.local else "open"
+        print(side, "headers on stream", stream.id, dict(headers))
+
+    dialer.intercept_incoming_headers(show)
+    acceptor.intercept_incoming_headers(show)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.reply({"rows": 3}, headers={"content-type": "application/json"})
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    await dialer.request("export", headers={"trace": "t-42"}, timeout=5.0)
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `peer.interceptIncomingHeaders()` (TypeScript)
+
+Register an interceptor for the leading headers the remote sends. Semantics are those of the Python
+entry above: once per stream, synchronously inside the read loop, at the remote's `open` (before the
+`onStream` handler) or at the remote's first `data` on a stream this peer opened (before its
+payload), with `stream.local` telling the two apart. `headers` is a frozen copy, empty when the frame
+carried none.
+
+### Signature
+
+```ts
+interceptIncomingHeaders(interceptor: IncomingHeadersInterceptor): () => void;
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `interceptor` | [`IncomingHeadersInterceptor`](./types.md#incomingheadersinterceptor) | required | Called `(headers, stream)` once per stream. Must be synchronous; its return value is ignored. |
+
+### Return
+
+`() => void` — removes this registration. A second call does nothing.
+
+### Raises
+
+Raises: nothing. An interceptor that throws, or returns a thenable (its rejection is silenced), is
+logged through `logger.error`; the remaining interceptors still run, and the frame, the stream and the
+connection carry on unchanged.
+
+### Example
+
+```ts
+import { JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+const show = (headers: Readonly<Record<string, unknown>>, stream: Stream): void => {
+  console.log(stream.local ? 'reply' : 'open', 'headers on stream', stream.id, headers);
+};
+dialer.interceptIncomingHeaders(show);
+acceptor.interceptIncomingHeaders(show);
+
+acceptor.onStream(async (_payload: unknown, stream: Stream) =>
+  stream.reply({ rows: 3 }, { headers: { 'content-type': 'application/json' } }),
+);
+
+void dialer.serve();
+void acceptor.serve();
+
+await dialer.request('export', { headers: { trace: 't-42' }, timeoutMs: 5000 });
+await dialer.close({ drainMs: 100 });
+```
+
 ## `peer.ping()` (Python)
 
 Send a `ping` frame and wait for its `pong`, returning the round-trip time in **seconds**.
@@ -2236,4 +2515,5 @@ console.log('our own opens do not consume it:', peer.open('a').id, peer.open('b'
 - [`Reconnect`](./reconnect.md) — the schedule behind `on_reconnect`.
 - [Errors](./errors.md) — `ConnectionLost`, `ConnectionGoingAway`, `RemoteError` and the rest.
 - [Registry](./registry.md) — finding a peer by its `tags`.
-- [Types](./types.md) — `CloseReason`, `StreamHandler`, `ErrorSerializer`, `Frame`.
+- [Types](./types.md) — `CloseReason`, `StreamHandler`, `ErrorSerializer`, `OpenInterceptor`,
+  `IncomingHeadersInterceptor`, `Frame`.

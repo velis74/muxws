@@ -265,6 +265,12 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /** @internal Which shape claimed the stream; the peer sets `'notify'` directly. */
   claim: StreamClaim | null = null;
 
+  /**
+   * @internal True once the remote has sent a frame on this stream - the other half of WSM-FRM-016's
+   * one chance. The peer reads it to recognise the answer to a stream it opened (WSM-API-029).
+   */
+  receivedAFrame = false;
+
   private readonly peer: StreamPeer;
   private readonly queue = new PayloadQueue();
   private readonly answer = deferred<T>();
@@ -274,9 +280,6 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
 
   /** @internal True once this side has put any frame on this stream - the one chance of WSM-FRM-016. */
   private sentAFrame = false;
-
-  /** True once the remote has sent one - the other half of the same rule. */
-  private receivedAFrame = false;
 
   /** True once `replyHeadersArrived` has been resolved; it resolves exactly once, from three places. */
   private headersSettled = false;

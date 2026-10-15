@@ -1160,6 +1160,193 @@ async function main(): Promise<void> {
 void main();
 ```
 
+## `OpenInterceptor`
+
+The type of an interceptor registered with `peer.intercept_open(...)` / `peer.interceptOpen(...)`.
+It is called synchronously inside every `open()`, `notify()` and `request()` on that peer, before a
+stream id is allocated, and shapes the headers the `open` frame carries.
+
+It receives a fresh mapping holding a shallow copy of the caller's headers and mutates it in place:
+adding, replacing or deleting keys. It cannot touch the rest of the frame. The reconnect helper's
+hello and the answering side's leading headers do not pass through it.
+
+### Signature
+
+```python
+OpenInterceptor = Callable[[dict[str, Any], Any], None]
+```
+
+```ts
+export type OpenInterceptor = (headers: Record<string, unknown>, payload: unknown) => void;
+```
+
+### Parameters
+
+The parameters of the callable itself:
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `headers` | `dict[str, Any]` / `Record<string, unknown>` | none — positional | The headers the `open` frame will carry, as left by the interceptors registered before this one. Mutate it; keys must be strings. Changes made after the call returned have no effect. |
+| `payload` | `Any` / `unknown` | none — positional | The opening payload, `None` / `null` when the caller passed none. For reading only. |
+
+### Return
+
+`None` / `void`; any other value is ignored, except an awaitable (Python) or a thenable
+(TypeScript), which fails the open with `TypeError`.
+
+### Raises
+
+The type raises nothing. An implementation that raises fails the `open()` with that exception: no
+later interceptor runs, no stream id is allocated, and nothing is sent.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import JsonCodec, OpenInterceptor, Peer, Stream
+from muxws.transports.memory import memory_pair
+
+
+def tag_connection(headers: dict, _payload: object) -> None:
+    headers["connection"] = "tab-7"
+
+
+async def main() -> None:
+    interceptor: OpenInterceptor = tag_connection
+    left, right = memory_pair()
+    codec = JsonCodec()
+    dialer = Peer(left, codec=codec, is_dialer=True)
+    acceptor = Peer(right, codec=codec, is_dialer=False)
+    dialer.intercept_open(interceptor)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.reply(dict(stream.headers))
+
+    acceptor.on_stream(handler)
+    tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+    print(await dialer.request("hi", headers={"trace": "t-1"}, timeout=2.0))
+
+    await dialer.close(drain=0.1)
+    for task in tasks:
+        task.cancel()
+
+
+asyncio.run(main())
+```
+
+```ts
+import { JsonCodec, type OpenInterceptor, Peer, type Stream, memoryPair } from 'muxws';
+
+const tagConnection: OpenInterceptor = (headers) => {
+  headers.connection = 'tab-7';
+};
+
+const [left, right] = memoryPair();
+const codec = new JsonCodec();
+const dialer = new Peer(left, { codec, isDialer: true });
+const acceptor = new Peer(right, { codec, isDialer: false });
+dialer.interceptOpen(tagConnection);
+acceptor.onStream(async (_payload: unknown, stream: Stream) => stream.reply({ ...stream.headers }));
+
+void dialer.serve();
+void acceptor.serve();
+console.log(await dialer.request('hi', { headers: { trace: 't-1' }, timeoutMs: 2000 }));
+await dialer.close({ drainMs: 100 });
+```
+
+## `IncomingHeadersInterceptor`
+
+The type of an interceptor registered with `peer.intercept_incoming_headers(...)` /
+`peer.interceptIncomingHeaders(...)`. It is called once per stream, synchronously inside the read
+loop, with the leading headers of the remote's first frame on that stream: the `open` of a stream the
+remote opened, or the first `data` of a stream this peer opened.
+
+### Signature
+
+```python
+IncomingHeadersInterceptor = Callable[[Mapping[str, Any], Stream], None]
+```
+
+```ts
+export type IncomingHeadersInterceptor = (headers: Readonly<Record<string, unknown>>, stream: Stream) => void;
+```
+
+### Parameters
+
+The parameters of the callable itself:
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `headers` | `Mapping[str, Any]` / `Readonly<Record<string, unknown>>` | none — positional | A read-only view of the headers that frame carried: a `MappingProxyType` in Python, a frozen copy in TypeScript. Empty when the frame carried none. |
+| `stream` | `Stream` | none — positional | The stream. `stream.local` is false for a stream the remote opened (the headers are `stream.headers`) and true for the answer to one this peer opened (the headers are `stream.reply_headers` / `stream.replyHeaders`). |
+
+### Return
+
+`None` / `void`; the value is ignored. A returned awaitable (Python) or thenable (TypeScript) is not
+awaited and is logged.
+
+### Raises
+
+The type raises nothing. An implementation that raises is logged; the frame, the stream and the
+connection are unaffected.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import IncomingHeadersInterceptor, JsonCodec, Peer, Stream
+from muxws.transports.memory import memory_pair
+
+
+def show(headers, stream: Stream) -> None:
+    print("local" if stream.local else "remote", "stream", stream.id, dict(headers))
+
+
+async def main() -> None:
+    interceptor: IncomingHeadersInterceptor = show
+    left, right = memory_pair()
+    codec = JsonCodec()
+    dialer = Peer(left, codec=codec, is_dialer=True)
+    acceptor = Peer(right, codec=codec, is_dialer=False)
+    acceptor.intercept_incoming_headers(interceptor)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.reply("ok")
+
+    acceptor.on_stream(handler)
+    tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+    await dialer.request("hi", headers={"trace": "t-1"}, timeout=2.0)
+
+    await dialer.close(drain=0.1)
+    for task in tasks:
+        task.cancel()
+
+
+asyncio.run(main())
+```
+
+```ts
+import { type IncomingHeadersInterceptor, JsonCodec, Peer, type Stream, memoryPair } from 'muxws';
+
+const show: IncomingHeadersInterceptor = (headers, stream: Stream) => {
+  console.log(stream.local ? 'local' : 'remote', 'stream', stream.id, headers);
+};
+
+const [left, right] = memoryPair();
+const codec = new JsonCodec();
+const dialer = new Peer(left, { codec, isDialer: true });
+const acceptor = new Peer(right, { codec, isDialer: false });
+acceptor.interceptIncomingHeaders(show);
+acceptor.onStream(async (_payload: unknown, stream: Stream) => stream.reply('ok'));
+
+void dialer.serve();
+void acceptor.serve();
+await dialer.request('hi', { headers: { trace: 't-1' }, timeoutMs: 2000 });
+await dialer.close({ drainMs: 100 });
+```
+
 ## `logger` and `LogLevel` (TypeScript)
 
 TypeScript's stand-in for the logging module Python gets from its standard library.

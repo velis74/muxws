@@ -102,6 +102,8 @@ export {
   DEFAULT_MAX_PAYLOAD_BYTES,
   DEFAULT_PING_TIMEOUT_MS,
   type ErrorSerializer,
+  type IncomingHeadersInterceptor,
+  type OpenInterceptor,
   type OpenOptions,
   Peer,
   type PeerOptions,

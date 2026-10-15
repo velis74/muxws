@@ -28,14 +28,14 @@ newer: the `ws+unix:` dial is `websockets.asyncio.client.unix_connect`.
 |---|---|
 | [connect](/api/connect) | Dialling a peer, in Python, in the browser and under Node, with every connection option. |
 | [accept](/api/accept) | The acceptor side: `accept`, `serve`, and the subprotocol hooks that refuse a codec you do not speak. |
-| [Peer](/api/peer) | The object both ends hold: opening streams, the handler and lifecycle callbacks, `ping`, `close`, `serve`. |
+| [Peer](/api/peer) | The object both ends hold: opening streams, the handler and lifecycle callbacks, header interceptors, `ping`, `close`, `serve`. |
 | [Stream](/api/stream) | One call: sending, ending, replying, awaiting, iterating, cancelling and resetting. |
 | [Reconnect](/api/reconnect) | The dialer-only helper - backoff, the hello, and the three functions that describe its schedule. |
 | [Errors](/api/errors) | The exception tree, the nine reset codes, and how a reset becomes an exception. |
 | [Codec](/api/codec) | The codec protocol, the two codecs that ship, the registry, and the settings that select one. |
 | [Registry](/api/registry) | `PeerRegistry`: tagging live peers and looking them up again. |
 | [Transports](/api/transports) | `SocketAdapter` and every adapter that implements it, in both languages, plus the `ws+unix:` URL grammar and the `websockets` dial gates. |
-| [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, and the two callback aliases. |
+| [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, the two callback aliases and the two interceptor aliases. |
 
 New to muxws? Start with the [rationale](/guide/rationale) and the
 [quick start](/guide/getting-started); this reference assumes you have a connection open.

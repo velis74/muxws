@@ -7,6 +7,7 @@ import dataclasses
 import inspect
 import logging
 import re
+import warnings
 
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -1772,5 +1773,185 @@ async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_p
         # not a handler, and a `reset` reaching it is not a `reset` that was dealt with.
         assert "rx:reset" in frames_seen
         assert closes_seen == [], "the connection is fine; one stream failed"
+    finally:
+        await pair.stop()
+
+
+# --------------------------------------------------------------------------- header interceptors
+
+
+async def test_open_interceptors_shape_the_headers_of_every_open(make_pair):
+    """WSM-API-026/027: in registration order, on a copy, before the frame is built, for every opening call."""
+    pair = make_pair()
+    received: list[dict[str, Any]] = []
+
+    async def record(_payload: Any, stream: Stream) -> None:
+        received.append(dict(stream.headers))
+        await stream.reply({"ok": True})
+
+    pair.acceptor.on_stream(record)
+    calls: list[tuple[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+
+    def first(headers: dict[str, Any], payload: Any) -> None:
+        calls.append(("first", payload))
+        headers["trace"] = "t-1"
+        headers["attempt"] = 2
+        kept.append(headers)
+
+    def second(headers: dict[str, Any], _payload: Any) -> None:
+        calls.append(("second", dict(headers)))
+        headers.pop("drop-me", None)
+
+    unregister_first = pair.dialer.intercept_open(first)
+    unregister_second = pair.dialer.intercept_open(second)
+    pair.start()
+    try:
+        callers = {"attempt": 1, "drop-me": True, "own": "x"}
+        stream = pair.dialer.open({"n": 1}, headers=callers, end=True)
+        kept[0]["late"] = "after return"
+        await stream
+
+        assert callers == {"attempt": 1, "drop-me": True, "own": "x"}, "the caller's mapping is untouched"
+        assert calls == [("first", {"n": 1}), ("second", {"attempt": 2, "drop-me": True, "own": "x", "trace": "t-1"})]
+        assert stream.headers == {"attempt": 2, "own": "x", "trace": "t-1"}
+        assert received == [{"attempt": 2, "own": "x", "trace": "t-1"}], "a change after return never reaches the frame"
+
+        await pair.dialer.request("r")
+        await pair.dialer.notify("n")
+        await pair.settle()
+        assert [headers["trace"] for headers in received] == ["t-1", "t-1", "t-1"], "request() and notify() too"
+
+        unregister_first()
+        unregister_first()
+        unregister_second()
+        before = len(pair.dialer_socket.sent)
+        await pair.dialer.request("bare")
+        assert '"headers"' not in pair.dialer_socket.sent[before], "no interceptor left, no headers field"
+
+        pair.dialer.intercept_open(lambda _headers, _payload: None)
+        before = len(pair.dialer_socket.sent)
+        await pair.dialer.request("bare")
+        assert '"headers"' not in pair.dialer_socket.sent[before], "an interceptor that adds nothing changes no byte"
+    finally:
+        await pair.stop()
+
+
+async def test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing(make_pair):
+    """WSM-API-028: the interceptor's own exception at the call site, no id allocated, nothing enqueued."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_reply_now)
+    later: list[str] = []
+
+    def refuse(_headers: dict[str, Any], _payload: Any) -> None:
+        raise ValueError("no ambient token")
+
+    unregister = pair.dialer.intercept_open(refuse)
+    pair.dialer.intercept_open(lambda _headers, _payload: later.append("ran"))
+    pair.start()
+    try:
+        with pytest.raises(ValueError, match="no ambient token"):
+            pair.dialer.open("x")
+        with pytest.raises(ValueError, match="no ambient token"):
+            await pair.dialer.request("x")
+        assert later == [], "the interceptors after the one that raised do not run"
+        await pair.settle()
+        assert pair.dialer_socket.sent == [], "nothing reached the wire"
+        unregister()
+
+        async def asynchronous(headers: dict[str, Any], _payload: Any) -> None:
+            headers["late"] = True
+
+        unregister = pair.dialer.intercept_open(asynchronous)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(TypeError, match="awaitable"):
+                pair.dialer.open("x")
+        assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+        unregister()
+
+        unregister = pair.dialer.intercept_open(lambda headers, _payload: headers.__setitem__(7, "seven"))
+        with pytest.raises(TypeError, match="non-string"):
+            pair.dialer.open("x")
+        unregister()
+
+        assert pair.dialer.open("x").id == 1, "no failed open spent an id"
+        assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
+async def test_incoming_interceptors_see_each_streams_leading_headers_once(make_pair):
+    """WSM-API-029: the remote's open on one side, the remote's first data on the other, read-only."""
+    pair = make_pair()
+    order: list[str] = []
+    seen_by_acceptor: list[tuple[dict[str, Any], bool]] = []
+    seen_by_dialer: list[tuple[dict[str, Any], int, bool]] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        order.append("handler")
+        if payload == "reset":
+            await stream.reset(ResetCode.APPLICATION_ERROR, "no answer")
+            return
+        await stream.send_headers({"content-type": "text/csv"})
+        await stream.send("row")
+        await stream.end("last")
+
+    def acceptor_side(headers: Any, stream: Stream) -> None:
+        order.append("interceptor")
+        seen_by_acceptor.append((dict(headers), stream.local))
+        with pytest.raises(TypeError):
+            headers["x"] = 1
+
+    pair.acceptor.on_stream(handler)
+    pair.acceptor.intercept_incoming_headers(acceptor_side)
+    pair.dialer.intercept_incoming_headers(
+        lambda headers, stream: seen_by_dialer.append((dict(headers), stream.id, stream.local))
+    )
+    pair.start()
+    try:
+        stream = pair.dialer.open("go", headers={"trace": "abc"})
+        assert [item async for item in stream] == ["row", "last"]
+        assert order == ["interceptor", "handler"], "before the handler runs"
+        assert seen_by_acceptor == [({"trace": "abc"}, False)]
+        assert seen_by_dialer == [({"content-type": "text/csv"}, stream.id, True)], "once, on the answer"
+
+        with pytest.raises(StreamReset):
+            await pair.dialer.request("reset")
+        await pair.settle()
+        assert len(seen_by_dialer) == 1, "a reset is not an answer"
+        assert seen_by_acceptor[-1] == ({}, False), "an open without headers is seen with an empty mapping"
+    finally:
+        await pair.stop()
+
+
+async def test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing(make_pair, caplog):
+    """WSM-API-030: logged, the next interceptor still runs, and stream and connection carry on."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_reply_now)
+    after: list[Any] = []
+
+    def broken(_headers: Any, _stream: Stream) -> None:
+        raise RuntimeError("interceptor bug")
+
+    async def asynchronous(_headers: Any, _stream: Stream) -> None:
+        after.append("never awaited")
+
+    pair.acceptor.intercept_incoming_headers(broken)
+    pair.acceptor.intercept_incoming_headers(asynchronous)
+    pair.acceptor.intercept_incoming_headers(lambda headers, _stream: after.append(dict(headers)))
+    pair.dialer.intercept_incoming_headers(broken)
+    pair.start()
+    try:
+        with caplog.at_level(logging.ERROR, logger="muxws.frames"), warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert await pair.dialer.request("q", headers={"k": "v"}) == {"ok": True}
+        assert after == [{"k": "v"}]
+        assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+        messages = [record.getMessage() for record in caplog.records]
+        assert sum("incoming headers interceptor raised" in message for message in messages) == 2
+        assert any("returned an awaitable" in message for message in messages)
+        assert pair.dialer.is_open
+        assert pair.acceptor.is_open
     finally:
         await pair.stop()

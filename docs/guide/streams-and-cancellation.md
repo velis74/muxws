@@ -147,6 +147,65 @@ stream, spent by its first frame whether or not that frame carried any; a later 
 and, if a peer puts one on the wire anyway, resets that stream. There is no status field here and
 `headers` is not one - a failed exchange is a `reset` with a code. muxws never reads either set.
 
+## Header interceptors apply to every stream a peer opens
+
+Metadata that belongs on every stream - a connection identifier, a trace id taken from ambient
+context - is added once per peer rather than at every `open()` call. An **open interceptor** runs
+synchronously inside `open()`, `notify()` and `request()`, before the stream id is allocated, and
+mutates a copy of the caller's headers:
+
+```python
+# fragment
+def add_context(headers, payload):
+    headers["connection"] = connection_id
+    trace = current_trace.get()
+    if trace is not None:
+        headers.setdefault("trace", trace)
+
+unregister = peer.intercept_open(add_context)
+```
+
+```typescript
+// fragment
+const unregister = peer.interceptOpen((headers, payload) => {
+  headers.connection = connectionId;
+  if (currentTrace !== null && headers.trace === undefined) headers.trace = currentTrace;
+});
+```
+
+An **incoming interceptor** sees the leading headers the remote sends, once per stream: the `open`'s
+on a stream the remote opened (before the handler runs), the answer's on a stream this peer opened
+(before the first payload arrives). `stream.local` tells the two apart, and the headers are
+read-only:
+
+```python
+# fragment
+def note(headers, stream):
+    if stream.local and "server-time" in headers:
+        record_clock_skew(headers["server-time"])
+
+peer.intercept_incoming_headers(note)
+```
+
+```typescript
+// fragment
+peer.interceptIncomingHeaders((headers, stream) => {
+  if (stream.local && 'server-time' in headers) recordClockSkew(headers['server-time']);
+});
+```
+
+Both registrations return a function that removes them, run in registration order, and stay on the
+`Peer` across reconnects. An open interceptor that raises fails that `open()` with its exception,
+before any id is spent or any frame is sent. An incoming interceptor that raises is logged and
+changes nothing: the stream and the connection carry on. Interceptors are synchronous; one that
+returns an awaitable fails the open (outgoing) or is logged (incoming).
+
+What does not pass through them: the reconnect helper's hello, which is replayed byte for byte, and
+the answering side's own leading headers (`send_headers()` and the `headers=` argument of `send()`,
+`end()` and `reply()`). An interceptor is application code; muxws itself still reads no header. The
+reference entries are [`intercept_open`](/api/peer#peer-intercept-open-python) and
+[`intercept_incoming_headers`](/api/peer#peer-intercept-incoming-headers-python).
+
 ## Trailers ride the `end` frame
 
 Trailers are metadata you only know once the body is finished - a checksum, a row count, a

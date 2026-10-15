@@ -55,6 +55,18 @@ export type StreamHandler = (payload: any, stream: Stream) => void | Promise<voi
 /** Turns a handler's failure into a payload for the `reset(APPLICATION_ERROR)` frame (WSM-ERR-006). */
 export type ErrorSerializer = (error: unknown) => unknown;
 
+/**
+ * `(headers, payload)`, called synchronously inside `open()` before an id is allocated. It adds,
+ * replaces or deletes keys by mutating `headers`; its return value is ignored (WSM-API-027).
+ */
+export type OpenInterceptor = (headers: Record<string, unknown>, payload: unknown) => void;
+
+/**
+ * `(headers, stream)`, called once per stream when the remote's first frame on it arrives. `headers`
+ * is frozen; the return value is ignored (WSM-API-029).
+ */
+export type IncomingHeadersInterceptor = (headers: Readonly<Record<string, unknown>>, stream: Stream) => void;
+
 /** `open()`'s options. There is no `timeoutMs` among them: `open()` does not wait (WSM-API-018). */
 export interface OpenOptions {
   payload?: unknown;
@@ -249,6 +261,24 @@ function monotonicNowMs(): number {
   return globalThis.performance.now();
 }
 
+/** Whether `value` is a thenable: what an `async` interceptor returns instead of finishing its work. */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    value !== null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
+/** Add `entry` under a fresh key and return the function that removes exactly that entry. */
+function register<T>(registry: Map<symbol, T>, entry: T): () => void {
+  const key = Symbol('registration');
+  registry.set(key, entry);
+  return () => {
+    registry.delete(key);
+  };
+}
+
 /** The sentinel a deadline rejects with; never an `Error`, so it cannot be confused with one. */
 const DEADLINE_EXPIRED: unique symbol = Symbol('DEADLINE_EXPIRED');
 
@@ -321,6 +351,15 @@ export class Peer {
   private readonly frameHandlers: ((direction: 'tx' | 'rx', frame: Frame, byteLength: number) => void)[] = [];
 
   private readonly errorHandlers: ((error: unknown, stream: Stream | null) => void)[] = [];
+
+  /**
+   * Keyed by one symbol per registration, so one function registered twice is two registrations and
+   * each unregister function removes only its own. `adoptSocket` leaves both alone: they belong to
+   * the `Peer`, not to its connection (WSM-API-026).
+   */
+  private readonly openInterceptors = new Map<symbol, OpenInterceptor>();
+
+  private readonly incomingInterceptors = new Map<symbol, IncomingHeadersInterceptor>();
 
   /** Outstanding pings, keyed by nonce and never by order (see `ts/lifecycle.ts`). */
   private readonly pings = new PingRegistry();
@@ -524,6 +563,29 @@ export class Peer {
   }
 
   /**
+   * Register an interceptor for the headers of every stream this peer opens (WSM-API-026/027).
+   *
+   * `open()`, `notify()` and `request()` call it synchronously as `(headers, payload)` before an id is
+   * allocated; it adds, replaces or deletes keys by mutating `headers`. One that throws fails the open
+   * with that error (WSM-API-028). Returns a function that removes this registration.
+   */
+  interceptOpen(interceptor: OpenInterceptor): () => void {
+    return register(this.openInterceptors, interceptor);
+  }
+
+  /**
+   * Register an interceptor for the leading headers the remote sends (WSM-API-026/029).
+   *
+   * Called once per stream as `(headers, stream)` when the remote's first frame on it arrives: the
+   * `open` of a stream the remote opened, the first `data` of a stream this peer opened. One that
+   * throws is logged and changes nothing (WSM-API-030). Returns a function that removes this
+   * registration.
+   */
+  interceptIncomingHeaders(interceptor: IncomingHeadersInterceptor): () => void {
+    return register(this.incomingInterceptors, interceptor);
+  }
+
+  /**
    * Where a failure nobody is waiting for goes (WSM-API-016).
    *
    * A `Stream`'s internal promise carries a no-op rejection handler from its constructor, so a reset
@@ -562,7 +624,39 @@ export class Peer {
   open<T = unknown>(options: OpenOptions): Stream<T>;
   open<T = unknown>(first?: unknown, second?: OpenOptions): Stream<T> {
     this.throwIfUnopenable();
-    return this.allocateAndEnqueue<T>(first, second);
+    if (this.openInterceptors.size === 0) return this.allocateAndEnqueue<T>(first, second);
+    const { payload, headers, end } = resolveCall(first, second, OPEN_OPTION_KEYS);
+    const intercepted = this.interceptedOpenHeaders(headers, payload);
+    return this.allocateAndEnqueue<T>(payload, { headers: intercepted ?? undefined, end });
+  }
+
+  /**
+   * Run the open interceptors over a copy of the caller's headers (WSM-API-027/028).
+   *
+   * Runs before the allocation, so an interceptor that throws leaves no id spent and nothing on the
+   * wire. The result is copied again, so an object an interceptor kept a reference to cannot change
+   * the frame after it returned.
+   */
+  private interceptedOpenHeaders(
+    headers: Record<string, unknown> | null,
+    payload: unknown,
+  ): Record<string, unknown> | null {
+    const working: Record<string, unknown> = { ...(headers ?? {}) };
+    [...this.openInterceptors.values()].forEach((interceptor) => {
+      const result: unknown = interceptor(working, payload);
+      if (isThenable(result)) {
+        result.then(undefined, () => undefined);
+        throw new TypeError(
+          'an open interceptor returned a thenable; interceptors are synchronous and nothing awaits them ' +
+            '(WSM-API-028)',
+        );
+      }
+    });
+    if (Object.getOwnPropertySymbols(working).length > 0) {
+      throw new TypeError('open interceptors left symbol header keys, which no codec carries (WSM-API-028)');
+    }
+    if (Object.keys(working).length === 0 && headers === null) return null;
+    return { ...working };
   }
 
   /**
@@ -1102,6 +1196,7 @@ export class Peer {
     const stream = new Stream(this, streamId, { headers: frame.headers ?? null, local: false });
     stream.state = frame.end === true ? StreamState.HALF_CLOSED_REMOTE : StreamState.OPEN;
     this.liveStreams.set(streamId, stream);
+    this.interceptIncoming(stream, stream.headers);
 
     if (hasFragment(frame)) {
       stream.opening = true;
@@ -1298,10 +1393,12 @@ export class Peer {
     // WSM-FRM-016, before anything is delivered: headers ride the remote's first frame on the stream
     // or no frame at all. Stream-level, so a peer that gets this wrong loses its stream and not the
     // connection - the same weight as `data after end` above, and for the same reason.
+    const answer = stream.local && !stream.receivedAFrame;
     if (!stream.noteRemoteFrame(frame.headers)) {
       this.resetStream(stream, ResetCode.PROTOCOL_ERROR, 'headers after the first frame (WSM-FRM-016)');
       return true;
     }
+    if (answer) this.interceptIncoming(stream, stream.replyHeaders);
 
     if (stream.assembler.inProgress && !hasFragment(frame)) {
       this.resetStream(stream, ResetCode.PROTOCOL_ERROR, 'non-fragment frame mid-reassembly (WSM-FRG-033)');
@@ -1320,6 +1417,33 @@ export class Peer {
 
     if (frame.end === true) stream.remoteEnd(frame.trailers ?? null);
     return true;
+  }
+
+  /**
+   * Hand the remote's leading headers to every incoming interceptor (WSM-API-029/030).
+   *
+   * Runs inside the read loop, so each interceptor is isolated: one that throws is logged, and the
+   * frame, the stream and the connection carry on as if it had not been registered.
+   */
+  private interceptIncoming(stream: Stream, headers: Record<string, unknown>): void {
+    if (this.incomingInterceptors.size === 0) return;
+    const view = Object.freeze({ ...headers });
+    [...this.incomingInterceptors.values()].forEach((interceptor) => {
+      let result: unknown;
+      try {
+        result = interceptor(view, stream);
+      } catch (error) {
+        logger.error(`muxws conn=${this.id} stream=${stream.id} an incoming headers interceptor threw`, error);
+        return;
+      }
+      if (isThenable(result)) {
+        result.then(undefined, () => undefined);
+        logger.error(
+          `muxws conn=${this.id} stream=${stream.id} an incoming headers interceptor returned a thenable; ` +
+            'it is not awaited (WSM-API-030)',
+        );
+      }
+    });
   }
 
   /**

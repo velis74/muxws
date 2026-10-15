@@ -1378,3 +1378,37 @@ async def test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade()
         f"a reconnect presented a different credential, or none: {seen}. The dial closure is the only "
         f"place a credential enters, and every attempt must go through it (WSM-AUT-003)"
     )
+
+
+async def test_header_interceptors_survive_a_reconnect_and_leave_the_hello_alone(dialable_server: DialableServer):
+    """WSM-API-026/027: registrations belong to the `Peer`, and the hello is not an `open()` call.
+
+    The hello comparison is on the raw messages, as in WSM-RCN-027's own test: an interceptor that
+    reached the hello would make the replay differ from the first one.
+    """
+    answered: list[dict[str, Any]] = []
+
+    async def answer(_payload: Any, stream: Stream) -> None:
+        await stream.send_headers({"served-by": len(dialable_server.acceptors)})
+
+    dialable_server.handler = answer
+    again = asyncio.Event()
+    peer, loop = await dialable_server.driver(hello=Hello(payload={"tab": "abc"}))
+    peer.on_reconnect(lambda _attempt, _peer: again.set())
+    await loop.establish()
+    peer.intercept_open(lambda headers, _payload: headers.update(conn="tab-abc"))
+    peer.intercept_incoming_headers(lambda headers, _stream: answered.append(dict(headers)))
+    loop.start()
+    try:
+        await dialable_server.drop()
+        await asyncio.wait_for(again.wait(), 5.0)
+        stream = peer.open({"after": "reconnect"}, end=True)
+        await stream.closed.wait()
+
+        assert stream.headers == {"conn": "tab-abc"}
+        assert dialable_server.frames(1)[1].headers == {"conn": "tab-abc"}
+        assert dialable_server.raw(1)[0] == dialable_server.raw(0)[0], "the hello replays byte for byte"
+        assert dialable_server.frames(1)[0].headers is None
+        assert answered[-1] == {"served-by": 2}
+    finally:
+        await loop.stop()
