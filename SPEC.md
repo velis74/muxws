@@ -260,9 +260,10 @@ The discriminator, when a new case arises: **if the peers can still agree about 
 - **WSM-API-002** `Stream` MUST be simultaneously awaitable (resolving with the remote's **first**
   payload) and async-iterable (yielding every reassembled payload until the remote ends).
 - **WSM-API-003** `open()` MUST take zero mandatory arguments; `payload` defaults to `null` / `None`.
-- **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly two cases:
-  `ConnectionGoingAway` after a received `goaway`, and `ConnectionLost` while the peer is between
-  sockets. It MUST NOT queue. There MUST NOT be a `StreamLimit` exception and `open()` MUST NOT fail
+- **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly two connection-state
+  cases: `ConnectionGoingAway` after a received `goaway`, and `ConnectionLost` while the peer is
+  between sockets. The only other synchronous failures are those of the peer's open interceptors
+  (WSM-API-028). It MUST NOT queue. There MUST NOT be a `StreamLimit` exception and `open()` MUST NOT fail
   for concurrency: that limit is the receiver's (WSM-STM-036) and surfaces asynchronously as
   `StreamRefused` on the pending await.
 - **WSM-API-005** `notify()` MUST be async and MUST return nothing. It MUST NOT return a `Stream` or

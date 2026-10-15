@@ -1934,10 +1934,14 @@ async def test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing
     def broken(_headers: Any, _stream: Stream) -> None:
         raise RuntimeError("interceptor bug")
 
+    def cancelled(_headers: Any, _stream: Stream) -> None:
+        raise asyncio.CancelledError
+
     async def asynchronous(_headers: Any, _stream: Stream) -> None:
         after.append("never awaited")
 
     pair.acceptor.intercept_incoming_headers(broken)
+    pair.acceptor.intercept_incoming_headers(cancelled)
     pair.acceptor.intercept_incoming_headers(asynchronous)
     pair.acceptor.intercept_incoming_headers(lambda headers, _stream: after.append(dict(headers)))
     pair.dialer.intercept_incoming_headers(broken)
@@ -1949,7 +1953,7 @@ async def test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing
         assert after == [{"k": "v"}]
         assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
         messages = [record.getMessage() for record in caplog.records]
-        assert sum("incoming headers interceptor raised" in message for message in messages) == 2
+        assert sum("incoming headers interceptor raised" in message for message in messages) == 3
         assert any("returned an awaitable" in message for message in messages)
         assert pair.dialer.is_open
         assert pair.acceptor.is_open

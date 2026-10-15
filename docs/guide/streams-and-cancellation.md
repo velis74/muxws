@@ -194,8 +194,9 @@ peer.interceptIncomingHeaders((headers, stream) => {
 });
 ```
 
-Both registrations return a function that removes them, run in registration order, and stay on the
-`Peer` across reconnects. An open interceptor that raises fails that `open()` with its exception,
+Both registrations return a function that removes them and run in registration order. They belong
+to the `Peer`: a dialer keeps them across reconnects, while on the acceptor a reconnect is a new
+`Peer`, which starts with none. An open interceptor that raises fails that `open()` with its exception,
 before any id is spent or any frame is sent. An incoming interceptor that raises is logged and
 changes nothing: the stream and the connection carry on. Interceptors are synchronous; one that
 returns an awaitable fails the open (outgoing) or is logged (incoming).

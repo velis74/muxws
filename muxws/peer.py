@@ -912,7 +912,11 @@ class Peer:
         for interceptor in list(self._incoming_interceptors.values()):
             try:
                 result = interceptor(view, stream)
-            except Exception:  # noqa: BLE001 - an interceptor is not allowed to break the read loop
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:  # noqa: BLE001 - an interceptor is not allowed to break the read loop
+                # A CancelledError raised by a synchronous call belongs to the interceptor, not to this
+                # task: cancellation of the read loop is delivered at an await, never inside this call.
                 logger.exception("muxws conn=%s stream=%s an incoming headers interceptor raised", self.id, stream.id)
                 continue
             if inspect.isawaitable(result):

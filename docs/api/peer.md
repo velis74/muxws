@@ -187,7 +187,7 @@ def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, en
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `Any` | `None` | The opening payload, encoded by the codec and fragmented automatically if it exceeds the frame cap. `None` puts a `null` payload on the wire. |
-| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame. muxws never reads it; the remote handler sees it as `stream.headers`. Not a place for credentials - authentication belongs at the upgrade. |
+| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame, as the peer's open interceptors leave it ([`intercept_open()`](#peer-intercept-open-python)). muxws never reads it; the remote handler sees it as `stream.headers`. Not a place for credentials - authentication belongs at the upgrade. |
 | `end` | `bool` | `False` | Send `end` on the `open` frame, which half-closes this side immediately: the request is complete and only the response is still to come. `end` is a flag on a frame, never a frame of its own. |
 
 ### Return
@@ -198,11 +198,14 @@ def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, en
 
 ### Raises
 
-Exactly two, both synchronous, and never one for concurrency:
+All synchronous, and never one for concurrency:
 
 - `ConnectionLost` — the peer is between sockets. Nothing is buffered for the next one.
 - `ConnectionGoingAway` — a `goaway` has arrived, or this peer has sent one, or the connection's
   stream ids are exhausted.
+- whatever an open interceptor raises, unchanged (see [`intercept_open()`](#peer-intercept-open-python)).
+- `TypeError` — an open interceptor returned an awaitable, or the interceptors left a key that is
+  not a `str`.
 
 ### Example
 
@@ -268,6 +271,8 @@ Throws, synchronously:
 
 - `ConnectionLost` — the peer is between sockets.
 - `ConnectionGoingAway` — a `goaway` has been received or sent, or the stream ids are exhausted.
+- whatever an open interceptor throws, unchanged (see [`interceptOpen()`](#peer-interceptopen-typescript)).
+- `TypeError` — an open interceptor returned a thenable, or the interceptors left a symbol key.
 
 ### Example
 
@@ -313,7 +318,7 @@ export interface OpenOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `unknown` | `null` | The opening payload, when it is given in the options object rather than positionally. |
-| `headers` | `Record<string, unknown>` | `null` | Per-stream metadata on the `open` frame; the remote handler reads it as `stream.headers`. |
+| `headers` | `Record<string, unknown>` | `null` | Per-stream metadata on the `open` frame, as the peer's open interceptors leave it ([`interceptOpen()`](#peer-interceptopen-typescript)); the remote handler reads it as `stream.headers`. |
 | `end` | `boolean` | `false` | Half-close this side on the `open` frame itself. |
 
 ### Return
@@ -352,7 +357,7 @@ async def notify(self, payload: Any = None, *, headers: dict[str, Any] | None = 
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `Any` | `None` | The payload. It rides the `open` frame with `end` set. |
-| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on that frame. |
+| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on that frame, as the peer's open interceptors leave it. |
 
 ### Return
 
@@ -361,10 +366,12 @@ async def notify(self, payload: Any = None, *, headers: dict[str, Any] | None = 
 
 ### Raises
 
-The two `open()` raises, for the same reasons:
+The `open()` raises, for the same reasons:
 
 - `ConnectionLost` — the peer is between sockets.
 - `ConnectionGoingAway` — a `goaway` has been received or sent, or the ids are exhausted.
+- whatever an open interceptor raises, and `TypeError` for an awaitable it returned or a non-`str`
+  key it left (see [`intercept_open()`](#peer-intercept-open-python)).
 
 ### Example
 
@@ -415,7 +422,7 @@ async notify(payload?: unknown, options?: { headers?: Record<string, unknown> })
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `unknown` | `null` | The payload, riding the `open` frame with `end` set. Unlike `open()`, a lone object here is always the payload; the options object is the second argument. |
-| `options.headers` | `Record<string, unknown>` | none | Per-stream metadata on that frame. |
+| `options.headers` | `Record<string, unknown>` | none | Per-stream metadata on that frame, as the peer's open interceptors leave it. |
 
 ### Return
 
@@ -424,7 +431,9 @@ claimed internally so a failure on it is reported to `peer.onError` rather than 
 
 ### Raises
 
-Rejects with the two `open()` throws: `ConnectionLost` and `ConnectionGoingAway`. They originate in
+Rejects with the `open()` throws: `ConnectionLost`, `ConnectionGoingAway`, whatever an open
+interceptor throws, and `TypeError` for a thenable it returned or a symbol key it left (see
+[`interceptOpen()`](#peer-interceptopen-typescript)). They originate in
 the synchronous `open()` inside this call, but `notify` is an `async` method, so they reach you as a
 **rejection** rather than as a throw at the call site — `peer.notify(x).catch(...)` catches them, and
 a bare `try`/`catch` around an un-awaited `peer.notify(x)` does not.
@@ -477,7 +486,7 @@ async def request(
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `Any` | `None` | The request payload. |
-| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame. |
+| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame, as the peer's open interceptors leave it. |
 | `timeout` | `float \| None` — seconds | `None` | The deadline, in seconds. `None` waits forever. When it expires the remote is sent `reset(TIMEOUT)` **before** the caller is told, so the remote stops working rather than finishing into a caller that has gone. |
 
 ### Return
@@ -489,6 +498,8 @@ async def request(
 - `ConnectionLost` — the peer is between sockets when the call is made, or the socket died while
   waiting.
 - `ConnectionGoingAway` — a `goaway` has been received or sent, or the ids are exhausted.
+- whatever an open interceptor raises, and `TypeError` for an awaitable it returned or a non-`str`
+  key it left (see [`intercept_open()`](#peer-intercept-open-python)).
 - `StreamTimeout` — `timeout` seconds expired. The remote has already been told.
 - `ProtocolError` — the remote sent more than one payload (its stream is reset with
   `PROTOCOL_ERROR`), or ended the stream without sending one.
@@ -570,8 +581,9 @@ request<T = unknown>(options: RequestOptions): Promise<T>;
 
 Rejects with the same set as Python: `ConnectionLost`, `ConnectionGoingAway`, `StreamTimeout`,
 `ProtocolError` (more than one payload, or none at all), `RemoteError`, `StreamRefused`,
-`StreamReset`. `ConnectionLost` and `ConnectionGoingAway` originate in the synchronous `open()`
-inside this call, but `request` is an `async` method, so every one of them arrives as a **rejection**
+`StreamReset`, plus whatever an open interceptor throws and `TypeError` for a thenable it returned
+or a symbol key it left (see [`interceptOpen()`](#peer-interceptopen-typescript)). `ConnectionLost`, `ConnectionGoingAway` and the interceptor
+failures originate in the synchronous `open()` inside this call, but `request` is an `async` method, so every one of them arrives as a **rejection**
 — there is no failure `request()` throws at the call site.
 
 ### Example
@@ -1259,7 +1271,7 @@ Register an interceptor for the headers of every stream this peer opens. `open()
 `request()` call it synchronously, after the `ConnectionLost` / `ConnectionGoingAway` checks and before
 a stream id is allocated. Semantics are those of the Python entry above: a fresh shallow copy of the
 caller's `headers` (an empty object when none were passed) mutated in place, registration order,
-kept across reconnects, not applied to the hello or to the answering side's leading headers, and no
+kept by a dialer across reconnects, not applied to the hello or to the answering side's leading headers, and no
 `headers` field on the frame when the caller passed none and the interceptors added none.
 
 ### Signature
@@ -1325,7 +1337,8 @@ stream, synchronously inside the read loop, when the remote's first frame on tha
 
 `headers` is a read-only `MappingProxyType`, empty when the frame carried none. A `reset` is not an
 answer and calls no interceptor; neither does a stream that closes unanswered, nor an `open` refused
-for the concurrency limit. Interceptors run in registration order and are kept across reconnects.
+for the concurrency limit. Interceptors run in registration order. A dialer keeps them across
+reconnects; on the acceptor a reconnect is a new `Peer`, which starts with none.
 
 ### Signature
 
