@@ -3,9 +3,8 @@
 The module name carries a trailing underscore: a top-level `json.py` inside the package would shadow
 the stdlib module this very file imports.
 
-This module does **not** register itself (WSM-CDC-014). `muxws/__init__.py` does, because the library
-is required to ship JSON registered (WSM-CDC-004) while a side-effecting import can never be
-tree-shaken out.
+This module does not register itself (WSM-CDC-014). `muxws/__init__.py` registers it, because the
+library ships with JSON registered (WSM-CDC-004).
 """
 
 from __future__ import annotations
@@ -18,13 +17,14 @@ from muxws.errors import ProtocolError
 from muxws.frames import Frame, from_mapping, to_mapping
 
 #: Compact separators and no ASCII escaping, so that `json.dumps` here and `JSON.stringify` in the
-#: TypeScript port emit the same bytes for the same value - for strings, containers, booleans, null
-#: and integers up to 2**53. They do **not** agree on floats or on larger integers: Python writes
-#: `1.0`, `-0.0`, `1e+16`, `1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`,
-#: and JavaScript rounds an integer beyond 2**53 to the nearest double. Fragment boundaries are cut
-#: over this encoded form, so a payload carrying a float is cut differently by the two ports - see
-#: GAPS.md. It costs nothing on the wire (the sender chooses the cuts and the receiver only
-#: concatenates), but it does bound what the shared boundary corpus may contain.
+#: TypeScript port emit the same bytes for strings, containers, booleans, null and integers up to
+#: 2**53. They differ for floats and larger integers: Python writes `1.0`, `-0.0`, `1e+16`, `1e-07`
+#: where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`, and JavaScript rounds an integer
+#: beyond 2**53 to the nearest double. Fragment boundaries are cut over this encoded form, so the two
+#: ports cut a payload containing a float at different offsets. Interoperability is unaffected,
+#: because the sender chooses the cuts and the receiver only concatenates; the shared boundary corpus
+#: contains no such payloads.
+
 _DUMP_KWARGS: dict[str, Any] = {"separators": (",", ":"), "ensure_ascii": False, "allow_nan": False}
 
 

@@ -1,23 +1,20 @@
 /**
- * The demo's whole store, and the only place a `Peer` is built (D4).
+ * The demo's store, and the only module that creates a `Peer`.
  *
- * There is no state management library and no router here on purpose: every line a reader has to
- * understand before they see muxws is a line taxed against the demo's purpose. What is left is one
- * `reactive` object, one `connect()`, and the four call shapes:
+ * The demo uses no state management library and no router. The store is one `reactive` object, the
+ * connection is one `connect()`, and the four call shapes are:
  *
- *   * the board  - twenty streams the *backend* opened, arriving at this dialer's own `onStream`
- *                  handler. There is no push API because there does not need to be one
- *                  (WSM-INV-002).
+ *   * the board  - twenty streams opened by the backend, delivered to this dialer's `onStream`
+ *                  handler; muxws has no separate push API (WSM-INV-002).
  *   * `quote`    - `peer.request()`: one payload out, exactly one back (WSM-API-006).
- *   * `history`  - `for await (... of peer.open(...))`: a response that fills in progressively, and
- *                  one that stops the *producer* when it is cancelled (WSM-ERR-012/013).
+ *   * `history`  - `for await (... of peer.open(...))`: a progressive response; cancelling it stops the
+ *                  backend producer (WSM-ERR-012/013).
  *   * `depth` /
- *     `export`   - one payload far over `MAX_FRAME_BYTES`, fragmented on the way out and reassembled
- *                  on the way in with this file doing nothing at all (WSM-FRG-010).
+ *     `export`   - one payload larger than `MAX_FRAME_BYTES`, fragmented by the sender and reassembled
+ *                  by the receiver without code in this file (WSM-FRG-010).
  *
- * Nothing in here holds seed data. Every symbol, price and name the screen shows arrived over the
- * socket, because a board that could draw itself without a connection would prove nothing about the
- * transport (D1).
+ * This module holds no symbol data. Every symbol, price and name on the screen is received over the
+ * socket.
  */
 
 import {
@@ -77,7 +74,7 @@ interface ExportPayload {
   trades: unknown[];
 }
 
-/** `MarketService._stats`: the counters plus what the backend knows about itself. */
+/** The `stats` reply: the backend's counters, peer and stream counts, symbols and tick interval. */
 export interface Stats {
   history_started: number;
   history_points_sent: number;
@@ -91,7 +88,7 @@ export interface Stats {
   tick_interval: number;
 }
 
-/** What one large payload cost, measured from `on_frame` rather than claimed. */
+/** Measurements of one large payload, taken from the `onFrame` hook. */
 export interface FragmentReport {
   action: string;
   symbol: string;
@@ -99,10 +96,10 @@ export interface FragmentReport {
   bytes: number;
   /** How many frames of it carried a `fragment` field (WSM-FRG-010). */
   fragments: number;
-  /** Data frames on **other** streams that landed between the first and the last fragment. */
+  /** Data frames on other streams received between the first and the last fragment. */
   interleaved: number;
   ms: number;
-  /** The worst tick lateness observed while it was in flight, in milliseconds. */
+  /** The largest tick lateness sampled while the payload was in transit, in milliseconds. */
   worstLatencyMs: number;
 }
 
@@ -115,13 +112,13 @@ export type HistoryState = 'idle' | 'loading' | 'done' | 'cancelled' | 'lost';
 /** How often the throughput counters and the ping are refreshed. */
 const DIAGNOSTICS_INTERVAL_MS = 1000;
 
-/** One sample per nominal tick period, so a sample is one opportunity for a tick to have been late. */
+/** Latency sampling period in milliseconds; equal to the default tick interval. */
 const LATENCY_SAMPLE_MS = 250;
 
-/** 80 samples at 250 ms is twenty seconds of sparkline - long enough to hold a whole export. */
+/** Samples kept for the sparkline: 80 samples at 250 ms cover twenty seconds. */
 const LATENCY_SAMPLES = 80;
 
-/** The event log is a witness, not a journal; the oldest lines are the least interesting. */
+/** Maximum event log length; the oldest lines are dropped first. */
 const MAX_EVENTS = 40;
 
 // --------------------------------------------------------------------------- the store
@@ -129,27 +126,25 @@ const MAX_EVENTS = 40;
 export const store = reactive({
   connection: 'connecting' as ConnectionState,
   connectError: null as string | null,
-  /** Changes on every reconnection, on purpose: a reconnected peer reads as a new connection. */
+  /** The current peer's id; it changes on every reconnection. */
   peerId: '',
-  /** `on_reconnect`'s attempt number - the reconnect count the brief asks to be visible. */
+  /** The attempt number passed to the latest `onReconnect` call. */
   reconnects: 0,
   tickInterval: 0.25,
 
-  /** Board streams open right now, and how many this *connection* has opened. */
+  /** Board streams currently open, and board streams opened on the current connection. */
   boardLive: 0,
   boardOpened: 0,
-  /** Board streams that ended by raising rather than by ending, cumulative (WSM-RCN-030). */
+  /** Cumulative count of board streams that ended with an error (WSM-RCN-030). */
   streamsLost: 0,
-  /** What ended them, named by its error class. Twenty streams die together and say the same thing. */
+  /** The error that ended the board streams at the latest loss, as `Name: message`. */
   lastStreamEnd: null as string | null,
-  /** True between a socket loss and the first tick of the next connection; the rows are stale. */
+  /** True from a socket loss until the first board repaint on the next connection. */
   stale: false,
   /**
-   * Renders avoided, not frames lost.
-   *
-   * Every tick is received, counted and timed; this counts the ones whose row was superseded before
-   * a paint could happen. It climbs as soon as the push rate passes what a display can show, which
-   * is the honest way to say "the socket is faster than your monitor".
+   * Ticks whose row was replaced by a newer tick before it was rendered. No frames are lost: every
+   * tick is received, counted and timed. The count increases when the push rate exceeds the display's
+   * animation frame rate.
    */
   coalesced: 0,
 
@@ -184,10 +179,10 @@ export const store = reactive({
 
 let peer: Peer | null = null;
 
-/** The outstanding history generation, held so switching symbols can stop it at the producer. */
+/** The open history stream, kept so selecting another symbol can cancel it. */
 let historyStream: Stream<HistoryPoint> | null = null;
 
-/** When each symbol's stream last delivered a row, for the lateness readout. */
+/** When each symbol's stream last delivered a row (`performance.now()`), for the lateness readout. */
 const lastTickAt = new Map<string, number>();
 
 /** The worst lateness seen since the last sparkline sample. */
@@ -196,10 +191,10 @@ let windowLatencyMs = 0;
 const throughput = { framesIn: 0, framesOut: 0, bytesIn: 0, bytesOut: 0 };
 
 /**
- * The live measurement behind the headline, and the same assertion
- * `handlers_test.py::test_ticks_keep_flowing_during_an_export` makes: count the fragments of one
- * large payload, and count the data frames on *other* streams that arrived between the first and the
- * last of them. A FIFO writer scores zero. A round-robin writer cannot (WSM-INV-004).
+ * Measurement state for one large payload: the fragments of the payload, and the data frames on other
+ * streams received between its first and last fragment. This is the quantity that
+ * `handlers_test.py::test_ticks_keep_flowing_during_an_export` asserts on. With a FIFO writer
+ * `interleaved` is zero; with the round-robin writer it is not (WSM-INV-004).
  */
 interface Probe {
   streamId: number;
@@ -211,7 +206,7 @@ interface Probe {
 
 let probe: Probe | null = null;
 
-/** One line per socket loss rather than twenty; the count is carried by `store.streamsLost`. */
+/** Set after the first board stream failure of a loss is logged; `store.streamsLost` holds the count. */
 let lossReported = false;
 
 function say(line: string): void {
@@ -227,11 +222,10 @@ function describe(error: unknown): string {
 // --------------------------------------------------------------------------- connecting
 
 /**
- * The dial. Same origin as the page, which is what makes Vite's `ws: true` proxy entry load-bearing.
+ * The WebSocket URL: `/ws` on the page's origin, forwarded by Vite's `ws: true` proxy entry.
  *
- * Where a credential would go: **not here and not in the hello**. It belongs on the handshake - a
- * ticket in the query string, or a cookie the browser already sends - checked before `accept()` ever
- * runs (WSM-AUT-001). The demo dials without one.
+ * A credential belongs in the handshake, not in the hello: a ticket in the query string, or a cookie
+ * the browser sends, checked before `accept()` runs (WSM-AUT-001). The demo sends no credential.
  */
 function socketUrl(): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -239,9 +233,8 @@ function socketUrl(): string {
 }
 
 /**
- * A stable identity for this tab, in `sessionStorage` because that is exactly the lifetime of the
- * thing being identified: `localStorage` would make three tabs claim to be one client, and a module
- * variable would die on the reload that most often causes a reconnection.
+ * An id for this browser tab, stored in `sessionStorage`, which is per tab and survives a reload.
+ * `localStorage` would give every tab the same id; a module variable would not survive a reload.
  */
 function tabId(): string {
   let tab = window.sessionStorage.getItem('muxws-demo-tab');
@@ -256,27 +249,25 @@ export async function start(): Promise<void> {
   store.connection = 'connecting';
   store.connectError = null;
   try {
-    // The handler goes in `connect()` rather than on the peer it returns: the backend pushes the
-    // board the instant it has read the hello, and a handler registered one `await` later would meet
-    // those twenty streams with `reset(REFUSED)` (WSM-STM-033).
+    // The handler is passed to `connect()`, not set on the returned peer: the backend pushes the board
+    // as soon as it reads the hello, and a handler registered one `await` later would see those twenty
+    // streams reset with `REFUSED` (WSM-STM-033).
     peer = await connect(socketUrl(), {
-      // Replayed verbatim on every socket this peer ever gets (WSM-RCN-020), which is what makes the
-      // subscription survive a reconnection without a line of code on the accepting side (D3).
+      // Replayed unchanged on every new socket (WSM-RCN-020), so the subscription is restored after a
+      // reconnection without reconnection-specific code on the accepting side.
       hello: { action: 'hello', tags: { app: 'muxws-demo', tab: tabId() } },
-      // A demo cap, not the library's. The default is 30 s, which is right for production - it is
-      // what stops N clients hammering a server the moment it comes back - but it makes this demo
-      // look broken: stop the backend, wait half a minute, restart it, and the schedule has already
-      // grown to 0.25, 0.5, 1, 2, 4, 8, 16, 30 s, so the client can sit for another half minute
-      // before it tries again. That is the backoff doing its job, and on a page somebody is watching
-      // it reads as a hang.
+      // The demo caps the backoff at 2 s. The library default cap is 30 s, which spreads out
+      // reconnecting clients after a server restart. With that cap the delays grow to 0.25, 0.5, 1, 2,
+      // 4, 8, 16, 30 s, so after a backend that was stopped for half a minute restarts, the client can
+      // wait up to another 30 s before its next attempt.
       reconnect: new Reconnect({ maxDelayMs: 2_000 }),
       onStream: onPushedStream,
       onClose: onConnectionClose,
       onReconnect: onReconnected,
     });
   } catch (error) {
-    // WSM-RCN-006: the **first** attempt is never retried, whatever `reconnect` says. A typo in the
-    // URL that retried forever would be indistinguishable from a server that is merely slow.
+    // WSM-RCN-006: the first connection attempt is not retried, whatever `reconnect` says, so a wrong
+    // URL fails immediately instead of retrying indefinitely.
     store.connection = 'failed';
     store.connectError = describe(error);
     say(`connect() failed and did not retry (WSM-RCN-006): ${store.connectError}`);
@@ -294,8 +285,8 @@ export async function start(): Promise<void> {
 }
 
 function onConnectionClose(reason: CloseReason): void {
-  // `willRetry` is the promise being kept or withdrawn: true while the helper still intends to dial,
-  // false exactly once, when it has given up or `close()` was called deliberately.
+  // `willRetry` is true while the reconnect helper will dial again, and false once, when it has given
+  // up or `close()` was called.
   store.connection = reason.willRetry ? 'reconnecting' : 'failed';
   store.stale = true;
   store.rttMs = null;
@@ -310,10 +301,9 @@ function onReconnected(attempt: number, reconnected: Peer): void {
   store.reconnects = attempt;
   store.peerId = reconnected.id;
   store.connection = 'live';
-  // Reset, so the number that climbs back to twenty below is *this* connection's subscription and
-  // not a total carried over from the last one. Nothing was resumed: WSM-RCN-030 restores a live
-  // socket and an accepted identity and nothing else, so the board the reader is about to watch
-  // re-appear is twenty brand-new streams the backend opened after replaying the hello.
+  // Reset, so `boardOpened` counts the streams of this connection only. No stream is resumed
+  // (WSM-RCN-030): the board consists of twenty new streams the backend opens after the replayed
+  // hello.
   store.boardOpened = 0;
   lossReported = false;
   lastTickAt.clear();
@@ -324,17 +314,15 @@ function onReconnected(attempt: number, reconnected: Peer): void {
 // --------------------------------------------------------------------------- the board (push)
 
 /**
- * This dialer's own `on_stream` handler, and the reason there is no push API.
+ * This dialer's `onStream` handler.
  *
- * The backend calls `peer.open()` on its own initiative, twenty times, and each one arrives here on
- * the socket that was already there - one `Peer` type, one mechanism, no second correlation story
- * (WSM-INV-002).
+ * The backend calls `peer.open()` twenty times, and each stream arrives here on the existing socket,
+ * through the same `Peer` API used for requests (WSM-INV-002).
  */
 async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
   const opening = payload as { topic?: unknown; symbol?: unknown };
   if (opening?.topic !== 'ticks' || typeof opening.symbol !== 'string') {
-    // REFUSED and not APPLICATION_ERROR: this end has not processed the stream and never will, which
-    // is precisely the distinction the two codes carry (WSM-STM-034).
+    // REFUSED, not APPLICATION_ERROR: this end has not processed the stream (WSM-STM-034).
     await stream.reset(ResetCode.REFUSED, 'this demo subscribes to ticks and nothing else');
     return;
   }
@@ -346,15 +334,14 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
       applyTick(row);
     }
   } catch (error) {
-    // WSM-RCN-030: every stream live at the moment of a loss is already dead, and each one says so
-    // by raising. The UI has to repeat it - a board that merely stopped moving is indistinguishable
-    // from a quiet market. Twenty streams fail together, so this counts twenty times and speaks once.
+    // WSM-RCN-030: every stream open at a connection loss fails with an error. The UI reports it,
+    // because a board that stops updating looks the same as a market without price changes. Twenty
+    // streams fail together, so each is counted and one line is logged.
     //
-    // Which exception arrives is worth reading rather than assuming. `ConnectionLost` is the socket
-    // dying underneath a live stream; a plain `StreamReset` is a producer that stopped first, which
-    // is what this backend's kill switch deliberately does before it closes anything (its board
-    // streams have no natural end, and `close()` would otherwise wait out its whole drain window on
-    // them). The demo shows whichever actually happened.
+    // `ConnectionLost` means the socket closed under a live stream. A plain `StreamReset` means the
+    // producer cancelled the stream first; the backend's kill switch does this before closing, because
+    // board streams do not end by themselves and `close()` would wait for its full drain window. The
+    // log line names which of the two occurred.
     store.streamsLost += 1;
     if (!lossReported) {
       lossReported = true;
@@ -371,27 +358,25 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
 }
 
 /**
- * Rows that have arrived and are not on the screen yet. **Not reactive**, deliberately.
+ * Received rows not yet rendered, newest per symbol. Not reactive.
  *
- * Writing every tick straight into `store.rows` freezes this page at 10 ms: twenty symbols at a
- * hundred a second is two thousand reactive writes a second, each one scheduling a re-render of a
- * grid that a display can repaint sixty times a second at best. The work is unbounded, the observable
- * output is not, and the main thread loses - to the point where the control that would turn the rate
- * back down cannot be clicked.
+ * Writing every tick directly into `store.rows` blocks the page at a 10 ms interval: twenty symbols at
+ * a hundred ticks a second are two thousand reactive writes a second, each scheduling a re-render of
+ * the grid, while the display repaints at most about sixty times a second. The main thread then cannot
+ * process input, including the control that lowers the rate.
  *
- * Nothing is dropped on the wire: every frame is received, counted, and its lateness measured, which
- * is why the diagnostics keep climbing while the board is quiet. What is coalesced is the *painting*.
+ * No frame is dropped: every frame is received and counted and its lateness measured. Only rendering
+ * is coalesced.
  */
 const pending = new Map<string, BoardRow>();
 
-/** Renders avoided by coalescing - a second tick for a symbol that had not been painted yet. */
+/** Ticks that replaced a pending, not yet rendered row for the same symbol. */
 let coalesced = 0;
 
 let flushScheduled = false;
 
 function applyTick(row: BoardRow): void {
-  // Ingest at full rate, and measure here: lateness is a property of when the frame *arrived*, and
-  // measuring it after a paint would report this demo's own render budget as the socket's latency.
+  // Lateness is measured on arrival; measuring after rendering would include render time.
   const now = performance.now();
   const previous = lastTickAt.get(row.symbol);
   lastTickAt.set(row.symbol, now);
@@ -403,11 +388,10 @@ function applyTick(row: BoardRow): void {
 }
 
 /**
- * One paint per frame of animation, however many ticks arrived in between.
+ * Schedules one render per animation frame, regardless of how many ticks arrived in between.
  *
- * `requestAnimationFrame` rather than a timer: it is the rate the screen actually updates at, and it
- * stops entirely when the tab is hidden - so a backgrounded demo costs nothing and does not build a
- * backlog to render on return, because `pending` holds the newest row per symbol and nothing else.
+ * `requestAnimationFrame` runs at the display's refresh rate and does not run while the tab is hidden.
+ * `pending` holds only the newest row per symbol, so a hidden tab accumulates no backlog.
  */
 function scheduleFlush(): void {
   if (flushScheduled) return;
@@ -444,8 +428,8 @@ function recordFrame(direction: 'tx' | 'rx', frame: Frame, byteLength: number): 
     if (frame.fragment !== null && frame.fragment !== undefined) probe.fragments += 1;
     return;
   }
-  // Only once fragmentation has actually begun, so this counts frames that shared the wire with the
-  // large payload rather than frames that merely arrived during the round trip.
+  // Counted only after the first fragment has arrived, so frames received before the payload started
+  // are excluded.
   if (probe.fragments > 0 && frame.type === 'data') probe.interleaved += 1;
 }
 
@@ -469,23 +453,22 @@ async function samplePing(): Promise<void> {
     return;
   }
   try {
-    // A connection-level round trip on a `ping` frame, not a stream: it measures the socket, so it
-    // stays honest while every stream on it is busy (WSM-CON-012).
+    // A connection-level round trip on a `ping` frame, not on a stream, in milliseconds
+    // (WSM-CON-012).
     store.rttMs = Math.round((await peer.ping()) * 100) / 100;
   } catch {
-    // A ping that could not be sent or was not answered is a diagnostic that failed, not an
-    // application error; the connection state next to it already says what happened.
+    // A failed or unanswered ping clears the RTT readout and is not reported as an error; the
+    // connection state is shown separately.
     store.rttMs = null;
   }
 }
 
 /**
- * The tick-latency readout, sampled rather than event-driven.
+ * Samples the tick-latency readout every `LATENCY_SAMPLE_MS`.
  *
- * Two things feed it, because either alone would lie. `windowLatencyMs` is how late a tick was when
- * it finally landed - which is only known *after* the stall. The staleness scan below is how late
- * every symbol is *right now*, so a stall in progress shows while it is happening rather than at its
- * end.
+ * The sample is the larger of two values. `windowLatencyMs` is the lateness of ticks that arrived
+ * since the last sample, known only after a delayed tick arrives. The scan below computes how late
+ * each symbol's next tick is at sampling time, so a delay is shown while it is in progress.
  */
 function sampleLatency(): void {
   const now = performance.now();
@@ -509,11 +492,10 @@ export function resetLatencyWorst(): void {
 }
 
 /**
- * `history_cancelled` is why this exists.
+ * Requests the backend's `stats` over the same socket and stores the reply.
  *
- * Nothing on a screen can distinguish a backend that stopped generating from a frontend that stopped
- * looking, so the number is asked of the backend, over the same socket as everything else, and the
- * generator itself is what increments it (WSM-ERR-012/013).
+ * `history_cancelled` is incremented by the backend's history generator when a cancellation stops it,
+ * so it shows that the backend stopped generating (WSM-ERR-012/013).
  */
 export async function refreshStats(): Promise<void> {
   if (peer === null || !peer.isOpen) return;
@@ -526,12 +508,10 @@ export async function refreshStats(): Promise<void> {
 }
 
 /**
- * Ask the backend to push faster or slower.
+ * Sends a `rate` request that sets the backend's tick interval per symbol, in milliseconds.
  *
- * The board's four-a-second default is a `sleep` in the backend's generator and says nothing about
- * what the socket can carry, which is what this control is on the page to show. Turn it to 10 ms and
- * the frames/second readout climbs by two orders of magnitude while the tick-lateness line stays
- * where it was.
+ * The default of four ticks a second per symbol is a `sleep` in the backend's generator, not a
+ * transport limit.
  */
 export async function setTickInterval(intervalMs: number): Promise<void> {
   if (peer === null || !peer.isOpen) return;
@@ -546,10 +526,10 @@ export async function setTickInterval(intervalMs: number): Promise<void> {
 
 // --------------------------------------------------------------------------- the four call shapes
 
-/** A row click: cancel what is outstanding, then one unary call and one streaming one. */
+/** Selects a symbol: cancels the open history stream, then sends a quote request and opens a history stream. */
 export async function select(symbol: string): Promise<void> {
-  // First, and before anything is awaited: until this reset is on the wire the backend is still
-  // generating points for the symbol the reader has already left (WSM-ERR-012).
+  // Cancelled first: until the reset is sent, the backend keeps generating points for the previously
+  // selected symbol (WSM-ERR-012).
   await cancelHistory('the reader selected another symbol');
 
   store.selected = symbol;
@@ -567,11 +547,9 @@ async function cancelHistory(reason: string): Promise<void> {
   const outstanding = historyStream;
   if (outstanding === null) return;
   historyStream = null;
-  // A no-op if the stream is already closed, including after socket death, where there is nothing to
-  // send it on (WSM-RCN-041).
+  // A no-op if the stream is already closed, including after a connection loss (WSM-RCN-041).
   await outstanding.cancel(reason);
-  // Asked immediately rather than waited for on the poll, so the counter the reader is watching
-  // moves while the click is still the last thing they did.
+  // Requested immediately instead of on the next poll, so the counter updates right after the click.
   void refreshStats();
 }
 
@@ -587,8 +565,8 @@ async function loadQuote(symbol: string): Promise<void> {
 }
 
 /**
- * The streaming shape. `open()` is synchronous - it hands back the `Stream` in the same turn it
- * allocated the id (WSM-API-001) - and `end: true` says this side has nothing more to send.
+ * The streaming shape. `open()` is synchronous and returns the `Stream` in the same turn it allocates
+ * the id (WSM-API-001); `end: true` half-closes the sending side.
  */
 async function streamHistory(symbol: string): Promise<void> {
   if (peer === null) return;
@@ -607,8 +585,7 @@ async function streamHistory(symbol: string): Promise<void> {
     for await (const point of stream) {
       store.history.push(point);
     }
-    // Trailers ride the `end` frame, so they are readable only once the body is finished - which is
-    // what makes them the right place for a count of what was sent.
+    // Trailers are carried on the `end` frame and are readable after the body is complete.
     store.historyTrailers = stream.trailers;
     store.historyState = 'done';
   } catch (error) {
@@ -627,11 +604,12 @@ async function streamHistory(symbol: string): Promise<void> {
 }
 
 /**
- * One payload far over `MAX_FRAME_BYTES`, and the measurement of what it did to everything else.
+ * Requests one payload larger than `MAX_FRAME_BYTES` and measures its fragments and the frames
+ * interleaved with them.
  *
- * `open()` awaited rather than `request()` only because the probe needs the stream id, and `request()`
- * returns the payload without ever showing it. The shape on the wire is identical - `request()` *is*
- * `open(payload, {end: true})` awaited to the stream's end (WSM-API-006).
+ * Uses an awaited `open()` instead of `request()` because the probe needs the stream id, which
+ * `request()` does not expose. The frames are the same: `request()` is `open(payload, {end: true})`
+ * awaited to the stream's end (WSM-API-006).
  */
 async function fragmented<T>(action: string, symbol: string): Promise<{ payload: T; report: FragmentReport }> {
   if (peer === null) throw new ConnectionLost('there is no peer');
@@ -639,8 +617,7 @@ async function fragmented<T>(action: string, symbol: string): Promise<{ payload:
   probe = { streamId: stream.id, bytes: 0, fragments: 0, interleaved: 0, worstLatencyMs: 0 };
   const startedAt = performance.now();
   try {
-    // Nothing here calls a reassembler. The peer hands over one whole payload and the application
-    // never learns it was cut, which is the entire point of WSM-FRG-010.
+    // The peer reassembles the fragments and resolves with the whole payload (WSM-FRG-010).
     const payload = await stream;
     return {
       payload,
@@ -672,12 +649,11 @@ export async function loadDepth(): Promise<void> {
 }
 
 /**
- * The headline. One megabyte on one stream while twenty others keep ticking (WSM-INV-004).
+ * Requests the 1 MB export on one stream while the twenty tick streams continue (WSM-INV-004).
  *
- * What makes it a demonstration rather than a claim is `report.interleaved`: tick frames that landed
- * between the export's first and last fragment. The writer takes the streams round-robin and a stream
- * holds at most one unsent fragment at a time, so the export cannot own the wire. Replace the writer
- * with a FIFO and that number is zero.
+ * `report.interleaved` counts tick frames received between the export's first and last fragment. The
+ * writer serves streams round-robin and a stream holds at most one unsent fragment at a time, so the
+ * export's fragments alternate with tick frames. With a FIFO writer the count would be zero.
  */
 export async function runExport(): Promise<void> {
   const symbol = store.selected ?? Object.keys(store.rows)[0];
@@ -698,7 +674,7 @@ export async function runExport(): Promise<void> {
   }
 }
 
-/** Ask the backend to close every peer, so the reader can watch a reconnection they did not cause. */
+/** Sends a `kill` request; the backend closes every peer, and the reconnect helper reconnects. */
 export async function killBackend(): Promise<void> {
   if (peer === null) return;
   try {

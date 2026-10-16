@@ -1,24 +1,23 @@
 /**
  * `peer.tags` and `PeerRegistry`: finding a peer by keys the application chose (§9.5).
  *
- * A direct port of `muxws/registry.py`, member for member. The registry indexes; it does not watch.
- * That distinction is the whole design, and WSM-REG-013 and WSM-REG-014 exist to make a plain object
- * provably the right choice for `tags`: writing a tag is free and costs no bookkeeping, and the index
- * only moves when someone says so.
+ * Mirrors `muxws/registry.py` member for member. The registry indexes `peer.tags` when `register` is
+ * called and does not observe later changes. `tags` is a plain object (WSM-REG-013, WSM-REG-014):
+ * writing a tag performs no bookkeeping, and the index changes only on `register`, `deregister` or
+ * close.
  *
- * The documented usage rule follows from that: **look up on keys you do not mutate, and mutate keys
- * you do not look up.** A consumer needing both on one key calls `register(peer)` after each write.
+ * Usage rule: look up on keys that are not mutated, and mutate keys that are not looked up. For a key
+ * that is both, call `register(peer)` after each write.
  */
 
 import type { Peer } from './peer';
 
 /**
- * What may serve as a lookup value. Python asks `hash()` and catches `TypeError`; JavaScript has no
- * such question to ask, so the five primitive `typeof` results are the enumeration of it.
+ * The types usable as lookup values: the five primitive `typeof` results listed here. Python decides
+ * with `hash()` and catches `TypeError`; JavaScript has no hashability check.
  *
- * An object or an array is passed over rather than rejected (WSM-REG-011): `Map` keys them by
- * identity, so indexing one would make the peer findable only by a caller already holding the very
- * same reference - a lookup nobody can perform, bought at the price of an entry that never matches.
+ * Object and array values are skipped, not rejected (WSM-REG-011). `Map` compares them by identity,
+ * so an indexed object would match only a lookup with the same reference.
  */
 export type TagValue = string | number | boolean | bigint | symbol;
 
@@ -33,32 +32,28 @@ export class PeerRegistry {
   /**
    * Tag name -> tag value -> the peers registered under it.
    *
-   * Two levels rather than one string key: `('a', 1)` and `('a1', undefined)` concatenate to the same
-   * characters, and a registry that confused them would answer `peersFor({ a: 1 })` with a peer that
-   * never carried that tag. A value that is not indexable never reaches here at all, so an
-   * object-valued tag costs nothing whatever.
+   * Two levels, not one concatenated string key, because concatenation is ambiguous (`'a' + 1` and
+   * `'a1' + ''` are equal). Non-indexable values are not stored.
    */
   private readonly index = new Map<string, Map<TagValue, Set<Peer>>>();
 
   /**
-   * The reverse map, so `register` can replace a peer's entries **wholesale** in one pass
-   * (WSM-REG-012) rather than scanning the index for it.
+   * The reverse map, so `register` replaces all of a peer's entries in one pass (WSM-REG-012)
+   * without scanning the index.
    */
   private readonly entries = new Map<Peer, [string, TagValue][]>();
 
   /**
    * Peers whose close hook is already installed.
    *
-   * WSM-REG-017 tells a consumer that both looks up and mutates one key to call `register(peer)`
-   * after **every** write, so a hook appended per call would leave a long-lived peer carrying one
-   * handler per write, all of them doing the same already-idempotent deregistration - bookkeeping
-   * WSM-REG-001 says a rewrite must not cost. `Peer` has no way to remove a handler, so the only
-   * place to be careful is here. Weak, so a registry never keeps a peer alive that nothing else
-   * holds.
+   * WSM-REG-017 has a consumer call `register(peer)` after every write to a key it also looks up.
+   * Installing a close hook on every call would add one handler per write, and `Peer` cannot remove
+   * a handler; WSM-REG-001 requires a rewrite to add no bookkeeping. A `WeakSet`, so the registry does
+   * not keep an otherwise unreferenced peer alive.
    */
   private readonly hooked = new WeakSet<Peer>();
 
-  /** How many peers are registered. Python spells it `len(registry)`. */
+  /** The number of registered peers. Python: `len(registry)`. */
   get size(): number {
     return this.entries.size;
   }
@@ -73,19 +68,19 @@ export class PeerRegistry {
   }
 
   /**
-   * Index `peer` under **every key its `tags` holds at this moment** (WSM-REG-010).
+   * Index `peer` under every key in its current `tags` (WSM-REG-010).
    *
-   * It has no notion of which keys matter, and re-registering replaces the previous entries rather
-   * than adding to them: found under the new values, no longer under the old ones.
+   * Re-registering replaces the previous entries: the peer is found under the new values and no
+   * longer under the old ones.
    *
-   * Removal on close is automatic (WSM-REG-016) - a consumer never has to prune the index.
+   * The peer is removed automatically when it closes (WSM-REG-016).
    */
   register(peer: Peer): void {
     this.deregister(peer);
 
     const entries: [string, TagValue][] = [];
-    // `Object.entries`, never `for...in`: the latter walks the prototype chain and is banned by the
-    // shared eslint config for exactly that reason.
+    // `Object.entries`, not `for...in`, which includes inherited properties and is disallowed by the
+    // shared eslint config.
     Object.entries(peer.tags).forEach(([key, value]) => {
       if (!isIndexable(value)) return;
       entries.push([key, value]);
@@ -106,9 +101,8 @@ export class PeerRegistry {
     if (this.hooked.has(peer)) return;
     this.hooked.add(peer);
     peer.onClose(() => {
-      // Forgets the hook as well as the entries, so a `Peer` that survives a reconnect
-      // (WSM-RCN-032) and is registered again on its next connection gets a fresh hook rather than
-      // spending the rest of its life without one.
+      // Clears the hook marker as well as the entries, so a `Peer` that is reused across a reconnect
+      // (WSM-RCN-032) and registered again gets a new close hook.
       this.hooked.delete(peer);
       this.deregister(peer);
     });
@@ -132,9 +126,9 @@ export class PeerRegistry {
   /**
    * `register` plus an explicit deregister, for a consumer that wants the scope visible.
    *
-   * Python has `with registry.registered(peer):`. TypeScript's `using` needs a `Symbol.dispose` this
-   * package's ES2020 target does not carry, so the scope is a callback: the shape survives, and the
-   * deregister still runs when the body throws.
+   * Python uses `with registry.registered(peer):`. TypeScript's `using` requires `Symbol.dispose`,
+   * which the package's ES2020 target lacks, so the scope is a callback. `deregister` runs also when
+   * `body` throws.
    */
   async registered<T>(peer: Peer, body: (peer: Peer) => T | Promise<T>): Promise<T> {
     this.register(peer);
@@ -148,9 +142,8 @@ export class PeerRegistry {
   /**
    * Every live peer whose `tags` match **all** the given keys.
    *
-   * An **array** in a stable order, never a `Set` (WSM-REG-015): callers iterate it, and a `Set`'s
-   * order is insertion order, which varies between runs for no reason anyone can see. Treat it as a
-   * snapshot - a peer in it may already be closing.
+   * Returns an array sorted by `peer.id`, not a `Set` (WSM-REG-015); a `Set` iterates in insertion
+   * order, which varies between runs. The result is a snapshot: a peer in it may already be closing.
    */
   peersFor(tags: Record<string, unknown> = {}): Peer[] {
     const wanted = Object.entries(tags);
@@ -158,8 +151,8 @@ export class PeerRegistry {
 
     let found: Set<Peer> | null = null;
     for (const [key, value] of wanted) {
-      // A value that could never have been indexed matches nothing, which is the same answer
-      // WSM-REG-011 gives on the write side rather than a different one (Python's `except TypeError`).
+      // A non-indexable value matches nothing, consistent with `register` skipping such values
+      // (WSM-REG-011; Python's `except TypeError`).
       const holders = isIndexable(value) ? this.index.get(key)?.get(value) : undefined;
       if (holders === undefined || holders.size === 0) return [];
       found = found === null ? new Set(holders) : intersect(found, holders);
@@ -177,7 +170,7 @@ function intersect(found: Set<Peer>, holders: Set<Peer>): Set<Peer> {
   return both;
 }
 
-/** `peer.id` is `<prefix>-<counter>` (WSM-API-009); sorting on it is what makes the order stable. */
+/** Sort by `peer.id` (`<prefix>-<counter>`, WSM-API-009), compared as strings. */
 function byId(peers: Peer[]): Peer[] {
   return peers.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }

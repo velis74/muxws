@@ -1,11 +1,10 @@
-"""What the send path costs: frames a second through the codec and the peer, printed on every run.
+"""Send-path throughput: frames per second through the codec and the peer, printed on every run.
 
-The demo's four ticks a second per symbol is an `asyncio.sleep(0.25)` in its own generator, so it says
-nothing about this path's ceiling.
+The demo's rate of four ticks per second per symbol comes from an `asyncio.sleep(0.25)` in its
+generator and does not reflect this path's maximum.
 
-Each assertion is a **floor far below** what a machine achieves, so the figure is reported on every
-run and caught when it regresses catastrophically, without the rate itself being pinned to a number a
-loaded runner would miss.
+Each assertion is a minimum far below typical throughput, so the figure is reported on every run and
+a large slowdown fails the test, while a loaded CI runner still passes.
 """
 
 from __future__ import annotations
@@ -21,8 +20,8 @@ from muxws.frames import Frame
 async def _drain_until(done: Callable[[], bool], *, limit: float = 30.0) -> None:
     """Turn the loop until everything sent has arrived.
 
-    The wait is on arrival, not on a fixed number of `sleep(0)` turns: the count is the measurement,
-    so a wait that ends mid-flight reports the throughput of a run that never finished.
+    The wait is on arrival, not on a fixed number of `sleep(0)` turns: the rate is computed from the
+    arrival count, so stopping before all frames arrive would report an incomplete run.
     """
     deadline = time.perf_counter() + limit
     while not done() and time.perf_counter() < deadline:
@@ -30,7 +29,7 @@ async def _drain_until(done: Callable[[], bool], *, limit: float = 30.0) -> None
 
 
 async def test_how_many_small_frames_a_second_one_peer_pair_moves(pair):
-    """One stream, small payloads, over the in-memory transport - the codec and peer cost alone."""
+    """One stream, small payloads, over the in-memory transport: codec and peer overhead only."""
     received = 0
 
     def count(direction: str, _frame: Frame, _length: int) -> None:
@@ -55,7 +54,7 @@ async def test_how_many_small_frames_a_second_one_peer_pair_moves(pair):
 
 
 async def test_the_rate_holds_up_across_many_concurrent_streams(pair):
-    """Twenty streams interleaved, which is the demo's shape - the rotation is not the bottleneck."""
+    """Twenty interleaved streams, as in the demo; the round-robin rotation does not reduce the rate."""
     received = 0
 
     def count(direction: str, _frame: Frame, _length: int) -> None:
@@ -77,4 +76,4 @@ async def test_the_rate_holds_up_across_many_concurrent_streams(pair):
     rate = received / elapsed
     print(f"\n  {received} frames in {elapsed:.3f}s = {rate:,.0f} frames/second (20 streams)")
     assert received > 4_000, f"only {received} of 5000 frames arrived"
-    assert rate > 2_000, f"{rate:,.0f} frames/second across 20 streams is below what the rotation costs"
+    assert rate > 2_000, f"{rate:,.0f} frames/second across 20 streams is below the minimum"

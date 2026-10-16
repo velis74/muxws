@@ -9,8 +9,7 @@
             one socket &middot; {{ boardSize }} pushed streams &middot; four call shapes
           </span>
           <v-spacer />
-          <!-- A board explains itself as a board and says nothing about the transport, which is the
-               only reason it is on the screen. This is where a reader finds out what to watch. -->
+          <!-- The help dialog explains what each panel demonstrates about the transport. -->
           <HelpDialog />
         </div>
 
@@ -50,8 +49,8 @@ const stateColour = computed(() => {
   return 'warning';
 });
 
-// One dial for the whole application, from the one place a `Peer` is built (D4). Nothing below this
-// line knows what a WebSocket is.
+// The application dials once, through `start()` in `muxws.ts`, the only module that creates a
+// connection. The components use the store and do not access the WebSocket.
 onMounted(() => {
   void start();
 });

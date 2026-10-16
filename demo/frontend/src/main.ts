@@ -7,9 +7,9 @@ import 'vuetify/dist/vuetify.css';
 
 import App from './App.vue';
 
-// Vuetify is the demo's dependency and nothing else's (D5). muxws keeps zero runtime dependencies in
-// the browser entry point (WSM-PKG-003), and `muxws/packaging_test.py` asserts that this file's
-// presence has not changed that.
+// Vuetify is a dependency of the demo frontend only, declared in `demo/frontend/package.json`. muxws
+// has no runtime dependencies in the browser entry point (WSM-PKG-003); `muxws/packaging_test.py`
+// asserts that the demo's packages are not dependencies of the root package.
 const vuetify = createVuetify({ components, directives, theme: { defaultTheme: 'dark' } });
 
 createApp(App).use(vuetify).mount('#app');

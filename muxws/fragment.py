@@ -1,7 +1,6 @@
-"""Fragmentation: the splitter and the assembler, as pure functions (§4).
+"""Fragmentation: the splitter and the assembler (§4).
 
-Nothing here touches a socket: the splitter and the assembler are pure functions of their arguments,
-which is what WSM-FRG-015 asks for.
+Nothing here touches a socket; the splitter is a pure function of its arguments (WSM-FRG-015).
 """
 
 from __future__ import annotations
@@ -23,8 +22,8 @@ MAX_FRAME_BYTES: Final[int] = 65_536
 def encoded_length(message: str | bytes) -> int:
     """Byte length of an encoded message: UTF-8 for text, buffer length for bytes.
 
-    A JavaScript string's `.length` counts UTF-16 code units and disagrees with this on every
-    non-BMP character, which is why WSM-FRG-002 spells the measurement out for both ports.
+    A JavaScript string's `.length` counts UTF-16 code units and differs from this for any non-ASCII
+    text, so WSM-FRG-002 defines the measurement for both ports.
     """
     if isinstance(message, str):
         return len(message.encode("utf-8"))
@@ -39,16 +38,14 @@ def _reservation(cap: int) -> int:
 def _floor_boundary(data: bytes, cut: int, *, text: bool) -> int:
     """Move `cut` back to the nearest offset in `data` a fragment may end on.
 
-    Under a text codec that is a UTF-8 codepoint boundary (WSM-FRG-012). The slice does not travel as
-    bytes: it sits inside the fragment's own envelope as a value of the codec's type system, and half
-    a codepoint has no representation in a JSON string. WebSocket's continuation frames would carry a
-    split codepoint happily, but muxws does not use them - a continuation sequence holds the socket
-    until the message ends, which is the head-of-line blocking the library exists to prevent
-    (WSM-INV-004). So every fragment is a whole message and every slice is whole codepoints, in both
-    ports (WSM-FRG-016).
+    Under a text codec that is a UTF-8 codepoint boundary (WSM-FRG-012). The slice is carried inside
+    the fragment's envelope as a string value of the codec, and a JSON string cannot hold part of a
+    codepoint. muxws does not use WebSocket continuation frames, because a continuation sequence
+    occupies the socket until the message ends (WSM-INV-004); every fragment is a whole message and
+    every slice consists of whole codepoints, in both ports (WSM-FRG-016).
 
-    At most three steps back: UTF-8 is self-synchronising, a continuation byte being exactly
-    `0b10xxxxxx`. Under a binary codec the unit is the byte and every offset is already a boundary.
+    The loop moves back at most three bytes, because UTF-8 continuation bytes have the form
+    `0b10xxxxxx`. Under a binary codec the unit is the byte and every offset is a boundary.
     """
     if text:
         while 0 < cut < len(data) and data[cut] & 0xC0 == 0x80:
@@ -110,9 +107,9 @@ def _floor_error(cap: int) -> ProtocolError:
 def _closing_floor_error(cap: int) -> ProtocolError:
     """The closing fragment does not fit even carrying no payload at all.
 
-    `end` and `trailers` ride the final fragment and cannot themselves be fragmented (WSM-FRG-020),
-    exactly as `headers` cannot (WSM-FRG-021). If they do not fit, no valid split exists and saying
-    so is the only honest answer - the alternative is a sequence that never terminates.
+    `end` and `trailers` travel on the final fragment and are not fragmented (WSM-FRG-020), as
+    `headers` are not (WSM-FRG-021). If they do not fit, no valid split exists, and the splitter
+    raises instead of emitting fragments without end.
     """
     return ProtocolError(
         f"a frame cap of {cap} bytes cannot hold this frame's closing envelope; `trailers` ride the "
@@ -133,17 +130,14 @@ def _largest_fitting_count(
 ) -> int:
     """Largest slice at `position` whose non-final fragment frame still fits under `cap`, in bytes.
 
-    This is the verify-and-re-split half of WSM-FRG-014, and it is a **binary search** rather than a
-    guess-and-shrink loop for two reasons. It terminates in log2(ceiling) encodes instead of however
-    many rounds a multiplier happens to need - a payload of control characters under JSON expands
-    enough that a proportional guess converges too slowly to be bounded honestly. And it is exactly
-    reproducible: both ports run the same search over the same encoded form, in the same order, and
-    therefore cut at the same boundary, which is what WSM-FRG-016 requires. The search bisects byte
-    limits and floors each probe onto a boundary the codec can represent, so what it counts and what
-    it cuts are the same quantity.
+    The verify-and-re-split step of WSM-FRG-014, as a binary search. It needs at most log2(ceiling)
+    encodes, independent of how much the codec's escaping expands the payload (control characters
+    under JSON expand up to sixfold). Both ports run the same search over the same encoded form in the
+    same order and cut at the same boundary (WSM-FRG-016). Each probe's byte limit is floored onto a
+    boundary the codec can represent, so the counted and the cut quantities are the same.
 
-    Returns 0 when not even one unit fits - the probes below the first unit's width all floor back to
-    an empty slice, which fits and records nothing.
+    Returns 0 when not even one unit fits: every probe below the first unit's width floors to an empty
+    slice, which is not recorded.
     """
     low, high, best = 1, ceiling, 0
     while low <= high:
@@ -159,33 +153,30 @@ def _largest_fitting_count(
 
 
 def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> list[Frame]:
-    """Every fragment at once. `iter_fragments` is the same computation, one slice at a time.
-
-    The pure-function tests and the conformance corpus want the whole list, and a caller with a small
-    payload should not have to think about generators.
-    """
+    """All fragments of `frame` as a list. `iter_fragments` performs the same computation lazily."""
     return list(iter_fragments(frame, cap, codec))
 
 
 def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> Iterator[Frame]:
     """Yield `frame` when it already fits, else the fragment frames that replace it, **lazily**.
 
-    The writer consumes this one slice at a time, because WSM-FRG-018 says a stream holds at most one
-    unsent fragment: fragment *n+1* is sliced only once fragment *n* has been handed to the socket.
-    Computing them all up front would commit the wire order in advance, and interleaving - the whole
-    point of WSM-FRG-019 - becomes impossible once the order is already decided.
+    The writer consumes this one slice at a time, because a stream holds at most one unsent fragment
+    (WSM-FRG-018): fragment *n+1* is sliced after fragment *n* has been handed to the socket, so the
+    writer can interleave other streams' frames between them (WSM-FRG-019).
 
-    Every boundary decision lives here, so `split_frame` and the writer cut in exactly the same
-    places by construction rather than by two implementations agreeing.
+    `split_frame` and the writer both use this function, so they cut at the same boundaries.
 
     A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads nothing else and mutates neither
     argument. `cap` defaults to the protocol constant; a smaller value comes only from a test or the
-    conformance runner (WSM-FRG-005) and is never a value read off the wire.
+    conformance runner (WSM-FRG-005) and is never read off the wire.
 
-    The sender encodes the logical payload with the codec, slices *that* encoded form, and puts each
-    slice into a frame the codec then encodes again (WSM-FRG-011). Slicing budgets for the envelope
-    (WSM-FRG-013) and then **verifies and re-splits** (WSM-FRG-014): the reservation is a per-codec
-    hint, the loop is the guarantee.
+    The sender encodes the logical payload with the codec, slices the encoded form, and puts each
+    slice into a frame the codec encodes again (WSM-FRG-011). Each slice is sized to leave room for
+    the envelope (WSM-FRG-013), then the encoded fragment is measured and re-split if it exceeds the
+    cap (WSM-FRG-014).
+
+    Raises `ProtocolError` when no codec is given, when `cap` is below 2, when a frame over the cap
+    has no payload, or when the cap cannot hold an envelope plus one unit of payload (WSM-FRG-034).
     """
     if codec is None:
         raise ProtocolError("split_frame requires a codec: fragment boundaries are defined over its output")
@@ -215,15 +206,12 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
     total = len(data)
 
     while True:
-        # Everything left, as the closing fragment? `end` and `trailers` ride only this one, so it is
-        # a different size from a middle fragment and has to be measured as itself. This is checked
-        # first on every pass, including the one where the payload is already spent: the sequence
-        # MUST end with a fragment carrying `more: false`, even if that fragment carries no bytes.
-        # Skipped when the answer is already known: the encoded frame carries the remaining payload
-        # plus an envelope plus whatever the codec's escaping adds, so it is never *shorter* than the
-        # remainder itself. Encoding a remainder that is already over the cap renders the whole rest
-        # of the payload for nothing, and does it again on every pass, which is quadratic in payload
-        # size.
+        # Try the whole remainder as the closing fragment. `end` and `trailers` travel only on this
+        # fragment, so it is measured separately from a middle fragment. Checked first on every pass,
+        # including when no payload is left: the sequence MUST end with a fragment carrying
+        # `more: false`, even an empty one. The encode is skipped when the raw remainder alone
+        # exceeds the cap, since the encoded frame is never shorter than the remainder; encoding it on
+        # every pass would make splitting quadratic in payload size.
         if total - position <= cap:
             tail = _fragment_frame(frame, _chunk(data, position, total, text=text), first=emitted == 0, last=True)
             if encoded_length(codec.encode(tail)) <= cap:
@@ -233,17 +221,16 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
         if position >= total:
             raise _closing_floor_error(cap)
 
-        # Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013), floored onto a
-        # boundary, and never onto `position` itself - a fragment carrying nothing leaves the loop no
-        # way forward, so a first unit wider than the budget is taken whole and cut back below.
+        # Otherwise a middle fragment: the slice is sized to leave room for the envelope
+        # (WSM-FRG-013) and floored onto a boundary. A slice is never empty: when the first unit is
+        # wider than the budget it is taken whole, and the check below shrinks it if needed.
         end = _floor_boundary(data, min(position + budget, total), text=text)
         if end == position:
             end = _next_boundary(data, position, text=text)
         count = end - position
         candidate = _fragment_frame(frame, _chunk(data, position, end, text=text), first=emitted == 0, last=False)
 
-        # ...then verify, and re-split if the reservation guessed low (WSM-FRG-014). The reservation
-        # is a per-codec hint; this is the guarantee.
+        # Measure the encoded fragment and re-split if it exceeds the cap (WSM-FRG-014).
         if encoded_length(codec.encode(candidate)) > cap:
             count = _largest_fitting_count(
                 frame, data, position, count, text=text, first=emitted == 0, cap=cap, codec=codec
@@ -281,14 +268,14 @@ class Assembler:
     def byte_length(self) -> int:
         """Bytes accumulated so far.
 
-        `max_payload_bytes` is enforced against this **as fragments arrive** rather than after
-        reassembly (WSM-FRG-032): a receiver that assembles a payload in order to measure it has
-        already spent what the limit was protecting.
+        The peer checks `max_payload_bytes` against this as fragments arrive, before reassembly
+        (WSM-FRG-032).
         """
         return self._bytes
 
     def reset(self) -> None:
-        """Drop the partial buffer. Called when the stream is reset, releasing the bytes with it."""
+        """Drop the partial buffer and its byte count."""
+
         self._parts.clear()
         self._bytes = 0
 

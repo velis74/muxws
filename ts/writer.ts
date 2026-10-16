@@ -1,18 +1,16 @@
 /**
  * The send path: per-stream queues and a round-robin writer (§4.2).
  *
- * A line-for-line mirror of `muxws/writer.py`. This module is the whole of WSM-FRG-017, WSM-FRG-018
- * and WSM-FRG-019, and it is one object on purpose. The three rules are really one requirement seen
- * from three sides:
+ * Mirrors `muxws/writer.py` line for line. This module implements WSM-FRG-017, WSM-FRG-018 and
+ * WSM-FRG-019 together:
  *
- *   a stream holds at most **one** unsent fragment (WSM-FRG-018),
- *   fragments of one payload stay contiguous **on their own stream** (WSM-FRG-017),
- *   and the next frame to go out is chosen by **round-robin across streams** (WSM-FRG-019).
+ *   a stream holds at most one unsent fragment (WSM-FRG-018),
+ *   fragments of one payload are contiguous on their own stream (WSM-FRG-017),
+ *   the next frame to send is chosen round-robin across streams (WSM-FRG-019).
  *
- * Together they are what stops a 1 MB export adding a full second of latency to a 200-byte progress
- * update on another stream (WSM-INV-004). A single FIFO of frames anywhere in this path breaks all
- * three at once: the ordering decision is then made at enqueue time, and interleaving stops being
- * possible no matter what the loop does afterwards.
+ * As a result, a small frame on one stream is not delayed behind all fragments of a large payload on
+ * another stream (WSM-INV-004); it waits for at most one fragment per other active stream. A single
+ * FIFO of frames in this path would fix the order at enqueue time and prevent interleaving.
  */
 
 import type { Codec } from './codec';
@@ -20,24 +18,22 @@ import { MAX_FRAME_BYTES, iterFragments } from './fragment';
 import type { Frame } from './frames';
 
 /**
- * Connection-level frames - `ping`, `pong`, `goaway` - have no stream of their own. They get one lane
- * keyed here, so they take their turn in the rotation rather than jumping it or waiting on it.
+ * The lane for connection-level frames (`ping`, `pong`, `goaway`), which have no stream. It takes
+ * turns in the rotation like a stream lane.
  */
 export const CONNECTION_LANE = 0;
 
 /**
  * A frame on one lane could not be encoded.
  *
- * Named rather than allowed to propagate: the encode happens inside the writer, so a codec that
- * refuses a payload - an `ArrayBuffer` under JSON, say - would otherwise take the write loop down
- * with it, and a peer whose writer is dead while it still reports itself open is the worst possible
- * state. The lane is carried so the caller can fail exactly that stream and leave the connection
- * working.
+ * Encoding happens inside the writer. A codec error (for example an `ArrayBuffer` under JSON) is
+ * wrapped in this class, with the lane, so the peer fails only that stream and the write loop keeps
+ * running; an unwrapped error would stop the write loop while the peer still reports itself open.
  */
 export class LaneEncodingError extends Error {
   readonly lane: number;
 
-  /** The codec's own failure, kept whole so the peer can report it to the stream it belongs to. */
+  /** The codec's original error, which the peer reports to the affected stream. */
   readonly cause: unknown;
 
   constructor(lane: number, cause: unknown) {
@@ -53,10 +49,10 @@ function describeCause(cause: unknown): string {
 }
 
 /**
- * An `asyncio.Event` in the two lines TypeScript needs for it.
+ * The TypeScript equivalent of `asyncio.Event`.
  *
- * Latching, exactly as Python's is: `set()` stays set until `clear()`, so an `enqueue` that lands
- * between two turns of the write loop cannot be missed.
+ * Latching, as in Python: after `set()`, `wait()` resolves immediately until `clear()`, so an
+ * `enqueue` between two iterations of the write loop is not missed.
  */
 class Gate {
   private signalled = false;
@@ -85,17 +81,17 @@ class Gate {
 }
 
 /**
- * One stream's outbound work: whole frames waiting, and **at most one** prepared fragment.
+ * One stream's outbound frames: whole frames waiting, and at most one prepared fragment.
  *
- * The per-stream order is a queue and has to be - fragments of one payload are contiguous on their
- * stream (WSM-FRG-017). What must never be a queue is the choice *between* streams.
+ * Frames within a stream are sent in FIFO order, so fragments of one payload are contiguous on their
+ * stream (WSM-FRG-017). The choice between streams is made by `Writer`, round-robin.
  */
 export class StreamQueue {
   readonly streamId: number;
 
   private waiting: Frame[] = [];
 
-  /** The one fragment already sliced and not yet handed to the socket. WSM-FRG-018 in a field. */
+  /** The single fragment already sliced and not yet passed to the socket (WSM-FRG-018). */
   private prepared: Frame | null = null;
 
   /** The lazy remainder of the payload in flight, if this stream is mid-fragmentation. */
@@ -105,7 +101,7 @@ export class StreamQueue {
     this.streamId = streamId;
   }
 
-  /** How many frames are queued but unsent. Never more than one **prepared** (WSM-FRG-018). */
+  /** The number of queued, unsent frames, of which at most one is prepared (WSM-FRG-018). */
   get depth(): number {
     return this.waiting.length + (this.prepared === null ? 0 : 1);
   }
@@ -114,7 +110,7 @@ export class StreamQueue {
     return this.prepared !== null || this.waiting.length > 0 || this.fragments !== null;
   }
 
-  /** Instrumentation for the rule: this must never exceed 1. */
+  /** 0 or 1: whether a prepared fragment is held (WSM-FRG-018). Read by tests. */
   get preparedDepth(): number {
     return this.prepared === null ? 0 : 1;
   }
@@ -124,11 +120,10 @@ export class StreamQueue {
   }
 
   /**
-   * Slice the next fragment - and only the next one.
+   * Slice the next fragment only. No-op while a prepared fragment is held.
    *
-   * Called *after* the previous fragment has reached the socket, never before. Slicing ahead is the
-   * bug WSM-FRG-018 forbids: it is not wrong on the wire, it is wrong in the queue, because it
-   * decides an order the writer has not been asked to commit to yet.
+   * Called after the previous fragment has been passed to the socket. Slicing further fragments
+   * ahead would violate WSM-FRG-018 (at most one unsent fragment per stream).
    */
   prepare(cap: number, codec: Codec): void {
     if (this.prepared !== null) return;
@@ -149,7 +144,7 @@ export class StreamQueue {
     this.prepared = started.done === true ? null : started.value;
   }
 
-  /** Hand over the prepared fragment. The next one is not sliced until `prepare` is called. */
+  /** Return and clear the prepared fragment. The next one is sliced by the next `prepare` call. */
   take(): Frame | null {
     const frame = this.prepared;
     this.prepared = null;
@@ -163,7 +158,7 @@ export class StreamQueue {
   }
 }
 
-/** Chooses the next frame across streams by round-robin, and never by arrival order. */
+/** Chooses the next frame across streams round-robin, not by arrival order. */
 export class Writer {
   private readonly codec: Codec;
 
@@ -172,9 +167,8 @@ export class Writer {
   private readonly queues = new Map<number, StreamQueue>();
 
   /**
-   * Where the rotation resumes. Lane ids taken from the front and pushed to the back, never an index
-   * into a list: streams come and go, and an index would silently start favouring whoever happened
-   * to land in the vacated slot.
+   * The rotation order: lane ids are taken from the front and pushed to the back. A position index
+   * into a list would skip or repeat lanes when lanes are added or removed.
    */
   private readonly order: number[] = [];
 
@@ -204,7 +198,7 @@ export class Writer {
     return this.queues.get(streamId)?.preparedDepth ?? 0;
   }
 
-  /** Synchronous by contract: `open()` must not suspend between allocating and enqueuing. */
+  /** Synchronous, so `open()` does not suspend between allocating a stream id and enqueuing. */
   enqueue(frame: Frame): void {
     const lane = frame.stream ?? CONNECTION_LANE;
     let queue = this.queues.get(lane);
@@ -220,8 +214,7 @@ export class Writer {
   /**
    * The next frame to put on the wire, waiting if there is nothing to send.
    *
-   * Resolves `null` when `stop()` retired the writer while we were waiting - the caller checks for
-   * that rather than being handed a frame that no longer means anything.
+   * Resolves `null` once `stop()` has been called, including while waiting.
    */
   async nextFrame(): Promise<Frame | null> {
     for (;;) {
@@ -237,10 +230,10 @@ export class Writer {
   /**
    * One full turn of the rotation, at most.
    *
-   * Every lane gets asked once before any lane is asked twice. That is the entire mechanism: a
-   * stream mid-way through a megabyte holds the wire for exactly one fragment at a time.
+   * Every lane is asked once before any lane is asked twice, so a stream sending a large payload
+   * sends one fragment per turn.
    *
-   * @internal - the peer drives the writer through `nextFrame`; only the tests turn it by hand.
+   * @internal - the peer uses `nextFrame`.
    */
   private rotate(): Frame | null {
     const turns = this.order.length;
@@ -256,7 +249,7 @@ export class Writer {
     return null;
   }
 
-  /** Ask one lane for its next frame, converting a codec refusal into a lane-scoped failure. */
+  /** Ask one lane for its next frame; a codec error discards the lane and throws `LaneEncodingError`. */
   private turnOne(lane: number, queue: StreamQueue): Frame | null {
     try {
       queue.prepare(this.cap, this.codec);
@@ -273,7 +266,7 @@ export class Writer {
     return null;
   }
 
-  /** Forget a lane with nothing left. Nothing is retained per closed stream (WSM-STM-001). */
+  /** Remove an empty stream lane. No state is retained per closed stream (WSM-STM-001). */
   private retire(lane: number): void {
     if (lane === CONNECTION_LANE) return;
     this.queues.delete(lane);
@@ -281,7 +274,7 @@ export class Writer {
     if (at >= 0) this.order.splice(at, 1);
   }
 
-  /** Slice that stream's next fragment, now that its previous one has reached the socket. */
+  /** Slice the stream's next fragment after its previous one has been passed to the socket. */
   advance(streamId: number | null | undefined): void {
     const queue = this.queues.get(streamId ?? CONNECTION_LANE);
     if (queue === undefined) return;
@@ -289,7 +282,7 @@ export class Writer {
     if (queue.hasWork) this.wake.set();
   }
 
-  /** Drop one stream's queued work - it was reset, and none of it means anything now. */
+  /** Drop all queued frames of one stream. Called when the stream is reset. */
   discard(streamId: number): void {
     const queue = this.queues.get(streamId);
     if (queue === undefined) return;
@@ -299,13 +292,13 @@ export class Writer {
     if (at >= 0) this.order.splice(at, 1);
   }
 
-  /** Retire the writer. `nextFrame` resolves `null` from here on, once and for good. */
+  /** Stop the writer. Every subsequent and pending `nextFrame` resolves `null`. */
   stop(): void {
     this.stopped = true;
     this.wake.set();
   }
 
-  /** Socket death: every lane is dropped and nothing is held for a next socket (WSM-RCN-042). */
+  /** Drop every lane on socket loss; nothing is kept for a later socket (WSM-RCN-042). */
   discardAll(): void {
     this.queues.forEach((queue) => {
       queue.discard();

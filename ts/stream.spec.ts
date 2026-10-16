@@ -1,9 +1,9 @@
 /**
  * `Stream`: the state table, the awaitable handle, cancellation and the send-after-close rules.
  *
- * The TypeScript mirror of `muxws/stream_test.py`. Where the two ports genuinely differ - what a
- * consumer walking away can be observed to do, `closed` being a promise, `signal` standing in for
- * Python's task cancellation - the difference is asserted here rather than glossed over.
+ * Counterpart of `muxws/stream_test.py`. Where the two ports differ - what can be observed when a consumer stops
+ * reading, `closed` being a promise, `signal` in place of Python's task cancellation - the difference is asserted
+ * here.
  */
 
 import { JsonCodec } from './codec';
@@ -142,15 +142,13 @@ describe('the state table', () => {
     const [state, event] = cell.split('|');
 
     it(`${state} + ${event} -> ${outcome}`, async () => {
-      // An ILL-C cell drives the peer into a connection-level protocol error deliberately, and a
-      // peer that meets one is **required** to log it (§12) - so the line on the console is the
-      // implementation working, not noise from a broken test. Python's twin is quiet only because
-      // pytest captures `logging`; the TypeScript logger is a `console` shim, since the browser entry
+      // An ILL-C cell drives the peer into a connection-level protocol error, and a peer that receives one is
+      // **required** to log it (§12), so the console line is expected behaviour. The Python counterpart is quiet
+      // because pytest captures `logging`; the TypeScript logger is a `console` shim, because the browser entry
       // point may not depend on a logging library (WSM-PKG-003), and vitest prints what it writes.
       //
-      // Silenced for these seven cells and nowhere wider. A global filter would also hide a log from
-      // a test that never asked for one, and that log is a signal: it is how an accidental
-      // connection-level failure announces itself in a suite where every other test is quiet.
+      // Silenced for these seven cells only. A global filter would also hide a log from a test that does not expect
+      // one, and such a log indicates an unexpected connection-level failure.
       const level = logger.level;
       if (outcome === 'ILL-C') logger.level = 'silent';
       const pair = new Pair();
@@ -175,10 +173,9 @@ describe('the state table', () => {
 /**
  * Put a dialer-side stream into `state`, using only the public API.
  *
- * The return value is BOXED, and has to be. `await` unwraps thenables recursively, and `Stream`
- * implements `PromiseLike` (WSM-API-002/015) - so `await somePromiseOfAStream` does not hand back
- * the stream, it awaits the stream and hands back its first payload, or throws the reset that
- * closed it. A `Stream` can never be the resolution value of a promise anywhere. See GAPS.md.
+ * The return value is BOXED. `await` unwraps thenables recursively, and `Stream` implements `PromiseLike`
+ * (WSM-API-002/015), so `await somePromiseOfAStream` does not return the stream: it awaits the stream and returns
+ * its first payload, or throws the reset that closed it. A `Stream` cannot be the resolution value of a promise.
  */
 async function driveTo(pair: Pair, state: string): Promise<{ stream: Stream }> {
   const stream = pair.dialer.open({ n: 1 }, { end: state === 'half_closed_local' });
@@ -218,10 +215,9 @@ async function assertIdleCell(pair: Pair, event: string, outcome: string): Promi
   }
 
   if (outcome === 'n/r') {
-    // `idle` exists only inside the indivisible allocate-and-enqueue step (WSM-SID-006), so the cell
-    // is unreachable exactly when no stream the public API can hand out is ever in it. `open()`
-    // returning a Stream rather than a Promise is what makes that true: there is no suspension point
-    // at which a caller could be given a stream whose frame has not been enqueued.
+    // `idle` exists only inside the indivisible allocate-and-enqueue step (WSM-SID-006), so the cell is unreachable
+    // because no stream the public API returns is ever in it. `open()` returns a Stream rather than a Promise, so
+    // there is no suspension point at which a caller could receive a stream whose frame has not been enqueued.
     const handed: Stream[] = [];
     pair.acceptor.onStream(capture(handed));
 
@@ -261,8 +257,8 @@ async function assertIdleCell(pair: Pair, event: string, outcome: string): Promi
 
 async function assertCell(pair: Pair, stream: Stream, event: string, outcome: string): Promise<void> {
   if (event === 'send_open') {
-    // `open` is a peer-level call; a stream never re-opens. What the RAISE column is really about is
-    // the id never being handed out twice, which the allocator guarantees.
+    // `open` is a peer-level call; a stream never re-opens. The RAISE column covers the requirement that an id is
+    // never allocated twice, which the allocator guarantees.
     expect(pair.dialer.open({ n: 2 }).id).not.toBe(stream.id);
     return;
   }
@@ -349,8 +345,8 @@ describe('the awaitable handle', () => {
       const first = await stream;
       const second = await stream;
       expect(first).toEqual({ answer: 42 });
-      // Identity, not equality: an implementation that re-read the queue would build an equal object
-      // and pass an equality check while having consumed a payload that is not there twice.
+      // Identity, not equality: an implementation that re-read the queue would build an equal object and pass an
+      // equality check although no second payload exists.
       expect(second).toBe(first);
       expect(await stream.result()).toBe(first);
     } finally {
@@ -400,8 +396,8 @@ describe('the awaitable handle', () => {
     try {
       const stream = pair.dialer.open({ q: 1 });
       await pair.settle();
-      // The answer arrived before anyone asked. Leaving the promise pending here is the spinner that
-      // never stops which WSM-INV-011 names.
+      // The answer arrived before the await. A promise left pending here is the indefinite wait WSM-INV-011
+      // forbids.
       await expect(stream.result()).rejects.toThrow(ProtocolError);
     } finally {
       await pair.stop();
@@ -493,8 +489,8 @@ describe('closed and signal', () => {
 
         await close(pair, stream);
 
-        // `closed` resolves and never rejects: a stream that closed by being reset still closed, and
-        // the reset reaches the awaits and the iterator instead.
+        // `closed` resolves and never rejects: a stream closed by a reset is still closed, and the reset is
+        // delivered to the awaits and the iterator.
         await expect(stream.closed, name).resolves.toBeUndefined();
         expect(stream.signal.aborted, name).toBe(true);
       } finally {
@@ -516,7 +512,7 @@ describe('send after close', () => {
       expect(await ended).toEqual({ ok: true });
       await pair.settle();
 
-      // A last send racing an orderly end is an expected outcome, not a failure and not a caller bug.
+      // A last send racing an orderly end is an expected outcome, not a failure and not a caller error.
       await expect(ended.send({ late: true })).rejects.toThrow(StreamClosed);
       await ended.send({ late: true }).catch((error: unknown) => {
         expect(error).not.toBeInstanceOf(StreamReset);
@@ -549,7 +545,7 @@ describe('send after close', () => {
         await stream.send({ late: true }).catch((error: unknown) => seen.push(error as StreamReset));
       }
       expect(seen).toHaveLength(5);
-      // Distinct objects: re-throwing one instance appends a frame to its stack on every raise.
+      // Distinct objects: re-throwing one instance would append a frame to its stack on every throw.
       expect(new Set(seen).size).toBe(5);
       seen.forEach((error) => expect(error.code).toBe(ResetCode.CANCELLED));
     } finally {
@@ -750,15 +746,14 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
       const [answering] = answered;
 
       await answering.sendHeaders({ 'content-type': 'text/csv' });
-      // The chance is spent by the *frame*, not by the argument: a second set raises whether it
-      // rides `sendHeaders`, `send` or `end`, and a port that only guarded the first would let two
-      // sets onto a wire whose rule is one.
+      // The single allowance is used up by the *frame*, not by the argument: a second set raises whether it is
+      // passed to `sendHeaders`, `send` or `end`, so no path sends two sets on a wire whose rule is one.
       await expect(answering.sendHeaders({ late: true })).rejects.toBeInstanceOf(ProtocolError);
       await expect(answering.send({ row: 1 }, { headers: { late: true } })).rejects.toBeInstanceOf(ProtocolError);
       await expect(answering.end({ headers: { late: true } })).rejects.toBeInstanceOf(ProtocolError);
 
-      // Still sendable without them, which is the half a "raises on the second call" check misses:
-      // refusing the headers must not have refused the frame.
+      // Sending without headers still works; a check that only asserts "raises on the second call" does not cover
+      // this. Refusing the headers must not refuse the frame.
       await answering.send({ row: 1 });
       await pair.settle();
       const data = pair.framesOfType('acceptor', 'data');
@@ -775,8 +770,8 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     pair.acceptor.onStream(hold);
     pair.start();
     try {
-      // The opener's first frame was the `open`, so its one chance is already spent - and the error
-      // has to name `open()` rather than repeat the rule, since the caller has somewhere to put them.
+      // The opener's first frame was the `open`, so its allowance is already used, and the error names `open()`
+      // rather than repeating the rule, because that is where the caller can put them.
       const stream = pair.dialer.open({ q: 1 });
       await expect(stream.sendHeaders({ trace: 'abc' })).rejects.toThrow(/open\(\)/);
     } finally {
@@ -793,9 +788,9 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     pair.start();
     try {
       const stream = pair.dialer.open({ q: 'export' }, { end: true });
-      // The ordering is the whole feature: a consumer that learns the content type only after the
-      // body has started has learned it too late. `replyHeadersArrived` settles on the frame that carried
-      // them, which arrived before the one carrying the payload.
+      // The feature is the ordering: a consumer needs the content type before the body starts.
+      // `replyHeadersArrived` settles on the frame that carried the headers, which arrived before the one carrying
+      // the payload.
       await stream.replyHeadersArrived;
       expect(stream.replyHeaders).toEqual({ 'content-type': 'text/csv' });
       expect(await stream).toEqual({ row: 1 });
@@ -815,7 +810,7 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
       expect(await stream).toEqual({ rows: 2 });
       await stream.replyHeadersArrived;
       expect(stream.replyHeaders).toEqual({ 'content-type': 'application/json' });
-      // One frame, not two: `reply` carried them rather than announcing them separately.
+      // One frame, not two: `reply` carried the headers instead of sending them separately.
       expect(pair.framesOfType('acceptor', 'data')).toHaveLength(1);
     } finally {
       await pair.stop();
@@ -831,8 +826,8 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
       const other = pair.dialer.open({ q: 2 });
       await pair.settle();
 
-      // Injected rather than sent: the local handle refuses to build this frame (WSM-API-024), which
-      // is exactly why the receiver's half needs a witness of its own.
+      // Injected rather than sent: the local handle refuses to build this frame (WSM-API-024), so the receiver's
+      // handling needs its own test.
       pair.inject('dialer', { type: 'data', stream: stream.id, payload: { row: 1 } });
       pair.inject('dialer', { type: 'data', stream: stream.id, headers: { late: true }, payload: { row: 2 } });
       await pair.settle();
@@ -856,9 +851,9 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     });
     pair.start();
     try {
-      // A remote that resets before answering sends no headers and never will. WSM-API-025 makes
-      // that settle rather than hang: this await is the assertion, and a port that only settled on a
-      // first frame would fail it by never returning.
+      // A remote that resets before answering sends no headers. WSM-API-025 requires `replyHeadersArrived` to
+      // settle rather than hang in that case: this await is the assertion, and a port that settled only on a first
+      // frame would never return from it.
       const refused = pair.dialer.open({ q: 1 });
       void Promise.resolve(refused).catch(() => undefined);
       await refused.replyHeadersArrived;

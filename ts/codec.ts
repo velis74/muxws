@@ -1,9 +1,9 @@
 /**
- * The codec seam: the port, the explicit registry, and `JsonCodec` (§2.1, WSM-CDC-001..016).
+ * The codec interface, the explicit codec registry, and `JsonCodec` (§2.1, WSM-CDC-001..016).
  *
- * This module does **not** register anything at import time (WSM-CDC-014). `ts/index.ts` registers
- * JSON, because the library is required to ship it registered (WSM-CDC-004) while a side-effecting
- * import can never be tree-shaken out.
+ * This module registers nothing at import time (WSM-CDC-014), so importing it has no side effects
+ * and it can be tree-shaken. `ts/index.ts` registers JSON, which the library ships registered
+ * (WSM-CDC-004).
  */
 
 import { CodecNotRegistered, ProtocolError } from './errors';
@@ -12,14 +12,14 @@ import { type Frame, fromMapping, toMapping } from './frames';
 /**
  * Turns a logical frame into a WebSocket message and back.
  *
- * `binary` is **declared, not inferred** (WSM-CDC-002): the peer reads it to choose the socket's
- * text or binary send method and the inbound message type it expects. A peer never sniffs a message
- * to decide which branch to take.
+ * `binary` is declared by the codec (WSM-CDC-002). The peer reads it to choose between the socket's
+ * text and binary send methods and to know which inbound message type to expect; it does not
+ * inspect message contents to decide.
  *
- * `encodePayload` / `decodePayload` are the payload-level half of the port. WSM-CDC-001 names only
- * the frame-level pair, but fragmentation is defined in terms of the encoded form of a *logical
- * payload* (WSM-FRG-011) which the receiver hands back to the codec once reassembled (WSM-FRG-030),
- * and neither operation can be expressed through `encode`/`decode` alone. See GAPS.md.
+ * `encodePayload` / `decodePayload` encode and decode a payload on its own. WSM-CDC-001 names only
+ * `encode` / `decode`, but fragmentation splits the encoded form of a logical payload (WSM-FRG-011)
+ * and the receiver decodes the reassembled bytes (WSM-FRG-030); `encode` / `decode` operate on whole
+ * frames and cannot do either.
  */
 export interface Codec {
   readonly name: string;
@@ -35,9 +35,8 @@ const REGISTRY = new Map<string, Codec>();
 /**
  * Register `codec` under `name`.
  *
- * Registration is explicit and eager (WSM-CDC-013): there is no dynamic import, no lazy
- * auto-registration, no entry-point scan, and no probing of whether a module happens to be
- * installed.
+ * Registration is explicit and eager (WSM-CDC-013). The library performs no dynamic imports, lazy
+ * auto-registration, entry-point scans or checks for installed modules.
  */
 export function registerCodec(name: string, codec: Codec): void {
   REGISTRY.set(name, codec);
@@ -47,8 +46,7 @@ export function registerCodec(name: string, codec: Codec): void {
  * Return the codec registered under `name`.
  *
  * Throws `CodecNotRegistered` naming the environment variable, the value found and the registered
- * set (WSM-CDC-016). There is no fallback to JSON, ever - a deployment that believes it is running
- * msgpack and silently is not may never find out (WSM-INV-015).
+ * set (WSM-CDC-016). It never falls back to JSON (WSM-INV-015).
  */
 export function getCodec(name: string): Codec {
   const codec = REGISTRY.get(name);
@@ -69,17 +67,18 @@ export function registeredCodecs(): string[] {
   return [...REGISTRY.keys()].sort();
 }
 
-/** Test seam: forget every registration. Never called by the library itself. */
+/** Remove every registration. For tests; the library never calls it. */
 export function clearCodecs(): void {
   REGISTRY.clear();
 }
 
 /**
- * Refuse rather than invent an encoding.
+ * Throw `TypeError` for bytes, non-finite numbers, bigints, functions, symbols, `Map`, `Set` and
+ * circular structures anywhere in `value`.
  *
- * Bytes are a first-class payload type under a binary codec and are *not* one under JSON, and muxws
- * MUST NOT base64-encode them on the application's behalf (WSM-CDC-008). `JSON.stringify` would
- * quietly turn an `ArrayBuffer` into `{}`, which is worse than base64 - it loses the data in silence.
+ * Bytes are a payload type under a binary codec but not under JSON, and muxws does not base64-encode
+ * them (WSM-CDC-008). Without this check `JSON.stringify` would encode an `ArrayBuffer` as `{}` and
+ * drop its contents.
  */
 function assertJsonEncodable(value: unknown, seen: Set<object> = new Set()): void {
   if (value === null || value === undefined) return;
@@ -118,14 +117,14 @@ function assertJsonEncodable(value: unknown, seen: Set<object> = new Set()): voi
 /**
  * `Codec` implementation over `JSON`.
  *
- * `JSON.stringify` emits no spaces and does not escape non-ASCII, which is exactly what Python's
- * `json.dumps(..., separators=(",", ":"), ensure_ascii=False)` emits - for strings, containers,
- * booleans, null and integers up to 2**53. The two do **not** agree on floats or on larger
- * integers: JavaScript writes `1`, `0`, `10000000000000000`, `1e-7` where Python writes `1.0`,
- * `-0.0`, `1e+16`, `1e-07`. Fragment boundaries are cut over this encoded form, so a payload
- * carrying a float is cut differently by the two ports - see GAPS.md. It costs nothing on the wire
- * (the sender chooses the cuts and the receiver only concatenates), but it does bound what the
- * shared boundary corpus may contain.
+ * `JSON.stringify` emits no spaces and does not escape non-ASCII. For strings, containers, booleans,
+ * null and integers up to 2**53 this is identical to Python's
+ * `json.dumps(..., separators=(",", ":"), ensure_ascii=False)`. Floats and larger integers differ:
+ * JavaScript writes `1`, `0`, `10000000000000000`, `1e-7` where Python writes `1.0`, `-0.0`,
+ * `1e+16`, `1e-07`. Fragment boundaries are computed over this encoded form, so the two
+ * implementations split a payload containing such numbers at different offsets. Interoperability is
+ * unaffected (the sender chooses the boundaries and the receiver concatenates), but the shared
+ * boundary corpus cannot contain such payloads.
  */
 export class JsonCodec implements Codec {
   readonly name = 'json';

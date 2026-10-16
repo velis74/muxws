@@ -1,164 +1,154 @@
 # Rationale
 
-muxws exists because a WebSocket gives you exactly one thing: an ordered sequence of messages. Every
-application that needs more than one conversation on that sequence has to build the same layer, and
-that layer is larger than it looks the first time you start it.
+A WebSocket provides one ordered sequence of messages. An application that runs more than one
+conversation over that sequence needs a multiplexing layer: correlation, stream termination, error
+reporting, cancellation and fragmentation. muxws is that layer, implemented once in Python and once in
+TypeScript against a shared conformance corpus.
 
 ## One socket, many streams
 
 A **stream** in muxws is an independently addressed, independently cancellable, bidirectional
-exchange. Any number of them share one socket. Each carries its own payloads, its own optional
-headers, its own end, and its own failure.
+exchange. Any number of streams share one socket. Each stream has its own payloads, its own optional
+headers, its own end and its own failure.
 
-There are two other ways to get concurrency, and both cost more than they appear to.
+The two alternatives are one socket per conversation and a custom message envelope on one socket.
 
 ### Why not N sockets
 
-Opening a socket per conversation moves the problem into the transport, where you have less control
-over it, not more.
+With one socket per conversation, concurrency is handled by the transport:
 
-- Each socket is a TCP connection and a TLS handshake. A browser also caps how many it will hold
-  open to one host, and that cap is not yours to raise.
-- Order between sockets is undefined. Two messages that must be applied in sequence cannot be, once
-  they are on different connections.
-- Cancelling one conversation means closing its socket. If you multiplexed even two things onto it
-  to save connections, you have just thrown away the other one.
-- Reconnect is per socket. Backoff, jitter, and re-authentication get written N times and drift.
-- On the server, each socket is a separate authenticated session to accept, track and tear down.
+- Each socket is a separate TCP connection with its own TLS handshake. Browsers limit the number of
+  concurrent connections to one host, and the application cannot change that limit.
+- Message order between sockets is undefined. Two messages that must be applied in sequence cannot be
+  ordered when they travel on different connections.
+- Cancelling a conversation requires closing its socket. If the socket carries more than one
+  conversation, closing it ends all of them.
+- Reconnect logic (backoff, jitter, re-authentication) runs per socket and is implemented N times.
+- The server accepts, tracks and tears down a separate authenticated session per socket.
 
-With muxws, cancelling a stream sends one frame and closes one exchange. The socket, and every other
-stream on it, is untouched.
+In muxws, cancelling a stream sends one frame and closes one stream. The socket and the other streams
+on it are not affected.
 
-### Why not your own envelope
+### Why not a custom envelope
 
-The other route is one socket and a message envelope of your own: a `{ id, type, body }` wrapper and
-a map of pending callbacks. This works, and then it grows.
+The other approach is one socket and an application-defined envelope, such as a `{ id, type, body }`
+wrapper and a map of pending callbacks. Supporting the usual requirements adds these features to it:
 
-You add a correlation id, because replies arrive out of order. Then a "this is the last one" flag,
-because some replies are a sequence rather than a value. Then a distinct error shape, because an
-error is not a reply. Then cancellation, because the user navigated away and the export is still
-running. Then you notice that a 4 MB message blocks every other message on the socket - a WebSocket
-has a single global message order, and a large message occupies it from first byte to last - so you
-add fragmentation. Then you discover fragmentation alone does not help, because a naive sender emits
-all the fragments of one payload before looking at anything else, so you add a round-robin between
-the fragmenting messages.
+- a correlation id, because replies arrive out of order;
+- a last-message flag, because some replies are a sequence of values;
+- a separate error shape, because an error is not a reply;
+- cancellation, for work whose result is no longer needed;
+- fragmentation, because a WebSocket has one global message order and a 4 MB message blocks every
+  other message on the socket until its last byte is sent;
+- round-robin scheduling between fragmenting messages, because a sender that emits all fragments of
+  one payload before any other message still blocks the other messages.
 
-That list is muxws. Every item on it is reachable from "I just need to tell replies apart", and none
-of them is optional once you are far enough in.
+muxws implements all of these. Each is tested against a shared cross-language corpus:
 
-What you get instead, already written and already tested against a shared cross-language corpus:
-
-- **Stream ids you never allocate.** The dialer takes odd ids, the acceptor even ones, so both ends
-  can open at any moment without colliding and without asking. No API anywhere takes an id.
-- **`end` as a flag on a payload**, not a separate message. A one-payload reply is one frame.
-- **Reset codes with a defined reaction.** "Not accepted, definitively not processed - retry
-  elsewhere" is a different answer from "the handler raised", and the caller can act on the
-  difference. See [Errors](/guide/errors).
-- **Per-stream cancellation** that closes locally at once and tells the remote to stop working.
-- **Automatic fragmentation with a round-robin writer**, so a 1 MB export does not stall a 200-byte
+- **Stream ids are allocated by the library.** The dialer uses odd ids and the acceptor even ids, so
+  both ends can open streams at any time without collisions or coordination. No API takes an id.
+- **`end` is a flag on a payload frame**, not a separate message. A one-payload reply is one frame.
+- **Reset codes define the receiver's reaction.** "Not accepted, definitively not processed - retry
+  elsewhere" is a different code from "the handler raised", and the caller can handle them
+  differently. See [Errors](/guide/errors).
+- **Per-stream cancellation** closes the stream locally immediately and tells the remote to stop
+  processing it.
+- **Automatic fragmentation with a round-robin writer**: a 1 MB export does not delay a 200-byte
   progress update on another stream. See [Sizes & fragmentation](/guide/sizes-and-fragmentation).
-- **A reconnect helper** with jittered backoff, an idle-only heartbeat, and an opening payload
-  replayed verbatim on every connection. See [Reconnect](/guide/reconnect).
+- **A reconnect helper** with jittered backoff, a heartbeat that runs only while the connection is
+  idle, and an opening payload replayed verbatim on every connection. See [Reconnect](/guide/reconnect).
 
-## Where the model comes from
+## Relation to HTTP/2 and HTTP/3
 
-muxws did not invent this. It is the stream model **HTTP/2 and HTTP/3 already settled on**, moved
-onto a WebSocket - and the reason it is worth copying is that every problem in the section above was
-solved there first, in public, under load, by people who had to live with the answer.
+muxws uses the stream model of **HTTP/2 and HTTP/3** on top of a WebSocket. The problems listed in the
+previous section are solved in those protocols, and the solutions are widely deployed.
 
-What is deliberately mimicked:
+muxws copies these properties:
 
 - many independent streams multiplexed over one connection;
-- either end able to open one, so a server push is not a special case;
+- either end can open a stream, so server push needs no separate mechanism;
 - headers, then a body, then optional trailers;
 - unary request/response and streaming responses built on the same primitive;
-- per-stream cancellation that leaves every other stream alone;
-- connection-level graceful shutdown with a `goaway` naming the last stream it processed.
+- per-stream cancellation that does not affect other streams;
+- connection-level graceful shutdown with a `goaway` that names the last stream it processed.
 
-If you have written against gRPC or an HTTP/2 client, `open()`, `end`, trailers and `goaway` will
-already read the way you expect. That is on purpose.
+`open()`, `end`, trailers and `goaway` behave like their counterparts in gRPC and HTTP/2 clients.
 
-### What is not mimicked, and cannot be
+### What is not copied
 
-This is a claim about **semantics**, not about transport, and the difference is worth stating plainly
-rather than leaving you to discover it.
+muxws copies the semantics of HTTP/2 and HTTP/3, not their transport. A WebSocket runs over one TCP
+connection, which has these consequences:
 
-A WebSocket runs over one TCP connection. Therefore:
+- **No independent per-stream loss recovery.** In QUIC, a lost packet stalls only the stream it
+  belonged to. Over TCP, one lost segment stalls *every* muxws stream until it is retransmitted. A
+  framing layer above TCP cannot change this.
+- **No 0-RTT, no connection migration, no per-stream congestion control.** These are QUIC transport
+  features, below the layer muxws operates at.
+- **One global message order.** A WebSocket delivers messages in send order across all streams,
+  because the connection has one send queue. The frame cap is therefore a protocol constant, not a
+  setting: it bounds how long one stream can occupy that queue.
 
-- **No independent per-stream loss recovery.** QUIC's headline feature is that a lost packet stalls
-  only the stream it belonged to. Under TCP one lost segment stalls *every* muxws stream until it is
-  retransmitted, and no framing choice above the transport can undo that.
-- **No 0-RTT, no connection migration, no per-stream congestion control.** Those live in QUIC, below
-  where muxws sits.
-- **One global message order.** A WebSocket delivers messages in the order they were sent, across all
-  streams, because there is exactly one send queue. This is why the frame cap is a constant rather
-  than something you tune: it bounds how long any one stream can hold that queue.
+muxws also has no equivalent of the HTTP/2 and HTTP/3 `SETTINGS` exchange. No limit is negotiated -
+see [Connection lifecycle](./connection-lifecycle.md).
 
-And one thing that is deliberately *not* copied even though it could have been: HTTP/2 and HTTP/3
-open with a `SETTINGS` exchange, and muxws has none at all. No limit is ever negotiated - see
-[Connection lifecycle](./connection-lifecycle.md).
+### Head-of-line blocking
 
-### The blocking that is solved, and the blocking that is not
+Two different problems are called head-of-line blocking. muxws solves the first and cannot solve the
+second.
 
-The first bullet above says what muxws does not fix and can read as though multiplexing bought you
-nothing. It bought you the half you meet daily. There are two different problems with the same name.
-
-**Application-level head-of-line blocking** is self-inflicted: you put more than one conversation on
-one channel, and a 1 MB export occupies the send queue from its first byte to its last while a
-200-byte progress update waits behind it. **This is solved.** Large payloads are fragmented, the
-frame cap is a constant so no stream can hold the queue for longer than one frame, and the writer
-rotates between streams with at most one prepared frame each - see
+**Application-level head-of-line blocking** occurs when several conversations share one channel and a
+large message occupies the send queue: a 1 MB export is sent from its first byte to its last while a
+200-byte progress update waits. **muxws solves this.** Large payloads are fragmented, the frame cap is
+a constant so no stream occupies the queue for longer than one frame, and the writer rotates between
+streams with at most one prepared frame per stream - see
 [Sizes & fragmentation](./sizes-and-fragmentation.md).
 
-**Transport-level head-of-line blocking** is inflicted by the network: one lost TCP segment stalls
-every stream until it is retransmitted. **This is not solved, and cannot be above TCP.** Loss is
-visible only to whoever owns the packets, and by the time a message reaches muxws the kernel has
-already either repaired the gap or is still holding everything behind it. QUIC fixes this by *being*
-the transport.
+**Transport-level head-of-line blocking** is caused by packet loss: one lost TCP segment stalls every
+stream until it is retransmitted. **muxws does not solve this, and no protocol above TCP can.** Only
+the layer that handles packets can see packet loss. When a message reaches muxws, the kernel has
+either already filled the gap or is still holding back all data after it. QUIC solves this problem
+because QUIC is the transport.
 
-So: muxws removes the blocking you cause yourself and leaves the blocking the network causes you.
-[Comparison to HTTP/2 and HTTP/3](./comparison.md) is the full accounting.
+[Comparison to HTTP/2 and HTTP/3](./comparison.md) covers the differences in detail.
 
-## The three things muxws is not
+## What muxws does not do
 
-**Not a router.** There is one incoming-stream handler per peer, registered with `on_stream`, and it
-is invoked as `(payload, stream)` for every stream the remote opens. muxws does not look inside the
-payload to decide anything: no path matching, no method dispatch, no handler table, no per-action
-registration. If you want dispatch, write it in your handler, where you can see your own types.
+**Routing.** A peer has one incoming-stream handler, registered with `on_stream`, and it is called as
+`(payload, stream)` for every stream the remote opens. muxws does not inspect the payload: there is no
+path matching, method dispatch, handler table or per-action registration. Dispatch is implemented in
+the application's handler.
 
 ```python
 # fragment
 @peer.on_stream
 async def handle(payload, stream):
-    # Dispatch is yours. muxws never reads this dict.
+    # The application dispatches; muxws never reads this dict.
     if payload["action"] == "list":
         await stream.reply({"items": []})
 ```
 
-**Not a serializer of domain objects.** The codec turns a frame into a WebSocket message and back;
-what your payload *means* is not muxws's business. muxws defines no vocabulary inside `payload` - no
-`kind`, no reserved key, no discriminator of any sort. A payload is whatever your codec can encode.
-See [Codecs](/guide/codecs).
+**Serialization of domain objects.** The codec converts a frame to a WebSocket message and back; it
+does not interpret the payload. muxws defines no vocabulary inside `payload`: no `kind`, no reserved
+key, no discriminator. A payload is any value the codec can encode. See [Codecs](/guide/codecs).
 
-**Not an RPC framework.** There are no service definitions, no schemas, no generated stubs, and no
-status codes: muxws never maps an exception to a numeric status of any kind. A handler that raises
-produces a reset carrying a reason and an optional structured error object, and the caller sees a
-`RemoteError` - not a 500.
+**RPC.** muxws has no service definitions, schemas, generated stubs or status codes, and never maps an
+exception to a numeric status. A handler that raises produces a reset carrying a reason and an
+optional structured error object, and the caller receives a `RemoteError`.
 
-It is also not an authentication mechanism. Authentication belongs at the WebSocket upgrade, before
-the peer exists; muxws interprets no credential anywhere, including in per-stream `headers`. See
+**Authentication.** Authentication happens at the WebSocket upgrade, before the peer exists. muxws
+does not interpret credentials anywhere, including in per-stream `headers`. See
 [Transports](/guide/transports).
 
 ## Symmetry: one `Peer` type per language
 
 There is one `Peer` class in Python and one in TypeScript, and both ends of a connection use it. The
-dialer's peer and the acceptor's peer differ in exactly two things: which parity of stream id they
-allocate, and that only a dialer can have a reconnect helper, because only a dialer can dial.
+dialer's peer and the acceptor's peer differ in two things only: the parity of the stream ids they
+allocate, and that only a dialer can have a reconnect helper.
 
-Everything else is the same object. The acceptor can call `open()`, `notify()` and `request()`
-whenever it likes, and the dialer receives those streams through *its* `on_stream` handler. Server
-push is not a second mechanism bolted on: it is a client request with the roles swapped, with the
-same correlation (a stream id) and the same cancellation story (`stream.cancel()` from either end).
+Everything else is the same. The acceptor can call `open()`, `notify()` and `request()` at any time,
+and the dialer receives those streams through its own `on_stream` handler. Server push is a client
+request with the roles swapped: the same correlation (a stream id) and the same cancellation
+(`stream.cancel()` from either end).
 
 ```python
 # fragment
@@ -177,9 +167,8 @@ peer.onStream(async (payload, stream) => {
 });
 ```
 
-A consequence worth stating plainly: a peer may open a stream on its very first frame, in either
-direction, because there is nothing either side must send first. See
-[Connection lifecycle](/guide/connection-lifecycle).
+Neither side is required to send a frame first, so a peer may open a stream with its first frame, in
+either direction. See [Connection lifecycle](/guide/connection-lifecycle).
 
 ## See also
 

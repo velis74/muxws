@@ -67,10 +67,10 @@ async def test_round_robin_selects_across_streams_not_fifo(writer: Writer):
 
 
 async def test_a_small_frame_overtakes_a_fragmented_payload(writer: Writer):
-    """WSM-INV-004, the reason all of this exists.
+    """WSM-INV-004: a small frame on one stream is not delayed by a large payload on another.
 
-    A 200-byte update on one stream must not wait for a megabyte on another. Without the rotation it
-    would go out last; with it, it goes out on the second turn.
+    A 200-byte update on one stream goes out on the second turn while a megabyte is fragmented on
+    another. Without the rotation it would go out last.
     """
     writer.enqueue(Frame("data", stream=1, payload=_big(40_000)))
     writer.enqueue(Frame("data", stream=3, payload={"progress": 42}))
@@ -101,7 +101,7 @@ async def test_every_frame_out_is_under_the_cap(writer: Writer, codec: JsonCodec
 
 
 async def test_the_writer_cuts_where_the_splitter_cuts(writer: Writer, codec: JsonCodec):
-    """One boundary computation, used two ways - so they cannot drift apart."""
+    """The writer and `split_frame` use the same boundary computation and cut in the same places."""
     source = Frame("data", stream=1, payload=_big(3000), end=True)
     writer.enqueue(source)
     assert [f.fragment for f in await _drain(writer)] == [f.fragment for f in split_frame(source, 256, codec)]
@@ -123,14 +123,14 @@ async def test_no_fifo_of_frames_exists_in_the_send_path():
     from muxws import writer as module
 
     source = inspect.getsource(module)
-    # A single deque of *frames* spanning streams is exactly what the rule forbids. The per-stream
-    # `_waiting` deque is fine and necessary - contiguity (WSM-FRG-017) requires it.
+    # The rule forbids a single deque of frames spanning streams. The per-stream `_waiting` deque is
+    # allowed; contiguity (WSM-FRG-017) requires it.
     assert "deque[Frame]" in source
     assert source.count("deque[Frame]") == 1, "there is more than one frame queue in the send path"
 
 
 async def test_discard_all_leaves_nothing_for_a_next_socket(writer: Writer):
-    """WSM-RCN-042/WSM-INV-010: connection loss calls this, and nothing may survive it."""
+    """WSM-RCN-042/WSM-INV-010: connection loss calls this, and it leaves no queued frame."""
     writer.enqueue(Frame("data", stream=1, payload=_big()))
     writer.enqueue(Frame("data", stream=3, payload={"n": 1}))
     writer._rotate()
@@ -186,18 +186,16 @@ async def test_a_stream_queue_holds_one_prepared_fragment(codec: JsonCodec):
 
 
 async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(make_pair):
-    """WSM-INV-004 on a **fast** socket, which is the only link that can test it.
+    """WSM-INV-004 on a fast socket, where the send path does not suspend on its own.
 
-    The round-robin is only worth having if another stream can get a frame into the writer while a
-    large payload is going out. Nothing in `_write_loop` is guaranteed to suspend: `next_frame()`
-    returns without awaiting when there is work, and a socket whose buffer has room - uvicorn on
-    loopback, and `MemorySocket` always - completes its send without yielding either. Without a
-    deliberate turn per frame the loop drains a whole megabyte in one uninterrupted run, no other
-    task runs, nothing else can enqueue, and the rotation has exactly one lane to choose from.
+    The round-robin requires that another stream can enqueue a frame while a large payload is being
+    sent. `next_frame()` returns without awaiting when there is work, and a socket whose buffer has
+    room (uvicorn on loopback, `MemorySocket` always) completes its send without yielding. Unless
+    `_write_loop` yields once per frame, it sends a whole megabyte without letting another task run,
+    no other stream can enqueue, and the rotation has one lane.
 
-    On a link slow enough that backpressure supplies the missing suspension the guarantee holds
-    either way, so a slow transport proves nothing here; every test transport and localhost are the
-    fastest links there are, which is what makes this the place the rule is provable.
+    On a slow link, backpressure suspends the loop and the guarantee holds without the explicit
+    yield, so the test uses a fast transport.
     """
     pair = make_pair()
     pair.acceptor.on_stream(lambda _payload, _stream: None)
@@ -211,7 +209,7 @@ async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(mak
         while ticking:
             try:
                 pair.dialer.open({"tick": 1}, end=True)
-            except Exception:  # noqa: BLE001 - the connection ending is how this task retires
+            except Exception:  # noqa: BLE001 - the task ends when the connection ends
                 return
             await asyncio.sleep(0)
 

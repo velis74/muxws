@@ -10,15 +10,13 @@
  * Conduct the corpus:         node --import tsx interop/runner.ts corpus-dial 127.0.0.1:<control-port>
  *
  * The same entry points exist in `interop/runner.py`, and `interop/drive.sh` pairs them in both
- * role assignments, so a rule one port implements differently from the other shows up as a named
- * failure rather than as a hang.
+ * role assignments, so a rule the two ports implement differently is reported as a named failure,
+ * not a hang.
  *
- * `dial` takes a URL and nothing else, which is why the Unix pairing needs no dialling mode of its
- * own: `ws+unix:///path/to.sock:/route` is the whole of the difference, and the same script that
- * runs over TCP runs over a socket file with the string changed. The one cross-language risk in
- * that URL is that the two ports must split it identically - pathname-and-search up to the
- * **first** colon is the filesystem path, the rest is the HTTP request target - and no
- * single-language test can witness an agreement between two parsers.
+ * `dial` takes only a URL, so the Unix pairing needs no separate dialling mode: the same script runs
+ * over a socket file with the URL `ws+unix:///path/to.sock:/route`. Both ports must split that URL
+ * identically - pathname and search up to the **first** colon are the filesystem path, the rest is
+ * the HTTP request target - and only a cross-language run tests that the two parsers agree.
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
@@ -29,19 +27,16 @@ import { fileURLToPath } from 'node:url';
 
 import { WebSocket, WebSocketServer } from 'ws';
 
-// Imported through the public entry points, exactly as an application would. `ts/index.ts` is what
-// registers the JSON codec (WSM-CDC-004), because a codec module must never register itself
-// (WSM-CDC-014); reaching past it into `ts/codec` gives an empty registry, which is the correct
-// behaviour. The dialer comes from `ts/node`, so the reconnect driver under test here is the one a
-// node application actually gets.
-// `offer` builds the subprotocol list and is the library's own business, so it is not exported
-// from the package root (a consumer needs `PREFIX`, not the machinery). The interop driver is
-// in-repo and reaches for the module directly.
-// `deepEqual` and not `assert.deepStrictEqual` or a hand-rolled comparison: a payload under a binary
-// codec is an `ArrayBuffer` (WSM-CDC-008), and the comparison `conformance/README.md` names for that
-// case is this one. Anything that compares two buffers by byte *length* calls buffers of equal
-// length equal whatever they contain, and the one fixture that carries bytes would then be a fixture
-// that cannot fail.
+// Imported through the public entry points, as an application imports them. `ts/index.ts` registers
+// the JSON codec (WSM-CDC-004), because a codec module must not register itself (WSM-CDC-014);
+// importing `ts/codec` directly gives an empty registry. The dialer comes from `ts/node`, so the
+// reconnect driver under test is the one a node application uses.
+// `offer` builds the subprotocol list and is internal, so it is not exported from the package root
+// (a consumer needs `PREFIX` only). The interop driver is in-repo and imports the module directly.
+// `deepEqual`, not `assert.deepStrictEqual` or a custom comparison: a payload under a binary codec
+// is an `ArrayBuffer` (WSM-CDC-008), and `conformance/README.md` names this comparison for that
+// case. A comparison by byte *length* would treat buffers of equal length as equal regardless of
+// content.
 import { deepEqual } from '../ts/frames';
 import {
   ABSENT,
@@ -73,31 +68,28 @@ const PUSH_COUNT = 3;
 /** Rows an `export` produces, the last one carrying `end` and trailers. */
 const EXPORT_ROWS = 5;
 /**
- * A pause between export rows. Deliberate, not incidental: the interleaving assertion below has to
- * be a fact about the protocol rather than about how fast one handler happened to run. Without it an
- * acceptor could enqueue all five rows before any other handler was scheduled, and the assertion
- * would pass or fail on scheduling luck.
+ * A pause between export rows. Without it an acceptor could enqueue all five rows before any other
+ * handler is scheduled, and the interleaving assertion below would depend on scheduling order.
  */
 const EXPORT_GAP_MS = 10;
 /** The cancelled-mid-flight producer's cadence. */
 const DRIP_GAP_MS = 20;
-/** Rows the `slow` stream produces; it is the stream that must survive the goaway drain. */
+/** Rows the `slow` stream produces; this stream must complete during the goaway drain. */
 const SLOW_ROWS = 3;
 const SLOW_GAP_MS = 50;
 
 /**
  * The hello replayed on every connection the reconnect scenario's dialer makes (WSM-RCN-020/027).
- * Nested, so a replay that rebuilt the payload rather than replaying the captured bytes has
- * somewhere to differ. Byte-for-byte the same value as `interop/runner.py`'s, so either language's
- * dialer produces a hello either language's acceptor sees identically.
+ * Nested, so a replay that rebuilds the payload instead of replaying the captured bytes can produce
+ * different bytes. Byte-for-byte the same value as in `interop/runner.py`, so both languages'
+ * dialers produce the same hello.
  */
 const HELLO_PAYLOAD = { who: 'interop', caps: ['a', 'b'], nested: { n: 1 } };
 const HELLO_HEADERS: Record<string, unknown> = { session: 'interop-session' };
 
 /**
- * WSM-TST-005 bounds the reconnect job's wall clock: a jittered retry has to be observable inside a
- * CI job without a 30 s wait. The jitter fraction is left at its default, because the point of the
- * scenario is that the delay is *dispersed* - pinning it would be pinning the thing under test.
+ * Short delays, so the jittered retries of WSM-TST-005 complete within a CI job without a 30 s wait.
+ * The jitter fraction keeps its default, because the scenario asserts that the delays are dispersed.
  */
 const RECONNECT = new Reconnect({ initialDelayMs: 50, maxDelayMs: 500 });
 
@@ -118,15 +110,16 @@ function emit(fields: Record<string, unknown>): void {
 }
 
 /**
- * Select and register the configured codec. The **application's** job, never the library's.
+ * Select and register the configured codec. This is the application's responsibility, not the
+ * library's.
  *
- * WSM-CDC-013 forbids the library dynamic-importing or probing for a codec; it says nothing about an
- * application choosing which codec module to import, which is exactly what a deployment does. An
- * unknown name is a loud startup failure and never a silent JSON fallback (WSM-INV-015).
+ * WSM-CDC-013 forbids the library from dynamically importing or probing for a codec; an application
+ * chooses which codec module to import. An unknown name fails at startup and never falls back to
+ * JSON (WSM-INV-015).
  *
- * `settings.codec` is assigned rather than read: `ts/conf.ts` reads `import.meta.env`, which Vite
- * replaces at build time and which does not exist under `node`. A runner that only read it would
- * silently run the msgpack job on JSON - the exact failure WSM-INV-015 names. See GAPS.md.
+ * `settings.codec` is assigned here: `ts/conf.ts` reads `import.meta.env`, which Vite replaces at
+ * build time and which does not exist under `node`. Without the assignment the msgpack job would run
+ * on JSON (WSM-INV-015).
  */
 async function configureCodec(): Promise<void> {
   const name = process.env.VITE_MUXWS_CODEC ?? process.env.MUXWS_CODEC ?? 'json';
@@ -148,8 +141,8 @@ function codec(): Codec {
 /**
  * The bytes this frame goes out as, as hex.
  *
- * Hex rather than the value itself because a binary codec produces an ArrayBuffer and JSON produces
- * text, and the byte-identity WSM-RCN-027 asks about is a question about neither one's spelling.
+ * Hex, because a binary codec produces an ArrayBuffer and JSON produces text, and WSM-RCN-027
+ * compares bytes.
  */
 function encodingOf(frame: Frame): string {
   const encoded = codec().encode(frame);
@@ -168,19 +161,18 @@ interface ConnectionState {
 /**
  * Every shape the two scenarios exercise, chosen by the opening payload.
  *
- * Built per connection so that it can reach `peer` - a server push is an ordinary `open()` from the
- * acceptor - and so that `state` cannot leak from one connection to the next, which matters once the
- * reconnect scenario gives this process two of them.
+ * Built per connection, so it can use `peer` (a server push is an ordinary `open()` from the
+ * acceptor) and so `state` is not shared between connections; the reconnect scenario makes two
+ * connections to this process.
  */
 function makeHandler(peer: Peer, state: ConnectionState): StreamHandler {
   return async (payload: any, stream: Stream) => {
     const action = (payload ?? {}).action as string | undefined;
 
     if (action === undefined) {
-      // The hello. Nothing marks it on the wire (WSM-RCN-021) and its acknowledgement is this
-      // handler returning, which ends the stream implicitly (WSM-RCN-022/WSM-STM-035). An acceptor
-      // that insisted on an `action` would reset the one stream the reconnect helper needs accepted,
-      // and the reconnect scenario would never get past its first connection.
+      // The hello. It has no marker on the wire (WSM-RCN-021); it is acknowledged by this handler
+      // returning, which ends the stream (WSM-RCN-022/WSM-STM-035). Requiring an `action` here would
+      // reset the hello stream and the reconnect scenario would fail on its first connection.
       if (JSON.stringify(payload) !== JSON.stringify(HELLO_PAYLOAD)) {
         throw new Error(`opened with neither an action nor the hello: ${JSON.stringify(payload)}`);
       }
@@ -213,31 +205,29 @@ function makeHandler(peer: Peer, state: ConnectionState): StreamHandler {
     } else if (action === 'forever') {
       await stream.closed;
     } else if (action === 'big') {
-      // Comfortably over MAX_FRAME_BYTES once encoded, so fragmentation is exercised end to end
-      // while other streams are in flight - which is WSM-FRG-019's round robin.
+      // Larger than MAX_FRAME_BYTES once encoded, so the reply is fragmented while other streams are
+      // in flight (WSM-FRG-019 round robin).
       await stream.reply({ blob: 'š'.repeat(40_000) });
     } else if (action === 'goaway') {
-      // Started, never awaited here: `peer.close()` drains the streams still in flight and this
-      // handler's own stream is one of them, so awaiting it would be the connection waiting for
-      // itself. The promise is parked in `state` so the drain outlives this handler.
+      // Started, not awaited: `peer.close()` drains the streams in flight, including this handler's
+      // own stream, so awaiting it here would deadlock. The promise is stored in `state` so the drain
+      // continues after this handler returns.
       state.shutdown = peer.close({ reason: 'interop goaway' });
       void state.shutdown.catch(() => undefined);
     } else {
-      // Thrown, not exited: an unknown action is one stream's problem, and killing the acceptor
-      // process here would report it to the dialer as a socket death rather than as the mismatch it
-      // is (WSM-ERR-006).
+      // Thrown, not exited: an unknown action fails only this stream, and the dialer receives it as
+      // an application error (WSM-ERR-006) instead of a lost socket.
       throw new Error(`unknown action ${String(action)}`);
     }
   };
 }
 
 /**
- * Produce until the consumer stops us - the remote half of the cancel-mid-flight assertion.
+ * Produce until the consumer cancels the stream; the remote half of the cancel-mid-flight assertion.
  *
  * Both exits are recorded. TypeScript cannot interrupt a running function, so WSM-ERR-013 gives the
- * handler `stream.signal` to cooperate with, while a reset landing between two sends surfaces as
- * `StreamClosed`/`StreamReset` from the send itself. A scenario asserting only one of them would
- * pass or fail on which millisecond the reset arrived in.
+ * handler `stream.signal`; a reset that arrives between two sends surfaces as
+ * `StreamClosed`/`StreamReset` from the send. Which exit is taken depends on when the reset arrives.
  */
 async function drip(stream: Stream, state: ConnectionState): Promise<void> {
   try {
@@ -254,32 +244,26 @@ async function drip(stream: Stream, state: ConnectionState): Promise<void> {
 }
 
 /**
- * One accepted connection, whatever carried it - a TCP socket or a socket file.
+ * One accepted connection, over a TCP socket or a socket file.
  *
- * Hoisted out of `acceptForever` rather than nested in it, and that is the whole claim the Unix
- * pairing makes: `acceptForeverOnSocketFile` below registers this same listener, so the two
- * acceptors differ in the line that binds and in nothing else. A UDS acceptor carrying its own copy
- * of this handler could pass while the transport-agnostic path was broken, which is the failure the
- * matrix exists to catch rather than to reproduce (WSM-API-021).
+ * `acceptForever` and `acceptForeverOnSocketFile` both register this listener, so the two acceptors
+ * differ only in how they bind and the Unix pairing tests the same transport-agnostic path
+ * (WSM-API-021).
  */
 function serveConnection(socket: WebSocket, request: IncomingMessage): void {
   void (async () => {
-    // The HTTP request target this connection arrived on. Reported because it is the half of the
-    // `ws+unix://<path>:/route` grammar that reaching the socket does not prove: the socket file is
-    // the address, neither acceptor routes on the target, so a dialer that dropped the target and
-    // sent `/`, or built it from the URL's pathname and left the query string behind, would connect
-    // and pass every assertion in the script. The driver compares this line against the route it
-    // put in the URL, which is the only place the two languages' parsers meet each other.
+    // The HTTP request target of this connection. The socket file is the address and neither
+    // acceptor routes on the target, so a dialer that sent `/` or dropped the query string would
+    // pass every assertion in the script. The driver compares this line with the route it put in the
+    // `ws+unix://<path>:/route` URL.
     emit({ event: 'accepted', target: request.url ?? null });
     const peer = await accept(socket);
     const state: ConnectionState = { dripSent: 0, dripStopped: false, shutdown: null };
     let seenOpen = false;
 
-    // Report the first inbound `open` of this connection, re-encoded. This is where WSM-TST-005's
-    // "byte-identical hello" is checked from the *other* language: the driver compares this line
-    // across the two acceptor processes, so the comparison is made by the port that had to accept
-    // the replay rather than by the one that sent it. Being the *first* open is itself
-    // WSM-RCN-023 - nothing may precede the hello.
+    // Report the first inbound `open` of this connection, re-encoded. The driver compares this line
+    // across the two acceptor processes, which checks WSM-TST-005's byte-identical hello on the
+    // accepting port. The hello is the first open because nothing may precede it (WSM-RCN-023).
     peer.onFrame((direction, frame) => {
       if (direction === 'rx' && frame.type === 'open' && !seenOpen) {
         seenOpen = true;
@@ -287,8 +271,8 @@ function serveConnection(socket: WebSocket, request: IncomingMessage): void {
       }
     });
     peer.onStream(makeHandler(peer, state));
-    // A dialer that walks away leaves the read loop reporting the close; that is this connection
-    // ending, not this process failing.
+    // A dialer that disconnects makes `serve()` reject with `ConnectionLost`; that ends this
+    // connection, not the acceptor process.
     await peer.serve().catch((error: unknown) => {
       if (!(error instanceof ConnectionLost)) throw error;
     });
@@ -296,10 +280,9 @@ function serveConnection(socket: WebSocket, request: IncomingMessage): void {
 }
 
 async function acceptForever(port: number): Promise<void> {
-  // Both hooks, because `handleProtocols` alone answers 101 to a codec this acceptor does not speak
-  // (WSM-CDC-022). The cross-language matrix is the only place a *foreign* dialer ever meets this
-  // process, so an acceptor here that refuses differently from the one the library documents would
-  // leave the one shape CI exists to witness untested.
+  // Both hooks, because `handleProtocols` alone answers 101 to a codec this acceptor does not
+  // support (WSM-CDC-022). The refusal must match the documented acceptor setup, because this is
+  // where a dialer of the other language is refused.
   const server = refuseMismatchedUpgrade(new WebSocketServer({ port, host: '127.0.0.1', handleProtocols }));
 
   server.on('connection', serveConnection);
@@ -314,21 +297,18 @@ async function acceptForever(port: number): Promise<void> {
 /**
  * The same acceptor on a socket **file**, for the Unix half of WSM-TST-004.
  *
- * `WebSocketServer({ port })` owns an HTTP server it creates itself and has nowhere to put a path,
- * so the socket file needs one built here and attached with `{ server }`. `refuseMismatchedUpgrade`
- * wraps `shouldHandle`, which the attached form still calls, so a dialer offering a codec this
- * process does not speak meets the same HTTP 400 it would over TCP and still has to turn it into
- * `CodecMismatch` (WSM-CDC-022/024). That is the point of running the matrix over this transport at
- * all: the only thing that changed is which kernel object the handshake travelled over, and the
- * driver proves it by running the unmodified WSM-TST-004 script across it.
+ * `WebSocketServer({ port })` creates its own HTTP server and cannot listen on a path, so an HTTP
+ * server is created here and attached with `{ server }`. `refuseMismatchedUpgrade` wraps
+ * `shouldHandle`, which the attached form also calls, so a dialer offering an unsupported codec gets
+ * the same HTTP 400 as over TCP and must raise `CodecMismatch` (WSM-CDC-022/024). The driver runs the
+ * unmodified WSM-TST-004 script over this transport.
  *
- * The driver's readiness signal is the `path=` line below rather than a `port=` one - a socket file
- * exists between `bind` and `listen`, so a driver that waited for the file would race the listen.
+ * The driver's readiness signal is the `path=` line below, not a `port=` line. A socket file exists
+ * between `bind` and `listen`, so waiting for the file would race the listen.
  */
 async function acceptForeverOnSocketFile(path: string): Promise<void> {
-  // `platform`, not a failed bind: on Windows `listen(path)` opens a *named pipe* under some
-  // spellings and fails with an opaque errno under others, and either answer to a driver asking for
-  // an AF_UNIX pairing is worse than this line.
+  // Checked by `platform` before binding: on Windows `listen(path)` opens a named pipe for some path
+  // forms and fails with an unspecific errno for others.
   if (process.platform === 'win32') {
     throw new Error('this platform has no AF_UNIX, so the unix scenario cannot run here');
   }
@@ -337,9 +317,8 @@ async function acceptForeverOnSocketFile(path: string): Promise<void> {
 
   server.on('connection', serveConnection);
 
-  // The HTTP server is the one to wait on because it is the only one that can bind a path: a
-  // `WebSocketServer` attached to a server has no `listen()` of its own. It does re-emit the
-  // attached server's `listening`, so either object would answer - only one of them can be asked.
+  // Waits on the HTTP server, which binds the path; a `WebSocketServer` attached to a server has no
+  // `listen()` of its own.
   await new Promise<void>((resolve) => httpServer.listen(path, () => resolve()));
   emit({ role: 'ts-acceptor', path, codec: settings.codec });
   await new Promise(() => undefined);
@@ -352,8 +331,8 @@ type JournalEntry = { direction: 'tx' | 'rx'; type: string; stream: number | nul
 /**
  * Every frame the peer saw, in order.
  *
- * The wire order is the only place "interleaved" is a fact rather than a hope: two calls that
- * overlapped in JavaScript could still have been serialised on the socket.
+ * Interleaving is asserted on the wire order, because two calls that overlap in JavaScript can still
+ * be serialised on the socket.
  */
 class Journal {
   readonly entries: JournalEntry[] = [];
@@ -405,8 +384,8 @@ async function runTst004(peer: Peer, journal: Journal, pushes: any[], label: str
     for await (const row of stream) exportRows.push(row);
   };
 
-  // Six streams open at once. `Promise.all` is what makes them concurrent rather than sequential,
-  // and the export and the fragmented `big` reply are what make the concurrency visible on the wire.
+  // Six streams open at once through `Promise.all`. The export and the fragmented `big` reply make
+  // the concurrency visible on the wire.
   const [echoed1, echoed2, echoed3, big, , pushed] = await Promise.all([
     peer.request({ action: 'echo', value: 1 }),
     peer.request({ action: 'echo', value: 2 }),
@@ -426,9 +405,8 @@ async function runTst004(peer: Peer, journal: Journal, pushes: any[], label: str
   const wantedRows = JSON.stringify([0, 1, 2, 3, 4].map((row) => ({ row })));
   check(JSON.stringify(exportRows) === wantedRows, `${label}: export gave ${JSON.stringify(exportRows)}`);
   check(JSON.stringify(pushed) === JSON.stringify({ pushed: PUSH_COUNT }), `${label}: push answered ${String(pushed)}`);
-  // Compared as a set: three pushed streams are three streams, and nothing in v1 orders the delivery
-  // of one stream against another (WSM-STM-001). Asserting the arrival order would be asserting an
-  // implementation detail of whichever port happened to be the acceptor.
+  // Compared as a set: v1 does not order delivery across streams (WSM-STM-001), so the arrival order
+  // of the three pushed streams is unspecified.
   const indices = pushes.map((push) => push.index as number).sort((left, right) => left - right);
   const events = new Set(pushes.map((push) => push.event as string));
   check(
@@ -436,11 +414,9 @@ async function runTst004(peer: Peer, journal: Journal, pushes: any[], label: str
     `${label}: the server pushed ${JSON.stringify(pushes)}`,
   );
 
-  // The interleaving itself, asserted on the wire and not on the API: between the export's first and
-  // last **inbound** frame there must be an inbound frame belonging to some other stream. Only
-  // inbound frames count - the six opens leave together whatever the acceptor does with them, so
-  // counting those would make this pass against a port that answered each stream to completion
-  // before starting the next, which is exactly the implementation it exists to catch.
+  // Interleaving, asserted on the wire: between the export's first and last **inbound** frame there
+  // must be an inbound frame of another stream. Outbound frames are not counted, because the six
+  // opens are sent together regardless of how the acceptor schedules its replies.
   const inbound = journal.entries.filter((entry) => entry.direction === 'rx');
   const positions = inbound.flatMap((entry, index) => (entry.stream === exportId ? [index] : []));
   check(positions.length > 0, `${label}: no inbound frame for the export stream ${exportId}`);
@@ -465,9 +441,9 @@ async function runApplicationError(peer: Peer, label: string): Promise<void> {
   check(raised !== null, `${label}: a throwing handler did not produce an error`);
 
   const payload = raised!.payload as { type?: unknown; message?: unknown } | null;
-  // `message` is portable; `type` is NOT. WSM-ERR-006's default serializer reports the remote's own
-  // exception class name, so a Python acceptor says 'ValueError' where a TypeScript one says
-  // 'Error'. Asserting equality on it would be asserting which language answered.
+  // Only `message` is compared. WSM-ERR-006's default serializer reports the remote's exception
+  // class name in `type`, which is 'ValueError' from a Python acceptor and 'Error' from a
+  // TypeScript one.
   check(payload?.message === 'interop handler said no', `${label}: application error ${JSON.stringify(payload)}`);
   check(
     typeof payload?.type === 'string' && payload.type.length > 0,
@@ -488,9 +464,8 @@ async function runCancelMidFlight(peer: Peer, label: string): Promise<void> {
   await dripStream.cancel('interop cancel mid-flight');
   check(dripStream.signal.aborted, `${label}: cancel did not close the stream locally`);
 
-  // Polled rather than slept-then-asked once: the deadline is what gives the assertion its teeth,
-  // and a fixed sleep is either a flake or a tax. A producer that never saw the reset never reports
-  // `stopped` and this fails at the deadline.
+  // Polled until a deadline instead of a fixed sleep. A producer that does not see the reset never
+  // reports `stopped`, and this fails at the deadline.
   const deadline = Date.now() + 5000;
   let report: { stopped?: boolean; sent?: number } = {};
   while (Date.now() < deadline) {
@@ -514,8 +489,8 @@ async function runGoawayShutdown(peer: Peer, journal: Journal, label: string): P
   })();
 
   await peer.notify({ action: 'goaway' });
-  // The frame, not a sleep: everything below is a statement about what happens *after* the goaway
-  // arrived, and timing it by sleeping would make the whole phase a race.
+  // Waits for the goaway frame instead of sleeping: the assertions below are about behaviour after
+  // the goaway arrives.
   await journal.goawayArrived(5000);
   const frame = journal.goawayFrame!;
   check(
@@ -543,7 +518,7 @@ async function runGoawayShutdown(peer: Peer, journal: Journal, label: string): P
 
 // --------------------------------------------------------------------------- WSM-TST-005
 
-/** Kill the acceptor process with streams open, restart it, and hold the peer to WSM-TST-005. */
+/** Kill the acceptor process with streams open, restart it, and check the peer against WSM-TST-005. */
 async function runTst005(url: string, label: string): Promise<void> {
   const hellos: string[] = [];
   const reconnects: [number, number][] = [];
@@ -554,29 +529,28 @@ async function runTst005(url: string, label: string): Promise<void> {
     helloHeaders: HELLO_HEADERS,
     reconnect: RECONNECT,
     onClose: (reason) => closes.push(reason),
-    // The second number is the ordering assertion: at the instant `onReconnect` fires the replayed
-    // hello must already have gone out and been acknowledged (WSM-RCN-023/030). A peer that
-    // announced the identity first would record a zero here.
+    // The second number is the ordering assertion: when `onReconnect` fires, the replayed hello must
+    // already be sent and acknowledged (WSM-RCN-023/030). A peer that fired `onReconnect` first would
+    // record zero here.
     onReconnect: (attempt) => reconnects.push([attempt, hellos.length]),
   });
 
-  // Capture the encoding of every hello this peer sends after the first connection. Stream 1 is the
-  // hello and only the hello: the id space restarts at 1 on every socket, and WSM-RCN-023 forbids
-  // anything preceding it. The first connection's hello went out inside `connect()`, before any
-  // application code could register a handler - which is why the first-connection half of the byte
-  // comparison is made by the acceptor instead (see `acceptForever`). See GAPS.md.
+  // Capture the encoding of every hello this peer sends after the first connection. Stream 1 is
+  // always the hello: the id space restarts at 1 on every socket, and WSM-RCN-023 forbids anything
+  // preceding it. The first connection's hello is sent inside `connect()`, before application code
+  // can register a handler, so the acceptor records the first-connection encoding instead (see
+  // `serveConnection`).
   peer.onFrame((direction, frame) => {
     if (direction === 'tx' && frame.type === 'open' && frame.stream === 1) hellos.push(encodingOf(frame));
   });
 
   const held = [peer.open({ action: 'forever' }), peer.open({ action: 'forever' })];
   const outcomes = held.map(async (stream) => stream.then(() => null).catch((error: unknown) => error));
-  // The driver kills the acceptor when it reads this, so the streams above must already exist.
+  // The driver kills the acceptor when it reads this line, so the streams above are opened first.
   emit({ role: label, event: 'streams-open', streams: held.map((stream) => stream.id) });
 
-  // Deadlined, not simply awaited. A peer that lost its socket and left these streams pending -
-  // neither failed nor answered - is a defect WSM-RCN-041 exists to prevent, and without the
-  // deadline it would surface as a job that hung rather than as a driver that said so.
+  // Awaited with a deadline. WSM-RCN-041 forbids leaving these streams pending after the socket is
+  // lost; with the deadline that defect is reported as a failure instead of a hung job.
   const raised = await withDeadline(Promise.all(outcomes), 60_000, 'the streams open at the kill never settled');
   raised.forEach((outcome, index) => {
     check(
@@ -589,9 +563,8 @@ async function runTst005(url: string, label: string): Promise<void> {
   const loop = peer.connectionLoop as unknown as ConnectionLoop;
   const deadline = Date.now() + 60_000;
   while (reconnects.length === 0 && Date.now() < deadline) await sleep(50);
-  // `delays`, not `attempts`: the attempt counter resets the moment a connection is established
-  // (WSM-RCN-004), so a peer that reconnected but never announced it would report zero here and read
-  // as a peer that never tried.
+  // `delays`, not `attempts`: the attempt counter resets when a connection is established
+  // (WSM-RCN-004), so it reads zero after a successful reconnect.
   check(
     reconnects.length > 0,
     `${label}: the dialer never announced a reconnect; it waited ${JSON.stringify(loop.delays)}`,
@@ -609,17 +582,16 @@ async function runTst005(url: string, label: string): Promise<void> {
   );
   checkJitterDispersed(loop.delays, label);
 
-  // The connection is usable again, which is the only proof that the acceptor accepted the replay
-  // for more than the length of the handshake.
+  // A request on the new connection checks that the acceptor accepted the replayed hello and kept
+  // the connection open.
   const echoed = await peer.request({ action: 'echo', value: 7 });
   check(JSON.stringify(echoed) === JSON.stringify({ echo: 7 }), `${label}: reconnected peer said ${String(echoed)}`);
   check(closes.length >= 1, `${label}: losing the socket fired no onClose`);
 
   const attempts = loop.delays.length;
-  // Closed, not abandoned. A peer under test holds a heartbeat timer and a supervisor task, so a
-  // driver that let the event loop drain by itself would sit at a passing scenario until the job's
-  // timeout and report a green run as a hang. `close()` is also the only thing that stops the
-  // reconnect helper (WSM-RCN-040), and this peer is configured to retry forever.
+  // Closed explicitly. The peer holds a heartbeat timer and a supervisor task that keep the event
+  // loop alive, and `close()` is the only way to stop the reconnect helper (WSM-RCN-040); this peer
+  // retries without limit.
   await peer.close({ reason: 'interop reconnect scenario complete' });
   emit({ role: label, ok: true, attempts, reconnections: loop.reconnections });
 }
@@ -627,10 +599,8 @@ async function runTst005(url: string, label: string): Promise<void> {
 /**
  * WSM-RCN-002: jitter is applied to every delay, including the capped ones.
  *
- * Asserted as dispersion and never as a value. Pinning a jittered delay to a constant is an
- * assertion that flakes by construction, so this looks at the delays whose *unjittered* schedule has
- * already reached `maxDelayMs`: those would all be exactly `maxDelayMs` if jitter were missing, and
- * that is the failure this catches.
+ * Asserted as dispersion, not as a value. The check looks at the delays whose *unjittered* schedule
+ * has reached `maxDelayMs`: without jitter they would all equal `maxDelayMs`.
  */
 function checkJitterDispersed(delays: readonly number[], label: string): void {
   const capped = delays.filter((_delay, attempt) => unjitteredDelay(attempt, RECONNECT) === RECONNECT.maxDelayMs);
@@ -654,24 +624,19 @@ function checkJitterDispersed(delays: readonly number[], label: string): void {
 
 // --------------------------------------------------------------------------- WSM-CDC-007: the corpus
 //
-// The cross-language half of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
+// The cross-language part of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
 // that codec, running the sequence corpus". `ts/conformance.spec.ts` and `muxws/conformance_test.py`
-// already replay `conformance/sequences/` with a real peer at each end - but both peers are in one
-// process, so what they prove is that each port agrees with *itself*. This is the other half.
+// replay `conformance/sequences/` with both peers in one process and one language.
 //
-// The obstacle is that a sequence fixture scripts **both** peers, and here the two peers are two
-// processes in two languages. The fixture's steps are one ordered script, so the two halves cannot
-// simply be run side by side and hoped to line up. So one process conducts: the dialer reads the
-// script, executes the steps whose `peer` is its own role, and ships every other step over a control
-// channel to the acceptor process, which executes it through the same `Side` class and answers. The
-// script therefore stays one totally ordered sequence, exactly as in the in-process runners, and the
-// whole corpus runs rather than the subset one side happens to be able to drive alone.
+// A sequence fixture scripts **both** peers as one ordered list of steps; here the peers are two
+// processes in two languages. The dialer process conducts: it reads the script, executes the steps
+// whose `peer` is its own role, and sends every other step over a control channel to the acceptor
+// process, which executes it through the same `Side` class and replies. The script stays one totally
+// ordered sequence, as in the in-process runners, and the whole corpus runs.
 //
-// Two things move over the control channel and nothing else: a step **index**, and the ordinal ->
-// stream id table. The fixture itself is loaded from disk by both processes, so a `$bytes`
-// placeholder (`conformance/README.md`) is resolved twice from one file rather than being shipped as
-// JSON - which would need a second spelling for bytes, and a second spelling is the divergence the
-// corpus exists to prevent.
+// The control channel carries only a step **index** and the ordinal -> stream id table. Both
+// processes load the fixture from disk, so a `$bytes` placeholder (`conformance/README.md`) is
+// resolved from the same file in each process and never needs a JSON encoding for bytes.
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -679,25 +644,21 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SEQUENCES_DIR = join(ROOT, 'conformance', 'sequences');
 
 /**
- * The expected fixture count is **not** declared here. `ts/conformance.spec.ts` pins it and
- * `muxws/conformance_test.py` is pinned against that file, so this driver reads the literal rather
- * than adding a third number that could drift on its own and make a shrinking corpus look
- * intentional.
+ * The file that declares the expected fixture count. `ts/conformance.spec.ts` declares it and
+ * `muxws/conformance_test.py` checks against that file; this driver reads the same literal.
  */
 const FIXTURE_COUNT_SOURCE = join(ROOT, 'ts', 'conformance.spec.ts');
 
 /**
- * Mirrors `runs every fixture under some configured codec, skipping none everywhere`. Pinned rather
- * than derived from the corpus: "skip whatever declares a codec I am not configured with" is a rule
- * that empties itself as fixtures acquire declarations, and a corpus run that skipped everything
- * would report the same green line as one that ran everything.
+ * Mirrors `runs every fixture under some configured codec, skipping none everywhere`. The corpus's
+ * `requires_codec` declarations must equal this list, so a fixture that gains a declaration fails the
+ * run instead of being skipped silently under the other codec.
  */
 const CODEC_SPECIFIC_FIXTURES: Record<string, string> = { 'bytes-payload-under-binary-codec': 'msgpack' };
 
 /**
- * Every step kind and every `call` of `conformance/README.md`. A fixture reaching for something
- * outside these is reported as **unsupported by name** and fails the run, because the alternative -
- * skipping it - is the hollow coverage this whole exercise exists to prevent.
+ * Every step kind and every `call` of `conformance/README.md`. A fixture that uses anything else is
+ * reported as **unsupported by name** and fails the run; it is not skipped.
  */
 const STEP_KINDS = [
   'settle',
@@ -738,15 +699,12 @@ const CORPUS_ERROR_CLASSES: Record<string, (error: unknown) => boolean> = {
 /**
  * The envelope defaults, mirroring the module-private `FIELD_DEFAULTS` of `ts/frames.ts`.
  *
- * A matcher must read a field the frame left out as that field's default, exactly as Python's
- * dataclass does. Reading it as `undefined` instead would make `{"end": false}` fail here and pass
- * there - one corpus, quietly meaning two different things.
+ * A matcher reads a field the frame omits as that field's default, as Python's dataclass does.
+ * Reading it as `undefined` would make `{"end": false}` fail here and pass in the Python runner.
  *
- * Defensive today rather than load-bearing: every frame the TypeScript peer currently puts on the
- * wire carries the keys this corpus's matchers ask about, so poisoning this table changes no
- * outcome. It is kept because the divergence it prevents is silent and the alternative is for the
- * two matchers to differ - `getattr(frame, key, None)` on the Python side reads a dataclass default
- * whether or not the peer wrote one.
+ * Every frame the TypeScript peer sends carries the keys the corpus matchers read, so the table does
+ * not change any current outcome. It keeps the matcher equivalent to the Python side, where
+ * `getattr(frame, key, None)` returns the dataclass default whether or not the peer sent the key.
  */
 const CORPUS_FIELD_DEFAULTS: Record<string, unknown> = {
   stream: null,
@@ -763,9 +721,9 @@ const CORPUS_FIELD_DEFAULTS: Record<string, unknown> = {
 };
 
 /**
- * Wall-clock ceiling on one waiting step. Larger than the in-process runner's 2 s because every step
- * here crosses a socket and a process boundary; still a ceiling, so a stalled fixture fails by name
- * rather than hanging the job until its timeout.
+ * Wall-clock limit on one waiting step. Larger than the in-process runner's 2 s because every step
+ * here crosses a socket and a process boundary. A stalled fixture fails by name instead of hanging
+ * the job.
  */
 const CORPUS_STEP_TIMEOUT_MS = 5000;
 
@@ -776,7 +734,7 @@ const QUIET_ROUNDS = 60;
 /** Ceiling on one control-channel round trip, so two processes cannot wait for each other forever. */
 const CONTROL_TIMEOUT_MS = 60_000;
 
-/** How long `streamFor` waits for an *inbound* stream to have been delivered. See the Python twin. */
+/** How long `streamFor` waits for an *inbound* stream to be delivered. Same value as in `interop/runner.py`. */
 const STREAM_ARRIVAL_TURNS = 400;
 
 type Who = 'dialer' | 'acceptor';
@@ -803,10 +761,9 @@ function turn(): Promise<void> {
 /**
  * Resolve every `{"$bytes": [...]}` placeholder into the `ArrayBuffer` those integers spell.
  *
- * The same function as the one in `ts/conformance.spec.ts`, and it has to run in **both** processes:
- * JSON has no byte type, so a placeholder that survived loading would be sent as an ordinary object
- * that msgpack carries happily, and `bytes-payload-under-binary-codec` would pass while asserting
- * nothing about bytes (WSM-CDC-008).
+ * The same function as in `ts/conformance.spec.ts`; it runs in **both** processes. JSON has no byte
+ * type, so an unresolved placeholder would be sent as an ordinary object, which msgpack also accepts,
+ * and `bytes-payload-under-binary-codec` would not test bytes (WSM-CDC-008).
  */
 function substituteBytes(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => substituteBytes(item));
@@ -825,14 +782,13 @@ function loadFixture(name: string): Fixture {
 /**
  * `max_frame_bytes` / `max_concurrent_streams` are instructions to the runner (WSM-TST-002).
  *
- * Both peers are constructed with them and neither may be encoded into any frame (WSM-CON-031),
- * which is why they are read here and never looked at again.
+ * Both peers are constructed with them, and neither is encoded into any frame (WSM-CON-031).
  */
 function peerOptions(fixture: Fixture): { maxFrameBytes?: number; maxConcurrentStreams?: number } {
   return { maxFrameBytes: fixture.max_frame_bytes, maxConcurrentStreams: fixture.max_concurrent_streams };
 }
 
-/** Why this driver cannot replay the fixture, or null. Declared, never silently skipped. */
+/** Why this driver cannot replay the fixture, or null. An unsupported fixture is reported, not skipped. */
 function unsupportedReason(fixture: Fixture): string | null {
   for (const [index, step] of fixture.steps.entries()) {
     const kind = STEP_KINDS.find((key) => key in step);
@@ -847,10 +803,9 @@ function unsupportedReason(fixture: Fixture): string | null {
 /**
  * One process's half of a cross-language replay: one peer, one journal, one role in the script.
  *
- * Both processes run this class, and that is the point: a step means the same thing whichever end of
- * the socket executes it, which is the property `conformance/README.md` exists to protect. The
- * conductor runs the steps whose `peer` is its own role and ships the rest here over the control
- * channel.
+ * Both processes run this class, so a step has the same meaning on either end of the socket, as
+ * `conformance/README.md` requires. The conductor runs the steps whose `peer` is its own role and
+ * sends the rest to the other process over the control channel.
  */
 class Side {
   /**
@@ -868,8 +823,8 @@ class Side {
   socketClosed = false;
 
   /**
-   * Set from the conductor's table on every step; this side never keeps its own count, because two
-   * independently maintained ordinal lists is precisely the divergence to avoid.
+   * Set from the conductor's table on every step; this side keeps no ordinal list of its own, so
+   * there is one ordinal table per run.
    */
   private ordinals: number[] = [];
 
@@ -892,14 +847,13 @@ class Side {
       if (direction === 'tx') this.sent.push(frame);
     });
     peer.onStream(async (payload: any, stream: Stream) => {
-      // Record the inbound stream, then hold it open. WSM-STM-035 ends a stream the moment its
-      // handler returns, so a handler that returned here would close every inbound stream before the
-      // script could `reply` on it.
+      // Record the inbound stream, then hold it open. WSM-STM-035 ends a stream when its handler
+      // returns, so returning here would close every inbound stream before the script can `reply`.
       this.byId.set(stream.id, stream);
       const asked = payload as { handler?: string; message?: string } | null;
-      // `Error` and not a subclass: WSM-ERR-006's serializer sends the class name, and the Python
-      // runner raises a class spelled `Error` for the same reason, so the payload
-      // `handler-raises-produces-application-error` pins is one value and not two.
+      // `Error`, not a subclass: WSM-ERR-006's serializer sends the class name, and the Python runner
+      // raises a class named `Error`, so `handler-raises-produces-application-error` sees the same
+      // payload from both languages.
       if (asked !== null && typeof asked === 'object' && asked.handler === 'raise') {
         throw new Error(asked.message ?? 'the handler raised');
       }
@@ -910,7 +864,7 @@ class Side {
   // ------------------------------------------------------------------ the script
 
   /**
-   * Run one step **as this side**, and hand back the stream id it allocated, if any.
+   * Run one step **as this side**, and return the stream id it allocated, if any.
    *
    * Routing has already happened by the time a step arrives here, so `step.peer` is not read: the
    * conductor decides who runs what, and for `inject` that decision is inverted (see `ownerOf`).
@@ -949,9 +903,9 @@ class Side {
     const expected = step.raises as string | undefined;
     if (expected === undefined) return handler(step);
     if (!(expected in CORPUS_ERROR_CLASSES)) throw new StepError(`'raises' names an unknown class '${expected}'`);
-    // `raises` says the *call itself* fails - a producer whose stream the consumer cancelled, say. No
-    // frame matcher can express that: a peer that reset the stream and went on producing looks
-    // identical on the wire (WSM-ERR-009).
+    // `raises` states that the *call itself* fails, for example a send on a stream the consumer
+    // cancelled. A frame matcher cannot express this: a peer that reset the stream and kept producing
+    // sends the same frames (WSM-ERR-009).
     let caught: unknown = NOTHING_RAISED;
     try {
       await handler(step);
@@ -978,8 +932,7 @@ class Side {
     const before = new Set(this.peer.streams.keys());
     const task = this.peer.request(step.payload ?? null, {
       headers: step.headers,
-      // Milliseconds here and in the corpus; the Python runner is the one that converts, because
-      // Python's durations are seconds (WSM-CON-012).
+      // Milliseconds here and in the corpus; the Python runner converts to seconds (WSM-CON-012).
       timeoutMs: step.timeout_ms as number | undefined,
     });
     void task.catch(() => undefined);
@@ -1048,8 +1001,8 @@ class Side {
   }
 
   private async corpusClose(step: Step): Promise<null> {
-    // Started rather than awaited: `close()` sends `goaway` and *then* drains, and the steps after
-    // this one are what the drain window exists to let happen (WSM-CON-025).
+    // Started, not awaited: `close()` sends `goaway` and then drains, and the steps after this one
+    // run during the drain window (WSM-CON-025).
     const closing = this.peer.close({
       code: (step.code ?? ResetCode.NO_ERROR) as ResetCode,
       reason: step.reason as string | undefined,
@@ -1076,11 +1029,11 @@ class Side {
   }
 
   /**
-   * The stream a call opened without handing it back, found through the public map.
+   * The stream a call opened without returning it, found through the public map.
    *
-   * The stream comes back **boxed**, and that is not decoration. `Stream` is a thenable, so a promise
-   * resolved with one adopts it: `await discover(...)` would await the stream itself, claiming it for
-   * `await` and making every later `iterate` on it fail as a second consumer (WSM-API-014).
+   * The stream is returned **boxed**. `Stream` is a thenable, so a promise resolved with one adopts
+   * it: `await discover(...)` would await the stream itself, claiming it for `await`, and every later
+   * `iterate` on it would fail as a second consumer (WSM-API-014).
    */
   private async discover(before: Set<number>): Promise<{ stream: Stream }> {
     for (let round = 0; round < STREAM_ARRIVAL_TURNS; round += 1) {
@@ -1095,16 +1048,15 @@ class Side {
   /**
    * Put one hand-written envelope on this side's socket, bypassing the writer.
    *
-   * This is `inject` seen from the other end. In-process a runner hands the message straight to the
-   * receiving peer's socket; across two processes the only thing that can deliver a message *to* a
-   * peer is that peer's remote, so the step is executed here, by the other side, as an ordinary send.
-   * The envelope deliberately does not pass through `fromMapping`, which drops unknown keys
-   * (WSM-FRM-001) - a frame built through it could never carry the unknown field or the unknown type
-   * whose toleration is the thing being asserted.
+   * This is `inject` executed by the sending side. In-process, a runner passes the message directly
+   * to the receiving peer's socket; across two processes only the remote can deliver a message *to*
+   * a peer, so this side sends it. The envelope does not pass through `fromMapping`, which drops
+   * unknown keys (WSM-FRM-001); the fixtures assert that an unknown field and an unknown frame type
+   * are tolerated.
    *
-   * The writer is bypassed rather than used because there is no public API for "send exactly these
-   * keys", and there should not be. Nothing else is in flight for the two fixtures that need it, and
-   * a WebSocket message is atomic, so this cannot interleave with a fragment.
+   * The writer is bypassed because the public API has no way to send an exact set of keys. Nothing
+   * else is in flight in the two fixtures that use this, and a WebSocket message is atomic, so it
+   * cannot interleave with a fragment.
    */
   private async writeRaw(envelope: Record<string, unknown>): Promise<void> {
     const message = this.codec.encodePayload(this.resolve(envelope));
@@ -1122,10 +1074,9 @@ class Side {
   }
 
   /**
-   * Boxed for the same reason `discover` is, and this one is a runtime hazard rather than a typing
-   * nicety: `Stream` is a thenable, so a promise resolved with one **adopts** it. Returning it bare
-   * would make every `await streamFor(...)` await the stream itself, claim it for `await`, and leave
-   * the later `iterate` on it failing as a second consumer (WSM-API-014).
+   * Boxed for the same reason as `discover`: `Stream` is a thenable, so a promise resolved with one
+   * **adopts** it. Unboxed, every `await streamFor(...)` would await the stream itself, claim it for
+   * `await`, and a later `iterate` on it would fail as a second consumer (WSM-API-014).
    */
   private async streamFor(ordinal: number): Promise<{ stream: Stream }> {
     const streamId = this.idOf(ordinal);
@@ -1172,7 +1123,7 @@ class Side {
     );
   }
 
-  /** Not "not yet", but "not at all": the whole of this peer's wire is searched. */
+  /** Searches every frame this peer has sent, not only frames sent since the last step. */
   private expectNoFrame(wantedRaw: Record<string, unknown>): void {
     const wanted = this.resolve(wantedRaw);
     const offending = this.sent.filter((frame) => Side.matches(frame, wanted));
@@ -1241,7 +1192,7 @@ class Side {
     }
   }
 
-  /** A bounded poll, not a single read: the other end learns of a close one turn later. */
+  /** A bounded poll, not a single read: the other end observes a close one turn later. */
   private async expectClosed(spec: Step): Promise<void> {
     const wantSocket = spec.socket === true;
     for (let round = 0; round < QUIET_ROUNDS; round += 1) {
@@ -1256,19 +1207,18 @@ class Side {
   // ------------------------------------------------------------------ teardown
 
   /**
-   * Drop the socket and let what the script left running settle.
+   * Drop the socket and let the work the script left running settle.
    *
-   * The socket is dropped rather than closed with a `goaway`: most fixtures deliberately end with
-   * streams still open, and a polite close would sit in its drain window for every one of them.
-   * Nothing is cancelled because nothing here can be: a collector still iterating a stream ends when
-   * the stream fails, and every promise this class started had its rejection absorbed where it was
-   * started.
+   * The socket is dropped, not closed with a `goaway`: most fixtures end with streams still open,
+   * and a `goaway` close would wait out its drain window for each of them. Nothing is cancelled: a
+   * collector still iterating a stream ends when the stream fails, and every promise this class
+   * started has a rejection handler attached where it was started.
    */
   async teardown(): Promise<void> {
     try {
       await this.socket.close(1000, 'fixture complete');
     } catch {
-      // A socket that cannot be closed is already gone, which is the state this wanted anyway.
+      // A socket that cannot be closed is already closed.
     }
     await turn();
   }
@@ -1284,19 +1234,16 @@ function renderValue(value: unknown): string {
 }
 
 /**
- * `settle: n` means n turns of one event loop; across two processes it means nothing.
+ * `settle: n` means n turns of one event loop, which has no meaning across two processes.
  *
  * The corpus defines `settle` as "a lower bound on progress, never a duration"
- * (`conformance/README.md`), and it is written for a transport where a message is delivered inside
- * the same event loop that sent it. Over a real socket between two processes the count is not a
- * lower bound on anything, so this driver reads a `settle` as what the fixtures actually want it to
- * mean: **let both peers go quiet**. Both sides watch their own frame counter across one window, and
- * the step returns only when neither saw a frame during it.
+ * (`conformance/README.md`), for a transport that delivers a message within the event loop that sent
+ * it. Over a socket between two processes the count bounds nothing, so this driver implements
+ * `settle` as **wait until both peers are quiet**: both sides watch their own frame counter across
+ * one window, and the step returns only when neither saw a frame during it.
  *
- * That is strictly stronger than the in-process reading and cannot pass earlier than it: a fixture
- * whose next step needs a reset to have arrived - `cancel-mid-stream-stops-the-producer` is the one
- * that does - waits here until it has, instead of failing on a race the number 24 was never a
- * promise about.
+ * This condition is at least as strong as the in-process one. A fixture whose next step needs a
+ * reset to have arrived (`cancel-mid-stream-stops-the-producer`) waits here until it has.
  */
 async function settleAcross(side: Side, control: Control): Promise<void> {
   for (let round = 0; round < QUIET_ROUNDS; round += 1) {
@@ -1313,10 +1260,8 @@ async function settleAcross(side: Side, control: Control): Promise<void> {
 /**
  * The conductor's end of the line-delimited JSON control channel.
  *
- * A plain TCP socket beside the WebSocket under test, and deliberately not the WebSocket itself: a
- * control message carried on the connection being asserted about would appear on the very wire the
- * fixtures read frames off, and every `expect_no_frame` in the corpus would be asserting about this
- * driver's own traffic.
+ * A plain TCP socket next to the WebSocket under test. Control messages on the WebSocket itself
+ * would appear among the frames the fixtures assert on, including every `expect_no_frame`.
  */
 class Control {
   private buffer = '';
@@ -1324,8 +1269,8 @@ class Control {
   private readonly waiting: { resolve: (line: string) => void; reject: (error: Error) => void }[] = [];
 
   /**
-   * A command sent by `dispatch` whose acknowledgement nobody has read yet. Collected before the
-   * next command, so replies stay paired with the commands that asked for them.
+   * A command sent by `dispatch` whose acknowledgement has not been read yet. Collected before the
+   * next command, so replies stay paired with their commands.
    */
   private pending: Promise<Record<string, any>> | null = null;
 
@@ -1341,9 +1286,8 @@ class Control {
         newline = this.buffer.indexOf('\n');
       }
     });
-    // Rejected rather than left to the deadline: an acceptor that died is a fact available now, and
-    // a driver that waited a minute for it would report a timeout where the real message is "the
-    // other process is gone".
+    // Rejected immediately instead of at the deadline, so a dead acceptor is reported as such and not
+    // as a timeout.
     socket.on('close', () => {
       while (this.waiting.length > 0) {
         this.waiting.shift()?.reject(new StepError("the acceptor's control channel closed mid-run"));
@@ -1359,23 +1303,23 @@ class Control {
   /**
    * Send a command and go straight on to the next step, collecting the answer later.
    *
-   * Exactly one step needs this, and the corpus asks for it in so many words: `close` is "**started
-   * and not awaited** - `close()` sends `goaway` and *then* drains, and the steps after it are what
-   * the drain window exists to let happen" (`conformance/README.md`). `goaway-drains-then-closes`
-   * then opens a stream "a moment too late", and the whole fixture turns on that stream leaving
-   * **before** its opener has heard the goaway (WSM-CON-021/023).
+   * Used only for `close`, which the corpus defines as "**started and not awaited** - `close()`
+   * sends `goaway` and *then* drains, and the steps after it are what the drain window exists to let
+   * happen" (`conformance/README.md`). `goaway-drains-then-closes` then opens a stream "a moment too
+   * late", and that stream must be sent **before** its opener receives the goaway
+   * (WSM-CON-021/023).
    *
-   * In one process that is guaranteed by turn ordering. Across two it is a race, and waiting for the
-   * acknowledgement is the way to lose it: the goaway is written before the ack, so both are in
-   * flight towards the dialer and which arrives first is a coin toss. Sending and moving on gives the
-   * local `open()` a head start of a full round trip, and gives the acceptor the control message one
-   * event-loop turn before the open it must exclude from `last_stream`.
+   * In one process turn ordering guarantees this. Across two processes, waiting for the
+   * acknowledgement would race: the goaway is written before the ack, so either can reach the dialer
+   * first. Not waiting lets the local `open()` go out a full round trip earlier, and the acceptor
+   * receives the control message one event-loop turn before the open it must exclude from
+   * `last_stream`.
    */
   async dispatch(message: Record<string, unknown>): Promise<void> {
     await this.collect();
     this.pending = this.exchange(message);
-    // Absorbed here and re-thrown by `collect`: an unhandled rejection would take the process down
-    // before the next step could report which command failed.
+    // Caught here and re-thrown by `collect`: an unhandled rejection would terminate the process
+    // before the failing command is reported.
     void this.pending.catch(() => undefined);
   }
 
@@ -1428,8 +1372,8 @@ class CorpusAcceptor {
   constructor(private readonly wireCodec: Codec) {}
 
   handleConnection(socket: WebSocket): void {
-    // Belt to the handshake hook's braces, and a real cross-language assertion: the dialer must have
-    // offered `muxws.v1.<codec>` first (WSM-CDC-020) and this is the acceptor saying so.
+    // Checked in addition to the handshake hook: the dialer must have offered `muxws.v1.<codec>`
+    // first (WSM-CDC-020), so the negotiated subprotocol is that one.
     if (socket.protocol !== `${PREFIX}${this.wireCodec.name}`) {
       check(false, `the dialer negotiated '${socket.protocol}', not '${PREFIX}${this.wireCodec.name}'`);
       return;
@@ -1486,7 +1430,8 @@ async function corpusAccept(port: number): Promise<void> {
   const wireCodec = codec();
   const acceptor = new CorpusAcceptor(wireCodec);
 
-  // Both hooks, for the reason `acceptForever` gives: selection is not refusal (WSM-CDC-022).
+  // Both hooks, as in `acceptForever`: `handleProtocols` selects a subprotocol but does not refuse a
+  // mismatched upgrade (WSM-CDC-022).
   const websockets = refuseMismatchedUpgrade(new WebSocketServer({ port: 0, host: '127.0.0.1', handleProtocols }));
   websockets.on('connection', (socket: WebSocket) => acceptor.handleConnection(socket));
   await new Promise<void>((resolve) => websockets.on('listening', () => resolve()));
@@ -1497,8 +1442,7 @@ async function corpusAccept(port: number): Promise<void> {
   const control = createServer((socket: TcpSocket) => {
     socket.setEncoding('utf8');
     let buffer = '';
-    // One command at a time, chained: two steps running concurrently would be two steps out of
-    // order, and the whole reason the conductor exists is that the script is one ordered sequence.
+    // One command at a time, chained, so steps run in script order.
     let queue: Promise<void> = Promise.resolve();
     socket.on('data', (chunk: string) => {
       buffer += chunk;
@@ -1511,8 +1455,8 @@ async function corpusAccept(port: number): Promise<void> {
           try {
             reply = await acceptor.dispatch(JSON.parse(line) as Record<string, any>);
           } catch (error) {
-            // The conductor is the only thing that can report a failure, so every one of them has to
-            // travel back down the channel rather than ending this process.
+            // Failures are reported by the conductor, so they are sent back over the channel instead of
+            // ending this process.
             reply = { ok: false, error: error instanceof Error ? error.message : String(error) };
           }
           socket.write(`${JSON.stringify(reply)}\n`);
@@ -1525,9 +1469,8 @@ async function corpusAccept(port: number): Promise<void> {
 
   await new Promise<void>((resolve) => control.listen(port, '127.0.0.1', () => resolve()));
   const controlAddress = control.address();
-  // The port `interop/drive.sh` greps and hands the conductor is the **control** port: the WebSocket
-  // port is an implementation detail the conductor learns from `begin`, so a fixture that one day
-  // needs a server of its own can have one without a change to the driver.
+  // The port `interop/drive.sh` reads and passes to the conductor is the **control** port. The
+  // conductor learns the WebSocket port from `begin`.
   emit({
     role: 'ts-corpus-acceptor',
     port: typeof controlAddress === 'object' && controlAddress !== null ? controlAddress.port : port,
@@ -1543,10 +1486,7 @@ async function corpusAccept(port: number): Promise<void> {
 // --------------------------------------------------------------------------- the conductor
 
 /**
- * The count `ts/conformance.spec.ts` already pins, read rather than restated.
- *
- * A fourth copy of "13" is a fourth thing that can drift, and the failure it would hide is silent: a
- * corpus that stopped being collected reports the same green line as one that was.
+ * The fixture count declared in `ts/conformance.spec.ts`, read from that file.
  */
 function pinnedFixtureCount(): number {
   const source = readFileSync(FIXTURE_COUNT_SOURCE, 'utf-8');
@@ -1561,11 +1501,9 @@ function pinnedFixtureCount(): number {
 /**
  * Which side executes this step.
  *
- * `inject` is **inverted** and that is the one thing in here worth reading twice: the step says
- * "deliver this message *to* peer X", and in a cross-process run the only thing that can deliver a
- * message to X is X's remote. A driver that read the key as "X runs this" would have each peer send
- * itself the unknown frame, and both extension-point fixtures would pass without a byte crossing the
- * socket.
+ * `inject` is **inverted**: the step means "deliver this message *to* peer X", and in a
+ * cross-process run only X's remote can deliver a message to X. Reading the key as "X runs this"
+ * would have each peer send the unknown frame to itself, and no frame would cross the socket.
  */
 function ownerOf(step: Step, labels: Map<string, Who>): Who {
   if ('inject' in step) return step.peer === 'dialer' ? 'acceptor' : 'dialer';
@@ -1634,9 +1572,9 @@ async function runStep(
 
   const who = ownerOf(step, labels);
   if ('call' in step && typeof step.as === 'string') {
-    // Which side is holding the awaitable a later `expect_result` will ask for. Labels are separate
-    // from ordinals: an ordinal identifies a stream on the wire, a label identifies a result the
-    // script wants to await, and only the side that started the call has one.
+    // Which side holds the awaitable a later `expect_result` reads. Labels are separate from
+    // ordinals: an ordinal identifies a stream on the wire, a label identifies a result the script
+    // awaits, and only the side that started the call holds it.
     labels.set(step.as, who);
   }
 
@@ -1645,7 +1583,7 @@ async function runStep(
   if (who === side.role) {
     allocated = await side.execute(step, ordinals);
   } else if (step.call === 'close') {
-    // The one call the corpus itself declares started-and-not-awaited; see `Control.dispatch`.
+    // The only call the corpus declares started and not awaited; see `Control.dispatch`.
     await control.dispatch(command);
     allocated = null;
   } else {
@@ -1654,8 +1592,8 @@ async function runStep(
 
   if (ALLOCATING_CALLS.includes(String(step.call))) {
     if (allocated === null) throw new StepError(`${String(step.call)} allocated no ordinal`);
-    // Appended here and nowhere else, so there is one ordinal table and the other process is handed a
-    // copy of it rather than keeping a second one (WSM-TST-002).
+    // Appended only here, so there is one ordinal table; the other process receives a copy of it
+    // (WSM-TST-002).
     ordinals.push(allocated);
   }
 }
@@ -1686,8 +1624,8 @@ async function corpusDial(endpoint: string, label: string): Promise<void> {
   check(
     JSON.stringify(declared) === JSON.stringify(CODEC_SPECIFIC_FIXTURES),
     `${label}: the corpus declares ${JSON.stringify(declared)} codec-specific; this driver's skip ` +
-      `list is ${JSON.stringify(CODEC_SPECIFIC_FIXTURES)}, and a fixture that quietly acquired a ` +
-      'declaration would shrink every pass not configured with it (WSM-CDC-007)',
+      `list is ${JSON.stringify(CODEC_SPECIFIC_FIXTURES)}, and a fixture that declares a codec ` +
+      'without being listed is skipped by every pass not configured with that codec (WSM-CDC-007)',
   );
 
   const ran: string[] = [];
@@ -1715,10 +1653,8 @@ async function corpusDial(endpoint: string, label: string): Promise<void> {
 
   await control.close();
 
-  // The three numbers, and every one of them has teeth. `unsupported` is empty on purpose: a fixture
-  // this driver cannot replay across two processes has to be recorded here deliberately, because the
-  // alternative - a driver that quietly runs three fixtures and reports success - is exactly the
-  // hollow coverage WSM-CDC-007 exists to stop.
+  // Three checks: no fixture is unsupported, at least one fixture ran, and every fixture on disk
+  // either ran or was skipped for requiring another codec (WSM-CDC-007).
   check(unsupported.length === 0, `${label}: this driver could not replay ${JSON.stringify(unsupported)}`);
   check(ran.length > 0, `${label}: the corpus run exercised no fixture at all`);
   check(
@@ -1744,8 +1680,8 @@ async function dial(url: string): Promise<void> {
   const pushes: any[] = [];
   const journal = new Journal();
 
-  // `maxAttempts: 0`: this scenario ends by having the *acceptor* go away, and a dialer that
-  // re-dialled afterwards would keep reconnecting to a process the driver has not killed yet.
+  // `maxAttempts: 0`: this scenario ends with the acceptor going away, and a dialer that reconnected
+  // would keep dialling a process the driver has not yet killed.
   const peer = await connect(url, {
     reconnect: new Reconnect({ maxAttempts: 0 }),
     onStream: (payload: any) => {
@@ -1757,13 +1693,12 @@ async function dial(url: string): Promise<void> {
 }
 
 /**
- * Exit on the scenario's own terms rather than waiting for the event loop to drain.
+ * Exit when the scenario ends instead of waiting for the event loop to drain.
  *
- * A JavaScript timer cannot be interrupted, only ignored, so the heartbeat's next tick is still
- * pending up to a ping interval after `close()` has told it to stop - and node stays alive for it.
- * Waiting would add twenty seconds of nothing to every CI job. stdout is flushed first: under a CI
- * runner it is a pipe, where writes are asynchronous and `process.exit` truncates the very line the
- * driver greps for.
+ * The heartbeat's next tick can stay pending for up to a ping interval after `close()`, and node
+ * stays alive until it fires; waiting would add up to twenty seconds to every CI job. stdout is
+ * flushed first: under a CI runner it is a pipe, where writes are asynchronous and `process.exit`
+ * would truncate the line the driver reads.
  */
 async function finish(): Promise<void> {
   await new Promise<void>((resolve) => process.stdout.write('', () => resolve()));

@@ -1,20 +1,18 @@
-"""The one `on_stream` handler, and every action the frontend can ask for.
+"""The `on_stream` handler and every action the frontend can request.
 
-There is one handler per peer and every stream the browser opens arrives at it - the first one and
-every one after it (WSM-STM-030). What distinguishes the four call shapes is not four APIs but what
-this code does with the stream it was handed:
+There is one handler per peer, and every stream the browser opens arrives at it (WSM-STM-030). The
+four call shapes use the same API and differ in what the handler does with the stream:
 
-  * `quote`   - `reply()`: one payload, and the stream ends with it (WSM-API-006).
-  * `history` - `send()` in a loop, then `end()`: a response that arrives progressively, and one that
-                stops when the opener cancels it (WSM-ERR-012/013).
-  * `depth`   - `reply()` with a payload over MAX_FRAME_BYTES: fragmented and reassembled with the
-                application doing nothing at all (WSM-FRG-010).
-  * `export`  - the same, with a megabyte. The headline: while its sixteen fragments are on the wire,
-                the twenty pushed tick streams keep their turn (WSM-INV-004).
+  * `quote`   - `reply()`: one payload, which also ends the stream (WSM-API-006).
+  * `history` - `send()` in a loop, then `end()`: a response that arrives progressively and stops
+                when the opener cancels it (WSM-ERR-012/013).
+  * `depth`   - `reply()` with a payload over MAX_FRAME_BYTES, fragmented and reassembled without
+                application code (WSM-FRG-010).
+  * `export`  - the same with a megabyte. While its sixteen fragments are sent, the twenty pushed
+                tick streams continue to send frames between them (WSM-INV-004).
 
-The board itself is not an action. The backend calls `peer.open()` on its own initiative and the
-browser receives it through *its* `on_stream` handler - one `Peer` type, one mechanism, no second
-correlation story (WSM-INV-002).
+The board is not an action. The backend calls `peer.open()` and the browser receives the stream in
+its own `on_stream` handler; both directions use the same `Peer` type and correlation (WSM-INV-002).
 """
 
 from __future__ import annotations
@@ -40,28 +38,25 @@ from muxws import (
 
 logger = logging.getLogger("muxws.demo")
 
-#: How often each symbol's pushed stream carries a new price. Four a second per symbol is fast enough
-#: that the board is visibly live and slow enough that a reader can follow one row.
+#: Seconds between prices on each symbol's pushed stream: four per second per symbol.
 TICK_INTERVAL = 0.25
 
-#: The pause between two points of a history response. It exists so the response is visibly
-#: *progressive*: a chart that filled in one frame would demonstrate nothing that a unary reply does
-#: not, and there would be nothing to cancel halfway through.
+#: Seconds between two points of a history response, so the chart fills in progressively and the
+#: response can be cancelled while in progress.
 HISTORY_POINT_DELAY = 0.02
 
-#: How long the kill switch waits before closing the sockets. Long enough for its own reply to reach
-#: the wire, because a handler whose connection is closed underneath it is a handler whose answer
-#: never arrives - and the panel would then look like a bug rather than like a demonstration.
+#: Seconds the kill switch waits before closing the sockets, so that its own reply is sent before
+#: the connection closes.
 KILL_DELAY = 0.1
 
 
 @dataclass
 class Counters:
-    """What the diagnostics strip reads, and what `handlers_test.py` asserts on.
+    """Counters shown in the diagnostics strip and asserted on by `handlers_test.py`.
 
-    `history_cancelled` is the one that matters. WSM-ERR-012/013 say the opener's `cancel()` stops
-    the *backend* generator, and nothing on a screen can distinguish a backend that stopped from a
-    frontend that stopped looking. A number the generator increments itself can.
+    Under WSM-ERR-012/013 the opener's `cancel()` stops the backend generator. `history_cancelled` is
+    incremented by the generator itself, so it shows that the backend stopped, which the rendered
+    chart alone cannot show.
     """
 
     history_started: int = 0
@@ -73,7 +68,7 @@ class Counters:
 
 
 class MarketService:
-    """The demo's backend, as one object: the market, the registry, and the pushed tick streams."""
+    """The demo's backend: the market, the registry, and the pushed tick streams."""
 
     def __init__(
         self,
@@ -90,10 +85,9 @@ class MarketService:
         self._tick_interval = tick_interval
         self._history_delay = history_delay
         self._kill_delay = kill_delay
-        #: One list of pushing tasks per peer, held so the garbage collector cannot take the board
-        #: away from a connection that is still watching it.
+        #: One list of pushing tasks per peer, referenced so the tasks are not garbage-collected.
         self._boards: dict[Peer, list[asyncio.Task[None]]] = {}
-        #: The kill switch's own task, held for the same reason.
+        #: The kill switch's task, referenced for the same reason.
         self._killer: asyncio.Task[None] | None = None
         self._actions = {
             "hello": self._hello,
@@ -108,7 +102,7 @@ class MarketService:
 
     @property
     def actions(self) -> tuple[str, ...]:
-        """Every action the frontend may name. The test asserts each one answers."""
+        """Every action the frontend may name."""
         return tuple(self._actions)
 
     # ------------------------------------------------------------------ registration
@@ -116,10 +110,9 @@ class MarketService:
     def handler_for(self, peer: Peer) -> StreamHandler:
         """The `on_stream` handler for one connection.
 
-        Bound per peer because a handler is handed `(payload, stream)` and the actions need the
-        `Peer`: the hello has to tag and register *this* connection, and the board has to be pushed
-        onto it. The route has the peer in scope, which is where the documented examples close over
-        it too.
+        Bound per peer because a handler receives `(payload, stream)` and the actions need the
+        `Peer`: the hello tags and registers this connection, and the board is pushed onto it. The
+        route has the peer in scope, as in the documented examples.
         """
 
         async def on_stream(payload: Any, stream: Stream) -> None:
@@ -130,9 +123,9 @@ class MarketService:
     async def dispatch(self, peer: Peer, payload: Any, stream: Stream) -> None:
         """Route one stream to one action.
 
-        An unknown action raises, and that raise is the answer: WSM-STM-034 turns a handler exception
-        into `reset(APPLICATION_ERROR)` - never `REFUSED`, which would promise the request had not
-        been processed and would invite the browser to retry something that may already have run.
+        An unknown action raises `ValueError`. WSM-STM-034 turns a handler exception into
+        `reset(APPLICATION_ERROR)`, not `REFUSED`, which would state that the request was not
+        processed and may be retried.
         """
         action = payload.get("action") if isinstance(payload, dict) else None
         handler = self._actions.get(action) if isinstance(action, str) else None
@@ -149,25 +142,25 @@ class MarketService:
     # ------------------------------------------------------------------ the hello (D3)
 
     async def _hello(self, peer: Peer, payload: Any, stream: Stream) -> None:
-        """The subscription. It is an ordinary stream and nothing marks it on the wire (WSM-RCN-021).
+        """The subscription: an ordinary stream with no marker on the wire (WSM-RCN-021).
 
-        The dialer sends it through `connect(hello=...)`, so it is replayed verbatim on every socket
-        that peer ever gets (WSM-RCN-020) and this runs again, on a brand-new `Peer`, after every
-        reconnect. That is the whole of why the acceptor re-indexes here rather than anywhere else:
-        an acceptor's `tags` die with their connection (WSM-RCN-033), so whatever it indexes it must
-        index again on every connection.
+        The dialer sends it through `connect(hello=...)`, so it is replayed unchanged on every socket
+        that peer gets (WSM-RCN-020), and this runs again on a new `Peer` after every reconnect. An
+        acceptor's `tags` end with their connection (WSM-RCN-033), so the peer is indexed here, on
+        every connection.
 
-        The reply is a courtesy and nothing depends on it. `connect()`'s reconnect helper owns this
-        stream and discards what comes back on it - the acknowledgement WSM-RCN-022 asks for is this
-        handler *returning*. Everything the frontend actually needs arrives on the pushed streams
-        below, which is what makes the backend the only source of truth about symbols (D1).
+        Nothing depends on the reply. `connect()`'s reconnect helper owns this stream and discards
+        the reply; the acknowledgement WSM-RCN-022 requires is this handler returning. The frontend
+        receives its data on the pushed streams below; the backend is the only source of symbol data
+        (D1).
         """
         tags = payload.get("tags") if isinstance(payload, dict) else None
         if isinstance(tags, dict):
-            # muxws never reads `tags` and defines no key of its own in it (WSM-REG-001/002); these
-            # are the frontend's own labels, and the index is built from exactly what it named.
+            # muxws does not read `tags` and defines no keys in it (WSM-REG-001/002); these are the
+            # frontend's labels, and the index uses them unchanged.
             peer.tags.update(tags)
-        # After the writes and never before: the registry indexes, it does not watch (WSM-REG-010).
+        # After the tag writes: the registry indexes tags at registration and does not observe later
+        # changes (WSM-REG-010).
         self.registry.register(peer)
         self._start_board(peer)
         await stream.reply({"ok": True, "symbols": len(self.market.symbols), "tick_interval": self._tick_interval})
@@ -175,14 +168,12 @@ class MarketService:
     async def _rate(self, peer: Peer, payload: dict[str, Any], stream: Stream) -> None:
         """Change how often each pushed stream carries a price.
 
-        The demo's pacing is not the library's speed, and this control is what lets a reader see the
-        difference. `TICK_INTERVAL` is a `sleep` in the generator below and has nothing to do with
-        what the transport can carry: over the in-memory transport one peer pair moves ~25,000 frames
-        a second across twenty concurrent streams (`muxws/throughput_test.py`), and the board's
-        default asks for eighty.
+        The tick interval is a `sleep` in the generator below and does not reflect the transport's
+        capacity; `muxws/throughput_test.py` measures throughput. The board's default sends eighty
+        frames per second.
 
-        The floor is 1 ms rather than zero. At zero the generator becomes a busy loop that starves
-        the very event loop it needs to send on, which would demonstrate the opposite of the point.
+        The minimum is 1 ms. At zero the generator becomes a busy loop that starves the event loop it
+        sends on.
         """
         _ = peer
         requested = payload.get("interval_ms") if isinstance(payload, dict) else None
@@ -194,52 +185,49 @@ class MarketService:
     # ------------------------------------------------------------------ server push
 
     def _start_board(self, peer: Peer) -> None:
-        """Twenty streams, opened by the acceptor on its own initiative (WSM-INV-002).
+        """Open twenty streams from the acceptor side (WSM-INV-002).
 
-        One per symbol rather than one carrying all twenty, because the claim being witnessed is that
-        a stream mid-way through a megabyte does not hold the wire: twenty independent lanes plus the
-        export is the arrangement in which a FIFO and a round-robin writer look different.
+        One stream per symbol, not one stream for all twenty: with twenty independent streams plus
+        the export, a round-robin writer and a FIFO writer produce different frame orders, which
+        shows that a stream sending a megabyte does not block the others.
         """
         if peer in self._boards:
-            # A second hello on one socket must not double the board. It should not happen - the
-            # helper replays a hello per *connection* - but a duplicated tick stream would look like
-            # a protocol bug rather than like this.
+            # A second hello on one socket does not start a second board. The reconnect helper sends
+            # one hello per connection, so this applies only to a client that sends another.
             return
         self._boards[peer] = [asyncio.create_task(self._push_ticks(peer, symbol)) for symbol in self.market.symbols]
-        # Sync, because `on_close` handlers are, and cancelling a task is a synchronous call. Without
-        # it a socket that dies with no route around it - a test, say - leaves twenty tasks pushing
-        # into a peer that has been dead since WSM-RCN-042 discarded its writer.
+        # Synchronous, as `on_close` handlers are; cancelling a task is synchronous. Without it a
+        # socket that closes outside the route (for example in a test) leaves twenty tasks pushing
+        # into a closed peer whose writer was discarded (WSM-RCN-042).
         peer.on_close(lambda _reason, target=peer: self.forget(target))
 
     async def _push_ticks(self, peer: Peer, symbol: str) -> None:
         """One symbol's price stream, for as long as the socket lasts.
 
         `peer.open()` here is the same call the browser makes for a quote, on the same socket, with
-        the same correlation and the same cancellation. There is no push API because there does not
-        need to be one (WSM-INV-002).
+        the same correlation and cancellation. There is no separate push API (WSM-INV-002).
         """
         try:
             stream = peer.open({"topic": "ticks", "symbol": symbol})
         except (ConnectionLost, ConnectionGoingAway):
-            # The socket died between the hello and this task's first turn. Nothing is buffered for a
-            # next one (WSM-RCN-042) and there is nothing to report.
+            # The socket closed between the hello and this task's first turn. Nothing is buffered for
+            # the next connection (WSM-RCN-042).
             return
         try:
-            # The snapshot first, so a row can be drawn before any price has moved: the frontend
-            # holds no seed data and this is where a row comes from (D1).
+            # The snapshot first, so the row is drawn before the first price change; the frontend
+            # holds no seed data (D1).
             await stream.send(self.market.snapshot(symbol))
             while True:
                 await asyncio.sleep(self._tick_interval)
                 await stream.send(self.market.tick(symbol))
         except (StreamReset, StreamClosed):
-            # `ConnectionLost` is a `StreamReset`, so this covers the ordinary end of the demo: the
-            # socket went away and every live stream failed with it before `on_close` fired.
+            # `ConnectionLost` is a `StreamReset`, so this covers the normal end: the socket closed
+            # and every live stream failed before `on_close` ran.
             return
         finally:
-            # A board stream has no natural end, and `close()` lets every live stream finish before
-            # it closes the socket (WSM-CON-024/025). Twenty streams that never finish would hold
-            # that drain open for its whole window, so the producer that is going away says so. A
-            # no-op when the stream is already closed, which is the ordinary path.
+            # A board stream does not end on its own, and `close()` waits for live streams before
+            # closing the socket (WSM-CON-024/025); without the cancel, twenty board streams would keep
+            # the drain waiting for its full window. A no-op when the stream is already closed.
             await stream.cancel("the board stopped")
 
     # ------------------------------------------------------------------ the four call shapes
@@ -250,12 +238,12 @@ class MarketService:
         await stream.reply(self.market.quote(_symbol_of(payload)))
 
     async def _history(self, _peer: Peer, payload: Any, stream: Stream) -> None:
-        """Streaming, and cancellable. The cancellation is the point (WSM-ERR-012/013).
+        """Streaming and cancellable (WSM-ERR-012/013).
 
-        When the browser clicks another row mid-load it calls `cancel()` on this stream. The reset
-        reaches this peer, which cancels the task this handler is running on, and `CancelledError` is
-        raised at whatever it is awaiting. The counter incremented below is how a reader sees that
-        the *backend* stopped generating rather than that the frontend stopped looking.
+        When the user selects another row during loading, the browser calls `cancel()` on this
+        stream. The reset reaches this peer, which cancels this handler's task, and `CancelledError`
+        is raised at the current `await`. The `history_cancelled` counter shows that the backend
+        stopped generating.
         """
         symbol = _symbol_of(payload)
         points = self.market.history(symbol, HISTORY_POINTS)
@@ -267,25 +255,21 @@ class MarketService:
                 await asyncio.sleep(self._history_delay)
         except asyncio.CancelledError:
             self.counters.history_cancelled += 1
-            # Re-raised, never swallowed (WSM-ERR-014). A handler that returned normally here would
-            # tell the peer this stream finished, and the browser would be shown a completed chart
-            # for a request it had already abandoned.
+            # Re-raised (WSM-ERR-014). Returning normally here would end the stream as completed.
             raise
-        # Trailers ride the `end` frame: they are the things only known once the body is finished,
-        # and a separate trailing message would be a second frame the browser has to correlate.
+        # Trailers are carried on the `end` frame and hold values known only after the body is sent.
         await stream.end(trailers={"symbol": symbol, "points": len(points)})
 
     async def _depth(self, _peer: Peer, payload: Any, stream: Stream) -> None:
-        """A payload comfortably over MAX_FRAME_BYTES. Nothing here calls a splitter (WSM-FRG-010)."""
+        """A payload larger than MAX_FRAME_BYTES, fragmented by the writer (WSM-FRG-010)."""
         self.counters.depths += 1
         await stream.reply(self.market.depth(_symbol_of(payload)))
 
     async def _export(self, _peer: Peer, payload: Any, stream: Stream) -> None:
-        """The stall test. One megabyte, one payload, one stream, and twenty others unaffected.
+        """The stall test: one megabyte as one payload on one stream, while twenty other streams continue.
 
-        This handler is deliberately unremarkable: the whole demonstration is what the *writer* does
-        with what it enqueues here, which is to hand the socket back after every 64 KiB fragment so
-        each of the twenty tick streams gets its turn (WSM-FRG-018/019, WSM-INV-004).
+        The handler only replies. The writer sends the reply in 64 KiB fragments and sends frames of
+        the twenty tick streams between them (WSM-FRG-018/019, WSM-INV-004).
         """
         self.counters.exports += 1
         await stream.reply(self.market.export(_symbol_of(payload)))
@@ -293,26 +277,24 @@ class MarketService:
     # ------------------------------------------------------------------ the diagnostics strip
 
     async def _stats(self, peer: Peer, _payload: Any, stream: Stream) -> None:
-        """What the backend knows about itself, asked for over the same socket as everything else."""
+        """Backend counters and state, requested over the same socket as everything else."""
         await stream.reply(
             {
                 **asdict(self.counters),
                 "peers": len(self.registry.peers_for()),
                 "streams": len(peer.streams),
                 "symbols": self.market.symbols,
-                # The board's own period, so a tick-latency readout has a baseline it was told rather
-                # than one it guessed. The hello ack carries it too, but `connect(hello=...)` owns
-                # that stream and discards what comes back on it (WSM-RCN-022).
+                # The board's tick interval, the baseline for the tick-latency readout. The hello reply
+                # also carries it, but `connect(hello=...)` discards that reply (WSM-RCN-022).
                 "tick_interval": self._tick_interval,
             }
         )
 
     async def _kill(self, _peer: Peer, _payload: Any, stream: Stream) -> None:
-        """Close every peer, so the browser can watch a reconnect it did not cause.
+        """Close every peer, so the browser reconnects.
 
-        Scheduled rather than awaited: `close()` sends `goaway`, drains and closes the socket
-        (WSM-CON-025), and doing that inline would take down the socket this handler's own reply is
-        still queued on.
+        Scheduled, not awaited: `close()` sends `goaway`, drains and closes the socket (WSM-CON-025),
+        and doing that inline would close the socket before this handler's reply is sent.
         """
         peers = self.registry.peers_for()
         await stream.reply({"closing": len(peers)})
@@ -322,17 +304,17 @@ class MarketService:
         await asyncio.sleep(self._kill_delay)
         for peer in peers:
             # The board first. `close()` drains every live stream before it closes the socket
-            # (WSM-CON-024), and the twenty pushed streams are exactly the ones that would never
-            # reach an end of their own - the drain would spend its full window waiting for them.
+            # (WSM-CON-024), and the twenty pushed streams do not end on their own, so the drain would
+            # wait for its full window.
             self.forget(peer)
             try:
                 await peer.close(ResetCode.NO_ERROR, "the demo's kill switch")
-            except Exception:  # noqa: BLE001 - a socket already gone is what the kill switch wanted
+            except Exception:  # noqa: BLE001 - a peer that is already closed needs no closing
                 logger.debug("muxws demo: peer %s was already gone when the kill switch reached it", peer.id)
 
 
 def _symbol_of(payload: Any) -> str:
-    """Every action but `hello`, `stats` and `kill` names a symbol; a request that does not is an error."""
+    """The symbol of a request; raises `ValueError` when the payload names none."""
     symbol = payload.get("symbol") if isinstance(payload, dict) else None
     if not isinstance(symbol, str):
         raise ValueError(f"this action needs a symbol; got {symbol!r}")

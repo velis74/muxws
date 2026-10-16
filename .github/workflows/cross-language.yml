@@ -1,13 +1,12 @@
 name: Cross-language
 
 # The live Python<->TypeScript checks (WSM-TST-004/005, WSM-CDC-007), and the documentation examples
-# that need both languages. `ci.yml` runs each language against itself; this file is the only place
-# the two ports speak to one another over a real socket, in both role assignments, for every codec
-# that ships.
+# that need both languages. `ci.yml` runs each language against itself; this workflow connects a
+# Python peer and a TypeScript peer over a real socket, in both role assignments, for every shipped
+# codec.
 #
-# One job, because every step needs the same two toolchains and the same two installs, and the
-# steps themselves take seconds. Each check is its own step and runs even when an earlier one failed,
-# so one run reports every failing pair.
+# One job, because every step needs the same two toolchains and installs. Each check is a separate
+# step and runs even when an earlier one failed, so one run reports every failing pair.
 on:
   push:
     branches: [main]
@@ -15,7 +14,7 @@ on:
 
 env:
   # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and the interop scenario and the
-  # examples carry non-ASCII payloads, so the runner's locale is load-bearing rather than incidental.
+  # examples contain non-ASCII payloads; the checks require a UTF-8 locale.
   LANG: C.UTF-8
 
 jobs:
@@ -33,45 +32,42 @@ jobs:
           node-version: '22'
       # `[dev]` already carries `msgpack`, so the Python side needs nothing conditional.
       - run: pip install -e .[dev]
-      # `npm install`, not `npm ci`: package-lock.json is deliberately not committed, so that CI
-      # resolves dependencies afresh and tests against current upstream rather than a frozen tree.
-      # `@msgpack/msgpack` is an *optional* peer dependency (WSM-PKG-003) and a devDependency, so
-      # this install pulls it in; the second command keeps it present if the devDependency goes.
-      # Evidence that the json legs never reach msgpack is `ts/packaging.spec.ts`, which bundles
-      # `ts/index.ts` and greps the output.
+      # `npm install`, not `npm ci`: package-lock.json is not committed, so CI resolves dependencies
+      # on every run and tests against current upstream versions.
+      # `@msgpack/msgpack` is an optional peer dependency (WSM-PKG-003) and a devDependency, so this
+      # install includes it; the second command installs it explicitly in case it is removed from
+      # devDependencies. `ts/packaging.spec.ts` bundles `ts/index.ts` and checks that the output does
+      # not reference msgpack.
       - id: install
         run: |
           npm install
           npm install --no-save @msgpack/msgpack
 
       # WSM-TST-004 and WSM-CDC-007: {Python acceptor, TS dialer} and {TS acceptor, Python dialer},
-      # each under json and msgpack. A scenario run in one role assignment proves only that one
-      # side's parity, ids and close semantics agree with themselves, and a codec that ships without
-      # a live cross-language pair MUST NOT ship.
+      # each under json and msgpack. A scenario run in a single role assignment tests one side's
+      # parity, ids and close semantics only against the same side, and a codec MUST NOT ship without
+      # a live cross-language pair.
       #
       # Each leg runs three scenarios through `interop/drive.sh`:
       #   main    the hand-written scenario over TCP.
-      #   unix    the same scenario over a socket file. The protocol is identical; what is at risk is
-      #           the `ws+unix:` URL grammar, which each port parses with its own code. The acceptors
+      #   unix    the same scenario over a socket file. The protocol is identical; this leg tests the
+      #           `ws+unix:` URL grammar, which each port parses with its own code. The acceptors
       #           report the request target they were handed and the driver compares it with the
       #           route it put in the URL, query string included.
       #   corpus  the sequence corpus, replayed by a Python peer and a TypeScript peer to each other.
-      #           The in-process runners have a peer of one language at each end and prove only that
-      #           their own port agrees with itself.
+      #           The in-process conformance runners use peers of one language at both ends.
       #
       # The codec is exported in both spellings (WSM-CDC-010): the Python half reads MUXWS_CODEC and
       # the TypeScript half reads VITE_MUXWS_CODEC, which Vite substitutes at build time and which
-      # does not exist under node, so `interop/runner.ts` reads it from the environment itself. It is
-      # also passed to the driver as an argument, the one copy that does not come from the variables
-      # under test, so a step whose environment never reached a process fails instead of running json
-      # under a msgpack name.
+      # does not exist under node, so `interop/runner.ts` reads it from the environment. The codec is
+      # also passed to the driver as an argument, independent of the environment variables, so a step
+      # whose environment did not reach a process fails instead of running json under a msgpack name.
       #
       # The last argument of `corpus` is how many fixtures the leg must exercise: the whole corpus
       # under msgpack and one fewer under json, which cannot carry `bytes-payload-under-binary-codec`
-      # (WSM-CDC-008). It is pinned here rather than counted by the conductor, because a conductor
-      # that counted its own fixtures could report three of them as thirteen. Adding a sequence
-      # fixture means raising these two numbers alongside EXPECTED_SEQUENCE_FIXTURES in both
-      # conformance runners.
+      # (WSM-CDC-008). The count is fixed here and not computed by the conductor, so a conductor that
+      # skips fixtures fails. Adding a sequence fixture requires raising these two numbers and
+      # EXPECTED_SEQUENCE_FIXTURES in both conformance runners.
       - name: python acceptor, ts dialer, json
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
@@ -114,8 +110,8 @@ jobs:
           interop/drive.sh ts python corpus msgpack 14
 
       # WSM-TST-005: the acceptor is SIGKILLed with streams open and a second one is started on the
-      # same port, in both role assignments, because "the replayed hello the OTHER language's
-      # acceptor accepts" has two directions. Not run over a socket file: a SIGKILLed acceptor cannot
+      # same port, in both role assignments, so each language's acceptor receives a hello replayed by
+      # the other language's dialer. Not run over a socket file: a SIGKILLed acceptor cannot
       # unlink its own socket file (see `interop/drive.sh`).
       - name: reconnect, python acceptor, ts dialer
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}

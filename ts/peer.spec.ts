@@ -1,10 +1,9 @@
 /**
- * `Peer`: id allocation, retention, dispatch, and what socket death does to every shape.
+ * `Peer`: id allocation, retention, dispatch, and the effect of socket death on every stream shape.
  *
- * A mirror of `muxws/peer_test.py`, test for test, against `ts/transports/memory.ts`. Where a rule is
- * asserted differently here it is because JavaScript offers a different witness of the same fact -
- * `stream.signal.aborted` where Python reads `stream.closed.is_set()`, a `console` spy where Python
- * reads `caplog` - and each of those places says so.
+ * Mirrors `muxws/peer_test.py` test for test, using `ts/transports/memory.ts`. Where an assertion differs from
+ * Python it uses the JavaScript observable for the same fact - `stream.signal.aborted` for Python's
+ * `stream.closed.is_set()`, a `console` spy for `caplog` - and a comment at that place names it.
  */
 
 // `describe`/`it`/`expect` are configured as globals; `vi` is imported because the shared eslint
@@ -58,9 +57,9 @@ class Pair {
   ) {}
 
   start(): void {
-    // There is no `asyncio.Task` here: `serve()` is simply a promise nobody awaits until `stop()`.
-    // The rejection handler is attached at once so a read loop that dies mid-test is not reported as
-    // an unhandled rejection before the assertions get to look at it.
+    // `serve()` returns a promise that `stop()` awaits; there is no `asyncio.Task`. The rejection handler is
+    // attached immediately so a read loop that fails mid-test is not reported as an unhandled rejection before the
+    // assertions inspect it.
     this.served = [this.dialer.serve(), this.acceptor.serve()];
     this.served.forEach((task) => {
       void task.catch(() => undefined);
@@ -137,10 +136,10 @@ function makePair(options: { errorSerializer?: ErrorSerializer; codec?: Codec } 
 }
 
 /**
- * The peer's private bookkeeping, which the Python suite reads as `_ignored_late_frames` and friends.
+ * The peer's private bookkeeping (Python: `_ignored_late_frames` and related fields).
  *
- * Reaching for it is deliberate: WSM-STM-001 and WSM-STM-002 are statements about what the peer
- * *retains*, and a test that could only see the wire could not tell "ignored" from "not received".
+ * WSM-STM-001 and WSM-STM-002 are statements about what the peer retains; the wire alone cannot distinguish
+ * "ignored" from "not received".
  */
 interface PeerInternals {
   ignoredLateFrames: number;
@@ -148,7 +147,7 @@ interface PeerInternals {
   nextId: number;
   highestLocalOpen: number;
   highestRemoteOpen: number;
-  /** The writer, so a test can see what the peer is still holding for a socket that is gone. */
+  /** The writer, so a test can inspect what the peer holds for a socket that is closed. */
   writer: { depth: number; lanes: number };
   dispatch(frame: Frame): Promise<boolean>;
   /** The socket-death fan-out, and the socket a reconnected `Peer` takes next. */
@@ -190,7 +189,7 @@ afterEach(async () => {
 
 // --------------------------------------------------------------------------- helpers
 
-/** Python's `_hold`: keep the stream open until somebody else closes it. */
+/** Python's `_hold`: keep the stream open until the other side closes it. */
 async function hold(payload: unknown, stream: Stream): Promise<void> {
   await stream.closed;
 }
@@ -201,14 +200,13 @@ async function replyNow(payload: unknown, stream: Stream): Promise<void> {
 }
 
 /**
- * Python's `Lone` fixture: one peer, fed a raw message by hand, with no counterpart at all.
+ * Python's `Lone` fixture: one peer with no counterpart, fed a raw message directly.
  *
- * A live pair cannot be asked what a receiver does with a frame no correct sender would produce -
- * the counterpart sees the answer to a stream it never opened and kills the connection, correctly
- * and entirely beside the point.
+ * A live pair cannot test how a receiver handles a frame no correct sender produces: the counterpart receives the
+ * answer to a stream it never opened and kills the connection, which is unrelated to the assertion.
  *
- * Reports the three things a "changes nothing" assertion needs: everything the peer put on the wire,
- * what its handler was handed, and whether it survived.
+ * Returns what a "changes nothing" assertion needs: every message the peer wrote, the frames it received, what its
+ * handler was given, and whether the peer is still open.
  */
 async function replayIntoLonePeer(
   message: string,
@@ -253,7 +251,7 @@ class HandlerFailure extends Error {
   }
 }
 
-/** `pytest.raises`, as a value: the rejection reason, or a failure if there was none. */
+/** Equivalent of `pytest.raises`: the rejection reason, or a test failure if the promise resolves. */
 async function rejection(work: PromiseLike<unknown>): Promise<unknown> {
   try {
     await work;
@@ -289,9 +287,9 @@ function sizeOf(value: unknown): number | null {
   if (value instanceof Map || value instanceof Set) return value.size;
   if (typeof value !== 'object' || value === null) return null;
   if (Object.getPrototypeOf(value) === Object.prototype) return Object.keys(value).length;
-  // Anything else that reports its own occupancy counts too. The peer's outbound `AsyncQueue` is
-  // exactly such a container: a frame retained per closed stream would sit in it, invisible to a
-  // check that only understood `Map`, `Set` and `Array`.
+  // Any other object that reports its own size is counted too. The peer's outbound `AsyncQueue` is such a
+  // container: a frame retained per closed stream would be stored there, where a check limited to `Map`, `Set` and
+  // `Array` does not see it.
   const reported = value as { size?: unknown; length?: unknown };
   if (typeof reported.size === 'number') return reported.size;
   if (typeof reported.length === 'number') return reported.length;
@@ -318,9 +316,8 @@ describe('stream ids', () => {
   });
 
   it('allocates and enqueues as one indivisible step - WSM-SID-006/WSM-INV-005', async () => {
-    // Fifty opens from fifty separate tasks. If anything suspended between taking the id and queueing
-    // the frame, the wire would carry a non-monotonic sequence - a protocol error this peer would be
-    // committing against itself.
+    // Fifty opens from fifty separate tasks. If anything suspended between allocating the id and queueing the
+    // frame, the wire would carry a non-monotonic id sequence, which is a protocol error by this peer.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -358,9 +355,9 @@ describe('stream ids', () => {
   });
 
   it("does not free a closed peer's id for reuse - WSM-API-009", async () => {
-    // Reuse is the failure being prevented, so this needs a peer that was actually closed: counting
-    // distinct ids among peers that were never closed cannot fail against a scheme that recycles the
-    // ids of closed connections - which is precisely the scheme the rule forbids.
+    // The test closes a peer before creating the next ones. Counting distinct ids among peers that were never
+    // closed also passes for a scheme that reuses the ids of closed connections, which is the scheme the rule
+    // forbids.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -485,9 +482,8 @@ describe('retention', () => {
     expect(lingering, 'the peer still holds entries after 200 closed streams').toEqual([]);
     expect(containersOf(pair.acceptor).filter((entry) => entry.size > 0)).toEqual([]);
 
-    // And the scan has teeth. A request still in flight is reported, so the emptiness above is a
-    // fact about the peer rather than about a scan that found nothing to look at - which is exactly
-    // how a retention check passes for the wrong reason.
+    // The scan reports a request that is still in flight, so the empty result above reflects the peer's state and
+    // not a scan that inspects nothing.
     const inFlight = pair.dialer.request({ q: 1 });
     expect(
       containersOf(pair.dialer).some((entry) => entry.size > 0),
@@ -503,29 +499,27 @@ describe('retention', () => {
 
 describe('dispatch', () => {
   it('ignores an unknown frame type, staying quiet and alive - WSM-FRM-002', async () => {
-    // All three halves of the rule in one test, because each alone passes for the wrong reason: a
-    // peer that never received the frame is also alive and also quiet, and one that answered it with
-    // a `reset` also logged something.
+    // All three parts of the rule are asserted in one test. Each part alone also holds for a non-conforming peer: a
+    // peer that never received the frame is alive and quiet, and a peer that answered it with a `reset` also logs.
     const pair = makePair();
     pair.acceptor.onStream(hold);
-    // Non-vacuity. Without a witness that the frame *arrived*, every assertion below would hold just
-    // as well against a peer that never received it, which is not what "ignored" means.
+    // Assert first that the frame arrived; otherwise every assertion below also holds for a peer that never
+    // received it.
     const arrived: Frame[] = [];
     pair.acceptor.onFrame((direction, frame) => {
       if (direction === 'rx') arrived.push(frame);
     });
     pair.start();
 
-    // Python raises `muxws.frames` to INFO with `caplog.at_level`; `logger.level` is the same seam.
-    // Below 'info' the single `logger.info` call in `dispatch` reaches no console at all and the
-    // count would be zero for a reason that has nothing to do with the peer.
+    // Python raises `muxws.frames` to INFO with `caplog.at_level`; `logger.level` is the equivalent setting. Below
+    // 'info' the single `logger.info` call in `dispatch` reaches no console and the count is zero regardless of the
+    // peer's behaviour.
     const level = logger.level;
     logger.level = 'info';
     const before = pair.sentBy('acceptor').length;
     try {
-      // `stream=1` is above this acceptor's high-water mark, so an implementation that let an
-      // unrecognised type fall through to the stream-frame path kills the connection (WSM-STM-003)
-      // rather than failing some subtler assertion.
+      // `stream=1` is above this acceptor's high-water mark, so an implementation that passes an unrecognised type
+      // to the stream-frame path kills the connection (WSM-STM-003) and the test fails directly.
       pair.injectRaw('acceptor', '{"type":"widget","stream":1}');
       await pair.settle();
     } finally {
@@ -546,26 +540,25 @@ describe('dispatch', () => {
   });
 
   it('ignores an unknown envelope field - WSM-FRM-001', async () => {
-    // `frames.spec.ts` proves the decoder drops the key. That is not the rule: a receiver could drop
-    // it and still behave differently - refuse the frame, warn, take a slower path. So the same
-    // exchange is replayed twice, once with `"colour": "red"` on the `open` and once without, and
-    // the two peers' *whole wires* are compared. Equality across the two runs is the only
-    // formulation that cannot pass while the extra field is quietly acted on downstream, and it is
-    // what WSM-CON-009 rests on: additive revisions are safe to receive precisely because of this.
+    // `frames.spec.ts` checks that the decoder drops the key. The rule is broader: a receiver that drops the key
+    // can still behave differently (refuse the frame, warn, take a slower path). The same exchange therefore runs
+    // twice, once with `"colour": "red"` on the `open` and once without, and the complete wires of both peers are
+    // compared. Equal wires show that the extra field has no effect downstream. WSM-CON-009 depends on this:
+    // additive revisions are safe to receive because receivers ignore unknown fields.
     const tainted = await replayIntoLonePeer('{"type":"open","stream":1,"payload":{"q":1},"end":true,"colour":"red"}');
     const clean = await replayIntoLonePeer('{"type":"open","stream":1,"payload":{"q":1},"end":true}');
 
-    // Non-vacuity: two silent peers also have equal wires. The handler must have run and answered.
+    // Two silent peers also have equal wires, so the handler must have run and answered.
     expect(clean.seen).toEqual([{ q: 1 }]);
     expect(clean.wire.length, 'the control exchange produced no frames at all').toBeGreaterThan(0);
     expect(tainted.alive).toBe(true);
     expect(clean.alive).toBe(true);
     expect(tainted.seen, 'the payload the handler saw').toEqual(clean.seen);
     expect(tainted.wire, 'an unknown envelope field changed what went out').toEqual(clean.wire);
-    // The wire is the loudest witness but not the finest: a decoder that let the extra key disturb a
-    // *quiet* field - `end`, `more`, `code` - can answer this one exchange identically and the next
-    // one differently. `onFrame` fires after decode and before dispatch (WSM-OBS-003), so this
-    // compares the frames the peer actually acted on, field for field.
+    // Wire equality does not cover every field: a decoder that let the extra key change a field such as `end`,
+    // `more` or `code` could produce an identical answer for this exchange and a different one for the next.
+    // `onFrame` fires after decode and before dispatch (WSM-OBS-003), so this compares the decoded frames the peer
+    // acted on, field by field.
     expect(tainted.received).toHaveLength(clean.received.length);
     tainted.received.forEach((frame, index) => {
       expect(framesEqual(frame, clean.received[index]), 'the frame the peer dispatched').toBe(true);
@@ -585,8 +578,8 @@ describe('dispatch', () => {
   });
 
   it('answers a throwing handler with APPLICATION_ERROR always - WSM-STM-034/WSM-INV-008', async () => {
-    // REFUSED promises the operation definitively did not happen. A handler that debits an account
-    // and then throws would, under REFUSED, be inviting the client to retry the debit.
+    // REFUSED states that the operation did not happen. A handler that debits an account and then throws would,
+    // under REFUSED, invite the client to retry the debit.
     const pair = makePair();
     pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
       await stream.send({ partial: true });
@@ -626,9 +619,9 @@ describe('dispatch', () => {
     expect(JSON.stringify(pair.lastFrameOfType('acceptor', 'reset').payload)).not.toContain('secret detail');
   });
 
-  // Python has one way to return nothing and JavaScript has two. A serializer written as
-  // `(error) => { if (isPublic(error)) return describe(error); }` returns `undefined` on the
-  // redacting path, so both spellings have to mean the same thing or the redaction leaks.
+  // JavaScript has two values for "nothing" where Python has one. A serializer written as `(error) => { if
+  // (isPublic(error)) return describe(error); }` returns `undefined` on the redacting path, so `undefined` and
+  // `null` must both mean "no payload", otherwise the redacted data is sent.
   (
     [
       ['null', () => null],
@@ -767,7 +760,7 @@ class Rig {
     readonly name: string,
     readonly peer: Peer,
     private readonly watched: Stream[],
-    /** Say this shape is in position. The socket is not dropped until every shape has said so. */
+    /** Signal that this shape is ready. The socket is dropped only after every shape has signalled. */
     readonly arm: () => void,
     /** Resolves once the socket has been dropped, for the shapes that act only afterwards. */
     readonly dropped: Promise<void>,
@@ -796,7 +789,7 @@ async function iterateShape(rig: Rig): Promise<void> {
   const stream = rig.open();
   rig.arm();
   for await (const item of stream) void item;
-  // A clean end would read as "the export finished", which is exactly the lie WSM-RCN-041 forbids.
+  // A clean end would report a completed export; WSM-RCN-041 requires an error.
   throw new Error('an async for must raise on socket death, not terminate normally');
 }
 
@@ -809,12 +802,12 @@ async function sendShape(rig: Rig): Promise<void> {
   const stream = rig.open();
   rig.arm();
   for (;;) {
-    // Mid-send when the socket dies, rather than sending once and waiting: a sender that had already
-    // stopped would be testing `send()` on a closed stream, which is a different rule.
+    // The shape is mid-send when the socket dies. A sender that had already stopped would test `send()` on a closed
+    // stream, which is a different rule.
     await stream.send({ shape: rig.name });
-    // A macrotask and not `Promise.resolve()`: a loop of resolved microtasks never yields to the
-    // timer queue, so the drop this shape is waiting for could never happen and it would starve the
-    // whole test instead of being killed by it. Python's `asyncio.sleep(0)` buys the same turn.
+    // The loop yields with a macrotask, not `Promise.resolve()`: a loop of resolved microtasks never yields to the
+    // timer queue, so the socket drop it waits for would never run and the loop would block the whole test.
+    // Python's `asyncio.sleep(0)` yields the same way.
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 0);
     });
@@ -830,10 +823,9 @@ async function cancelShape(rig: Rig): Promise<void> {
 }
 
 /**
- * Every shape WSM-RCN-041 names, with what the socket dying under it must do to that shape. **This
- * map is the only place they are listed**: the runner below opens one stream per entry, waits for all
- * of them to be armed, kills the socket once, and checks each outcome against the expectation
- * recorded here - so adding a seventh shape is one line in one place (§6).
+ * Every shape WSM-RCN-041 names, with the required outcome when the socket dies under it. **This map is the only
+ * list of shapes**: the runner below opens one stream per entry, waits until all are armed, kills the socket once,
+ * and checks each outcome against the expectation here. Adding a seventh shape is one entry in this map (§6).
  */
 const DEATH_SHAPES: Record<string, { run: (rig: Rig) => Promise<void>; expected: typeof ConnectionLost | null }> = {
   'await stream': { run: awaitShape, expected: ConnectionLost },
@@ -841,35 +833,33 @@ const DEATH_SHAPES: Record<string, { run: (rig: Rig) => Promise<void>; expected:
   'async for': { run: iterateShape, expected: ConnectionLost },
   'in-flight request()': { run: requestShape, expected: ConnectionLost },
   'sender mid-send()': { run: sendShape, expected: ConnectionLost },
-  // `cancel()` and `reset()` are the shapes WSM-RCN-041 makes **no-ops** rather than failures, so
-  // `null` is the expectation. They belong here anyway: "does not raise" is worth nothing if it
-  // hangs, and hanging is what this test detects.
+  // WSM-RCN-041 makes `cancel()` and `reset()` no-ops rather than failures, so their expectation is `null`. They
+  // are included because the test also detects a no-op that hangs.
   'a stream awaiting cancel()': { run: cancelShape, expected: null },
 };
 
 describe('socket death', () => {
   it('names the shape that hung rather than timing out anonymously - WSM-INV-011', async () => {
-    // The next test fails by hang detection, so its safety net is itself tested. A `within` that
-    // silently awaited forever would turn "a shape hung" into a vitest timeout naming only the file,
-    // which is the anonymous failure WSM-INV-011 is about.
+    // The next test detects failure with a hang deadline, so this test checks the deadline helper. A `within` that
+    // awaited forever would turn a hung shape into a vitest timeout naming only the file, which is the anonymous
+    // failure WSM-INV-011 describes.
     const never = new Promise<never>(() => undefined);
     const caught = await rejection(within('iterate', never, 10));
 
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toContain("the 'iterate' shape hung");
     expect((caught as Error).message).toContain('WSM-INV-011');
-    // And it resolves normally when the work does, so it can never invent a hang that did not happen.
+    // `within` resolves normally when the work completes, so it reports no hang that did not happen.
     expect(await within('settles', Promise.resolve('done'), 10)).toBe('done');
   });
 
   it('fails every shape and none of them hangs - WSM-RCN-041/WSM-STM-014', async () => {
-    // One stream per shape, all of them live at the same instant, and one socket death underneath all
-    // of them at once. What each shape must do is read from `DEATH_SHAPES` rather than written out
-    // here, so the list of shapes has exactly one home.
+    // One stream per shape, all live at the same time, and one socket death under all of them. The expected outcome
+    // of each shape is read from `DEATH_SHAPES`, the single list of shapes.
     //
-    // **This test fails by hang detection.** A shape that never finishes is named in the failure,
-    // because the failure WSM-INV-011 describes is not an exception: it is a caller who sees no
-    // error, no log and no timeout, just a spinner that never stops.
+    // **This test fails by hang detection.** A shape that never finishes is named in the failure. The failure
+    // WSM-INV-011 describes raises no exception: the caller sees no error, no log and no timeout, and the operation
+    // never completes.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -877,9 +867,9 @@ describe('socket death', () => {
     const closes: CloseReason[] = [];
     const watched: Stream[] = [];
     /**
-     * What the world looked like at the instant `onClose` ran. WSM-STM-014 puts the synthesised
-     * failures *before* it, so a handler that fired first would observe streams still live - and
-     * counting the calls alone cannot tell the two orderings apart.
+     * The state at the instant `onClose` ran. WSM-STM-014 requires the synthesised failures to happen before
+     * `onClose`; a handler that fired first would observe streams still open, and counting calls alone does not
+     * distinguish the two orderings.
      */
     const worldAtClose: { liveStreams: number; allClosed: boolean[]; allFailed: StreamState[] }[] = [];
 
@@ -915,8 +905,8 @@ describe('socket death', () => {
         outcomes.set(name, settled(shape.run(rig)));
       });
 
-      // Nothing dies until every shape says it is in position, or the test would be asserting about
-      // whichever shapes happened to be ready.
+      // No socket dies until every shape has signalled that it is ready; otherwise the test would cover only the
+      // shapes that happened to be ready.
       await within('arming', Promise.all(armed), 5_000);
       await pair.settle();
 
@@ -990,8 +980,8 @@ describe('socket death', () => {
     pair.dialerSocket.drop();
     await pair.settle();
 
-    // The memoized future is resolved **once**. A second await that hung, or that raised something
-    // different, would mean the failure had been delivered rather than recorded.
+    // The memoized future is resolved **once**. A second await that hung, or that raised a different error, would
+    // mean the failure was delivered to one awaiter instead of being stored.
     const first = await within('await', rejection((async () => stream)()));
     const second = await within('second await', rejection((async () => stream)()));
     expect(first).toBeInstanceOf(ConnectionLost);
@@ -1013,7 +1003,7 @@ describe('socket death', () => {
     const consuming = settled(
       (async () => {
         for await (const item of stream) collected.push(item);
-        // A clean end would read as "the export finished", which is exactly the lie the rule forbids.
+        // A clean end would report a completed export; the rule requires an error.
         throw new Error('the loop terminated normally instead of raising ConnectionLost');
       })(),
     );
@@ -1036,8 +1026,8 @@ describe('socket death', () => {
     pair.dialerSocket.drop();
     await pair.settle();
 
-    // No-ops, not errors: the caller asked for something the socket already did, and neither may put
-    // a frame on a wire that is gone.
+    // No-ops, not errors: the socket has already ended the stream, and neither call may write a frame to a socket
+    // that is closed.
     expect(await within('cancel', settled(stream.cancel()))).toBeUndefined();
     expect(await within('reset', settled(stream.reset(ResetCode.NO_ERROR)))).toBeUndefined();
     expect(pair.sentBy('dialer')).toHaveLength(framesBefore);
@@ -1059,8 +1049,8 @@ describe('socket death', () => {
       expect(await rejection(pair.dialer.request({ attempt: index }))).toBeInstanceOf(ConnectionLost);
     }
 
-    // A queue that flushed into the next socket would deliver work the server has forgotten the
-    // sender of, turning a failure that would have reached a call site into silent misdelivery.
+    // A queue flushed into the next socket would deliver work whose sender the server no longer knows, so a failure
+    // that would have reached the call site would become a silent misdelivery.
     const [fresh] = memoryPair();
     pair.dialer.adoptSocket(fresh);
     const serving = pair.dialer.serve();
@@ -1073,9 +1063,8 @@ describe('socket death', () => {
   });
 
   it("discards the writer's queues when the socket dies - WSM-RCN-042/WSM-INV-010", async () => {
-    // `ts/writer.spec.ts` proves `discardAll()` empties the queues when it is called, which is a
-    // different claim from proving that socket death reaches it. This is the test that fails if the
-    // call is deleted from `die()`.
+    // `ts/writer.spec.ts` checks that `discardAll()` empties the queues when called; this test checks that socket
+    // death calls it, and fails if the call is removed from `die()`.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1083,17 +1072,16 @@ describe('socket death', () => {
     for (let index = 0; index < 5; index += 1) {
       pair.dialer.open({ body: 'x'.repeat(5000), n: index });
     }
-    // Not settled first, deliberately: the queues have to still be full at the instant the socket
-    // dies, or a writer that had already drained them would make this pass against a peer that holds
-    // everything for the next socket.
+    // Not settled first: the queues must still be full when the socket dies, otherwise a writer that had already
+    // drained them makes this pass against a peer that keeps everything for the next socket.
     expect(internals(pair.dialer).writer.depth, 'the queues must be full at the moment of death').toBeGreaterThan(0);
 
     pair.dialerSocket.drop();
     await pair.settle();
 
-    // Nothing is held for a next socket: a queue that flushed into it would deliver work the server
-    // has forgotten the sender of, turning a failure that would have reached a call site into silent
-    // misdelivery (WSM-INV-010).
+    // Nothing is held for a next socket: a queue flushed into it would deliver work whose sender the server no
+    // longer knows, so a failure that would have reached the call site would become a silent misdelivery
+    // (WSM-INV-010).
     expect(internals(pair.dialer).writer.depth, 'frames were kept for a socket that will never carry them').toBe(0);
     expect(internals(pair.dialer).writer.lanes).toBe(0);
   });
@@ -1115,12 +1103,11 @@ describe('socket death', () => {
   });
 
   it("clears the dead socket's exhaustion shutdown on adopt - WSM-SID-007/WSM-RCN-031", async () => {
-    // Running out of stream ids schedules an orderly shutdown and remembers it, so a second `open()`
-    // cannot schedule a second one. That memory belongs to the socket that ran out and not to the
-    // `Peer`, which outlives it: carried into the next connection it makes `beginExhaustionShutdown`
-    // a no-op there, and a socket that exhausts its ids never says goodbye and never closes - it
-    // refuses every `open()` from then on while reporting itself perfectly healthy.
-    // `muxws/socket_death_test.py` asserts the same on the field Python resets on the line above.
+    // Running out of stream ids schedules an orderly shutdown and records it, so a second `open()` does not
+    // schedule another. The record belongs to the socket that ran out, not to the `Peer`, which outlives it.
+    // Carried into the next connection, it makes `beginExhaustionShutdown` a no-op there: a socket that exhausts
+    // its ids then never sends `goaway` and never closes, and refuses every `open()` while `isOpen` stays true.
+    // `muxws/socket_death_test.py` asserts the same for the corresponding Python field.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1141,9 +1128,9 @@ describe('socket death', () => {
     internals(pair.dialer).nextId = MAX_STREAM_ID;
     pair.dialer.open({ q: 2 });
     expect(pair.dialer.exhaustionShutdown, 'and the new socket schedules its own').not.toBeNull();
-    // Nothing reads `fresh`, so dropping it tells nobody and the second shutdown would sit out its
-    // whole drain window waiting for a stream no read loop will ever end (WSM-CON-024). Killing the
-    // peer is what ends that wait here; that the shutdown *started* is the whole claim.
+    // Nothing reads `fresh`, so dropping it is not detected and the second shutdown would wait its whole drain
+    // window for a stream that no read loop ends (WSM-CON-024). Killing the peer ends that wait; the assertion is
+    // only that the shutdown started.
     pair.dialer.die(new ConnectionClosed('the test is over', { code: 1006 }));
     await pair.dialer.exhaustionShutdown?.catch(() => undefined);
   });
@@ -1158,16 +1145,15 @@ describe('socket death', () => {
     pair.dialerSocket.drop();
     await pair.settle();
     pair.dialerSocket.drop();
-    // The heartbeat and the read loop are two code paths that can both notice one dead socket, and
-    // the reconnect helper calls `die()` from the first of them. Whichever arrives second must add
-    // nothing: `onClose` fires exactly once per loss, not once per witness.
+    // The heartbeat and the read loop can both detect one dead socket, and the reconnect helper calls `die()` from
+    // the heartbeat. The second detection has no effect: `onClose` fires exactly once per loss.
     pair.dialer.die(new ConnectionClosed('the heartbeat noticed the same death', { code: 1006 }));
     await pair.settle();
 
     expect(seen, 'one loss, one call - a second witness of a dead socket is not a second loss').toHaveLength(1);
     expect(Object.keys(seen[0]).sort()).toEqual(['code', 'reason', 'wasClean', 'willRetry']);
-    // Nothing retries until the helper says so: `willRetry` reads the intention set when the socket
-    // was established, and this peer has no helper at all.
+    // `willRetry` reads the retry intention set when the socket was established; this peer has no reconnect helper,
+    // so nothing retries.
     expect(seen[0].willRetry).toBe(false);
   });
 
@@ -1182,7 +1168,7 @@ describe('socket death', () => {
     await retrying.settle();
     expect(seen[0].willRetry).toBe(true);
 
-    // A deliberate close never says it will retry, whatever the helper meant a moment earlier.
+    // An explicit close reports `willRetry` false, whatever the helper intended before.
     const deliberate = makePair();
     deliberate.acceptor.onStream(hold);
     const closes: CloseReason[] = [];
@@ -1230,8 +1216,7 @@ describe('socket death', () => {
       seen.push(pair.dialer.id);
     }
 
-    // A reconnect reads as a new `conn=` in a log rather than as one continuous connection, and no
-    // id from a dropped socket is handed out again.
+    // A reconnect appears as a new `conn=` in logs, and no id from a dropped socket is reused.
     expect(new Set(seen).size, 'no id may repeat').toBe(seen.length);
     const counters = seen.map((id) => Number(id.split('-')[1]));
     expect(counters, 'the counter never rewinds').toEqual([...counters].sort((a, b) => a - b));
@@ -1248,10 +1233,9 @@ describe('socket death', () => {
     await pair.settle();
     const sentBefore = pair.sentBy('dialer').length;
 
-    // Declared dead on a socket that is still perfectly **writable** - which is exactly what the
-    // reconnect helper does when a pong is swallowed. Dropping the socket first and then looking for
-    // code 9 proves nothing at all: nothing can reach a wire that is already gone, so that version
-    // of this test passes against an implementation that resets every stream on the wire.
+    // The peer is declared dead on a socket that is still **writable**, as the reconnect helper does when a pong is
+    // lost. Dropping the socket first and then looking for code 9 would prove nothing: no frame reaches a closed
+    // socket, so that variant passes against an implementation that resets every stream on the wire.
     pair.dialer.die(new ConnectionClosed('declared dead with the socket still up', { code: 1006 }));
     await pair.settle();
 
@@ -1305,9 +1289,9 @@ describe('observability', () => {
     expect(await pair.dialer.request({ password: 'hunter2-sentinel' })).toEqual({ ok: true });
     await pair.settle();
 
-    // Non-vacuity: the secret really did travel through the frame path, so there was something to
-    // leak. What this cannot show is the *debug* line Python inspects: the shim's level defaults to
-    // 'warn' and is module-private, so `logger.debug` never reaches `console.debug` here at all.
+    // The secret did pass through the frame path, so there was data to leak. This test does not cover the debug
+    // line Python inspects: the shim's level defaults to 'warn' and is module-private, so `logger.debug` never
+    // reaches `console.debug` here.
     expect(seen.some((frame) => JSON.stringify(frame).includes('hunter2-sentinel'))).toBe(true);
     LEVELS.forEach((level) => {
       logged[level].forEach((line) => {
@@ -1437,8 +1421,8 @@ describe('edges', () => {
   });
 
   it('resets the stream but not the peer on an unknown reset code', async () => {
-    // A peer of another generation - or one still using the retired 5 - must be heard, not crashed on.
-    // Converting the wire value straight to a `ResetCode` throws out of the read loop, which leaves
+    // A reset code from another protocol version, or the retired code 5, resets the stream and leaves the peer
+    // running. Converting the wire value directly to a `ResetCode` throws out of the read loop, which leaves
     // `isOpen` true, `onClose` unfired, and every pending await hanging.
     for (const wireCode of [5, 42]) {
       const pair = makePair();
@@ -1461,8 +1445,9 @@ describe('edges', () => {
     }
   });
 
-  it('closes the peer when the read loop fails rather than zombifying it', async () => {
-    // A peer that reports itself open while its read loop is dead is worse than one that closed.
+  it('closes the peer when the read loop fails', async () => {
+    // A peer whose read loop has failed must close; a peer that reports itself open in that state leaves every
+    // caller waiting.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1483,14 +1468,14 @@ describe('edges', () => {
   });
 });
 
-// --------------------------------------------------------------------------- hostile frames and broken hooks
+// --------------------------------------------------------------------------- hostile frames and failing hooks
 
-describe('audit regressions', () => {
+describe('hostile frames and failing hooks', () => {
   it('does not let a wrong-parity open pose as a fragment continuation - WSM-SID-005', async () => {
-    // "Is this a continuation?" must not be inferred from whether *some* assembler is running on that
-    // id. A stream this peer opened and is receiving fragmented `data` on would then accept an `open`
-    // carrying our own parity as a continuation - dispatching a handler for a stream we opened, and
-    // skipping the connection-level error the rule requires.
+    // Whether a frame is a continuation must not be inferred from whether some assembler is active on that id.
+    // Otherwise a stream this peer opened, and receives fragmented `data` on, would accept an `open` with this
+    // peer's own parity as a continuation: it would dispatch a handler for a stream this peer opened and skip the
+    // connection-level error the rule requires.
     const pair = makePair();
     const handled: unknown[] = [];
     pair.acceptor.onStream((payload: unknown) => {
@@ -1513,7 +1498,8 @@ describe('audit regressions', () => {
   });
 
   it('keeps a duplicate open a connection error mid-reassembly', async () => {
-    // The same hole from the other side: a re-used id must not be laundered by a fragment.
+    // The same check for a duplicate open: a reused id is a connection error even while a fragment is being
+    // reassembled on it.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1528,9 +1514,8 @@ describe('audit regressions', () => {
   });
 
   it("fails an unencodable frame's stream without wedging the connection", async () => {
-    // A codec that cannot encode a frame must not take the writer down with it: nothing would drain
-    // the queue afterwards, every later send would sit in it forever, and the peer would go on
-    // reporting itself open - the same shape as the read-loop zombie, from the other end.
+    // A codec that cannot encode a frame must not stop the writer: otherwise nothing drains the queue, every later
+    // send stays in it, and the peer keeps reporting itself open, the writer-side equivalent of a failed read loop.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();
@@ -1546,7 +1531,7 @@ describe('audit regressions', () => {
     expect(error).toBeInstanceOf(StreamReset);
     expect((error as StreamReset).code).toBe(ResetCode.INTERNAL_ERROR);
 
-    // The writer is still alive: a later request still completes.
+    // The writer is still running: a later request still completes.
     expect(await pair.dialer.request({ q: 2 })).toEqual({ ok: true });
   });
 
@@ -1571,9 +1556,9 @@ describe('audit regressions', () => {
   });
 
   it('hands each send on a reset stream its own failure object', async () => {
-    // Python's failure mode is a traceback that grows a frame on every re-raise of one stored
-    // instance; JavaScript's is one shared mutable object, with one `stack` that no longer describes
-    // where it was thrown, handed to every caller. They are the same bug.
+    // In Python the failure mode is a traceback that grows by one frame on every re-raise of one stored instance;
+    // in JavaScript it is one shared mutable error object, whose `stack` does not describe where each caller's
+    // failure happened, handed to every caller. Both are the same defect.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1637,15 +1622,15 @@ describe("open()'s overloads", () => {
   });
 
   it('gives RequestOptions a deadline and OpenOptions none - WSM-API-018', async () => {
-    // Compile-time, not runtime: `tsc` rejects the file if either answer changes.
+    // Checked at compile time: `tsc` rejects the file if either type changes.
     type Has<T, K extends string> = K extends keyof T ? true : false;
     const openHasTimeout: Has<OpenOptions, 'timeoutMs'> = false;
     const requestHasTimeout: Has<RequestOptions, 'timeoutMs'> = true;
     expect(openHasTimeout).toBe(false);
     expect(requestHasTimeout).toBe(true);
 
-    // And it cannot sneak in at runtime either: `timeoutMs` is not one of `open()`'s option keys, so
-    // an object carrying it is a payload, and the deadline is visibly not honoured.
+    // At runtime `timeoutMs` is not one of `open()`'s option keys, so an object carrying it is a payload and no
+    // deadline is applied.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1655,10 +1640,9 @@ describe("open()'s overloads", () => {
   });
 
   it('takes zero mandatory arguments and defaults payload to null - WSM-API-003', async () => {
-    // `open()` on its own is the one-line push shape from section 5.1's call-shapes note; a required
-    // argument would break it at the call site, and a payload defaulting to *absent* rather than
-    // `null` would put a different frame on the wire from Python's `payload=None` - the two ports
-    // must agree.
+    // `open()` with no arguments is the one-line push shape from section 5.1's call-shapes note. A required
+    // argument would break that call, and a payload defaulting to absent rather than `null` would put a different
+    // frame on the wire from Python's `payload=None`; both ports must send the same frame.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -1676,15 +1660,14 @@ describe("open()'s overloads", () => {
     expect(open.end ?? false).toBe(false);
     expect(stream.payload).toBeNull();
 
-    // The remote sees an open, so nothing about the empty call is a local-only shortcut.
+    // The remote receives an open, so the empty call is not handled locally only.
     expect(pair.acceptor.streams.size).toBe(1);
   });
 
   it('accepts no stream id at any public entry point - WSM-SID-001', async () => {
-    // The parity test covers *which* id the library picks. This covers the other half: a caller
-    // cannot pick one. Every spelling an application might reach for is checked, because the rule is
-    // about the whole API surface rather than about one keyword - and in TypeScript an options object
-    // is structural, so an unexpected key is silently ignored rather than rejected by the compiler.
+    // The parity test covers which id the library picks; this test checks that a caller cannot pick one. Every form
+    // an application might use is checked, because the rule covers the whole API surface. In TypeScript an options
+    // object is structural, so the compiler accepts an unexpected key and the runtime ignores it.
     const idKeys = ['stream', 'streamId', 'stream_id', 'id'];
 
     const pair = makePair();
@@ -1702,10 +1685,10 @@ describe("open()'s overloads", () => {
 
     const opens = pair.framesOfType('dialer', 'open');
     expect(opens).toHaveLength(idKeys.length * 2);
-    // Ids stayed the library's own: odd, monotonic, allocated in call order, and never 9999.
+    // Ids are allocated by the library: odd, monotonic, in call order, and never 9999.
     expect(opens.map((frame) => frame.stream)).toEqual([1, 3, 5, 7, 9, 11, 13, 15]);
 
-    // And the caller's number is visible only where it belongs, as opaque payload on the odd ones.
+    // The caller's number appears only as opaque payload on the odd ones.
     idKeys.forEach((key, index) => {
       expect(opens[index * 2].payload).toEqual({ [key]: 9999 });
       expect(opens[index * 2 + 1].payload).toEqual({ q: 1 });
@@ -1739,8 +1722,9 @@ describe("open()'s overloads", () => {
     pair.start();
 
     // A default deadline can only be a timer, and `request()` schedules its timer synchronously
-    // before it returns (see `collectUnary`). Counting scheduled timers is therefore an exact
-    // witness that does not need a test to wait out whatever the default would have been.
+    // A default deadline would be a timer, and `request()` schedules its timer synchronously before it returns (see
+    // `collectUnary`). Counting scheduled timers therefore detects a default deadline without waiting for it to
+    // expire.
     const timers = vi.spyOn(globalThis, 'setTimeout');
     const forever = pair.dialer.request({ q: 1 });
     void forever.catch(() => undefined);
@@ -1750,7 +1734,7 @@ describe("open()'s overloads", () => {
     void explicit.catch(() => undefined);
     expect(timers, 'an empty options object supplied a deadline from somewhere').not.toHaveBeenCalled();
 
-    // The counter can see a deadline when there is one, so its silence above means something.
+    // The counter detects a deadline when one is set, so the zero count above is meaningful.
     const deadlined = pair.dialer.request({ q: 3 }, { timeoutMs: 20 });
     expect(timers).toHaveBeenCalledTimes(1);
     timers.mockRestore();
@@ -1758,8 +1742,8 @@ describe("open()'s overloads", () => {
     await expect(deadlined).rejects.toThrow(StreamTimeout);
     await pair.settle();
 
-    // Only the deadlined stream was reset, and only that one; the other two are still live and
-    // waiting, which is what "a stream lives until it ends, is reset, or the connection dies" means.
+    // Only the deadlined stream was reset; the other two are still open and waiting. A stream lives until it ends,
+    // is reset, or the connection dies.
     expect(pair.framesOfType('dialer', 'reset').map((frame) => frame.stream)).toEqual([5]);
     expect(pair.framesOfType('dialer', 'reset')[0].code).toBe(ResetCode.TIMEOUT);
     expect(pair.dialer.streams.size).toBe(2);
@@ -1777,10 +1761,9 @@ describe("open()'s overloads", () => {
   });
 
   it('never interprets per-stream headers - WSM-AUT-002', async () => {
-    // Headers exist for the application. The rule is a *negative*: whatever an opener puts there must
-    // arrive unchanged and must change nothing the library does - including keys that look like
-    // authentication, which is exactly where a library is tempted to grow a re-auth hook (WSM-AUT-001
-    // puts authentication at the upgrade, before `accept()` is ever called).
+    // Headers belong to the application. Whatever an opener sends must arrive unchanged and must not change the
+    // library's behaviour, including keys that look like authentication, where a re-auth hook would be attached
+    // (WSM-AUT-001 places authentication at the upgrade, before `accept()` is called).
     const headers = {
       authorization: 'Bearer expired.and.invalid',
       cookie: 'session=deleted',
@@ -1794,9 +1777,8 @@ describe("open()'s overloads", () => {
       nested: { deep: [1, null, 'two'] },
     };
 
-    // Snapshotted before the send for the same reason the payload test snapshots: a library that
-    // consumed a header by deleting it from the caller's object would pass a comparison against the
-    // object it mutilated.
+    // Snapshotted before the send, as in the payload test: a library that removed a header from the caller's object
+    // would pass a comparison against the modified object.
     const expected = JSON.parse(JSON.stringify(headers)) as typeof headers;
 
     const seen: Record<string, unknown>[] = [];
@@ -1811,21 +1793,19 @@ describe("open()'s overloads", () => {
     const without = await pair.dialer.request({ q: 1 });
     await pair.settle();
 
-    // Unchanged on the wire, and unchanged again by the time the opener's counterpart reads them.
+    // Unchanged on the wire, and unchanged when the opener's counterpart reads them.
     expect(pair.framesOfType('dialer', 'open')[0].headers).toEqual(expected);
     expect(seen[0]).toEqual(expected);
     expect(headers, "the caller's own headers object was modified in flight").toEqual(expected);
 
-    // And they changed nothing: the same answer, the same frames, the same peer state as the open
-    // that carried none. Comparing the two exchanges is the assertion - a library that had reacted
-    // to `authorization` would differ here even if it left the object itself alone.
+    // The headers change nothing: the same answer, the same frames, and the same peer state as the open without
+    // headers. A library that reacted to `authorization` would differ here even if it did not modify the object.
     expect(withHeaders).toEqual(without);
     const opens = pair.framesOfType('dialer', 'open');
     expect(framesEqual({ ...opens[0], stream: 0, headers: null }, { ...opens[1], stream: 0 })).toBe(true);
 
-    // The whole exchange, both directions, with the ids normalised away: the two requests produced
-    // the same frames in the same order, so nothing branched on a header. `authorization` was the
-    // most tempting branch and there is no branch at all.
+    // The whole exchange in both directions, with ids normalised: the two requests produce the same frames in the
+    // same order, so no code path depends on a header, including `authorization`.
     const trace = (who: Who, id: number): unknown[] =>
       pair
         .sentBy(who)
@@ -1841,9 +1821,8 @@ describe("open()'s overloads", () => {
   });
 
   it('never interprets the answering side’s headers either - WSM-AUT-002/WSM-FRM-016', async () => {
-    // The same shape of proof as the opener's half above, pointed the other way. A library that grew
-    // opinions about an answer's metadata would grow them here first - a `content-type` it decoded
-    // on, a `status` it turned into an exception - so the keys are spelled to invite exactly that.
+    // The same check as the opener's test above, for the answering side. The keys are ones a library might act on:
+    // a `content-type` to decode by, a `status` to turn into an exception.
     const announced = {
       'content-type': 'application/octet-stream',
       status: 500,
@@ -1877,8 +1856,8 @@ describe("open()'s overloads", () => {
     expect(second.replyHeaders).toEqual({});
     expect(pair.framesOfType('acceptor', 'data')[0].headers).toEqual(expected);
 
-    // And they changed nothing: `status: 500` did not become an exception, and both sides of the two
-    // exchanges are the same frames in the same order once the ids and the headers are normalised.
+    // The headers change nothing: `status: 500` did not become an exception, and both exchanges produce the same
+    // frames in the same order once ids and headers are normalised.
     expect(withHeaders).toEqual(without);
     const trace = (who: Who, id: number): unknown[] =>
       pair
@@ -1892,9 +1871,9 @@ describe("open()'s overloads", () => {
   });
 
   it('defines no vocabulary inside payload - WSM-FRM-006/WSM-INV-016', async () => {
-    // Every envelope field name, used as a payload key, plus the discriminators a library of this
-    // shape is usually tempted to reserve. If any of these meant anything to muxws, two consumers
-    // sharing one socket would have to nest their own vocabulary inside an imposed one.
+    // Every envelope field name used as a payload key, plus discriminators that libraries commonly reserve. If
+    // muxws interpreted any of them, two consumers sharing one socket would have to nest their own vocabulary
+    // inside the library's.
     const payload = {
       type: 'reset',
       stream: 9999,
@@ -1911,16 +1890,16 @@ describe("open()'s overloads", () => {
       kind: 'command',
     };
 
-    // The comparison is against a snapshot taken before the send, never against `payload` itself: a
-    // library that consumed a reserved key by deleting it from the caller's own object would leave
-    // both sides of `toEqual(payload)` equally mutilated and the assertion would pass.
+    // The comparison is against a snapshot taken before the send, not against `payload`: a library that removed a
+    // reserved key from the caller's object would modify both sides of `toEqual(payload)` and the assertion would
+    // pass.
     const expected = JSON.parse(JSON.stringify(payload)) as typeof payload;
 
     const seen: unknown[] = [];
     const pair = makePair();
     pair.acceptor.onStream(async (received: unknown, stream: Stream) => {
       seen.push(received);
-      // Echoed back, so the round trip is asserted in both directions rather than only outbound.
+      // Echoed back, so the round trip is asserted in both directions.
       await stream.reply(received);
     });
     pair.start();
@@ -1942,8 +1921,8 @@ describe("open()'s overloads", () => {
     expect('trailers' in toMapping(open)).toBe(false);
     expect('nonce' in toMapping(open)).toBe(false);
 
-    // Nothing acted on it either: no stream 9999, no reset carrying the payload's PROTOCOL_ERROR, no
-    // ping answered for its "nonce", and the connection is still up on both sides.
+    // Nothing acted on it: no stream 9999, no reset carrying the payload's PROTOCOL_ERROR, no pong for its "nonce",
+    // and both sides are still connected.
     const streams = new Set(pair.sentBy('dialer').map((frame) => frame.stream));
     expect(streams.has(9999)).toBe(false);
     expect(pair.framesOfType('dialer', 'reset')).toHaveLength(0);
@@ -1954,9 +1933,9 @@ describe("open()'s overloads", () => {
   });
 
   it('puts only the six v1 frame types on the wire - WSM-FRM-012/WSM-FRM-013', async () => {
-    // The constant is asserted by set equality in `frames.spec.ts`; this is the behavioural half.
-    // Ending a stream and attaching trailers must produce a `data` frame with flags on it, never a
-    // seventh frame type - which is the only way the absence of an `end` type is visible on a wire.
+    // `frames.spec.ts` asserts the constant by set equality; this test checks the behaviour. Ending a stream and
+    // attaching trailers must produce a `data` frame with flags, never a seventh frame type; this is how the
+    // absence of an `end` type shows on a wire.
     const pair = makePair();
     pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
       await stream.send({ chunk: 1 });
@@ -2004,11 +1983,10 @@ class BinaryJsonCodec implements Codec {
 
   encode(frame: Frame): ArrayBuffer {
     const bytes = new TextEncoder().encode(this.inner.encode(frame));
-    // The copy is not ceremony. Under jsdom `TextEncoder` is Node's global and `ArrayBuffer` is
-    // jsdom's intrinsic, so `bytes.buffer instanceof ArrayBuffer` is false purely because the two
-    // come from different realms. Allocating through the ambient constructor is what a real browser
-    // codec hands to `socket.send`, and keeps `instanceof` a statement about the send branch rather
-    // than about which realm built the buffer.
+    // The copy is required. Under jsdom `TextEncoder` is Node's global and `ArrayBuffer` is jsdom's, so
+    // `bytes.buffer instanceof ArrayBuffer` is false because the two come from different realms. Allocating through
+    // the ambient constructor matches what a browser codec passes to `socket.send`, so `instanceof` tests the send
+    // branch and not the realm that built the buffer.
     const buffer = new ArrayBuffer(bytes.byteLength);
     new Uint8Array(buffer).set(bytes);
     return buffer;
@@ -2029,10 +2007,10 @@ class BinaryJsonCodec implements Codec {
 
 describe('the frame logger', () => {
   /**
-   * The mirror of Python's `caplog.at_level` half of `test_unknown_frame_type_is_ignored` and
-   * `test_payload_contents_never_appear_in_a_log_record`. `logger.level` is the seam that makes the
-   * positive half assertable: it starts at 'warn', below which neither line reaches a console at all,
-   * and the negative half alone - nothing went out, nothing was written - would hold either way.
+   * Counterpart of the `caplog.at_level` part of Python's `test_unknown_frame_type_is_ignored` and
+   * `test_payload_contents_never_appear_in_a_log_record`. Setting `logger.level` makes the positive assertions
+   * possible: the level starts at 'warn', below which neither line reaches a console, and the negative assertions
+   * alone (nothing sent, nothing logged) hold either way.
    */
   it('logs an unknown frame type exactly once when the level allows it - WSM-FRM-002', async () => {
     const original = logger.level;
@@ -2087,9 +2065,8 @@ describe('the frame logger', () => {
 
 describe('WSM-RCN-044 is per connection, not per Peer object', () => {
   it('lets a new socket report its own final close', async () => {
-    // The latch that stops one loss being reported twice must not outlive the connection it was set
-    // on. A `Peer` handed a fresh socket is a new connection, and its next loss is a loss nobody has
-    // heard about - left unreset, it is reported to nobody at all.
+    // The latch that prevents one loss being reported twice is reset per connection. A `Peer` given a fresh socket
+    // is a new connection, and its next loss has not been reported yet; without the reset it is reported to no one.
     const [dialerSide] = memoryPair();
     const peer = new Peer(dialerSide, { codec: new JsonCodec(), isDialer: true });
     const closes: CloseReason[] = [];

@@ -1,10 +1,9 @@
 <!--
-  The board. Nobody asked for any of it.
+  The board.
 
-  Twenty streams the *backend* opened on its own initiative arrive at this dialer's `onStream`
-  handler, and every row below was drawn from what came down them - there is no seed data in this
-  application at all (D1, WSM-INV-002). The `ticks` column is the count the backend put in the row,
-  so a reader can see that each row is being fed by its own stream rather than by one broadcast.
+  Twenty streams opened by the backend arrive at this dialer's `onStream` handler, and every row is
+  drawn from the data received on them; the frontend holds no symbol data (WSM-INV-002). The `ticks`
+  column is the per-symbol count the backend puts in each row; each row has its own stream.
 -->
 <template>
   <v-card>
@@ -15,16 +14,15 @@
         {{ store.boardLive }} live streams
       </v-chip>
       <v-spacer />
-      <!-- The caption names the mechanism; the tooltip says why it is worth noticing. A reader who
-           has never met this library reads "server push" as a feature name rather than as a claim. -->
+      <!-- The caption names the mechanism; the tooltip explains it. -->
       <v-tooltip location="bottom" max-width="360">
         <template #activator="{ props: hint }">
           <span v-bind="hint" class="text-caption text-medium-emphasis" style="cursor: help">
             server push &middot; click a row &middot; <span class="text-decoration-underline">?</span>
           </span>
         </template>
-        Nobody asked for these rows. The backend opened a stream per symbol towards this browser, using the same call a
-        client uses to ask a question - one mechanism, both directions.
+        The browser did not request these rows. The backend opened one stream per symbol to this browser, with the same
+        open() call a client uses for a request.
       </v-tooltip>
     </v-card-title>
     <v-card-text class="pa-0">
@@ -70,8 +68,7 @@ import { computed } from 'vue';
 
 import { select, store, type BoardRow } from '../muxws';
 
-// Sorted by symbol rather than by the arrival order of twenty independent streams, so a row keeps
-// its place on the screen while its price moves under it.
+// Sorted by symbol, not by the arrival order of the twenty streams, so each row keeps its position.
 const rows = computed<BoardRow[]>(() =>
   Object.values(store.rows).sort((left, right) => left.symbol.localeCompare(right.symbol)),
 );
@@ -94,8 +91,8 @@ function onSelect(symbol: string): void {
 .board-row.selected {
   background: rgba(255, 255, 255, 0.08);
 }
-/* The rows are still on screen after a socket loss, and they are no longer true. Saying so is the
-   whole difference between a demonstration and a frozen screenshot (WSM-RCN-030). */
+/* After a socket loss the rows remain on screen but are no longer updated; they are dimmed until the
+   next connection's first update (WSM-RCN-030). */
 .stale {
   opacity: 0.45;
 }

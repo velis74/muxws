@@ -1,15 +1,15 @@
 """Random legal API sequences against a live pair, asserting the invariants that hold for all of them.
 
-The rest of the suite enumerates: `stream_test.py` walks all forty-five cells of the state table one
-at a time, `conformance/sequences/` scripts thirteen written-down exchanges. Neither reaches an
-ordering nobody wrote down, and a sequence can be legal in every step and wrong as a whole.
+`stream_test.py` covers the forty-five cells of the state table one at a time, and
+`conformance/sequences/` scripts thirteen fixed exchanges. Neither covers orderings outside those
+cases, and a sequence can be legal in every step and still violate an invariant as a whole.
 
-So this drives *random* sequences of ordinary calls and asserts only what must be true of **any** of
-them. It cannot say which rule broke, only that something did, so it stands beside the enumerated
-tests rather than replacing them.
+This module drives random sequences of ordinary calls and asserts only what holds for every sequence.
+A failure identifies a violated invariant, not the rule that caused it, so these tests complement the
+enumerated ones.
 
-Seeds are fixed and listed, so a failure is reproducible: the seed that failed is in the assertion
-message, and adding it to `SEEDS` turns a chance discovery into a permanent regression test.
+Seeds are fixed and listed, so a failure is reproducible: the failing seed is in the assertion message,
+and adding a seed to `SEEDS` keeps that sequence in every run.
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ from muxws.errors import ConnectionLost, MuxwsError, ResetCode
 from muxws.frames import Frame
 from muxws.stream import Stream, StreamState
 
-#: Fixed, not drawn: a suite whose inputs change per run reports failures nobody can reproduce.
+#: Fixed seeds, so every run executes the same sequences and a failure is reproducible.
 SEEDS = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
 
-#: Long enough that a stream can be opened, written on, ended and raced against another; short enough
-#: that ten of them run in the time an ordinary test takes.
+#: Enough steps to open, write on and end a stream concurrently with another; few enough that ten
+#: sequences run in the time of an ordinary test.
 STEPS = 40
 
 
@@ -75,22 +75,21 @@ async def _drive(seed: int, pair: Any) -> Recorder:
                 await stream.cancel("the caller changed its mind")
             elif choice == 4:
                 stream = rng.choice(live)
-                # Occasionally ask for the one code an application may not send. The library must
-                # refuse it (§8.1) - `CONNECTION_CLOSED` means "the socket under this stream died",
-                # which is both false when a caller says it and unfalsifiable by the remote. This is
-                # the only path by which code 9 can reach the wire at all: socket death synthesises
-                # it locally and never enqueues a frame, so without this call the invariant below is
-                # asserting against a sequence that could not produce a violation.
+                # Sometimes pass the one code an application may not send; the library must not send
+                # it (§8.1). `CONNECTION_CLOSED` means "the socket under this stream died", which is
+                # false when a caller sends it and cannot be checked by the remote. This call is the
+                # only path by which code 9 can reach the wire: socket death synthesises it locally
+                # and enqueues no frame, so without this call invariant 2 below cannot fail.
                 code = ResetCode.CONNECTION_CLOSED if rng.random() < 0.25 else ResetCode.APPLICATION_ERROR
                 await stream.reset(code, "a handler said no")
             else:
                 await pair.settle(rounds=2)
-        except Exception as failure:  # noqa: BLE001 - what came out is the measurement
-            # Deliberately everything. Calling at the wrong moment has several documented outcomes -
-            # `StreamClosed` for a second `end()`, that stream's own `StreamReset`, `ConnectionLost`,
-            # `ConnectionGoingAway` - and enumerating them here would make the first invariant assert
-            # only what this line had already filtered for. Recording whatever escaped and asserting
-            # afterwards that it was a muxws error is the same test with teeth.
+        except Exception as failure:  # noqa: BLE001 - every exception is recorded and checked below
+            # Catches every exception. A call at the wrong moment has several documented outcomes
+            # (`StreamClosed` for a second `end()`, the stream's own `StreamReset`, `ConnectionLost`,
+            # `ConnectionGoingAway`); catching only those would make invariant 1 below check only
+            # the types already caught here. Invariant 1 asserts that every recorded exception is a
+            # muxws error.
             recorder.failures.append(failure)
         live = [stream for stream in live if stream.state is not StreamState.CLOSED]
 
@@ -100,15 +99,15 @@ async def _drive(seed: int, pair: Any) -> Recorder:
 
 @pytest.mark.parametrize("seed", SEEDS)
 async def test_a_random_legal_sequence_upholds_every_invariant(seed: int, make_pair):
-    """Whatever the ordering, these five hold. Each names the failure it would have caught."""
+    """These five invariants hold for every ordering. Each assertion message names the violation."""
     pair = make_pair()
     try:
         recorder = await asyncio.wait_for(_drive(seed, pair), timeout=10.0)
     except asyncio.TimeoutError:
         pytest.fail(f"seed {seed}: the sequence hung. A call blocked forever rather than failing (WSM-INV-011)")
 
-    # 1. Nothing escapes that is not a muxws error. An AttributeError or a KeyError out of an
-    #    ordinary call is the library breaking, not the caller.
+    # 1. Every exception is a muxws error. An AttributeError or a KeyError from an ordinary call is a
+    #    library bug.
     stray = [f for f in recorder.failures if not isinstance(f, MuxwsError)]
     assert stray == [], f"seed {seed}: a call raised something that is not a muxws error: {stray!r}"
 
@@ -121,15 +120,16 @@ async def test_a_random_legal_sequence_upholds_every_invariant(seed: int, make_p
     assert opens == sorted(set(opens)), f"seed {seed}: opens were not monotonic: {opens}"
     assert all(stream_id % 2 == 1 for stream_id in opens), f"seed {seed}: the dialer allocated an even id: {opens}"
 
-    # 4. Nothing is retained per closed stream (WSM-STM-001). A sequence that opened and closed
-    #    dozens of streams must leave the peer holding only what is still live.
+    # 4. Nothing is retained per closed stream (WSM-STM-001). After a sequence that opened and closed
+    #    many streams, the peer holds only the live ones.
     assert len(pair.dialer.streams) <= len(opens), f"seed {seed}: the peer kept more streams than it opened"
     assert all(s.state is not StreamState.CLOSED for s in pair.dialer.streams.values()), (
         f"seed {seed}: a closed stream is still in the live map"
     )
 
-    # 5. The connection survives every legal sequence. A stream-level mistake is a stream-level
-    #    failure; only a protocol error at connection level may end it, and nothing here commits one.
+    # 5. The connection stays open after every legal sequence. A stream-level error fails only the
+    #    stream; only a connection-level protocol error closes the connection, and these calls cause
+    #    none.
     assert pair.dialer.is_open, f"seed {seed}: an ordinary sequence of legal calls killed the connection"
 
     await pair.stop()
@@ -139,14 +139,14 @@ async def test_a_random_legal_sequence_upholds_every_invariant(seed: int, make_p
 async def test_a_random_sequence_then_socket_death_fails_everything_and_sends_nothing(seed: int, make_pair):
     """The same sequences, ended by the socket dying under them.
 
-    Reset code `CONNECTION_CLOSED` is synthesised *locally* when a socket dies, so a sequence that
-    never dies never produces one and the test above asserts its absence from the wire vacuously. Only
-    a run in which the socket does die separates a library that never sends code 9 from one that
-    would: removing the guard in `_sendable_reset_code` leaves the test above green and fails this one.
+    Reset code `CONNECTION_CLOSED` is synthesised locally when a socket dies, so the test above, in
+    which the socket does not die, cannot distinguish a library that never sends code 9 from one that
+    does. Removing the guard in `_sendable_reset_code` leaves the test above passing and fails this
+    one.
 
-    What must hold after the socket goes, whatever the ordering that preceded it: every stream that
-    was live ends up closed and failed with `ConnectionLost`, nothing new can be started, and no frame
-    carrying code 9 was ever put on the wire (§8.1).
+    After the socket dies, whatever the preceding ordering: every stream that was live is closed and
+    failed with `ConnectionLost`, no new stream can be started, and no frame carrying code 9 was put
+    on the wire (§8.1).
     """
     pair = make_pair()
     try:

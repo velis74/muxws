@@ -16,17 +16,14 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    // Vite's default is to step to 5174 when 5173 is taken, print the new URL in its own banner and
-    // carry on. `demo.py` has already printed 5173 by then and cannot un-print it, so the reader
-    // opens a port this run is not serving - which, if the thing holding 5173 is a dev server left
-    // over from an earlier run, is a *stale muxws demo* that looks live and answers nothing new.
-    // Failing to start is the honest outcome.
+    // When 5173 is taken, Vite's default is to use 5174 and print the new URL. `demo.py` has already
+    // printed 5173, so the reader would open a port this run does not serve, possibly a dev server left
+    // over from an earlier run. `strictPort` makes Vite exit instead.
     strictPort: true,
     proxy: {
-      // `ws: true` is the whole of it, and it is the one line in this demo most likely to be
-      // omitted. Without it Vite proxies the upgrade request as an ordinary GET, the response never
-      // carries `Sec-WebSocket-Protocol`, and the dial fails as a subprotocol mismatch
-      // (WSM-CDC-020/026) - which reads exactly like a muxws bug and is not one.
+      // `ws: true` makes Vite proxy the WebSocket upgrade. Without it Vite proxies the upgrade request as
+      // an ordinary GET, the response carries no `Sec-WebSocket-Protocol`, and the dial fails as a
+      // subprotocol mismatch (WSM-CDC-020/026).
       '/ws': { target: 'ws://127.0.0.1:8020', ws: true },
     },
   },

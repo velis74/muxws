@@ -2,27 +2,22 @@
 
     ws+unix:///run/muxws/api.sock:/ws?tenant=42
 
-Dialling a Unix domain socket changes nothing about muxws. The handshake is still an HTTP GET with
-`Upgrade: websocket` offering `muxws.v1.<codec>` first (WSM-CDC-020), still answered 101 or 400
-(WSM-CDC-022), and the socket adapter above it cannot tell what carried the bytes (WSM-API-021). The
-one thing AF_UNIX needs that a TCP URL never does is a way to say *which file* to open as well as
-*which request target* to ask for, and this module is the whole of that: a string transformation
-with no socket anywhere in it.
+Over a Unix domain socket the handshake is the same as over TCP: an HTTP GET with
+`Upgrade: websocket` offering `muxws.v1.<codec>` first (WSM-CDC-020), answered 101 or 400
+(WSM-CDC-022), and the socket adapter does not depend on the transport (WSM-API-021). An AF_UNIX URL
+must name both the socket file and the HTTP request target; this module parses that URL. It opens no
+socket.
 
-The grammar is the `ws` npm package's, so that one URL pasted into either port's configuration gets
-the same connection: take the URL's pathname plus its query, split on `:`, the left half is the
-filesystem path and the right half is the HTTP request target, which defaults to `/` when there is
-no `:` at all.
+The grammar follows the `ws` npm package, so one URL works in either port's configuration: take the
+URL's pathname plus its query and split on `:`; the left part is the filesystem path and the right
+part is the HTTP request target, which defaults to `/` when there is no `:`.
 
-Both ports split on the **first** colon, where `ws` itself splits on every one: `ws` does
-`opts.path.split(':')` and keeps `parts[1]`, so `/a.sock:/r:x` becomes the target `/r` and
-`/a.sock:/r?t=a:b` becomes `/r?t=a`, the remainder silently dropped. Neither end can see that
-happen - the acceptor routes on the target it was given and the dialer never learns it was
-truncated - so the two ports must agree on the rule rather than on `ws`'s implementation of it.
+Both ports split on the **first** colon. `ws` splits on every colon (`opts.path.split(':')`) and
+keeps `parts[1]`, so `/a.sock:/r:x` becomes the target `/r` and `/a.sock:/r?t=a:b` becomes `/r?t=a`,
+with the remainder dropped. The two ports implement the rule, not `ws`'s behaviour.
 
-Stdlib only: the grammar has to be testable where AF_UNIX does not exist at all, and keeping
-`websockets` out keeps this file off the optional-dependency map in `packaging_test.py`
-(WSM-PKG-002).
+Stdlib only, so the grammar is testable where AF_UNIX does not exist, and this module has no
+optional dependency in `packaging_test.py` (WSM-PKG-002).
 """
 
 from __future__ import annotations
@@ -37,37 +32,34 @@ from muxws.errors import TransportUnsupportedError, TransportUrlError
 #: The scheme this module owns.
 SCHEME = "ws+unix"
 
-#: The scheme it refuses. There is no `wss+unix:` in either port: a filesystem socket is protected by
-#: its directory's permissions and by `SO_PEERCRED`, not by a certificate, and there is no host name
-#: for a certificate to be checked against. A deployment that wrote `wss+unix:` believes it has
-#: transport security, so the scheme is refused by name rather than dialled in plaintext.
+#: The scheme this module refuses. Neither port supports `wss+unix:`: a filesystem socket is
+#: protected by its directory's permissions and by `SO_PEERCRED`, and there is no host name to check a
+#: certificate against. A `wss+unix:` URL raises `UnixUrlError` instead of being dialled without TLS.
 _REFUSED_SCHEME = "wss+unix"
 
-#: What goes in the `Host:` header when the URL has no authority, which is the normal shape. The
-#: handshake is still HTTP and HTTP still requires a `Host`; nothing on the other side routes on it.
+#: The `Host:` header value when the URL has no authority, which is the usual case. HTTP requires a
+#: `Host` header; the acceptor does not route on it.
 _DEFAULT_AUTHORITY = "localhost"
 
 
 class UnixUrlError(TransportUrlError):
     """A `ws+unix:` URL that cannot be dialled: no socket path, a bad target, or `wss+unix:`.
 
-    Defined beside the transport that owns the grammar rather than in `muxws/errors.py`, and imported
-    as `from muxws.transports.unix import UnixUrlError` (WSM-ERR-016). The base is shared:
-    `TransportUrlError` is a `MuxwsError` and a `ValueError` both, so a caller catching either one
-    catches this, and an application that does not know which transport a configured URL names can
-    write `except TransportUrlError` without importing this module at all.
+    Defined in this module, not in `muxws/errors.py`; import it as
+    `from muxws.transports.unix import UnixUrlError` (WSM-ERR-016). Its base `TransportUrlError` is
+    both a `MuxwsError` and a `ValueError`, so catching any of the three catches it.
     """
 
 
 class UnixSocketsUnsupportedError(TransportUnsupportedError):
     """This interpreter has no `AF_UNIX`, so a `ws+unix:` URL can never be dialled here.
 
-    A `TransportUnsupportedError` (WSM-ERR-016) rather than a `TransportUrlError`: the URL is not the
-    problem and no rewriting of it will help. The base carries `RuntimeError` alongside `MuxwsError`.
+    A `TransportUnsupportedError` (WSM-ERR-016), not a `TransportUrlError`: changing the URL does not
+    help. The base is both a `RuntimeError` and a `MuxwsError`.
 
-    Raised from the parse. `websockets`' `unix_connect` imports perfectly well on Windows and fails
-    deep inside the dial with a bare `AttributeError` on `loop.create_unix_connection`, out of a
-    background reconnect attempt rather than out of the `connect()` call that caused it.
+    Raised from the parse, so `connect()` raises it before dialling. `websockets`' `unix_connect`
+    imports on Windows but fails during the dial with an `AttributeError` on
+    `loop.create_unix_connection`.
     """
 
 
@@ -75,31 +67,30 @@ class UnixSocketsUnsupportedError(TransportUnsupportedError):
 class UnixTarget:
     """Everything `unix_connect(path, uri=...)` needs, and nothing about muxws.
 
-    Two fields: `path` names a file to open, `uri` is the *logical* URL the handshake claims to be
-    for. `websockets` will not invent the second from the first - a WebSocket handshake is an HTTP
-    request and still needs a `Host` and a request target even when the connection is a file.
+    `path` names the socket file to open; `uri` is the logical URL used for the handshake.
+    `websockets` does not derive the second from the first: the handshake is an HTTP request and
+    needs a `Host` and a request target.
     """
 
-    #: The filesystem path of the listening socket. Note ~108 bytes is the kernel's limit for it.
+    #: The filesystem path of the listening socket. The kernel limits it to about 108 bytes.
     path: str
 
-    #: `ws://<authority><target>` - what the peer believes it dialled, and what goes on the wire as
-    #: the request line and the `Host` header.
+    #: `ws://<authority><target>`, sent as the request line and the `Host` header.
     uri: str
 
 
 def parse_unix_url(url: str) -> UnixTarget | None:
     """Split a `ws+unix:` URL into a socket path and a logical `ws://` URI; `None` for `ws:`/`wss:`.
 
-    `None` rather than an exception for an ordinary TCP URL, because this is called on **every** URL
-    `connect()` is given: it is the branch, not a validator. Anything that is neither `ws+unix:` nor
-    a scheme this module refuses is handed back untouched for `websockets.connect()` to accept or
-    reject on its own terms, so a typo'd `wss:/` URL is answered by the transport that owns it.
+    `connect()` calls this for every URL. Any scheme other than `ws+unix:` and `wss+unix:` returns
+    `None` and is left to `websockets.connect()` to accept or reject.
 
-    Called once, from outside the dial closure, so that a malformed URL and a platform without
-    AF_UNIX both surface synchronously out of `connect()` before any socket is touched - the same
-    ordering guarantee `resolve_codec()` gives the codec (WSM-CDC-016) - and so that every reconnect
-    re-dials the identical target rather than re-deriving it (WSM-CDC-020, WSM-AUT-003).
+    Called once, outside the dial closure, so a malformed URL and a platform without AF_UNIX raise
+    from `connect()` before any socket is opened, as `resolve_codec()` does for the codec
+    (WSM-CDC-016), and every reconnect dials the same target (WSM-CDC-020, WSM-AUT-003).
+
+    Raises `UnixUrlError` for `wss+unix:`, for a URL with no socket path, or for a request target not
+    starting with `/`; raises `UnixSocketsUnsupportedError` when the platform has no AF_UNIX.
     """
     parts = urlsplit(url)
 
@@ -117,9 +108,9 @@ def parse_unix_url(url: str) -> UnixTarget | None:
             f"(socket.AF_UNIX is missing); dial a ws:// or wss:// URL instead"
         )
 
-    # `ws` operates on `pathname + search`, so the query has to be put back before the split or
-    # `ws+unix:///p.sock:/r?a=1` loses its `?a=1` on the way to the request target. `urlsplit` is the
-    # one that separates them; WHATWG `new URL()` agrees with it on everything else that matters here.
+    # `ws` splits `pathname + search`, so the query is appended before the split; otherwise
+    # `ws+unix:///p.sock:/r?a=1` would lose `?a=1`. `urlsplit` separates them, and WHATWG `new URL()`
+    # parses these URLs the same way.
     target = parts.path + (f"?{parts.query}" if parts.query else "")
     path, _, route = target.partition(":")
 
@@ -129,12 +120,11 @@ def parse_unix_url(url: str) -> UnixTarget | None:
             f"by an optional ':' and the request target, as in {SCHEME}:///run/muxws/api.sock:/ws"
         )
     if route and not route.startswith("/"):
-        # `ws://localhost` + `ws` is `ws://localhostws`, which is a *valid* URL naming a host that
-        # does not exist, so the target is folded into the authority: the dial opens the right socket
-        # and then asks for `/` with a `Host` nobody chose. Against either acceptor this
-        # library documents - `unix_serve`, or a `WebSocketServer` with no `path` - that handshake
-        # **succeeds**, 101 and all, because neither routes on the target. A misdial that
-        # connects is worse than one that fails, and the only place to catch it is before the dial.
+        # `ws://localhost` + `ws` is `ws://localhostws`, a valid URL with the target merged into the
+        # authority: the dial opens the right socket and requests `/` with a wrong `Host`. Against
+        # `unix_serve`, or a `WebSocketServer` with no `path`, that handshake succeeds because
+        # neither routes on the target, so the error is raised before the dial.
+
         raise UnixUrlError(
             f"the request target in {url!r} must begin with '/': the part after the ':' is an HTTP "
             f"request target, not a path relative to anything"

@@ -1,15 +1,13 @@
 # Sizes and fragmentation
 
-Every size muxws talks about is a **byte count of the fully encoded WebSocket message** — the
-envelope included, exactly as it goes on the socket. Not the payload before encoding, not the number
-of characters in a string, and not the `fragment` field on its own.
-
-That sentence is the whole page. Everything below is a consequence of it.
+Every size in muxws is a **byte count of the fully encoded WebSocket message**, envelope included, as
+sent on the socket. It is not the size of the payload before encoding, not the number of characters
+in a string, and not the size of the `fragment` field alone.
 
 ## Bytes of encoded output, not characters
 
-`muxws.encoded_length` / `encodedLength` is the measurement both ports use, and it is the only one:
-UTF-8 byte length for text, buffer length for bytes.
+Both ports measure sizes only with `muxws.encoded_length` / `encodedLength`: the UTF-8 byte length for
+text, the buffer length for bytes.
 
 ```python
 from muxws import encoded_length
@@ -18,7 +16,7 @@ encoded_length("hello")  # 5
 encoded_length(b"hello")  # 5
 ```
 
-A string's *length* is a different number in each language, and neither of them is the byte count.
+The *length* of a string differs between the two languages, and neither is the byte count.
 
 | | `"🎉"` (U+1F389) |
 |---|---|
@@ -26,8 +24,8 @@ A string's *length* is a different number in each language, and neither of them 
 | JavaScript `s.length` | 2 — UTF-16 code units |
 | `encoded_length(s)` / `encodedLength(s)` | **4** — UTF-8 bytes |
 
-The three disagree on every non-BMP character, which is exactly the class of character an application
-never tests with. Worked through to a real frame, with the JSON codec:
+The three values differ for every character outside the Basic Multilingual Plane. The same string in
+a frame, with the JSON codec:
 
 ```python
 from muxws import Frame, JsonCodec, MAX_FRAME_BYTES, encoded_length, split_frame
@@ -44,17 +42,16 @@ print(len(split_frame(frame, MAX_FRAME_BYTES, codec)))  # 2     - so it is fragm
 print(MAX_FRAME_BYTES)                               # 65536
 ```
 
-The same value in the browser reports `party.length === 40000`. Twenty thousand characters, forty
-thousand code units, eighty thousand bytes, eighty thousand and thirty-nine bytes on the wire. A limit
-expressed in any unit but the last one is a limit that means something different on each end of the
-connection.
+In the browser, the same value has `party.length === 40000`: 20,000 codepoints, 40,000 UTF-16 code
+units, 80,000 UTF-8 bytes, and 80,039 bytes on the wire. Only the last number is the same on both
+ends of the connection, so limits are expressed in it.
 
-Two practical consequences:
+As a result:
 
-- A payload that "fits" by character count may be four times over a byte limit.
-- Fragment boundaries are cut over the **encoded** form, on a boundary the codec can represent — for
-  text, whole Unicode codepoints, so a surrogate pair is never split. Both ports cut in the same
-  places because both run the same search over the same encoded bytes.
+- A payload within a limit by character count can be up to four times over the same limit in bytes.
+- Fragment boundaries are cut over the **encoded** form, on a boundary the codec can represent: for
+  text, whole Unicode codepoints, so a surrogate pair is never split. Both ports cut at the same
+  positions because both run the same search over the same encoded bytes.
 
 ## `MAX_FRAME_BYTES` is 64 KiB, and it is not configurable
 
@@ -64,84 +61,78 @@ from muxws import MAX_FRAME_BYTES
 MAX_FRAME_BYTES  # 65536
 ```
 
-It is a protocol constant. It is never negotiated, never announced, never read from configuration and
-never derived from anything the remote said. A sender always fragments at it, regardless of what the
-remote looks willing to accept; a receiver accepts anything up to it, and may accept more.
+It is a protocol constant. It is not negotiated, not announced, not read from configuration, and not
+derived from any value the remote sends. A sender always fragments at it; a receiver accepts any frame
+up to it, and may accept larger frames.
 
-**The reason a bigger frame is not an improvement.** One muxws connection is one WebSocket, and a
-WebSocket has a single global message order. Whatever frame is being written holds the socket until
-it is finished. The cap is therefore not a memory limit — it is a *bound on how long one stream can
-monopolise the wire before another stream gets a turn*. At 64 KiB, a stream shipping a megabyte gives
-up the socket sixteen times on the way, and a 200-byte progress update on another stream waits at
-most one 64 KiB write. Raise the cap to a megabyte and that same update waits for the whole megabyte.
+**The constant bounds interleaving latency.** One muxws connection is one WebSocket, and a WebSocket
+sends messages in a single order. A frame being written occupies the socket until it is complete. The
+limit is therefore not a memory limit but a *bound on how long one stream can occupy the socket before
+another stream's frame is sent*. At 64 KiB, a stream sending 1 MiB releases the socket sixteen times,
+and a 200-byte progress update on another stream waits for at most one 64 KiB write. With a 1 MiB
+limit, the same update would wait for the whole 1 MiB.
 
-So a larger frame is worse, not better, and making the number negotiable would let two peers agree to
-optimise in the wrong direction — trading the interleaving that is the entire point of multiplexing
-for a marginally smaller envelope overhead. There is no option to raise it, and adding one would be a
-protocol change rather than a configuration change.
+A larger frame size reduces envelope overhead slightly and increases the latency of other streams.
+There is no option to raise the constant; changing it is a protocol change, not a configuration
+change.
 
-::: warning The `max_frame_bytes` argument is a test seam, not a setting
-`connect()`, `accept()` and `Peer()` do take a `max_frame_bytes` argument (`maxFrameBytes` in
-TypeScript), defaulting to `MAX_FRAME_BYTES`. It exists so the conformance runner can *lower* the cap
-and exercise fragmentation without megabyte fixtures. It is not a tuning knob: raising it produces
-frames a conforming remote is entitled to reject, and lowering it below what one envelope plus one
-indivisible unit of payload needs raises `ProtocolError` at construction rather than looping forever
-in the splitter.
+::: warning The `max_frame_bytes` argument is for testing, not configuration
+`connect()`, `accept()` and `Peer()` take a `max_frame_bytes` argument (`maxFrameBytes` in
+TypeScript), defaulting to `MAX_FRAME_BYTES`. It lets the conformance runner *lower* the limit to test
+fragmentation without megabyte fixtures. Do not use it for tuning: raising it produces frames a
+conforming remote may reject, and a value too small for one envelope plus one indivisible unit of
+payload raises `ProtocolError` at construction.
 :::
 
 ## Fragmentation is automatic and mandatory
 
-You never call the splitter. Any frame whose encoded form exceeds the cap is replaced by a sequence of
-fragment frames, and that happens inside the writer, on the way to the socket.
+The application does not call the splitter. The writer replaces any frame whose encoded form exceeds
+the limit with a sequence of fragment frames before sending it.
 
-What the sequence looks like:
+The sequence:
 
-- `headers` ride the **first** fragment only, and are never split.
-- `end` and `trailers` ride the **last** fragment only, and are never split.
-- `more: true` is set on every fragment but the last. The sequence always terminates with a fragment
-  carrying `more: false`, even when that final fragment carries no payload bytes at all.
-- The receiver concatenates the `fragment` values and hands the joined result back to the codec once
-  the closing fragment lands. Only then does a payload exist.
+- `headers` are carried on the **first** fragment only, and are never split.
+- `end` and `trailers` are carried on the **last** fragment only, and are never split.
+- `more: true` is set on every fragment except the last. The sequence always ends with a fragment
+  carrying `more: false`, even when that fragment carries no payload bytes.
+- The receiver concatenates the `fragment` values and passes the result to the codec when the last
+  fragment arrives. The payload is decoded only then.
 
-Two rules make interleaving possible rather than theoretical:
+Two rules allow frames of different streams to interleave:
 
-**A stream holds at most one unsent fragment.** Fragment *n+1* is sliced only once fragment *n* has
-been handed to the socket. Slicing ahead is not wrong on the wire; it is wrong in the queue, because
-it commits an order the writer has not been asked to commit to yet.
+**A stream holds at most one unsent fragment.** Fragment *n+1* is sliced only after fragment *n* has
+been passed to the socket. Slicing in advance would fix the order of queued frames before the writer
+selects them.
 
-**The writer chooses across streams by round-robin, never by arrival order.** Every lane is asked once
-before any lane is asked twice. Connection-level frames — `ping`, `pong`, `goaway` — have no stream of
-their own and take their turn in the same rotation, so they neither jump it nor wait on it.
+**The writer selects across streams in round-robin order, not in arrival order.** Each lane is served
+once before any lane is served twice. Connection-level frames (`ping`, `pong`, `goaway`) have no stream
+and are served in the same rotation, at the same priority as stream lanes.
 
-Together: a 1 MB export does not stall a 200-byte progress update. The export gets one fragment per
-turn, the update gets its whole frame on its turn, and neither one had to know the other existed.
+As a result, a 1 MB export does not delay a 200-byte progress update by more than one fragment: the
+export sends one fragment per turn, and the update sends its whole frame on its turn.
 
 ## `PAYLOAD_TOO_LARGE`, from both sides
 
-Reset code `7`. Two different checks produce it, and they mean slightly different things.
+Reset code `7`. Two checks produce it:
 
-**A single encoded message over the frame cap.** The receiver measures the *whole encoded message* it
-just took off the socket, not the `fragment` field inside it. Over the cap on a stream frame, that
-stream is reset with `PAYLOAD_TOO_LARGE`; over the cap on a connection-level frame, which has no
-stream to blame, the connection fails. In practice a correct muxws sender never provokes this, because
-it fragments at the same constant — it is the check that catches a peer that does not.
+**A single encoded message over the frame limit.** The receiver measures the *whole encoded message*
+read from the socket, not the `fragment` field inside it. If a stream frame exceeds the limit, that
+stream is reset with `PAYLOAD_TOO_LARGE`; if a connection-level frame exceeds it, the connection fails,
+because there is no stream to reset. A conforming muxws sender fragments at the same constant and does
+not trigger this check.
 
-**A reassembled payload over `max_payload_bytes`.** This is the receiver's own memory limit, and it is
-checked **as fragments arrive**: the accumulated byte count plus the incoming fragment is compared
-against the limit on every fragment, and the stream is reset the moment the crossing fragment lands.
-The partial buffer is dropped in the same step.
+**A reassembled payload over `max_payload_bytes`.** This is the receiver's memory limit, and it is
+checked **as fragments arrive**: for each fragment, the accumulated byte count plus the incoming
+fragment is compared against the limit, and the stream is reset when a fragment exceeds it. The
+partial buffer is discarded in the same step, so the receiver never holds more than the limit.
 
-Checking after reassembly would be pointless. A receiver that assembles 200 MB in order to discover it
-is larger than 64 MiB has already spent everything the limit was protecting.
+Each side observes:
 
-What each side sees:
-
-- **The receiver** — the stream is reset locally; a handler awaiting or iterating it gets a
-  `StreamReset` carrying `ResetCode.PAYLOAD_TOO_LARGE`. Nothing else on the connection is affected.
-- **The sender** — a `reset` frame arrives for that stream, and the pending `send`/`await`/`async for`
-  raises `StreamReset` with the same code and the receiver's reason text. The connection stays up.
-  Retrying the identical payload will fail identically; the reaction is to shrink it or to split it in
-  the application, not to retry.
+- **The receiver**: the stream is reset locally; a handler awaiting or iterating it receives a
+  `StreamReset` with `ResetCode.PAYLOAD_TOO_LARGE`. The rest of the connection is not affected.
+- **The sender**: a `reset` frame arrives for that stream, and the pending `send`/`await`/`async for`
+  raises `StreamReset` with the same code and the receiver's reason text. The connection stays open.
+  The same payload fails the same way on retry; reduce it or split it in the application.
 
 ## `max_payload_bytes` belongs to the receiver
 
@@ -155,25 +146,24 @@ peer = await connect(url, max_payload_bytes=67_108_864)  # the default: 64 MiB
 const peer = await connect(url, { maxPayloadBytes: 67_108_864 }); // the default: 64 MiB
 ```
 
-64 MiB, and it is **local**. It is never announced, never negotiated, and carried in no frame. A
-sender has no way to learn it except by provoking the reset — which is deliberate: a limit the sender
-can read is a limit the sender starts pre-validating against, and then it is a protocol feature that
-both ends must agree on forever.
+The default is 64 MiB, and the limit is **local**. It is not announced, not negotiated, and not
+carried in any frame. A sender learns it only from the reset. If senders could read the limit, it
+would become part of the protocol that both ends must agree on.
 
-**To raise it, raise it on the peer that will be receiving.** The sender has no say and no setting.
-If a browser uploads 200 MB documents to a server, the number belongs on the server's `accept()`:
+**Raise it on the receiving peer.** The sender has no setting for it. If a browser uploads 200 MB
+documents to a server, set it on the server's `accept()`:
 
 ```python
 # fragment
 peer = await accept(websocket, max_payload_bytes=209_715_200)
 ```
 
-and if the server streams 200 MB exports back, the number belongs on the browser's `connect()` as
-well. The two are independent; setting one does not set the other.
+If the server also streams 200 MB exports to the browser, set it on the browser's `connect()` as
+well. The two limits are independent.
 
-The mirror-image knob is `max_concurrent_streams` (default `100`), which is local in exactly the same
-way: it bounds how many streams the **remote** may have open here at once, it is announced nowhere,
-and an opener over the limit is answered `REFUSED` without its handler ever running.
+`max_concurrent_streams` (default `100`) is local in the same way: it bounds how many streams the
+**remote** may have open on this peer at once, it is not announced, and an `open` over the limit is
+answered with `REFUSED` without running the handler.
 
 ## See also
 

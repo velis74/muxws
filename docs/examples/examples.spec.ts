@@ -1,14 +1,14 @@
 /**
  * Runs the shipped TypeScript examples and checks them against the output the guide prints.
  *
- * The acceptor half of every example is Python, which makes this a cross-language check as well:
- * `quickstart-client.ts` must print, byte for byte, what `quickstart_client.py` prints and what
- * `docs/guide/getting-started.md` says they both print.
+ * The acceptor of every example is Python, so this is also a cross-language check:
+ * `quickstart-client.ts` must print, byte for byte, the block that `docs/guide/getting-started.md`
+ * shows, which is also what `quickstart_client.py` prints.
  *
  * The Python interpreter is `MUXWS_PYTHON`, or `python3`. It runs the example scripts with this
- * checkout on `PYTHONPATH`, so `muxws` itself need not be installed; where that interpreter cannot
- * import `fastapi` and `uvicorn` the suite skips rather than fails, because the TypeScript package
- * has no Python dependency and a checkout without one is not a broken example.
+ * checkout on `PYTHONPATH`, so `muxws` need not be installed. If that interpreter cannot import
+ * `fastapi` and `uvicorn`, the suite is skipped, because the TypeScript package has no Python
+ * dependency.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -36,14 +36,12 @@ const POLL_INTERVAL_MS = 50;
 const PYTHON = process.env.MUXWS_PYTHON ?? 'python3';
 
 /**
- * The environment every Python subprocess here gets, with **this checkout** ahead of anything
- * installed.
+ * The environment for every Python subprocess, with **this checkout** on `PYTHONPATH` ahead of any
+ * installed copy.
  *
- * Without it the example servers cannot import `muxws` at all unless the interpreter happens to have
- * it installed, because Python puts the *script's* directory on `sys.path` and not the working
- * directory - `docs/examples/` holds no package. With it they import the tree the test is testing,
- * which is the version a repository test wants anyway: an installed copy would let a green run mean
- * nothing about the code in front of you.
+ * Python puts the *script's* directory on `sys.path`, not the working directory, and
+ * `docs/examples/` contains no package, so without this the example servers import `muxws` only if
+ * it is installed. With it they import the checkout under test, not an installed copy.
  */
 const PYTHON_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -51,12 +49,11 @@ const PYTHON_ENV: NodeJS.ProcessEnv = {
 };
 
 /**
- * Whether the example servers can actually run - asked the way they are actually started.
+ * Whether the example servers can run, probed with the same environment they are started with.
  *
- * `cwd` is a directory with no `muxws` in it, deliberately: from the repository root `sys.path[0]`
- * makes `./muxws/` import cleanly, so the probe would pass on every checkout while the servers, run
- * as scripts from `docs/examples/`, import nothing. A guard that answers a different question from
- * the one it is guarding does not skip - it lets the suite fail somewhere else.
+ * `cwd` is a directory without `muxws` in it: from the repository root, `sys.path[0]` would let
+ * `./muxws/` import, so the probe would pass even when the servers, run as scripts from
+ * `docs/examples/`, cannot import it.
  */
 const pythonReady =
   spawnSync(PYTHON, ['-c', 'import muxws, fastapi, uvicorn'], {
@@ -118,7 +115,7 @@ async function listening(port: number): Promise<boolean> {
   });
 }
 
-/** `ms` milliseconds of nothing. */
+/** Resolve after `ms` milliseconds. */
 async function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => {
     setTimeout(resolveDelay, ms);
@@ -146,7 +143,7 @@ async function startServer(script: string): Promise<RunningServer> {
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`${script} exited with ${child.exitCode}:\n${stderr}`);
-    // eslint-disable-next-line no-await-in-loop -- polling a port is sequential by nature
+    // eslint-disable-next-line no-await-in-loop -- port polling is sequential
     if (await listening(port)) {
       return {
         url: `ws://127.0.0.1:${port}/ws`,
@@ -155,7 +152,7 @@ async function startServer(script: string): Promise<RunningServer> {
         },
       };
     }
-    // A refused connection comes back instantly, so without this the poll is a busy loop.
+    // A refused connection returns immediately; the delay keeps the poll from busy-looping.
     // eslint-disable-next-line no-await-in-loop -- see above
     await delay(POLL_INTERVAL_MS);
   }
@@ -169,7 +166,7 @@ interface Completed {
   stderr: string;
 }
 
-/** What a run that outlived its budget reports, so one hanging example cannot mask the rest. */
+/** The exit code reported for a run that exceeded its time limit. */
 const TIMED_OUT = -1;
 
 /** Run one file through `tsx`, with `muxws` and `muxws/node` pointed at this repository's sources. */
@@ -188,9 +185,8 @@ async function runTypescript(file: string, env: Record<string, string> = {}): Pr
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    // A run that outlives its budget is killed and **reported**, not thrown: rejecting here would
-    // abandon the loop in `every api example executes`, and one example that never exits would hide
-    // every example after it.
+    // A run that exceeds its time limit is killed and reported as a result, not thrown: rejecting
+    // here would end the loop in `every api example executes` and skip the remaining examples.
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -212,8 +208,8 @@ describe.skipIf(!pythonReady)('the documented examples', () => {
       const server = await startServer('quickstart_server.py');
       try {
         const run = await runTypescript(join(EXAMPLES, 'quickstart-client.ts'), { MUXWS_URL: server.url });
-        // `stderr` is the failure message rather than an assertion of its own: a Node release that
-        // prints an ExperimentalWarning there must not turn a correct example into a red build.
+        // `stderr` is the failure message, not asserted on: Node may print an ExperimentalWarning
+        // there for a correct example.
         expect(run.code, run.stderr).toBe(0);
         expect(run.stdout, run.stderr).toBe(documentedOutput('quickstart'));
       } finally {
@@ -240,20 +236,18 @@ describe.skipIf(!pythonReady)('the documented examples', () => {
 });
 
 /**
- * Where the extracted API examples are written. Two constraints pin this to the repository root.
+ * Where the extracted API examples are written: the repository root.
  *
- * `import 'ws'` needs Node's upward search for `node_modules` to reach this repository's copy, so a
- * directory under /tmp is out; and `tsx` applies tsconfig `paths` only to files **outside**
- * `node_modules`, so a directory under `node_modules/.cache` is out too. The directory is removed
- * again in the test's `finally`.
+ * `import 'ws'` needs Node's upward search for `node_modules` to reach this repository's copy, which
+ * excludes /tmp; `tsx` applies tsconfig `paths` only to files **outside** `node_modules`, which
+ * excludes `node_modules/.cache`. The directory is removed in the test's `finally`.
  */
 const SCRATCH_PREFIX = '.muxws-api-examples-';
 
 function scratchParent(): string {
   try {
     mkdirSync(REPOSITORY, { recursive: true });
-    // A run killed mid-flight leaves its directory behind, and an untracked directory in the
-    // repository root is exactly the kind of cruft nobody notices until it is committed.
+    // Remove directories left behind by runs that were killed before their `finally`.
     readdirSync(REPOSITORY)
       .filter((entry) => entry.startsWith(SCRATCH_PREFIX))
       .forEach((entry) => {
@@ -290,9 +284,9 @@ function apiExamples(): { name: string; code: string }[] {
   return found;
 }
 
-/** Collected at load time so the budget below can be counted rather than guessed. */
+/** Collected at load time so the test timeout below is computed from the number of examples. */
 const API_EXAMPLES = apiExamples();
-/** Per-example budget, in milliseconds. Node start-up dominates; a connecting example is slower. */
+/** Per-example time limit, in milliseconds. It is mostly Node start-up; a connecting example takes longer. */
 const PER_API_EXAMPLE_MS = 30_000;
 
 describe('every api example executes', () => {
@@ -301,7 +295,7 @@ describe('every api example executes', () => {
     async () => {
       const examples = API_EXAMPLES;
       if (examples.length === 0) {
-        // Nothing to run yet. The Python mirror in `run_examples_test.py` skips for the same reason.
+        // No examples to run. `run_examples_test.py` skips in the same case.
         expect(examples).toEqual([]);
         return;
       }
@@ -309,10 +303,10 @@ describe('every api example executes', () => {
       const failures: string[] = [];
       try {
         for (const example of examples) {
-          // `.mts` so the block is always ESM, which is what a top-level `await` in an example needs.
+          // `.mts` makes the block ESM, which a top-level `await` requires.
           const file = join(scratch, `${example.name.replace(/[^a-z0-9]+/gi, '-')}.mts`);
           writeFileSync(file, example.code, 'utf8');
-          // eslint-disable-next-line no-await-in-loop -- one subprocess at a time, on purpose
+          // eslint-disable-next-line no-await-in-loop -- runs one subprocess at a time
           const run = await runTypescript(file);
           if (run.code !== 0) failures.push(`${example.name} exited with ${run.code}:\n${run.stderr}`);
         }

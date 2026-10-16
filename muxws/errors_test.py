@@ -30,14 +30,13 @@ from muxws.errors import (
 ROOT = Path(__file__).resolve().parent.parent
 
 #: The three packages an extra exists for. A module that fails to import for one of these reasons is
-#: skipped by the walk below; a module that fails for any other reason is a bug the walk must not
-#: swallow, because a module that silently disappears takes its exception classes with it and the
-#: guard goes green by seeing nothing.
+#: skipped by the walk below; any other import failure propagates, because a skipped module removes
+#: its exception classes from the walk and the guard would pass without checking them.
 _OPTIONAL_DEPENDENCIES = frozenset({"msgpack", "starlette", "websockets"})
 
-#: The transport errors the walk must actually find, by name; without them the guard would pass in an
-#: environment where no transport module imported at all. Each lives in a module that imports with
-#: its optional dependency absent, so naming them cannot make the leanest supported environment red.
+#: The transport errors the walk must find, by name; without them the guard would pass in an
+#: environment where no transport module imported. Each lives in a module that imports without its
+#: optional dependency, so the check passes in an environment without extras.
 _TRANSPORT_ERRORS_THAT_MUST_EXIST = frozenset(
     {
         "UnixSocketsUnsupportedError",
@@ -53,7 +52,7 @@ def test_hierarchy():
     assert issubclass(ConnectionLost, StreamReset)
     assert not issubclass(ConnectionClosed, StreamReset)
 
-    # A normal close racing a last send() is an expected outcome, not a failure and not a caller bug.
+    # A send() after a normal close raises StreamClosed, which is neither a reset nor a protocol error.
     assert not issubclass(StreamClosed, StreamReset)
     assert not issubclass(StreamClosed, ProtocolError)
 
@@ -78,14 +77,13 @@ def test_hierarchy():
 
 
 def test_the_two_transport_bases_carry_their_builtin_as_well_as_muxwserror():
-    """WSM-ERR-016: each base is catchable by a handler written before muxws was ever heard of.
+    """WSM-ERR-016: each base is catchable as its builtin and as `MuxwsError`.
 
-    The dual inheritance is asserted rather than described, because dropping half of it breaks
-    nothing a behavioural test would notice. A caller who typed a URL wrong is already catching
-    `ValueError`; one running where the transport cannot exist is already catching `RuntimeError`;
-    and an application with a single `except MuxwsError` must not have either leak through. The split
-    between the two bases carries the only distinction the caller acts on - retype the address, or
-    change where you run - so neither may be a subclass of the other.
+    No behavioural test detects the removal of one of the two bases, so the inheritance is asserted
+    directly. A caller handling a malformed URL catches `ValueError`; a caller on a platform without
+    the transport catches `RuntimeError`; an application with a single `except MuxwsError` catches
+    both. The two bases separate a malformed address from an unsupported platform, so neither is a
+    subclass of the other.
     """
     assert issubclass(TransportUrlError, MuxwsError)
     assert issubclass(TransportUrlError, ValueError)
@@ -95,8 +93,8 @@ def test_the_two_transport_bases_carry_their_builtin_as_well_as_muxwserror():
     assert not issubclass(TransportUrlError, TransportUnsupportedError)
     assert not issubclass(TransportUnsupportedError, TransportUrlError)
 
-    # Neither is a stream failure, and neither is a codec failure: a URL is refused, and a platform is
-    # refused, before there is a stream or a negotiated codec to fail.
+    # Neither is a stream failure or a codec failure: a URL or a platform is refused before any stream
+    # or codec exists.
     for base in (TransportUrlError, TransportUnsupportedError):
         assert not issubclass(base, StreamReset)
         assert not issubclass(base, CodecError)
@@ -117,10 +115,9 @@ def _import_the_whole_library() -> tuple[list[str], dict[str, str]]:
     """Import every shipped module, reporting the ones an absent optional extra made unimportable.
 
     A module is skipped only when the import failed on one of the three packages an extra is named
-    for, and the caller asserts that; anything else propagates. The distinction is the whole point of
-    doing this by hand rather than with a bare `except ImportError: pass`: a module that fails for a
-    real reason - a typo, a circular import - would otherwise vanish from the walk with its exception
-    classes, and the guard below would go green precisely when it should be loudest.
+    for, and the caller asserts that; anything else propagates. A bare `except ImportError: pass`
+    would also skip a module that fails for another reason, such as a typo or a circular import, and
+    the guard below would pass without checking that module's exception classes.
     """
     imported: list[str] = []
     skipped: dict[str, str] = {}
@@ -138,11 +135,10 @@ def _import_the_whole_library() -> tuple[list[str], dict[str, str]]:
 
 
 def _descendants(cls: type[BaseException]) -> set[type[BaseException]]:
-    """Every subclass of `cls`, transitively - the classes that exist, not the ones a scan can name.
+    """Every subclass of `cls`, transitively.
 
-    By subclass walk and not by reading `class X(Y)` out of the source: a name-based scan cannot see a
-    class whose base is an alias or an attribute expression, and, worse, cannot see a transport module
-    nobody thought to list. Whatever was defined is here, however it was spelled.
+    Uses the subclass tree instead of reading `class X(Y)` from the source: a name-based scan misses a
+    class whose base is an alias or an attribute expression, and a module that is not listed.
     """
     found: set[type[BaseException]] = set()
     for sub in cls.__subclasses__():
@@ -154,14 +150,11 @@ def _descendants(cls: type[BaseException]) -> set[type[BaseException]]:
 def test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base():
     """WSM-ERR-016: a transport's own exception is a `TransportUrlError` or a `TransportUnsupportedError`.
 
-    The rule this enforces is what makes `except MuxwsError` exhaustive across transports: without
-    it a transport is free to raise a bare `ImportError` or its own library's `InvalidURI`, and an
-    application catching `MuxwsError` around `connect()` finds out which scheme it configured only in
-    production.
+    The rule makes `except MuxwsError` around `connect()` catch every transport's errors. A transport
+    that raised a bare `ImportError` or its own library's `InvalidURI` would escape that handler.
 
-    Nothing here names a transport. The walk imports every shipped module and then asks the class
-    tree what exists, so a transport added later is covered on the day its module is written, and the
-    failure names `module.QualName` so it also says which file to fix.
+    The test names no transport. The walk imports every shipped module and reads the class tree, so a
+    new transport module is covered without changes here, and a failure names `module.QualName`.
     """
     imported, skipped = _import_the_whole_library()
     assert len(imported) > 15, imported
@@ -177,22 +170,20 @@ def test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_ba
     )
     assert offenders == [], "defined outside muxws/errors.py under neither transport base (WSM-ERR-016)"
 
-    # The control, without which the assertion above is a comparison of two empty lists: the walk
-    # really did reach the classes that live outside the shared module. A stripped environment cannot
-    # turn this test into a no-op, because the `ws+unix:` grammar is stdlib-only and always imports.
+    # Control: the walk reached classes outside the shared module, so the assertion above does not
+    # compare two empty lists. The `ws+unix:` grammar is stdlib-only and imports in every environment.
     found = {cls.__name__ for cls in _descendants(MuxwsError) if cls.__module__ != "muxws.errors"}
     assert _TRANSPORT_ERRORS_THAT_MUST_EXIST <= found, sorted(found)
 
 
 def test_the_transport_bases_are_root_exported_and_their_subclasses_are_not():
-    """WSM-ERR-016's export half: the bases come from `muxws`, the concrete classes never do.
+    """WSM-ERR-016: the bases are exported from `muxws`; the concrete classes are not.
 
-    Both directions matter and neither implies the other. The bases must be root-exported, because an
-    application configured with a URL it has not read yet cannot know which transport module to
-    import and `except TransportUrlError` has to be writable without one. The concrete classes must
-    *not* be: the adapter seam is public (WSM-API-021) and a third-party adapter cannot add a name to
-    `muxws/__init__.py`, so a root-exported concrete class here would set an example nobody outside
-    this repository can follow.
+    The bases are root-exported because an application that does not know in advance which transport
+    a configured URL names must be able to write `except TransportUrlError` without importing a
+    transport module. The concrete classes are not root-exported: the adapter interface is public
+    (WSM-API-021), a third-party adapter cannot add a name to `muxws/__init__.py`, and the in-tree
+    transports follow the same rule.
     """
     import muxws
 
@@ -208,7 +199,7 @@ def test_the_transport_bases_are_root_exported_and_their_subclasses_are_not():
 
 
 def test_reset_codes_are_the_pinned_integers():
-    """Nine members, and 5 is a hole: STREAM_LIMIT is retired and its number is never reused."""
+    """Nine members; 5 is unassigned (STREAM_LIMIT is retired) and is never reused."""
     assert [(c.name, c.value) for c in ResetCode] == [
         ("NO_ERROR", 0),
         ("CANCELLED", 1),
@@ -227,7 +218,7 @@ def test_reset_codes_are_the_pinned_integers():
 
 
 def test_no_stream_limit_class_exists():
-    """WSM-ERR-001 is retired: StreamRefused covers every refusal and there is no sibling."""
+    """WSM-ERR-001 is retired: StreamRefused covers every refusal and has no sibling class."""
     import muxws.errors as errors
 
     assert not hasattr(errors, "StreamLimit")
@@ -275,16 +266,14 @@ def test_connection_closed_carries_the_socket_close_details():
 
 
 def test_nothing_in_the_error_hierarchy_carries_a_status_code():
-    """WSM-ERR-007: muxws maps exceptions to nothing. Reset codes are not status codes.
+    """WSM-ERR-007: muxws maps exceptions to no status code. Reset codes are not status codes.
 
-    What the rule is aimed at: a library sitting under a web framework is one convenience away from
-    `RemoteError.status_code = 500`, and once one exists every caller writes against it and the reset
-    table becomes a second, worse HTTP. The numbers below are the ones anybody would reach for first,
-    and none of them is a `ResetCode`: the two vocabularies do not overlap, and 5 (WSM-STM-022) is the
-    only hole in the reset table.
+    No error class has a `status_code` attribute such as `RemoteError.status_code = 500`. The HTTP
+    status numbers below are not `ResetCode` values: the two sets do not overlap, and 5
+    (WSM-STM-022) is the only unassigned value in the reset table.
 
-    The serializer is the other place a mapping would appear, because it is the one thing that turns
-    a local exception into something structured for the wire. WSM-ERR-006 fixes its two keys.
+    The error serializer turns a local exception into a structured wire value, so it is also checked:
+    WSM-ERR-006 fixes its two keys.
     """
     import muxws
 

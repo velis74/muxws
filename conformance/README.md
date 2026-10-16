@@ -1,18 +1,16 @@
 # The muxws conformance corpus
 
-One corpus, two runners, zero divergence.
-
 Everything under this directory is plain JSON, read verbatim by both the Python suite and the
-TypeScript suite. Nothing here is generated at test time and nothing here is language-specific: a
-fixture is the contract, and the two ports are the things being held to it. That is the whole reason
-the corpus exists. A rule that only one port checks is a rule that drifts, and a wire disagreement
-between the ports is invisible until two peers of different languages try to talk to each other, at
-which point it looks like corruption rather than like a bug.
+TypeScript suite. Nothing here is generated at test time and nothing here is language-specific. The
+fixtures define the required behaviour, and both implementations are tested against them. The corpus
+exists so that every rule is tested in both implementations: a rule that only one implementation
+tests can diverge, and a wire disagreement between the implementations shows up only when peers in
+different languages connect, where it looks like data corruption.
 
-**This document is the schema.** It is written so that two runners implemented independently from it
-cannot end up reading the same file differently (M6 §5). If a runner needs a field the other does not
-read, the fixture is wrong. If this document and a runner disagree, one of them is a defect - say
-which, do not quietly pick.
+**This document is the schema.** It specifies the fixture format precisely enough that two
+independently written runners read every file the same way. If a runner needs a field the other does
+not read, the fixture is wrong. If this document and a runner disagree, one of them is wrong;
+determine which one and fix it.
 
 ## Who reads what
 
@@ -23,9 +21,9 @@ which, do not quietly pick.
 | `sequences/*.json` | scripted exchanges | `muxws/conformance_test.py` | `ts/conformance.spec.ts` |
 | `invalid/*.json` | misbehaviour cases | `muxws/conformance_test.py`, `muxws/conformance_schema_test.py` | `ts/conformance.spec.ts` |
 
-**`muxws/conformance_test.py` and `ts/conformance.spec.ts` are the two runners of record**, and they
-are twins: the Python file reads the TypeScript one's fixture counts and the TypeScript file reads
-the Python one's frozen digest, so neither can drift alone.
+**`muxws/conformance_test.py` and `ts/conformance.spec.ts` are the two reference runners**, and they
+check each other: the Python file reads the TypeScript file's fixture count and the TypeScript file
+reads the Python file's frozen digest, so a change to one runner alone fails the other.
 
 Both suites resolve this directory relative to the repository root. `pytest` walks up from the module
 file; `vitest` uses `process.cwd()`.
@@ -35,15 +33,15 @@ file; `vitest` uses `process.cwd()`.
 - **JSON, UTF-8, no comments, no trailing commas.** A `description` field is where a fixture explains
   itself; every kind accepts one and every runner ignores it.
 - **A fixture that is one object per file carries a `name`, and it equals the file basename.** Both
-  sequence runners and the invalid runner assert this, so a renamed file cannot silently become a
-  second copy of a case that is already covered. Files that hold a *list* of cases
+  sequence runners and the invalid runner assert this, so a renamed copy of a file is detected as a
+  duplicate case. Files that hold a *list* of cases
   (`frames/`) instead require each entry's `name` to be unique within the file, because those names
   become test ids.
 - **No floats.** The two ports render them differently - Python writes `1.0`, `-0.0`, `1e+16`,
   `1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7` - and fragment boundaries are
-  cut over the encoded form, so a payload carrying a float is cut differently by the two ports. See
-  `GAPS.md`. Integers are safe only within ±(2^53 − 1); beyond that JavaScript rounds to the nearest
-  double. `NaN` and `Infinity` are not JSON and the codec refuses them (`allow_nan=False`).
+  cut over the encoded form, so a payload carrying a float is cut differently by the two ports.
+  Integers are safe only within ±(2^53 − 1); beyond that JavaScript rounds to the nearest double.
+  `NaN` and `Infinity` are not JSON and the codec refuses them (`allow_nan=False`).
 - **No bytes anywhere.** JSON has no byte type, and muxws MUST NOT base64-encode bytes on the
   application's behalf (WSM-CDC-008). Bytes are a payload type only under a binary codec, and no
   msgpack byte string may be pinned in a fixture at all (WSM-CDC-006): the two msgpack libraries make
@@ -53,9 +51,8 @@ file; `vitest` uses `process.cwd()`.
   `ack`, `protocol_version`, `extensions`, `max_concurrent_streams`, `max_payload_bytes` or
   `max_frame_bytes` key inside a frame. The `muxws.v1.` subprotocol prefix is the only version
   anywhere (WSM-CON-009, WSM-PKG-005). `muxws/conformance_schema_test.py` greps the corpus text for
-  these words, so do not put them in a `description` or a `reason` string with quotes around them
-  either.
-- **Reset code 5 is retired** (it was `STREAM_LIMIT`, WSM-STM-022). It must never appear. Code 9
+  these words, so they must not appear in quotes in a `description` or a `reason` string either.
+- **Reset code 5 is retired** (it was `STREAM_LIMIT`, WSM-STM-022) and must never appear. Code 9
   (`CONNECTION_CLOSED`) is synthesised locally and must never appear on the wire either
   (WSM-ERR-002).
 - **Every duration is milliseconds and its key ends in `_ms`.** The corpus is written once and read
@@ -88,13 +85,14 @@ keys (WSM-TST-001).
 Runners build the frame with `from_mapping` / `fromMapping`, which is what makes the corpus a
 receiver-side contract rather than a transcription of one language's dataclass:
 
-- **An absent `payload` key means `ABSENT`, and an explicit `"payload": null` means null** (D1). The
-  two are different frames and both appear in the corpus; a peer that conflated them could not tell
-  "no payload" from "a payload that is null".
+- **An absent `payload` key means `ABSENT`, and an explicit `"payload": null` means null.** The two
+  are different frames and both appear in the corpus; a peer that treated them as equal could not
+  distinguish "no payload" from "a payload that is null".
 - Every other key absent means that field's default (`stream: null`, `more: false`, `end: false`,
   `headers: null`, …).
-- Unknown keys are **dropped**, never preserved (WSM-FRM-001, D2). Do not add one to a triple
-  expecting it to survive - `decode(encode(frame)) == frame` would then pass on garbage.
+- Unknown keys are **dropped**, never preserved (WSM-FRM-001). An unknown key added to a triple is
+  not part of the decoded frame; if decoders preserved unknown keys, `decode(encode(frame)) == frame`
+  would also pass for frames carrying them.
 - `type` is required. `payload` and `fragment` together is a protocol error (WSM-FRM-004) and cannot
   appear in a triple.
 
@@ -110,31 +108,30 @@ Three assertions per triple, in both languages (WSM-CDC-004/005):
 2. `decode(encode(frame)) == frame`
 3. `JSON.parse(encode(frame))` deep-equals `JSON.parse(json_wire)`
 
-All three compare **parsed objects**. A byte comparison would break the moment either language's JSON
-serializer changed its spacing, and would make a legal encoder fail. Exactly one test in the whole
-repository may assert key order - `test_canonical_key_order_for_log_diffing`, which pins `type`, then
-`stream`, then the remaining keys alphabetically for the benefit of log diffing - and it builds its
-own frame rather than reading the corpus.
+All three compare **parsed objects**. A byte comparison would fail when either language's JSON
+serializer changes its whitespace, and would reject legal encoders. Exactly one test in the repository
+asserts key order: `test_canonical_key_order` in `muxws/frames_test.py`, which checks `type`, then
+`stream`, then the remaining keys alphabetically, for comparing logged frames. It builds its own frame
+and does not read the corpus.
 
-`json_wire` is therefore **authored by hand, not generated from our own encoder**; a wire generated
-from the thing it is meant to police proves nothing. By convention it is written in canonical key
-order and with the codec's separators (`,` and `:`, no spaces, `ensure_ascii=False`), because a
-corpus that already looks like the output is far easier to diff by eye - but no test depends on that.
+`json_wire` is **written by hand, not generated by the muxws encoder**, because a wire string generated
+by the encoder under test cannot detect errors in that encoder. By convention it is written in
+canonical key order and with the codec's separators (`,` and `:`, no spaces, `ensure_ascii=False`), so
+that it matches the encoder's output when compared by eye; no test depends on this.
 
 ### Consequences of adding a triple
 
-Anything with a `payload` key is also fed to the fragmenter at a hostile 96-byte cap by
+Every triple with a `payload` key is also passed to the fragmenter with a 96-byte cap by
 `muxws/fragment_test.py` and `ts/fragment.spec.ts`, which assert that every fragment fits under the
-cap and that reassembly reproduces the payload exactly. Adding a triple therefore adds a
-fragmentation case for free - and a payload that cannot be fragmented at 96 bytes will fail there,
-not here.
+cap and that reassembly reproduces the payload exactly. Adding a triple therefore also adds a
+fragmentation case, and a payload that cannot be fragmented at 96 bytes fails in those tests.
 
 ## Kind 2 - `frames/v1-fragment-boundaries.json`: the boundary cases
 
-A JSON list of `{"name", "cap", "payload", "fragments"}` objects and nothing else. This is the one
-fixture kind that pins **exact strings** rather than parsed equality, because the exact cut points
-*are* the contract (WSM-FRG-016): both ports must run the same search over the same encoded form and
-therefore cut at the same boundary.
+A JSON list of `{"name", "cap", "payload", "fragments"}` objects and nothing else. This is the only
+fixture kind that compares **exact strings** rather than parsed objects, because the exact cut points
+are part of the protocol (WSM-FRG-016): both implementations must run the same search over the same
+encoded form and therefore cut at the same boundary.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -147,21 +144,21 @@ The runner splits `{"type": "data", "stream": 1, "payload": payload, "end": true
 asserts the produced `fragment` values equal `fragments` element for element, then that reassembly
 reproduces `payload`.
 
-Cases must keep covering the three ways this drifts, and `test_every_boundary_hazard_has_a_case`
-enforces it: `astral-plane` (a non-BMP character is 2 in JavaScript's `.length` and 4 on the wire),
+The cases must cover the three kinds of boundary error, and `test_every_boundary_hazard_has_a_case`
+checks that they do: `astral-plane` (a non-BMP character is 2 in JavaScript's `.length` and 4 on the wire),
 `two-byte-codepoints` and `three-byte-codepoints` (a cut inside a multi-byte sequence must move
 backwards), and `control-characters` (JSON escaping expands one byte to six, so a proportional guess
-at the cut point converges differently in the two ports).
+at the cut point gives different results in the two implementations).
 
 ---
 
 ## Kind 3 - `sequences/*.json`: scripted exchanges
 
 One fixture per file, replayed by both implementations against the in-memory transport, in **both
-role assignments** (WSM-TST-002). Both peers are real, nothing is injected, and the fixture is a
-script of ordinary API calls with assertions interleaved. What this proves is that the ports agree
-about *sequences* - which frame goes out when, which stream survives which event - and not merely
-about how one frame is spelled.
+role assignments** (WSM-TST-002). Both peers are real peers, and the fixture is a script of ordinary
+API calls with assertions between them. These fixtures test that the implementations agree on
+*sequences* (which frame is sent when, which stream survives which event), in addition to the
+encoding of single frames.
 
 ```json
 {
@@ -178,7 +175,7 @@ about how one frame is spelled.
 | `description` | no | Prose. Ignored by both runners. |
 | `max_frame_bytes` | no | **An instruction to the runner**, not a wire value. |
 | `max_concurrent_streams` | no | The same: the receiver's local limit (WSM-STM-036), never announced. |
-| `requires_codec` | no | A codec name. Each runner replays the corpus once per shipped codec; a pass configured with another codec skips the fixture, loudly. The name must be one some pass is configured with (WSM-CDC-007). |
+| `requires_codec` | no | A codec name. Each runner replays the corpus once per shipped codec; a pass configured with another codec skips the fixture and records the reason. The name must be one some pass is configured with (WSM-CDC-007). |
 | `steps` | yes | A non-empty list, executed strictly in order. |
 
 ### `max_frame_bytes` and `max_concurrent_streams` are instructions to the runner
@@ -194,15 +191,14 @@ for this one by replaying the whole corpus and reading the raw messages
 ### `requires_codec` is the only reason a fixture is ever skipped
 
 Each runner replays this corpus **once per shipped codec**: a `json` pass and a `msgpack` pass, each
-in both role assignments. A fixture written for a codec a given pass is not configured with is
-skipped by that pass **with a recorded reason**, never quietly passed - and the set of skipped
-fixtures is itself pinned by a test in each runner, because a skip that spread to a second fixture
-would be a corpus quietly shrinking. Nothing else in this corpus may be skipped: an unrecognised step
-kind or an unimplemented `call` is a hard failure.
+in both role assignments. A pass skips a fixture that requires a different codec, **with a recorded
+reason**; it does not report it as passed. The set of skipped fixtures is pinned by a test in each
+runner, so an additional skipped fixture fails the suite. Nothing else in this corpus may be skipped:
+an unrecognised step kind or an unimplemented `call` is a hard failure.
 
-A `requires_codec` naming a codec **no** pass is configured with is a defect, not a skip: the fixture
-is then reachable by no line of the library while reading in the report as covered. Both runners
-assert against it by name (`test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere`,
+A `requires_codec` naming a codec that **no** pass is configured with is an error, not a skip: the
+fixture would then never run while the report lists it as covered. Both runners test for this by name
+(`test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere`,
 `runs every fixture under some configured codec, skipping none everywhere`), because WSM-CDC-007
 requires every codec that ships to have a peer at each end running this corpus.
 
@@ -217,10 +213,10 @@ list of integers in `0..255`:
 ```
 
 - Both runners resolve it **when the fixture is loaded**, before the first step runs: Python to
-  `bytes`, TypeScript to an `ArrayBuffer`. It is never a value on the wire, and a runner that left
-  the object unresolved would send an ordinary map that both codecs carry happily - the fixture would
-  pass while asserting nothing about bytes. Each runner therefore asserts that the corpus still
-  carries the placeholder *and* that loading resolved it
+  `bytes`, TypeScript to an `ArrayBuffer`. The placeholder object is never sent. A runner that did not
+  resolve it would send an ordinary map, which both codecs encode, and the fixture would pass without
+  testing bytes. Each runner therefore asserts that the corpus contains the placeholder *and* that
+  loading resolved it
   (`test_the_bytes_placeholder_is_resolved_before_a_step_runs`, `resolves the $bytes placeholder
   before a step runs`).
 - The substitution is recursive and applies to the whole fixture, so a placeholder is legal anywhere
@@ -228,17 +224,16 @@ list of integers in `0..255`:
 - `$bytes` alongside any other key is **not** a placeholder but an ordinary payload key, so an
   application object may still carry one.
 - Only a fixture that also declares `"requires_codec": "msgpack"` may use it. Under JSON, bytes are
-  not a payload type at all and muxws must not base64-encode them on the application's behalf
-  (WSM-CDC-008), so a JSON pass must fail on one rather than silently encode it.
-- **A byte comparison must be structural.** `assert a == b` is exact in Python, but vitest's
-  `toEqual` compares two `ArrayBuffer`s by byte *length* and calls buffers of equal length equal
-  whatever they contain. The TypeScript runner compares with `deepEqual` from `ts/frames.ts` for
-  exactly this reason; a runner that reaches for `toEqual` here has a fixture that cannot fail.
+  not a payload type and muxws must not base64-encode them on the application's behalf (WSM-CDC-008),
+  so a JSON pass must fail on one rather than encode it.
+- **A byte comparison must compare contents.** `assert a == b` is exact in Python, but vitest's
+  `toEqual` compares two `ArrayBuffer`s by byte *length* only and treats buffers of equal length as
+  equal regardless of contents. The TypeScript runner therefore compares with `deepEqual` from
+  `ts/frames.ts`; `toEqual` would not detect buffers of equal length with different contents.
 
 ### Streams are named by ordinal, never by a raw id
 
-This is the property that makes a fixture replayable when the roles are swapped, and it is the single
-easiest thing to get wrong.
+Ordinals make a fixture replayable with the roles swapped.
 
 - The runner keeps an ordered list of the streams the script opens. **Every step that opens a stream
   appends exactly one entry, in step order**, whatever call opened it. Ordinal 1 is the first stream
@@ -247,19 +242,17 @@ easiest thing to get wrong.
 - `"stream_ref": n` in any matcher resolves to the `stream` field of the *n*-th such stream; in any
   call it selects that stream's handle **on the peer the step names**.
 - `"last_stream_ref": n` is the same resolution applied to `goaway.last_stream`, which carries the
-  *other* peer's parity (WSM-CON-020) and so is the one place a raw number is most tempting and most
-  wrong.
-- **A raw `"stream": 3` in a matcher is a defect**, even when it happens to pass: it bakes one side's
-  parity into the corpus, and the fixture will fail the moment the roles are swapped. The brief's own
-  illustration of WSM-TST-002 writes raw ids; the rule wins over the illustration (see *Known
-  divergences* below).
+  *other* peer's parity (WSM-CON-020).
+- **A raw `"stream": 3` in a matcher is an error**, even when it passes: it fixes one side's parity in
+  the fixture, and the fixture fails when the roles are swapped. Always write `stream_ref` and name
+  the `peer`.
 
 ### Step vocabulary
 
 Every step is an object with exactly one *kind* key. The runners dispatch on the first kind they
-recognise in this order, so do not combine two in one step. **A step whose kind is not in this table,
-or a `call` this runner does not implement, is a hard failure - never a skip.** A silently skipped
-step is a fixture that passes by testing nothing.
+recognise in this order, so a step must not combine two. **A step whose kind is not in this table,
+or a `call` the runner does not implement, is a hard failure, never a skip**, because a skipped step
+would let the fixture pass without testing it.
 
 | Kind key | Other keys | What happens |
 |---|---|---|
@@ -274,9 +267,8 @@ step is a fixture that passes by testing nothing.
 | `expect_closed` | — | `{"peer", "socket"?}`: that peer is no longer open. |
 
 `peer` is `"dialer"` or `"acceptor"` and is **required** on `call`, `inject`, `expect_frame`,
-`expect_no_frame` and (inside its own object) `expect_headers` - an `expect_frame` without it cannot
-say whose wire to search, and a runner that guessed would be asserting something different in each
-language.
+`expect_no_frame` and (inside its own object) `expect_headers`. Without it, an `expect_frame` does not
+specify whose wire to search.
 
 #### `inject`
 
@@ -284,28 +276,27 @@ language.
 envelope **exactly as written** and hands it to that peer's socket as an inbound message. Ordinals
 are resolved first; nothing else is.
 
-The envelope deliberately does *not* pass through `from_mapping` / `fromMapping`, and that is the
-whole point for the two extension-point fixtures: those functions drop unknown keys (WSM-FRM-001), so
-a frame built through them could never carry the unknown field or the unknown type whose toleration
-is the thing being asserted (WSM-FRM-001, WSM-FRM-002).
+The envelope does *not* pass through `from_mapping` / `fromMapping`. Those functions drop unknown keys
+(WSM-FRM-001), so a frame built through them could not carry the unknown field or the unknown frame
+type that the two extension-point fixtures send (WSM-FRM-001, WSM-FRM-002).
 
-This is the one step kind a sequence fixture shares with `invalid/`, and the difference is intent:
-here the injected message is *legal but unrecognised*, and the assertion is that nothing happens. A
-message no correct implementation would send belongs in `invalid/`, where the survival column exists
-to say what it costs.
+`inject` is the only step kind a sequence fixture shares with `invalid/`. In a sequence fixture the
+injected message is *legal but unrecognised*, and the assertion is that nothing happens. A message no
+correct implementation would send belongs in `invalid/`, which records whether the connection
+survives it.
 
 #### `settle`
 
 `{"settle": 12}` yields the event loop twelve **turns** - not milliseconds. Python runs
 `await asyncio.sleep(0)` that many times; TypeScript awaits that many `setTimeout(…, 0)` macrotasks.
-These are not the same amount of progress, so a `settle` count is a *lower bound on progress, never a
-duration*. A fixture that only passes at exactly 12 and fails at 24 is a fixture that is racing, and
-the defect is the fixture's.
+These are not the same amount of progress, so a `settle` count is a *lower bound on progress, not a
+duration*. A fixture that passes at 12 and fails at 24 has a race condition, and the fixture must be
+fixed.
 
 #### `call`
 
-Implemented today by both runners. The three that allocate an ordinal are marked; every other call
-addresses a stream that already exists, by `stream_ref`.
+Both runners implement every call in this table. The three that allocate an ordinal are marked; every
+other call addresses an existing stream by `stream_ref`.
 
 | `call` | Keys | Maps to |
 |---|---|---|
@@ -314,18 +305,18 @@ addresses a stream that already exists, by `stream_ref`.
 | `notify` | `payload`?, `headers`?, `as`? | `peer.notify(...)`, awaited. **Allocates an ordinal.** |
 | `send` | `stream_ref`, `payload`?, `end`?, `headers`? | `stream.send(payload, end, headers)`. |
 | `send_headers` | `stream_ref`, `headers` | `stream.send_headers(...)` - a payload-less `data` carrying this side's leading headers (WSM-API-024). Legal only on this side's first frame on the stream (WSM-FRM-016). |
-| `end` | `stream_ref`, `payload`?, `trailers`?, `headers`? | `stream.end(...)`. An **absent** `payload` key is `ABSENT`, an explicit `null` is null (D1). |
+| `end` | `stream_ref`, `payload`?, `trailers`?, `headers`? | `stream.end(...)`. An **absent** `payload` key is `ABSENT`, an explicit `null` is null. |
 | `reply` | `stream_ref`, `payload`?, `trailers`?, `headers`? | `stream.reply(payload)` on that peer's handle for that ordinal. |
 | `cancel` | `stream_ref`, `reason`? | `stream.cancel(reason)` - `reset(CANCELLED)`, sent without waiting (WSM-ERR-013). |
 | `iterate` | `stream_ref`, `as` | Start consuming the stream as an async iterator; the collected list is the label's value. |
 | `close` | `code`?, `reason`?, `drain_ms`? | `peer.close(...)`, **started and not awaited** - `close()` sends `goaway` and *then* drains, and the steps after it are what the drain window exists to let happen (WSM-CON-025). Defaults: `code` 0 (`NO_ERROR`), `drain_ms` 10000. |
 | `await_close` | — | Await the `close()` this peer already has in flight. Fails if there is none. |
 
-`request` and `notify` do not hand back a handle - `request` deliberately returns a *value* - so both
-runners discover the stream those calls allocated through the public `peer.streams` map, by a bounded
-poll. A poll and not a single read, because Python reaches the `open()` inside `request()` only once
-the task is first scheduled while TypeScript reaches it synchronously: exactly the kind of difference
-a shared corpus must not be able to see.
+`request` and `notify` do not return a stream handle (`request` returns a *value*), so both runners
+find the stream those calls allocated in the public `peer.streams` map, by a bounded poll. A single
+read is not sufficient: Python executes the `open()` inside `request()` only when the task is first
+scheduled, while TypeScript executes it synchronously, and the fixtures must not depend on that
+difference.
 
 `timeout_ms` and `drain_ms` are **milliseconds**, like every duration in this corpus; the Python
 runner divides by 1000 because Python's durations are seconds (WSM-CON-012).
@@ -340,24 +331,24 @@ return.
 
 `{"peer": "acceptor", "call": "send", "stream_ref": 1, "payload": {...}, "raises": "StreamReset"}`
 states that the call itself fails, with an instance of the named class from the `expect_error` list.
-It is not a matcher on frames and could not be one: what it pins is that the *local handle* refuses
-to send at all (WSM-ERR-009), and a peer that reset the stream and then went on producing is
-indistinguishable from a correct one on the wire alone.
+It is not a frame matcher: it asserts that the *local handle* refuses to send (WSM-ERR-009). On the
+wire alone, a peer that reset the stream and then kept sending cannot be distinguished from a correct
+one.
 
-Adding a call name is a change to **both runners and this table in the same commit**. A call one
-runner knows and the other does not is exactly the divergence this document exists to prevent.
+Adding a call name requires changing **both runners and this table in the same commit**, so that both
+runners support the same set of calls.
 
 #### `expect_frame` and `expect_no_frame` - subset, not equality
 
-The listed keys must hold on the frame and **everything else about the frame is ignored**. This is
-deliberate: adding an optional field in a later revision must not invalidate the corpus, which is
-precisely what WSM-FRM-001 asks of a receiver, applied to the test suite. Never write a matcher that
-tries to say "and nothing else"; there is no such matcher and there should not be.
+The listed keys must hold on the frame and **all other fields of the frame are ignored**, so that
+adding an optional field in a later revision does not invalidate the corpus. This applies WSM-FRM-001,
+which requires a receiver to ignore unknown fields, to the test suite. There is no matcher for "and no
+other fields".
 
 - `expect_frame` searches **forward from a per-peer cursor** over the frames that peer has sent, and
   advances the cursor past the frame it matched. Successive `expect_frame` steps on one peer
-  therefore assert *relative order*, and the same fixture says nothing about the interleaving of the
-  two peers' wires - which is the only claim that survives a role swap.
+  therefore assert *relative order* within one peer's wire. They assert nothing about the interleaving
+  of the two peers' wires, which is not preserved when the roles are swapped.
 - `expect_no_frame` searches the **whole** of that peer's wire and ignores the cursor. It means "not
   at all", not "not yet".
 - Both resolve `stream_ref` → `stream` and `last_stream_ref` → `last_stream` before matching. Every
@@ -368,17 +359,17 @@ tries to say "and nothing else"; there is no such matcher and there should not b
 - `{"expect_result": {"ref": "r1", "value": {...}}}` awaits the labelled stream's result and compares
   `value` by deep equality.
 - `{"expect_error": {"ref": "above", "error": "StreamRefused", "code": 4}}` awaits it and requires the
-  failure to be an instance of the named class. `error` names a **class**, not a code, because the
-  class is the part WSM-ERR-004 fixes across the two languages; `code` is an optional extra
+  failure to be an instance of the named class. `error` names a **class**, not a code, because
+  WSM-ERR-004 specifies the class names for both languages; `code` is an optional additional
   assertion. The accepted names are `ConnectionLost`, `RemoteError`, `StreamRefused`, `StreamReset`
   and `StreamTimeout`.
 - `{"expect_closed": {"peer": "acceptor", "socket": true}}` polls, bounded, until that peer is no
-  longer open - and additionally until its socket is closed when `socket` is true. A bounded poll and
-  not a single read, because the other end learns of a close one turn later.
+  longer open, and, when `socket` is true, until its socket is closed. It polls because the other end
+  learns of a close one event-loop turn later.
 
 Every waiting step is bounded - `expect_result`, `expect_error` and `await_close` by a wall-clock
-ceiling, `expect_closed` by a turn count - so a fixture that cannot make progress fails by name
-instead of hanging the suite.
+ceiling, `expect_closed` by a turn count - so a fixture that cannot make progress fails with its name
+instead of blocking the suite.
 
 ---
 
@@ -402,7 +393,7 @@ two things: which frame goes out, and whether the connection survives (WSM-TST-0
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | yes | Equals the file basename. |
-| `description` | yes | Non-empty. Why this case is stream-level or connection-level; it is quoted in the assertion message. |
+| `description` | yes | Non-empty. States why this case is stream-level or connection-level; it is included in the assertion message. |
 | `inbound` | yes | Non-empty list of messages to inject, in order. |
 | `expect_out` | yes | Ordered subset matchers over what the peer under test sent. May be empty. |
 | `connection_survives` | yes | Boolean. |
@@ -411,10 +402,9 @@ two things: which frame goes out, and whether the connection survives (WSM-TST-0
 ### The peer under test is an acceptor, and ids here are raw
 
 The runner builds one real peer as an **acceptor** (even ids) and injects the wire of a misbehaving
-**dialer** (odd ids). Unlike a sequence fixture, an invalid fixture is deliberately **not**
-role-swappable and deliberately uses raw stream ids: the whole point is to hand-write bytes that no
-API call on either side could have produced, and an ordinal cannot name a stream that was never
-opened. `stream_ref` has no meaning in this kind and must not appear.
+**dialer** (odd ids). Unlike a sequence fixture, an invalid fixture is **not** role-swappable and uses
+raw stream ids: it contains messages that no API call on either side can produce, and an ordinal cannot
+name a stream that was never opened. `stream_ref` has no meaning in this kind and must not appear.
 
 ### `inbound` entries
 
@@ -437,29 +427,29 @@ listed are ignored, for the same WSM-FRM-001 reason as `expect_frame`.
 `"expect_out": []` is not "no assertion". It means **nothing at all went out**, and the runner
 asserts the sent list is empty. `data-for-closed-id` is the case that needs it: a late frame for a
 stream that closed below the high-water mark is expected during a normal race and is silently
-ignored - no reset, no connection error, at most a counter (WSM-STM-002). An empty `expect_out` is
-the only way to say that, and dropping it would let a peer that answered with a reset pass.
+ignored: no reset, no connection error, at most a counter increment (WSM-STM-002). Only an empty
+`expect_out` expresses this; without it, a peer that answered with a reset would pass.
 
-Entries are restricted to `reset` and `goaway` with an integer `code`, which is a schema-level way of
-saying that these are the only two frames an invalid message can provoke.
+Entries are restricted to `reset` and `goaway` frames with an integer `code`, because these are the
+only two frames an invalid message can cause.
 
-### `connection_survives` is the column that carries the meaning
+### `connection_survives`
 
-It is the difference between "the peers can still agree about every other stream" and "they cannot"
+It states whether the peers still agree about every other stream after the invalid message
 (WSM-STM-024), and it is checked against `peer.is_open` after the injection settles.
 
 Two invariants tie the two columns together, and both are asserted:
 
-- A fixture with `connection_survives: true` must never expect a `goaway`. `goaway` ends the
-  connection by definition, so the two columns cannot disagree.
+- A fixture with `connection_survives: true` must never expect a `goaway`, because `goaway` ends the
+  connection.
 - A stream-level failure emits a `reset` and survives; a connection-level failure emits a `goaway`
   and does not.
 
-### The eight required cases
+### The nine required cases
 
-`invalid/` contains **exactly** these eight, no more and no fewer, and
-`test_every_invalid_case_of_wsm_tst_003_has_a_fixture` proves it - without that meta-test, a deleted
-fixture is a silently passing suite.
+`invalid/` contains **exactly** these nine cases, and
+`test_every_invalid_case_of_wsm_tst_003_has_a_fixture` checks this, so that deleting a fixture fails
+the suite.
 
 | File | The misbehaviour | Level | Survives |
 |---|---|---|---|
@@ -471,57 +461,42 @@ fixture is a silently passing suite.
 | `fragment-interrupted-by-non-fragment.json` | a non-fragment frame lands mid-reassembly | stream (WSM-FRG-033) | yes |
 | `data-above-high-water-mark.json` | a stream-level frame for an id never opened | connection (WSM-STM-003) | no |
 | `data-for-closed-id.json` | `data` for an already-closed id below the mark | neither - ignored (WSM-STM-002) | yes, silently |
+| `headers-on-a-later-frame.json` | `headers` on a frame that is not the sender's first on the stream | stream (WSM-FRM-016) | yes |
 
 ---
 
 ## Changing the corpus
 
-1. **A failing fixture is a defect in the implementation, not in the fixture.** The fix belongs to the
-   peer that broke the rule. Do not edit a fixture to make a peer pass, and do not change a peer to
-   suit a fixture that was just written.
-2. **Both runners, one commit.** A new step kind, a new `call`, a new key: change this document and
-   both runners together, or the corpus has quietly become two corpora.
-3. **The frame corpus is frozen at 1.0.** `test_json_wire_is_frozen` hashes
-   `conformance/frames/*.json` against a committed digest, so changing the JSON wire after 1.0
-   requires deliberately editing that digest. Adding a triple changes the digest; that is the point.
+1. **A failing fixture indicates a defect in the implementation, not in the fixture.** The fix goes
+   into the implementation that violates the rule. A fixture is not edited to make an implementation
+   pass.
+2. **Both runners, one commit.** A new step kind, a new `call` or a new key requires changing this
+   document and both runners in the same commit.
+3. **The frame corpus is frozen.** `test_json_wire_is_frozen` hashes `conformance/frames/*.json`
+   against a committed digest, so any change to the JSON wire, including an added triple, requires an
+   explicit update of that digest.
 4. **Both runners pin the fixture count.** Adding a sequence fixture means raising
    `EXPECTED_SEQUENCE_FIXTURES` in `muxws/conformance_test.py` and in `ts/conformance.spec.ts`, and
-   the two numbers must agree - `test_both_runners_collect_the_same_number_of_fixtures` reads the
-   TypeScript declaration out of the file to prove they still do, because two independent constants
-   drift silently. A fixture that stopped being collected would otherwise be a suite that passes by
-   testing nothing. A **third** number lives outside both runners: the last argument of each
-   `corpus` call in `cross-language.yml`, which pins how many fixtures each live leg must exercise
+   the two numbers must agree; `test_both_runners_collect_the_same_number_of_fixtures` reads the
+   TypeScript declaration from the file and compares them. The pinned count detects a fixture that is
+   no longer collected. A **third** count is outside both runners: the last argument of each `corpus`
+   call in `.github/workflows/cross-language.yml`, which sets how many fixtures each live leg must run
    (one fewer under `json`, which cannot carry the bytes fixture). The cross-language conductor reads
-   `EXPECTED_SEQUENCE_FIXTURES` rather than restating it, so this is the only count a fixture author
-   has to remember separately - and it is deliberately outside the driver, because a driver that
-   counted its own fixtures could report three of them as thirteen.
+   `EXPECTED_SEQUENCE_FIXTURES` and does not restate it, so the workflow count is the only one that has
+   to be updated separately. It is kept outside the driver so that a driver cannot validate its own
+   fixture count.
 
-## Known divergences
+## Cross-process replay
 
-Recorded here so a runner author does not spend an afternoon on them. The divergences from the M6
-brief - the first and third below - are reported as gaps rather than resolved unilaterally; the
-second is a reading of this schema that two processes force.
+The cross-language half of WSM-CDC-007 is `interop/runner.py` and `interop/runner.ts`. They contain a
+corpus conductor (`corpus-accept` / `corpus-dial`) that replays the sequence fixtures with a Python peer
+at one end of a real socket and a TypeScript peer at the other, in both role assignments and with both
+codecs. One process conducts, because a sequence fixture is a single ordered script that drives both
+peers; the other process executes the steps it receives over a control channel separate from the
+WebSocket under test. Two step kinds are interpreted differently across two processes, as documented
+in the drivers:
 
-- **`expect_out` vs `expect_frame` in `invalid/`.** M6 §6 says each invalid case declares
-  `expect_frame`; the fixtures and both Python runners that read them spell it
-  `expect_out` and make it a **list**, so that a case may assert an ordered sequence of outgoing
-  frames or - crucially - that *nothing* went out. `expect_frame` in the singular cannot express the
-  empty case without a second convention. This document describes what the runners actually read.
-  Renaming is a coordinated change across the eight fixtures, `muxws/conformance_test.py` and
-  `muxws/conformance_schema_test.py`; until it happens, write `expect_out`.
-- **`inject` and `settle` read differently across two processes.** The cross-language half of
-  WSM-CDC-007 is `interop/runner.py` and `interop/runner.ts`, which carry a corpus conductor
-  (`corpus-accept` / `corpus-dial`) replaying these same files with a Python peer at one end of a real
-  socket and a TypeScript peer at the other, in both role assignments and both codecs. One process
-  conducts, because a sequence fixture is a single ordered script that drives *both* peers; the other
-  executes the steps it is sent over a control channel that is deliberately not the WebSocket under
-  test. Two readings of this schema differ there, and are documented in the drivers: `inject` names
-  the peer a message is delivered *to*, so across two processes its remote is what sends it, and
-  `settle` is read as cross-process quiescence rather than as turns of one event loop, which no second
-  process can observe.
-- **The WSM-TST-002 example uses raw stream ids.** The rule in the same paragraph says fixtures MUST
-  refer to streams by `stream_ref` and never by a raw id; the example immediately below it writes
-  `{"type": "open", "stream": 1, "end": true}` and `{"type": "open", "stream": 2}`, and omits the
-  `peer` key entirely. Those raw ids are correct only in one of the two role assignments, which is
-  the failure `stream_ref` exists to prevent. The rule wins over the illustration: write
-  `stream_ref`, and name the `peer`.
+- `inject` names the peer a message is delivered *to*, so across two processes the remote peer sends
+  it.
+- `settle` means cross-process quiescence rather than a number of turns of one event loop, because a
+  second process cannot observe the event-loop turns of the first.

@@ -1,8 +1,8 @@
 /**
  * The Node acceptor's socket adapter, over the `ws` package.
  *
- * Imported **only** by ts/node.ts. Nothing reachable from ts/index.ts may import it, or the browser
- * bundle pulls in `ws` (WSM-API-022) - a dependency a browser has no use for and cannot run.
+ * Imported only by ts/node.ts. No module reachable from ts/index.ts may import it, because the
+ * browser bundle must not contain `ws` (WSM-API-022), which does not run in a browser.
  */
 
 import type { WebSocket as NodeWebSocket } from 'ws';
@@ -73,7 +73,7 @@ export class WsSocket implements SocketAdapter {
   private die(closure: ConnectionClosed): void {
     if (this.closure !== null) return;
     this.closure = closure;
-    // Everyone still waiting learns at once; a receive that lands afterwards rejects from `closure`.
+    // Pending receives reject now; a later `receive()` rejects with `closure`.
     while (this.waiting.length > 0) {
       this.waiting.shift()?.reject(closure);
     }

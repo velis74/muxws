@@ -1,17 +1,16 @@
 /**
  * The socket adapter port.
  *
- * Mirrors `muxws/transports/__init__.py`. WSM-API-021: this is the **only** place transport-specific
- * code lives. Text and binary sends are separate methods, never one polymorphic `send` - the peer
- * picks between them from `codec.binary`, which is declared rather than sniffed (WSM-CDC-002).
+ * Mirrors `muxws/transports/__init__.py`. Transport-specific code lives only in implementations of
+ * this interface (WSM-API-021). Text and binary sends are separate methods; the peer chooses between
+ * them from the declared `codec.binary` (WSM-CDC-002).
  */
 
 /**
- * One WebSocket, seen the only way the peer is allowed to see it.
+ * The interface through which the peer uses one WebSocket.
  *
- * Every method may be synchronous: the memory pair has nothing to await, and a browser socket's
- * `send` returns immediately. The peer awaits them regardless, so an implementation is free to
- * return either.
+ * Every method except `receive` may return synchronously or return a promise; the peer awaits the
+ * result either way. The memory pair and a browser socket's `send` complete synchronously.
  */
 export interface SocketAdapter {
   sendText(text: string): Promise<void> | void;

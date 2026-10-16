@@ -32,7 +32,7 @@ async def _echo(payload: Any, stream: Stream) -> None:
 def _app(*, accept_first: bool = False, codec: Any = None) -> Starlette:
     async def endpoint(websocket: WebSocket) -> None:
         if accept_first:
-            # The mistake WSM-CDC-026 exists to catch: only accept() knows which subprotocol to pick.
+            # WSM-CDC-026: only muxws's accept() selects the subprotocol, so the endpoint must not accept.
             await websocket.accept()
         await muxws.serve(websocket, handler=_echo, codec=codec)
 

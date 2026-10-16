@@ -14,10 +14,9 @@ authors = [
 requires-python = ">=3.10"
 keywords = ["websocket", "multiplexing", "streams", "asyncio"]
 classifiers = [
-    # Two versions that move independently. The wire is at its first generation and frozen there:
-    # `muxws.v1.<codec>` is the subprotocol and `v1` stays until a breaking change earns a new one.
-    # The *package* is 0.1.0 and alpha, because nothing here has been through a real deployment yet;
-    # 1.0 is what the first confirmed production use earns, not what a complete test suite earns.
+    # The wire version and the package version are independent. The subprotocol is `muxws.v1.<codec>`;
+    # `v1` changes only with a breaking wire change. The package is 0.1.0 and alpha: it has no confirmed
+    # production deployment. 1.0 requires the first confirmed production use.
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -34,49 +33,43 @@ dependencies = []
 
 [project.optional-dependencies]
 starlette = ["starlette>=0.37"]
-# 14, not 12, and the two releases in between are not a rounding error. `muxws/api.py` dials with
-# `websockets.connect(..., additional_headers=...)`, and the top-level `connect` was an alias for
-# `websockets.legacy.client.connect` until 14.0 moved it to `websockets.asyncio.client`. The legacy
-# one spells that argument `extra_headers` and forwards anything it does not recognise straight to
-# the event loop, so under 12 or 13 the *first* dial dies with `TypeError:
-# BaseEventLoop.create_connection() got an unexpected keyword argument 'additional_headers'` - an
-# error that names neither muxws nor the release that is too old. The `ws+unix:` arm imports
-# `unix_connect` from `websockets.asyncio.client`, which needs 13, so the TCP path sets the floor.
+# Minimum 14. `muxws/api.py` dials with `websockets.connect(..., additional_headers=...)`. In websockets
+# 12 and 13 the top-level `connect` is `websockets.legacy.client.connect`, which names that argument
+# `extra_headers` and passes unknown arguments to the event loop, so the first dial raises `TypeError:
+# BaseEventLoop.create_connection() got an unexpected keyword argument 'additional_headers'`. From 14.0
+# `connect` is `websockets.asyncio.client.connect`. The `ws+unix:` path imports `unix_connect` from
+# `websockets.asyncio.client`, which requires 13; the TCP path sets the minimum.
 websockets = ["websockets>=14"]
 msgpack = ["msgpack>=1.0"]
-# The demo (`demo.py`, `demo/backend_python/`) is a consumer of the shipped package, not part of it: it is
-# excluded from both artefacts and nothing in the library imports it. These two are here so that
-# `pip install -e ".[demo,starlette]"` is the whole story for running `python demo.py --browser`, and
-# so that they stay out of `[project] dependencies`, which WSM-PKG-002 requires to be empty.
-# `websockets` is not optional here even though muxws itself does not import it: uvicorn ships no
-# WebSocket protocol implementation of its own, and without one it answers **404 to every upgrade**
-# while serving ordinary HTTP perfectly - so the demo loads in the browser and only the socket fails,
-# which reads as a muxws defect and is not one.
-# All three belong to the *Python* backend. `python demo.py --browser node` serves the same frontend
-# from `demo/backend_node/` under Node and imports none of them, which is why `missing_dependencies()`
-# in `demo.py` asks which backend before it asks what is missing. The other two demos are lighter
-# still: `--uds` needs `[websockets]` alone and `--bench` starts neither uvicorn nor a browser.
+# The demo (`demo.py`, `demo/backend_python/`) uses the package and is not part of it: it is excluded
+# from both artefacts and the library does not import it. `pip install -e ".[demo,starlette]"` installs
+# everything `python demo.py --browser` needs; WSM-PKG-002 requires `[project] dependencies` to be empty.
+# `websockets` is required although muxws does not import it here: uvicorn has no WebSocket protocol
+# implementation of its own, and without one it answers 404 to every upgrade request while serving
+# plain HTTP, so the page loads and the socket connection fails.
+# All three are used by the Python backend only. `python demo.py --browser node` serves the same
+# frontend from `demo/backend_node/` under Node and imports none of them; `missing_dependencies()` in
+# `demo.py` therefore checks the selected backend first. `--uds` needs only `[websockets]`; `--bench`
+# starts neither uvicorn nor a browser.
 demo = ["fastapi", "uvicorn", "websockets"]
 dev = [
     "coverage",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
-    # `muxws/packaging_test.py` builds a real wheel and reads its member list, because a test that
-    # checks the manifest cannot see what hatch actually put in the artefact. Without this the test
-    # skips, and a skip is indistinguishable from a pass.
+    # `muxws/packaging_test.py` builds a wheel and reads its member list; the manifest alone does not
+    # show what hatch puts in the artefact. Without `build` the test is skipped.
     "build",
     "starlette",
     "websockets",
     "msgpack",
-    # Starlette's TestClient is what `transports/starlette_test.py` drives a real ASGI app with, and
-    # it wants httpx2: with plain `httpx` it still works and warns, and the warning is emitted at
-    # *import* time, where a `pytest.mark.filterwarnings` inside the module cannot reach it. Filtering
-    # it would have been silencing a deprecation that can simply be resolved instead.
+    # `transports/starlette_test.py` drives an ASGI app with Starlette's TestClient, which requires
+    # httpx2. With plain `httpx` it works and emits a deprecation warning at import time, where a
+    # module-level `pytest.mark.filterwarnings` does not apply.
     "httpx2",
     # The quick start in `docs/guide/getting-started.md` is a FastAPI app served by uvicorn, and
-    # `docs/examples/run_examples_test.py` starts it for real. Without these two the three
-    # end-to-end example tests skip, which is indistinguishable from passing.
+    # `docs/examples/run_examples_test.py` starts it. Without these two the three end-to-end example
+    # tests are skipped.
     "fastapi",
     "uvicorn",
 ]
@@ -90,21 +83,18 @@ Documentation = "https://docs.velis.si/muxws/"
 [tool.hatch.version]
 path = "muxws/__init__.py"
 
-# The release tool stamps the two manifests by itself. `ts/version.ts` is the third place the version
-# is written down - the npm half exports it as a constant - and nothing about a Python manifest points
-# at it, so it is named here. Leaving it out is what makes WSM-PKG-001 fail *after* a release rather
-# than before one: the bump lands in `package.json`, the constant keeps the previous number, and the
-# test that exists to notice exactly that only runs once the version has already been tagged.
+# The release tool updates the Python and npm manifests without configuration. `ts/version.ts`
+# holds the version as an exported constant for the npm package and is listed here so the release tool
+# updates it too. Without it, `package.json` gets the new version, `ts/version.ts` keeps the old one,
+# and WSM-PKG-001 fails after the version is tagged.
 [tool.publish]
 additional_files = ["ts/version.ts"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["muxws"]
-# The wheel is the artefact a consumer actually installs, and it needs its own exclude list: the
-# sdist's list below governs the sdist only, and `python -m build` builds the wheel *from* the sdist,
-# so only installing the wheel and looking inside the package shows what it carries. Tests are not
-# part of the library: shipping them means a consumer downloads them, and a package-level
-# `conftest.py` is a file pytest can be made to notice.
+# The wheel needs its own exclude list: the sdist exclude list below applies to the sdist only, and
+# `python -m build` builds the wheel from the sdist. Tests and `conftest.py` are not part of the
+# library; a packaged `conftest.py` can be picked up by pytest in a consumer's environment.
 exclude = ["**/*_test.py", "**/conftest.py", "**/__pycache__"]
 
 [tool.hatch.build.targets.sdist]
@@ -119,29 +109,22 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-# `docs/examples` is here because leaving it out meant `run_examples_test.py` never ran: it holds the
-# end-to-end checks that the shipped examples still print what the guide says they print, and a test
-# nothing collects is weaker than a test that skips - a skip at least says so.
-#
-# `demo` for the same reason: `demo/entry_point_test.py` and `demo/backend_python/handlers_test.py`
-# sit under neither of the two entries above, and this list is the whole of what pytest collects.
-# They pass in about a second and load nothing the `dev` extra does not already provide. Coverage is
-# unaffected - `[tool.coverage.run]` omits `demo/*`
-# deliberately, since the demo is a consumer of the library and counting it would inflate the
-# library's own figure.
+# pytest collects only these paths. `docs/examples` contains `run_examples_test.py`, which checks that
+# the examples print what the guide says they print. `demo` contains `demo/entry_point_test.py` and
+# `demo/backend_python/handlers_test.py`; they need nothing beyond the `dev` extra. `[tool.coverage.run]`
+# omits `demo/*`, so demo code does not count towards library coverage.
 testpaths = ["muxws", "docs/examples", "demo"]
 python_files = ["*_test.py"]
 asyncio_mode = "auto"
 
 [tool.ruff]
-# `docs` is deliberately absent: `docs/examples/*.py` is shipped source that a reader copies, so it
-# is linted exactly like the library - which is what makes S101 (no bare `assert` outside a test)
-# apply to the examples.
+# `docs` is not excluded: `docs/examples/*.py` is source that readers copy, and it is linted like the
+# library, including S101 (no bare `assert` outside a test).
 #
-# `*.md` is excluded because this ruff formats fenced Python inside Markdown, and `docs/` is full of
-# it: the guide's illustrative fragments, and the design briefs and the specification under
-# `docs/design/`, which are a historical record and must not be rewritten by a formatter. The
-# Python that is *executed* lives in `docs/examples/*.py`, which this exclusion does not touch.
+# `*.md` is excluded because ruff formats fenced Python inside Markdown. `docs/` contains illustrative
+# fragments in the guide, and design briefs and the specification under `docs/design/`, which a
+# formatter must not rewrite. Executed Python lives in `docs/examples/*.py`, which this exclusion does
+# not affect.
 exclude = ['ts', '*.md', 'dist', 'build', 'node_modules', '.git', '.idea', '.vscode',
     '.pytest_cache', '.ruff_cache']
 line-length = 120
@@ -170,9 +153,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.per-file-ignores]
 "*_test.py" = ["S101"]
-# N818 wants every exception name to end in "Error". WSM-ERR-004 fixes these names exactly, in
-# both languages, so that cross-language tests can assert on error identity - the rule is simply
-# inapplicable to this module. See GAPS.md.
+# N818 requires exception names to end in "Error". WSM-ERR-004 fixes these names in both languages so
+# that cross-language tests can assert on error identity.
 "muxws/errors.py" = ["N818"]
 
 [tool.ruff.format]
@@ -188,7 +170,6 @@ combine-as-imports = true
 order-by-type = false
 
 [tool.coverage.run]
-# The documentation examples are executed by `docs/examples/run_examples_test.py`, but they are
-# teaching material rather than library code: counting them would inflate the library's coverage
-# with lines nobody ships.
+# `docs/examples/run_examples_test.py` executes the documentation examples. They are not library
+# code and are not shipped, so they are excluded from library coverage.
 omit = ["*_test.py", "demo/*", "demo.py", "docs/examples/*"]

@@ -7,13 +7,12 @@
  * the "before any socket" half of `test_unregistered_name_raises_before_socket`. The handshake half
  * of that file lives in `subprotocol.spec.ts`, the registry half in `codec.spec.ts`.
  *
- * Python's twin moves the environment with `monkeypatch.setenv`. There is no equivalent here: under
- * vitest every module is handed its **own** `import.meta.env`, built from the Vite config rather
- * than from `process.env`, so neither `vi.stubEnv` nor mutating this file's own `import.meta.env`
- * reaches the copy `ts/conf.ts` reads. The module is therefore compiled the way a bundler compiles
- * it and evaluated against an `import.meta` this file supplies - which is also the only way to reach
- * the case WSM-CDC-010 names explicitly and vitest itself cannot produce: no `import.meta.env` at
- * all.
+ * The Python tests set the environment with `monkeypatch.setenv`. Under vitest each module receives
+ * its own `import.meta.env`, built from the Vite config and not from `process.env`, so neither
+ * `vi.stubEnv` nor mutating this file's `import.meta.env` changes the copy `ts/conf.ts` reads. This
+ * file therefore compiles the module as a bundler does and evaluates it against an `import.meta` it
+ * supplies. This also covers the case WSM-CDC-010 names and vitest cannot produce: no
+ * `import.meta.env` at all.
  */
 
 import { readFileSync } from 'node:fs';
@@ -37,9 +36,8 @@ const META = 'muxwsImportMeta';
 /**
  * `ts/conf.ts`, compiled to CommonJS and evaluated with an `import.meta` of our choosing.
  *
- * `replaceImportMeta: false` leaves esbuild's own CommonJS substitution in place, which turns
- * `import.meta` into `{}` - exactly the environment WSM-CDC-010's guard exists for, and the one a
- * CommonJS consumer gets.
+ * `replaceImportMeta: false` keeps esbuild's CommonJS substitution, which turns `import.meta` into
+ * `{}`. That is the environment a CommonJS consumer gets and the one WSM-CDC-010's guard handles.
  */
 function loadConf(meta: unknown, replaceImportMeta = true): ConfModule {
   const source = readFileSync(join(process.cwd(), 'ts', 'conf.ts'), 'utf8');
@@ -74,7 +72,7 @@ class FakeWsConnection {
     this.closes.push([code, reason]);
   }
 
-  /** True while nothing has touched the socket - the TypeScript half of Python's dial recorder. */
+  /** True while no method of the socket has been called; the counterpart of Python's dial recorder. */
   get untouched(): boolean {
     return this.listeners.length === 0 && this.closes.length === 0 && this.binaryType === 'nodebuffer';
   }
@@ -86,8 +84,8 @@ function asSocket(fake: FakeWsConnection): Parameters<typeof accept>[0] {
 
 describe('Settings', () => {
   it('defaults to json, reads VITE_MUXWS_CODEC, and is writable at runtime - WSM-CDC-010/011', () => {
-    // The exact shape of Python's `test_env_default_and_runtime_override`, one mutable env object
-    // standing in for `monkeypatch.setenv`.
+    // Same structure as Python's `test_env_default_and_runtime_override`; one mutable env object
+    // replaces `monkeypatch.setenv`.
     const env: Record<string, unknown> = {};
     const conf = loadConf({ env });
     expect(new conf.Settings().codec).toBe('json');
@@ -99,39 +97,39 @@ describe('Settings', () => {
     fresh.codec = 'json';
     expect(fresh.codec).toBe('json');
     env.VITE_MUXWS_CODEC = 'other';
-    // Still the value the application set: the environment is read at construction and on `reload`,
-    // never behind the application's back.
+    // The value the application set is kept: the environment is read only at construction and on
+    // `reload`.
     expect(fresh.codec).toBe('json');
     fresh.reload();
     expect(fresh.codec).toBe('other');
   });
 
   it('reads VITE_MUXWS_CODEC and nothing else - WSM-CDC-010', () => {
-    // MUXWS_CODEC is the Python half's variable; a browser bundle never sees it, and reading it here
-    // would make the two halves disagree about which name configures which end.
+    // MUXWS_CODEC is the Python variable. A browser bundle does not receive it, and each port reads
+    // only its own variable.
     expect(loadConf({ env: { MUXWS_CODEC: 'msgpack' } }).settings.codec).toBe('json');
     expect(loadConf({ env: { VITE_MUXWS_CODEC: 'msgpack' } }).settings.codec).toBe('msgpack');
   });
 
   it('takes an empty value as configured rather than falling back to json - WSM-INV-015', () => {
-    // `os.environ.get` returns the empty string too, and a name that resolves to no codec must fail
-    // loudly at `getCodec` rather than quietly become JSON.
+    // `os.environ.get` also returns the empty string. A name that resolves to no codec must raise at
+    // `getCodec`; it does not fall back to JSON.
     expect(loadConf({ env: { VITE_MUXWS_CODEC: '' } }).settings.codec).toBe('');
-    // A non-string is not a configured name; a bundler that injected one has said nothing.
+    // A non-string value is treated as not configured.
     expect(loadConf({ env: { VITE_MUXWS_CODEC: 7 } }).settings.codec).toBe('json');
   });
 
   it('degrades to json where import.meta.env does not exist - the Node and vitest case', () => {
-    // Three shapes of "no environment": an import.meta without an env, an env-less object, and no
-    // import.meta at all, which is what a CommonJS consumer evaluates. None of them may throw during
-    // module load - the singleton is constructed at import time, so a throw here is unrecoverable.
+    // Three cases without an environment: an import.meta without an env, an env-less object, and no
+    // import.meta at all (the CommonJS case). None of them may throw during module load: the
+    // singleton is constructed at import time, so a throw would make the module unloadable.
     expect(loadConf({}).settings.codec).toBe('json');
     expect(loadConf({ env: undefined }).settings.codec).toBe('json');
     expect(loadConf(undefined, false).settings.codec).toBe('json');
   });
 
   it('is the one singleton, constructed at import time and readable ever after', () => {
-    // vitest is itself the environment above: its `import.meta.env` names no codec.
+    // Under vitest, `import.meta.env` names no codec.
     expect(settings).toBeInstanceOf(Settings);
     expect(settings.codec).toBe('json');
     expect(String(settings)).toBe("Settings(codec='json')");
@@ -142,8 +140,8 @@ describe('the acceptor', () => {
   const json = new JsonCodec();
 
   /**
-   * A codec carrying a name of its own, so the subprotocol the acceptor asserts on says *which*
-   * name it read. A `JsonCodec` registered under another key would still put 'json' on the wire.
+   * A codec with its own name, so the subprotocol the acceptor selects shows which name it read. A
+   * `JsonCodec` registered under another key would still send 'json' on the wire.
    */
   const marker: Codec = {
     name: 'bootstrap-set',
@@ -166,8 +164,8 @@ describe('the acceptor', () => {
   });
 
   it('reads settings.codec at connection time, not at import time - WSM-CDC-011', async () => {
-    // `./node` was imported before this line ran, so a value read at import time is 'json' and an
-    // acceptor holding one would refuse the socket below.
+    // `./node` is imported before this line runs, so a value read at import time is 'json', and an
+    // acceptor using it would refuse the socket below.
     registerCodec('bootstrap-set', marker);
     settings.codec = 'bootstrap-set';
 
@@ -180,9 +178,9 @@ describe('the acceptor', () => {
     expect(socket.closes).toEqual([]);
   });
 
-  it('refuses the codec it was configured with at import time, once that is no longer the one', async () => {
-    // The converse of the test above, and the reason it proves anything: 'muxws.v1.json' is now the
-    // wrong answer, so a captured value would have been visible as a *pass*.
+  it('refuses the import-time codec after settings.codec has changed', async () => {
+    // Converse of the test above: 'muxws.v1.json' no longer matches settings.codec, so an acceptor
+    // that captured the value at import time would accept it and this test would fail.
     registerCodec('bootstrap-set', marker);
     settings.codec = 'bootstrap-set';
 
@@ -201,8 +199,8 @@ describe('the acceptor', () => {
     expect((error as CodecNotRegistered).message).toContain('VITE_MUXWS_CODEC');
     expect((error as CodecNotRegistered).message).toContain('msgpack');
     expect((error as CodecNotRegistered).message).toContain('json');
-    // Python asserts a dial double recorded zero calls; the acceptor's equivalent is a socket that
-    // was never listened to, never reconfigured and never closed.
+    // Python asserts that a dial double recorded zero calls. Here the socket has no listeners, was
+    // not reconfigured and was not closed.
     expect(socket.untouched).toBe(true);
   });
 

@@ -4,9 +4,9 @@ outline: deep
 
 # Errors
 
-Every failure muxws reports is an instance of one class hierarchy per language, and the shared part
-of the two hierarchies is the same shape class for class. What a caller catches tells it what
-happened without inspecting a message.
+Every error muxws raises is an instance of one class hierarchy per language. The shared classes have
+the same names and the same inheritance in Python and TypeScript. The class of an exception
+identifies the failure; a caller does not need to inspect the message.
 
 The **shared** classes — everything down to and including the two `Transport…` bases — are importable
 from the package root in both languages. The classes indented under those bases are **transport
@@ -38,53 +38,48 @@ MuxwsError                          from muxws / 'muxws' — the whole tree is c
     └── ConnectionLost
 ```
 
-**Why a transport error is not importable from `muxws`.** The rule follows from the adapter seam.
-`SocketAdapter` is public and third parties are expected to write adapters for transports this
-repository does not ship — and a third party cannot add a class to `muxws/errors.py` or to
-`ts/errors.ts`. A convention that required a root export would be one only this repository could
-follow, so the convention is the other one: subclass a shared base, keep the class beside the code
-that raises it, and let `except TransportUrlError` be what an application writes when it does not know
-or care which transport was asked for the address. Both bases are plain classes with no dependency of
-their own, which is what makes that `except` writable in a process that cannot even import the
-transport that raised.
+**Why transport errors are not exported from `muxws`.** `SocketAdapter` is public, and third-party
+adapters can implement transports this repository does not ship. A third-party adapter cannot add a
+class to `muxws/errors.py` or `ts/errors.ts`. A transport error therefore subclasses one of the
+shared bases and is defined in the module of the transport that raises it. An application that does
+not know which transport handles an address catches `TransportUrlError`. Both bases have no
+dependencies, so `except TransportUrlError` works in a process that cannot import the transport that
+raised the error.
 
-TypeScript has no module path below its entry points — `package.json` publishes `muxws`, `muxws/node`
-and `muxws/msgpack`, and nothing finer — so the same rule reads there as "exported from the entry
-point that ships that transport, and from no other". That is why `UnixSocketsUnsupportedError` comes
-from `muxws` — the entry point that refuses the scheme is the one dialling with the platform
-`WebSocket` — while `WsUrlError` and `WsNotInstalledError` come from `muxws/node`, and why the browser
-bundle contains neither of the `ws`-flavoured names.
+TypeScript has no module paths below its entry points: `package.json` publishes `muxws`, `muxws/node`
+and `muxws/msgpack`. A TypeScript transport error is exported from the entry point that ships its
+transport and from no other. `UnixSocketsUnsupportedError` is exported from `muxws`, because that
+entry point dials with the platform `WebSocket` and refuses the `ws+unix:` scheme. `WsUrlError` and
+`WsNotInstalledError` are exported from `muxws/node`. The browser bundle contains neither.
 
-One asymmetry is worth knowing before you write the handler: the `connect()` exported from `muxws`
-does not frame a URL the platform's own `WebSocket` constructor rejects. A malformed URL arrives from
-that entry point as the runtime's `DOMException` — jsdom says `The URL 'nonsense' is invalid.`, undici
-says `TypeError: Invalid URL` — and neither is a `MuxwsError`. `muxws/node` answers a
-`TransportUrlError` for every one of those, and Python for every one its parsers reach: the exception
-is an authority with an unbalanced `[` (`ws://[::1`), which `urllib.parse.urlsplit` refuses before
-either check and which therefore leaves `connect()` as a bare `ValueError`.
+The `connect()` exported from `muxws` does not wrap a URL that the platform `WebSocket` constructor
+rejects. From that entry point a malformed URL raises the runtime's `DOMException` (jsdom:
+`The URL 'nonsense' is invalid.`; undici: `TypeError: Invalid URL`), which is not a `MuxwsError`.
+`muxws/node` raises a `TransportUrlError` for each of these URLs. Python raises a `TransportUrlError`
+for every URL its parsers reach. The exception is an authority with an unbalanced `[` (`ws://[::1`):
+`urllib.parse.urlsplit` rejects it before either check, so `connect()` raises a bare `ValueError`.
 
-`except MuxwsError` still catches every one of them without importing anything, and so does
-`except TransportUrlError` / `except TransportUnsupportedError` for the half a caller usually wants.
+`except MuxwsError` catches every transport error without importing a transport module.
+`except TransportUrlError` and `except TransportUnsupportedError` each catch one of the two groups.
 
-`StreamClosed` sits outside `StreamReset` on purpose: a stream that ended normally while a last
-`send()` was in flight is an expected race, not a failure. `ConnectionLost` sits *inside*
-`StreamReset` for the mirror reason: from a stream's point of view the socket dying is just another
-way the stream ended early, so one `except StreamReset` covers every early end.
+`StreamClosed` is not a `StreamReset`: a stream that ended normally while a last `send()` was in
+flight is an expected race, not a failure. `ConnectionLost` is a `StreamReset`: for a stream, socket
+loss is one more way of ending early, so one `except StreamReset` covers every early end.
 
-Two facts about reset codes that the numbers alone will not tell you:
+Reset codes 5 and 9:
 
-- **Reset code 5 is retired.** It was `STREAM_LIMIT`. No name maps to it, it is never sent, and a
-  peer that receives it treats it as any other unknown code: reset that one stream, keep the
-  connection. If you are reaching for a "too many streams" code, the one you want is `REFUSED` (4).
-- **Reset code 9, `CONNECTION_CLOSED`, must never appear on the wire.** It is synthesised locally, on
-  every stream that was live at the instant the socket died. Sending it would tell a remote that
-  *its* connection had died, which is both false and unfalsifiable — so `stream.reset()` refuses it
-  with a `ProtocolError` rather than putting it on the socket.
+- **Reset code 5 (`STREAM_LIMIT`) is retired.** No name maps to it and it is never sent. A peer that
+  receives it treats it as any other unknown code: it resets that one stream and keeps the
+  connection. The code for refusing a stream over a concurrency limit is `REFUSED` (4).
+- **Reset code 9, `CONNECTION_CLOSED`, must never appear on the wire.** It is synthesised locally on
+  every stream that is live when the socket dies. On the wire it would tell the remote that the
+  remote's own connection had died, which is false. `stream.reset()` refuses it with a
+  `ProtocolError` and does not send it.
 
 ## `MuxwsError`
 
-The root. `except MuxwsError` catches everything this library raises and nothing it does not, which
-is what an application's top-level handler wants.
+The root class. `except MuxwsError` catches every error class this library defines and no other
+exception.
 
 ### Signature
 
@@ -106,9 +101,9 @@ export class MuxwsError extends Error {
 | `message` (TypeScript) | `string \| undefined` | `undefined` | The human-readable text, stored on `Error.message`. |
 | `*args` (Python) | `object` | none | Inherited from `Exception` unchanged; the first argument becomes `str(exc)`. |
 
-`MuxwsError` defines no `__init__` of its own in Python, so it takes exactly what `Exception` takes.
-In TypeScript it sets `name` to `'MuxwsError'`, which is what makes the class identifiable after a
-structured clone or across a bundle boundary.
+`MuxwsError` defines no `__init__` in Python and takes the arguments of `Exception`. In TypeScript
+it sets `name` to `'MuxwsError'`, so the class can be identified by name after a structured clone or
+across a bundle boundary.
 
 ### Return
 
@@ -143,7 +138,7 @@ try {
 
 This peer or the remote broke the protocol: a frame with no `type`, a frame carrying both `payload`
 and `fragment`, a codec handed a message it cannot represent, or a local call that would put an
-illegal value on the wire. It is a bug report, not a retryable condition.
+illegal value on the wire. It indicates a bug and is not retryable.
 
 ### Signature
 
@@ -196,11 +191,11 @@ try {
 
 ## `ConnectionClosed`
 
-The socket died. Raised by `peer.ping()` when the pong deadline expires, and by a socket adapter's
-`receive` / `send_text` / `send_bytes` when it is asked to work a socket that is gone. `peer.serve()`
-catches it, kills the peer and **returns**, so a read loop that ends does not raise into whatever
-awaited it. It is **never** raised by a stream — a stream sees `ConnectionLost` instead, so a
-per-stream `except StreamReset` keeps working and a connection-level handler stays connection-level.
+The socket closed. Raised by `peer.ping()` when the pong deadline expires, and by a socket adapter's
+`receive` / `send_text` / `send_bytes` when the socket is already closed. `peer.serve()` catches it,
+kills the peer and **returns** without raising. A stream **never** raises it; a stream raises
+`ConnectionLost` instead, so a per-stream `except StreamReset` covers socket loss and a handler for
+`ConnectionClosed` deals only with the connection.
 
 ### Signature
 
@@ -226,7 +221,7 @@ export class ConnectionClosed extends MuxwsError {
 | `message` | `str` / `string \| undefined` | `""` / `undefined` | The exception text. Python falls back to `reason`, then to `"connection closed"`, when it is empty. TypeScript's fallback chain is `message ?? reason ?? 'connection closed'` and `reason` already defaults to `''`, so an omitted message yields an **empty** `error.message` there — pass the text you want. |
 | `code` | `int` / `number` | `1006` | The WebSocket close code. `1006` is "abnormal closure", the code the platform reports when no close frame was exchanged. Keyword-only in Python; a field of the options object in TypeScript. |
 | `reason` | `str` / `string` | `""` | The close frame's reason text, verbatim. |
-| `was_clean` / `wasClean` | `bool` / `boolean` | `False` / `false` | Whether a close handshake actually completed. |
+| `was_clean` / `wasClean` | `bool` / `boolean` | `False` / `false` | Whether a close handshake completed. |
 
 ### Return
 
@@ -258,8 +253,8 @@ console.log(new ConnectionClosed().code, '|', JSON.stringify(new ConnectionClose
 ## `ConnectionGoingAway`
 
 `peer.open()` was called after a `goaway` arrived from the remote, or after this peer sent one. It is
-raised **synchronously at the call site**, because `open()` is synchronous — there is no future to
-attach the failure to.
+raised **synchronously at the call site**, because `open()` is synchronous and returns no future that
+could carry the failure.
 
 ### Signature
 
@@ -312,7 +307,7 @@ async def main() -> None:
 
     dialer.open({"in": "flight"})
     await asyncio.sleep(0.05)
-    # `close()` sends goaway first and only then drains, so the socket is still up here.
+    # `close()` sends goaway before it drains, so the socket is still open here.
     # `drain=` is a number of seconds, as a float.
     closing = asyncio.create_task(acceptor.close(ResetCode.NO_ERROR, "shutting down", drain=1.0))
     await asyncio.sleep(0.05)
@@ -347,7 +342,7 @@ async function main(): Promise<void> {
 
   dialer.open({ in: 'flight' });
   await new Promise((resolve) => setTimeout(resolve, 50));
-  // `close()` sends goaway first and only then drains, so the socket is still up here.
+  // `close()` sends goaway before it drains, so the socket is still open here.
   // `drainMs` is a number of milliseconds, as an integer.
   void acceptor.close({ code: ResetCode.NO_ERROR, reason: 'shutting down', drainMs: 200 });
   await new Promise((resolve) => setTimeout(resolve, 50));
@@ -364,9 +359,9 @@ void main();
 
 ## `StreamAlreadyConsumed`
 
-A `Stream` is both awaitable and async-iterable, and the first use claims it. Awaiting a stream you
-have already iterated — or iterating one twice — raises this. It is a caller bug, always: the two
-shapes cannot both consume the same payload sequence.
+A `Stream` is both awaitable and async-iterable, and the first use claims it. Awaiting and iterating
+the same stream, in either order, or iterating it twice raises this. It always indicates a caller
+bug: one payload sequence cannot be consumed twice.
 
 ### Signature
 
@@ -463,9 +458,9 @@ void main();
 
 ## `StreamClosed`
 
-`send()`, `end()` or `reply()` on a stream that closed **normally**. Deliberately neither a
-`StreamReset` nor a `ProtocolError`: a normal close racing a last `send()` is an expected outcome,
-not a failure and not a caller bug. Catch it and move on.
+`send()`, `end()` or `reply()` on a stream that closed **normally**. It is neither a `StreamReset`
+nor a `ProtocolError`: a normal close that races a last `send()` is an expected outcome, not a
+failure and not a caller bug. A caller can catch it and continue.
 
 ### Signature
 
@@ -554,8 +549,8 @@ void main();
 
 ## `CodecError`
 
-A configuration failure, not a stream failure and not retryable. It lives outside `StreamReset`
-because retrying a misconfigured codec produces the same result forever.
+A configuration failure. It is not a `StreamReset` and is not retryable: a retry with the same
+codec configuration fails the same way.
 
 ### Signature
 
@@ -612,9 +607,8 @@ console.log(new CodecError('bare').configured, new CodecError('bare').available)
 
 ## `CodecNotRegistered`
 
-The configured codec name was never registered. Raised **before any socket is opened**, by
-`get_codec()` / `getCodec()`, which is the whole point: a deployment that believes it is running
-msgpack and silently is not would otherwise never find out. There is no fallback to JSON, ever.
+The configured codec name is not registered. `get_codec()` / `getCodec()` raises it **before any
+socket is opened**, so a misconfigured codec fails at startup. muxws never falls back to JSON.
 
 ### Signature
 
@@ -670,9 +664,9 @@ try {
 
 ## `CodecMismatch`
 
-The two ends do not speak the same codec, so the WebSocket handshake was rejected. The acceptor
-raises it after answering the upgrade with HTTP 400; a dialer composes it from the codec name it
-offered, because a refused handshake reaches a browser as a generic error with no body.
+The two ends are configured with different codecs, and the WebSocket handshake was rejected. The
+acceptor raises it after answering the upgrade with HTTP 400. The dialer composes it from the codec
+name it offered, because a browser receives a refused handshake as a generic error with no body.
 
 ### Signature
 
@@ -715,8 +709,8 @@ print(type(failure).__name__, "|", failure.configured)
 ```
 
 ```ts
-// `mismatchError` is the library's own factory and is not exported from the package root - the
-// dialer composes this failure for you (WSM-CDC-024). Construct one directly to see its shape.
+// `mismatchError` is internal and not exported from the package root; the dialer composes this
+// error itself (WSM-CDC-024). The example constructs one directly.
 import { CodecMismatch } from 'muxws';
 
 const failure = new CodecMismatch('the acceptor refused the muxws handshake for codec msgpack', {
@@ -727,15 +721,13 @@ console.log(failure instanceof CodecMismatch, '|', failure.configured);
 
 ## `StreamReset`
 
-A stream ended early. The base class of every early end, carrying the reset code, its reason and the
-stream id. `except StreamReset` is the one clause that covers "this stream did not finish", however
-it failed.
+A stream ended early. The base class of every early end; it carries the reset code, the reason and
+the stream id. `except StreamReset` covers every way a stream can fail to finish.
 
-Python's `code` attribute is typed `ResetCode | int`: a code this generation defines arrives as the
-enum member, and one it does not — a future generation's, or the retired 5 — arrives as a bare
-integer. Refusing to represent an unknown code would be refusing to hear a reset that really
-happened. TypeScript types it `ResetCode`, which is a numeric enum and therefore holds an unknown
-number just as happily.
+Python types the `code` attribute `ResetCode | int`: a code this generation defines is the enum
+member, and an undefined code (a later generation's, or the retired 5) is a bare `int`. A reset with
+an unknown code still ended the stream, so it is represented rather than rejected. TypeScript types
+it `ResetCode`, a numeric enum, which can hold any number.
 
 ### Signature
 
@@ -767,7 +759,7 @@ export class StreamReset extends MuxwsError {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `reason` | `str \| None` / `string \| null \| undefined` | `None` / `undefined` | The reason text from the `reset` frame. When absent, the exception's message becomes the code's name — Python spells an undefined code as `"reset code 42"`, while TypeScript's `ResetCode[code]` is `undefined` for such a number and the message ends up empty. |
-| `code` | `ResetCode \| int \| None` / `ResetCode \| undefined` | `None` / `ResetCode.NO_ERROR` | The reset code. In Python, `None` leaves the class attribute in place — which is how the subclasses pin their own code. Keyword-only in Python. |
+| `code` | `ResetCode \| int \| None` / `ResetCode \| undefined` | `None` / `ResetCode.NO_ERROR` | The reset code. In Python, `None` leaves the class attribute in place; the subclasses set their code through that class attribute. Keyword-only in Python. |
 | `stream_id` / `streamId` | `int \| None` / `number \| null \| undefined` | `None` / `undefined` | Which stream this ended. Keyword-only in Python; stored as `null` in TypeScript when omitted. |
 
 ### Return
@@ -802,13 +794,13 @@ console.log(unknown.code, '|', unknown.message);
 
 ## `StreamReset.clone()`
 
-A Python-only method. `send()` on a reset stream raises the stream's *stored* failure; raising the
-same instance repeatedly appends a traceback frame every time, so a caller that keeps retrying grows
-an object nothing ever releases. `clone()` hands back a fresh instance of the same failure with no
-traceback of its own.
+Python only. `send()` on a reset stream raises the stream's *stored* failure. Raising the same
+instance repeatedly appends a traceback frame each time, so a caller that retries in a loop grows an
+object that is never released. `clone()` returns a fresh instance of the same failure with no
+traceback.
 
-TypeScript has no equivalent because a JavaScript `Error` captures its stack once, at construction,
-and rethrowing it does not extend anything.
+TypeScript has no equivalent: a JavaScript `Error` captures its stack once, at construction, and
+rethrowing it does not extend the stack.
 
 ### Signature
 
@@ -844,8 +836,8 @@ print(type(copy).__name__, copy.code is ResetCode.TIMEOUT, copy.stream_id, copy 
 ## `RemoteError`
 
 The remote handler raised. Its code is always `APPLICATION_ERROR` (2). `reason` carries the message
-and `payload` carries the structured error object the remote's `error_serializer` produced — if it
-sent one.
+and `payload` carries the structured error object the remote's `error_serializer` produced, if the
+remote sent one.
 
 ### Signature
 
@@ -864,8 +856,7 @@ export class RemoteError extends StreamReset {
 }
 ```
 
-Note that `RemoteError` **overrides** the constructor rather than inheriting it: there is no `code`
-parameter, because the code is fixed.
+`RemoteError` **overrides** the constructor: it has no `code` parameter, because the code is fixed.
 
 ### Parameters
 
@@ -948,7 +939,7 @@ void main();
 ## `StreamTimeout`
 
 A local deadline expired and the remote was told to stop working. Its code is always `TIMEOUT` (6).
-Raised by the calls that wait — `stream.result(timeout=)` in seconds as a float,
+Raised by the calls that wait: `stream.result(timeout=)` in seconds as a float,
 `stream.result({ timeoutMs })` in milliseconds as an integer, and the same on `peer.request`.
 `peer.open()` has no deadline of its own; it does not wait for anything.
 
@@ -967,14 +958,15 @@ export class StreamTimeout extends StreamReset {
 
 Python defines no `__init__` here: the constructor is `StreamReset`'s, so it also accepts a
 keyword-only `code=`. Passing one overrides the class attribute and produces a `StreamTimeout` whose
-code is not `TIMEOUT` — do not. TypeScript's constructor pins the code and offers no way to set it.
+code is not `TIMEOUT`; callers should not pass it. TypeScript's constructor fixes the code and has no
+parameter for it.
 
 ### Parameters
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `reason` | `str \| None` / `string \| null \| undefined` | `None` / `undefined` | The reason text. When absent, the message becomes `"TIMEOUT"`. |
-| `code` (Python only) | `ResetCode \| int \| None` | `None` | Inherited from `StreamReset`; leave it alone. `None` keeps `ResetCode.TIMEOUT`. |
+| `code` (Python only) | `ResetCode \| int \| None` | `None` | Inherited from `StreamReset`; not to be passed. `None` keeps `ResetCode.TIMEOUT`. |
 | `stream_id` / `streamId` | `int \| None` / `number \| null \| undefined` | `None` / `undefined` | Which stream timed out. Keyword-only in Python. |
 
 ### Return
@@ -1002,9 +994,8 @@ async def main() -> None:
 
     @acceptor.on_stream
     async def handle(payload, stream):
-        # Never answers, and waits on the stream rather than on a clock: `closed` is set the moment
-        # the caller's deadline resets this stream (WSM-API-023), which is what a handler should
-        # cooperate with rather than sleep through.
+        # Never answers. `closed` is set when this stream ends (WSM-API-023), so the handler returns
+        # then instead of running on.
         await stream.closed.wait()
 
     tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
@@ -1032,10 +1023,8 @@ async function main(): Promise<void> {
   const dialer = new Peer(left, { codec, isDialer: true });
   const acceptor = new Peer(right, { codec, isDialer: false });
   acceptor.onStream(async (_payload: unknown, stream: Stream) => {
-    // A handler that never answers, spelled as a wait on the stream rather than on a clock. `closed`
-    // resolves the moment the caller's deadline resets this stream (WSM-API-023), so the example
-    // ends when the exchange does - a timer would hold the process open long after the last line was
-    // printed, and would also model a handler that ignores the cancellation it is being sent.
+    // Never answers. `closed` resolves when this stream ends (WSM-API-023), so the handler returns
+    // then. A timer would keep the process running after the example finishes.
     await stream.closed;
   });
   void dialer.serve();
@@ -1056,10 +1045,11 @@ void main();
 
 ## `StreamRefused`
 
-Not accepted and **definitively not processed**. Its code is always `REFUSED` (4). That guarantee is
-what makes it the one reset a caller may retry blindly: no handler was registered, the connection was
-already going away, or the open was beyond the receiver's own concurrency limit. Retry elsewhere if
-another connection is available, otherwise after a delay.
+Not accepted and **definitively not processed**. Its code is always `REFUSED` (4). It is the only
+reset after which a retry is safe without knowing whether the operation is idempotent. It is sent when
+no handler is registered, when the connection is already going away, or when the open exceeds the
+receiver's concurrency limit. Retry on another connection if one is available, otherwise after a
+delay.
 
 ### Signature
 
@@ -1075,14 +1065,14 @@ export class StreamRefused extends StreamReset {
 ```
 
 Python defines no `__init__` here; the constructor is `StreamReset`'s and the note under
-`StreamTimeout` applies unchanged.
+`StreamTimeout` applies.
 
 ### Parameters
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `reason` | `str \| None` / `string \| null \| undefined` | `None` / `undefined` | Why it was refused. When absent, the message becomes `"REFUSED"`. |
-| `code` (Python only) | `ResetCode \| int \| None` | `None` | Inherited from `StreamReset`; leave it alone. `None` keeps `ResetCode.REFUSED`. |
+| `code` (Python only) | `ResetCode \| int \| None` | `None` | Inherited from `StreamReset`; not to be passed. `None` keeps `ResetCode.REFUSED`. |
 | `stream_id` / `streamId` | `int \| None` / `number \| null \| undefined` | `None` / `undefined` | Which stream was refused. Keyword-only in Python. |
 
 ### Return
@@ -1149,16 +1139,16 @@ void main();
 
 ## `ConnectionLost`
 
-Synthesised locally when the socket dies, on every stream that was live at that instant. Its code is
-`CONNECTION_CLOSED` (9), and that code **must never appear on the wire** — nothing sends it, and
-`stream.reset(ResetCode.CONNECTION_CLOSED)` raises `ProtocolError` rather than emitting it.
+Synthesised locally on every stream that is live when the socket dies. Its code is
+`CONNECTION_CLOSED` (9), which **must never appear on the wire**: nothing sends it, and
+`stream.reset(ResetCode.CONNECTION_CLOSED)` raises `ProtocolError` instead of sending it.
 
-It is a `StreamReset` so that one `except StreamReset` around a stream covers socket death too.
-`ConnectionClosed`, which the *connection* raises, is not a `StreamReset` for the same reason
-inverted: it is not about any one stream.
+It is a `StreamReset`, so one `except StreamReset` around a stream also covers socket loss.
+`ConnectionClosed`, which the *connection* raises, is not a `StreamReset`, because it does not
+concern a single stream.
 
-Nothing is buffered while a peer is between sockets. A reconnect gives you a live socket and an
-accepted identity, and no stream survives it.
+Nothing is buffered while a peer is between sockets. A reconnect yields a new socket and an accepted
+identity; no stream survives it.
 
 ### Signature
 
@@ -1174,14 +1164,14 @@ export class ConnectionLost extends StreamReset {
 ```
 
 Python defines no `__init__` here; the constructor is `StreamReset`'s and the note under
-`StreamTimeout` applies unchanged.
+`StreamTimeout` applies.
 
 ### Parameters
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `reason` | `str \| None` / `string \| null \| undefined` | `None` / `undefined` | Why the socket died. When absent, the message becomes `"CONNECTION_CLOSED"`. |
-| `code` (Python only) | `ResetCode \| int \| None` | `None` | Inherited from `StreamReset`; leave it alone. `None` keeps `ResetCode.CONNECTION_CLOSED`. |
+| `code` (Python only) | `ResetCode \| int \| None` | `None` | Inherited from `StreamReset`; not to be passed. `None` keeps `ResetCode.CONNECTION_CLOSED`. |
 | `stream_id` / `streamId` | `int \| None` / `number \| null \| undefined` | `None` / `undefined` | Which stream was lost. Keyword-only in Python. |
 
 ### Return
@@ -1209,9 +1199,8 @@ async def main() -> None:
 
     @acceptor.on_stream
     async def handle(payload, stream):
-        # Never answers, and waits on the stream rather than on a clock: `closed` is set the moment
-        # the caller's deadline resets this stream (WSM-API-023), which is what a handler should
-        # cooperate with rather than sleep through.
+        # Never answers. `closed` is set when this stream ends (WSM-API-023), so the handler returns
+        # then instead of running on.
         await stream.closed.wait()
 
     tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
@@ -1245,10 +1234,8 @@ async function main(): Promise<void> {
   const dialer = new Peer(left, { codec, isDialer: true });
   const acceptor = new Peer(right, { codec, isDialer: false });
   acceptor.onStream(async (_payload: unknown, stream: Stream) => {
-    // A handler that never answers, spelled as a wait on the stream rather than on a clock. `closed`
-    // resolves the moment the caller's deadline resets this stream (WSM-API-023), so the example
-    // ends when the exchange does - a timer would hold the process open long after the last line was
-    // printed, and would also model a handler that ignores the cancellation it is being sent.
+    // Never answers. `closed` resolves when this stream ends (WSM-API-023), so the handler returns
+    // then. A timer would keep the process running after the example finishes.
     await stream.closed;
   });
   void dialer.serve();
@@ -1285,15 +1272,15 @@ Numeric on the wire, named in both APIs. The same enumeration serves `reset` and
 | 2 | `APPLICATION_ERROR` | The remote handler raised. Surfaces locally as `RemoteError`. |
 | 3 | `PROTOCOL_ERROR` | The peer violated the protocol. |
 | 4 | `REFUSED` | Not accepted and definitively not processed. Surfaces locally as `StreamRefused`. |
-| — | *(5 is retired)* | Was `STREAM_LIMIT`. The number is never reused and never sent; a peer receiving it treats it as any unknown code. |
+| — | *(5 is retired)* | Retired code `STREAM_LIMIT`. The number is never reused and never sent; a peer receiving it treats it as any unknown code. |
 | 6 | `TIMEOUT` | A local deadline expired. Surfaces locally as `StreamTimeout`. |
 | 7 | `PAYLOAD_TOO_LARGE` | An encoded message or a reassembled payload exceeded what the receiver accepts. |
 | 8 | `INTERNAL_ERROR` | A bug in the peer implementation itself, not in the application handler. |
 | 9 | `CONNECTION_CLOSED` | Synthesised locally when the socket dies. **Never appears on the wire.** Surfaces locally as `ConnectionLost`. |
 
-An unrecognised code — a future generation's, or the retired 5 — resets the named stream and leaves
-the connection alive. Turning the wire value straight into a closed enumeration would raise out of
-the read loop and leave the peer looking open with every await hanging.
+An unrecognised code (a later generation's, or the retired 5) resets the named stream and leaves the
+connection open. Converting the wire value directly into a closed enumeration would raise inside the
+read loop and leave the peer apparently open, with every pending await hanging.
 
 ### Signature
 
@@ -1433,14 +1420,14 @@ import { ResetCode, exceptionForReset } from 'muxws';
 ## `default_error_serializer` / `defaultErrorSerializer`
 
 Turns a handler's exception into the `payload` of the `reset(APPLICATION_ERROR)` frame that reports
-it. This is the default; every peer may be given its own with `error_serializer=` /
-`errorSerializer:` on `connect()` and `accept()`, which is per peer — so one process can redact on
-its browser-facing connection and not on its internal one.
+it. This is the default. Each peer can be given its own serializer with `error_serializer=` /
+`errorSerializer:` on `connect()` and `accept()`, so one process can redact on a browser-facing
+connection and not on an internal one.
 
 ::: warning
 The default puts the exception's class name **and its message text** on the wire. A public-facing
-deployment should replace it with one that redacts: exception messages routinely contain file paths,
-SQL, and identifiers the remote has no business seeing.
+deployment should replace it with one that redacts: exception messages often contain file paths, SQL
+and identifiers that must not reach the remote.
 :::
 
 ### Signature
@@ -1502,27 +1489,26 @@ console.log(redactingErrorSerializer(new Error('SELECT * FROM accounts WHERE id 
 
 ## `TransportUrlError`
 
-The base for *this transport cannot open the address it was given*. Never raised directly: what
-reaches a caller is always one of the concrete classes below it, named after the transport whose
-grammar the address broke. Catch this one when you do not know, or do not care, which transport a
-configured URL names.
+The base class for *this transport cannot open the address it was given*. It is never raised
+directly: a caller receives one of its concrete subclasses, named after the transport whose URL
+grammar the address violates. Catch the base when the transport a configured URL names is unknown or
+irrelevant.
 
-It is not, on its own, enough for every entry point. A bad `ws+unix://` URL is a `UnixUrlError` — a
-`TransportUrlError` — in Python and behind `muxws/node`, but the `muxws` entry point refuses the
-scheme before it parses the grammar and answers `UnixSocketsUnsupportedError`, because that build
-ships no transport that could open a socket file however the URL is spelled. The handler that covers
-every port is `except (TransportUrlError, TransportUnsupportedError)` in Python and
-`instanceof MuxwsError` in TypeScript.
+It does not cover every entry point. A malformed `ws+unix://` URL raises `UnixUrlError` (a
+`TransportUrlError`) in Python and from `muxws/node`, but the `muxws` entry point refuses the scheme
+before parsing it and raises `UnixSocketsUnsupportedError`, because that build has no transport that
+can open a socket file. The handler that covers every port is
+`except (TransportUrlError, TransportUnsupportedError)` in Python and `instanceof MuxwsError` in
+TypeScript.
 
-In Python it is a `ValueError` as well as a `MuxwsError`. Both halves are load-bearing: a caller who
-never heard of this library is already catching `ValueError` around a URL it typed, and an
-application whose one handler is `except MuxwsError` must not have a bad address leak through it. In
-TypeScript there is one prototype chain, so the class extends `MuxwsError` and carries its identity
-in `name`; the handler that must not be escapable there is `instanceof MuxwsError`.
+In Python it is a `ValueError` as well as a `MuxwsError`: code that does not know muxws and catches
+`ValueError` around a URL catches it, and so does an application whose single handler is
+`except MuxwsError`. TypeScript has one prototype chain, so the class extends `MuxwsError` and is
+identified by `name`; the handler that always catches it is `instanceof MuxwsError`.
 
-It is always raised **before the dial**, never out of a failed one. That ordering is what keeps a URL
-whose text happens to contain `HTTP 400` from being reported as a refused handshake, and it is what
-stops a bad address from resurfacing hours later out of a background reconnection.
+It is always raised **before the dial**, never from a failed dial. As a result, a URL whose text
+contains `HTTP 400` is not reported as a refused handshake, and a bad address is never raised later
+from a background reconnection.
 
 ### Signature
 
@@ -1545,7 +1531,7 @@ the top of this page.
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text. A library-raised one quotes the address and states the rule it broke. |
-| `options.cause` (TypeScript) | `unknown` | `undefined` | The underlying library's own error, kept so its wording survives the translation. Python chains with `raise … from exc` instead, which puts the original on `__cause__`. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | The underlying library's original error, so its message is preserved. Python chains with `raise … from exc` instead, which puts the original on `__cause__`. |
 
 ### Return
 
@@ -1566,9 +1552,9 @@ BAD_URLS = ["ws:/nohost", "ws+unix:///run/muxws/api.sock:ws"]
 
 
 async def main() -> None:
-    """Two transports, two grammars, two concrete classes - and one `except` that covers both.
+    """Two transports raise two concrete classes; `except TransportUrlError` catches both.
 
-    Written without importing either transport module, which is the whole point of the shared base.
+    Neither transport module is imported.
     """
     for url in BAD_URLS:
         try:
@@ -1585,8 +1571,8 @@ import 'muxws';
 import { TransportUrlError } from 'muxws';
 import { connect } from 'muxws/node';
 
-// The concrete class is `WsUrlError`, and this catch never names it: `TransportUrlError` comes from
-// the package root and is the same `except` over every transport, including ones muxws does not ship.
+// The concrete class is `WsUrlError`; this catch does not name it. `TransportUrlError` is exported
+// from the package root and catches the URL errors of every transport, including third-party ones.
 try {
   await connect('nonsense');
 } catch (error) {
@@ -1597,19 +1583,18 @@ try {
 
 ## `TransportUnsupportedError`
 
-The base for *this runtime cannot provide that transport at all*: no `AF_UNIX` in the interpreter, an
-optional dependency that was never installed, an entry point whose bundle deliberately does not carry
-the transport. Never raised directly.
+The base class for *this runtime cannot provide that transport*: the interpreter has no `AF_UNIX`, an
+optional dependency is not installed, or the entry point's bundle does not include the transport. It
+is never raised directly.
 
-It is a separate base from `TransportUrlError` rather than a flag on it because the two ask the
-reader for different actions. `TransportUrlError` means *retype the address*.
-`TransportUnsupportedError` means *the address is fine, change where or how you are running* — and no
-retry, no backoff and no different URL can turn one into the other. In Python it is a `RuntimeError`
-as well as a `MuxwsError`, which says exactly that to a caller who never heard of muxws.
+It is a separate base from `TransportUrlError` because the two require different actions.
+`TransportUrlError` means *correct the address*. `TransportUnsupportedError` means *the address is
+valid; change the environment the code runs in*. No retry, backoff or different URL resolves it. In
+Python it is a `RuntimeError` as well as a `MuxwsError`.
 
-A subclass raised because a package is missing **names the install that fixes it**. That is the whole
-value of the class: `ModuleNotFoundError: No module named 'websockets'` is what the interpreter
-already said, and it does not tell the reader that the answer is `pip install muxws[websockets]`.
+A subclass raised because a package is missing **names the install command** in its message.
+`ModuleNotFoundError: No module named 'websockets'` does not state that the fix is
+`pip install muxws[websockets]`.
 
 ### Signature
 
@@ -1650,8 +1635,7 @@ from muxws.transports.unix import UnixSocketsUnsupportedError
 try:
     raise UnixSocketsUnsupportedError("this interpreter has no socket.AF_UNIX")
 except TransportUnsupportedError as exc:
-    # One `except` for "this deployment cannot do that", written without importing the transport
-    # that could not be provided.
+    # Caught through the shared base from the package root.
     print(type(exc).__name__, "|", exc)
 
 print(issubclass(TransportUnsupportedError, MuxwsError), issubclass(TransportUnsupportedError, RuntimeError))
@@ -1667,18 +1651,17 @@ console.log(failure.name, failure instanceof MuxwsError, failure instanceof Tran
 ## `UnixUrlError`
 
 A `ws+unix://` URL that cannot be dialled: one naming no socket file, one whose request target does
-not begin with `/`, or a `wss+unix://` URL, which is not a scheme muxws has. Raised out of
-`connect()` before any socket is touched, and therefore before the first dial attempt, so it cannot
-reappear later out of a background reconnection.
+not begin with `/`, or a `wss+unix://` URL, which is not a scheme muxws has. Raised from `connect()`
+before any socket is opened, so it is never raised later from a background reconnection.
 
-It is the `ws+unix:` **grammar's** error, and that grammar belongs to one transport in each port, so
-the class lives with the transport rather than in the shared error module. Python raises it from
+The `ws+unix:` grammar belongs to one transport in each port, so the class is defined in that
+transport's module, not in the shared error module. Python raises it from
 [`parse_unix_url`](./transports.md#parse-unix-url-python) in `muxws.transports.unix`; TypeScript
-raises it from the `ws+unix:` parser behind `muxws/node`, which is the only entry point that can dial
-a socket file at all.
+raises it from the `ws+unix:` parser behind `muxws/node`, the only entry point that can dial a socket
+file.
 
-Both ports refuse the same three shapes, so a deployment can paste one URL into either port's
-configuration and get the same answer. On Windows the Python port answers two of them differently:
+Both ports refuse the same three shapes, so one URL gives the same result in either port's
+configuration. On Windows the Python port answers two of them differently:
 `socket.AF_UNIX` is checked after the `wss+unix:` refusal but before the two grammar checks, so a bad
 request target or a URL naming no socket file is a `UnixSocketsUnsupportedError` there. The
 TypeScript port answers `UnixUrlError` for all three on every platform.
@@ -1748,23 +1731,22 @@ try {
 
 ## `UnixSocketsUnsupportedError`
 
-A `ws+unix://` URL that this runtime cannot dial at all — as opposed to one it will not dial because
-of how it is written. The two ports reach it from different directions, and the sentence to the
-reader is the same in both: *a `ws+unix:` URL cannot be opened here.*
+A `ws+unix://` URL that this runtime cannot dial, however the URL is written. The two ports raise it
+under different conditions; in both it means that a `ws+unix:` URL cannot be opened here.
 
-**Python:** the interpreter has no `socket.AF_UNIX`, which means Windows. Raised from the URL parse,
-so the message names the platform, the scheme and the reason, and the failure arrives out of the
-`connect()` call rather than out of a background reconnect attempt.
+**Python:** the interpreter has no `socket.AF_UNIX` (Windows). Raised from the URL parse, so the
+error is raised from the `connect()` call, not from a background reconnect attempt. The message names
+the platform, the scheme and the reason.
 
-**TypeScript:** `connect()` from the package root was given a `ws+unix:` URL. Neither a browser nor
-Node's global `WebSocket` can open a filesystem socket, so the root entry point refuses the scheme up
-front and the message names `muxws/node` as the import that can dial it. `muxws/node` has no
-counterpart on any platform: `net.connect({ path })` opens a named pipe on Windows rather than
-failing, and no `ws+unix:` URL can address a named pipe anyway, because `new URL()` rejects the
-backslashes in `\\.\pipe\name` everywhere. A `muxws/node` dial of a POSIX-looking path on Windows
-fails with an ordinary connect error naming the path it tried.
+**TypeScript:** `connect()` from the package root received a `ws+unix:` URL. Neither a browser nor
+Node's global `WebSocket` can open a filesystem socket, so the root entry point refuses the scheme
+before dialling, and the message names `muxws/node` as the import that can dial it. `muxws/node`
+never raises it: on Windows `net.connect({ path })` opens a named pipe instead of failing, and no
+`ws+unix:` URL can address a named pipe, because `new URL()` rejects the backslashes in
+`\\.\pipe\name` on every platform. A `muxws/node` dial of a POSIX path on Windows fails with an
+ordinary connect error naming the path.
 
-Nothing about the call was wrong in either case, which is why the Python class is a `RuntimeError`.
+In both cases the call itself is valid, so the Python class is a `RuntimeError`.
 
 ### Signature
 
@@ -1778,16 +1760,16 @@ export class UnixSocketsUnsupportedError extends TransportUnsupportedError {
 }
 ```
 
-Imported from the transport that refuses, not the package root in Python:
-`from muxws.transports.unix import UnixSocketsUnsupportedError`. In TypeScript the refusing transport
-*is* the root entry point's: `import { UnixSocketsUnsupportedError } from 'muxws'`.
+In Python it is imported from the transport module, not the package root:
+`from muxws.transports.unix import UnixSocketsUnsupportedError`. In TypeScript the root entry point
+refuses the scheme, so the class is exported from there: `import { UnixSocketsUnsupportedError } from 'muxws'`.
 
 ### Parameters
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text. Python's names `socket.AF_UNIX` and points at `ws://` and `wss://`; TypeScript's names `muxws/node`. |
-| `options.cause` (TypeScript) | `unknown` | `undefined` | Unused by the library's own raise — the refusal is a scheme check, not a framed failure. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | Not set by the library: the refusal is a scheme check and wraps no underlying error. |
 
 ### Return
 
@@ -1814,7 +1796,7 @@ import { connect, UnixSocketsUnsupportedError } from 'muxws';
 try {
   await connect('ws+unix:///run/muxws/api.sock:/ws');
 } catch (error) {
-  // Always taken: the root entry point cannot dial a socket file on any platform.
+  // Always reached: the root entry point cannot dial a socket file on any platform.
   if (error instanceof UnixSocketsUnsupportedError) console.log(error.message);
   else throw error;
 }
@@ -1826,22 +1808,22 @@ A `ws://` or `wss://` URL that the `websockets` library cannot turn into somethi
 no hostname (`ws:/nohost`, `ws://user@/x`), one whose scheme is not `ws` or `wss`
 (`http://example.com/x`), one whose port is not an integer (`ws://host:notaport/x`), or a string that
 is not a URL at all. Raised from `connect()` before any socket is opened, with the `InvalidURI` or
-`ValueError` that `websockets.uri.parse_uri` produced chained as `__cause__`, so the underlying
-library's own wording is framed rather than replaced.
+`ValueError` that `websockets.uri.parse_uri` raised chained as `__cause__`; the message quotes that
+library's wording.
 
-It also covers the logical `ws://` URI that a `ws+unix://` URL is turned into, because that string is
-what `unix_connect(uri=…)` parses: `ws+unix://user@/a.sock:/y` is a `WebsocketUrlError` about
-`ws://user@/y`. A malformed `ws+unix:` URL is still a `UnixUrlError` — that grammar is checked first,
-and by stdlib alone, so it answers the same way whether or not `websockets` is installed.
+It also covers the logical `ws://` URI that a `ws+unix://` URL is converted to, because
+`unix_connect(uri=…)` parses that string: `ws+unix://user@/a.sock:/y` raises a `WebsocketUrlError`
+about `ws://user@/y`. A malformed `ws+unix:` URL raises `UnixUrlError`: that grammar is checked
+first, with the standard library only, so the result does not depend on whether `websockets` is
+installed.
 
-An `http://` or `https://` URL is one of the shapes this class refuses. Neither TypeScript port
-refuses it: the platform `WebSocket` and `ws` both upgrade those schemes to `ws:`/`wss:` and dial.
+This class refuses `http://` and `https://` URLs. Neither TypeScript entry point refuses them: the
+platform `WebSocket` and `ws` both convert those schemes to `ws:`/`wss:` and dial.
 
-The parse happens before the dial and outside the failed-dial handler, which is what keeps the two
-apart: that handler decides whether a failure was a refused muxws handshake by looking for a 400, and
-a URL whose own text contains `HTTP 400` would otherwise be reported as a `CodecMismatch` on a
-connection that was never made. [`verify_dialable_url`](./transports.md#verify-dialable-url-python)
-is the function that runs it.
+The URL is parsed before the dial, outside the handler for failed dials. That handler identifies a
+refused muxws handshake by looking for a 400; if the parse ran inside it, a URL whose text contains
+`HTTP 400` would be reported as a `CodecMismatch` for a connection that was never made.
+[`verify_dialable_url`](./transports.md#verify-dialable-url-python) runs the parse.
 
 ### Signature
 
@@ -1889,27 +1871,24 @@ asyncio.run(main())
 
 ## `WebsocketsNotInstalledError` (Python)
 
-`connect()` was called and `import websockets` failed. One class covers both arms — a `ws://` dial
-and a `ws+unix://` dial fail on the identical import — because it is the identical dependency.
+`connect()` was called and `import websockets` failed. One class covers a `ws://` dial and a
+`ws+unix://` dial, because both import the same dependency.
 
 **The message names the extra:** `pip install muxws[websockets]`, which the module also exports as
-[`INSTALL_HINT`](./transports.md#install-hint-python) so the remedy is spelled in one place. That is
-the whole reason the class exists: the condition is permanent, local, and has exactly one fix, and
-`ModuleNotFoundError: No module named 'websockets'` names none of it.
+[`INSTALL_HINT`](./transports.md#install-hint-python). The condition is permanent and local and has
+one fix; `ModuleNotFoundError: No module named 'websockets'` does not name the fix.
 
-Only the package being **absent** is claimed — a `ModuleNotFoundError` whose `name` is exactly
-`websockets`. Any other import failure, a broken install or a syntax error inside the package, is
-re-raised untouched, because a corrupt package reported as an uninstalled one sends the reader to
-reinstall something they already have and throws away the only message naming the real fault. A
-missing *sub*module (`websockets.asyncio`) counts as broken, not absent. `WsNotInstalledError` narrows
-identically, on `ERR_MODULE_NOT_FOUND`.
+Only an **absent** package is converted: a `ModuleNotFoundError` whose `name` is exactly
+`websockets`. Any other import failure (a broken install, a syntax error inside the package) is
+re-raised unchanged, because reporting it as an uninstalled package would direct the reader to
+reinstall it and would hide the message that names the actual fault. A missing *sub*module
+(`websockets.asyncio`) counts as broken, not absent. `WsNotInstalledError` applies the same rule to
+`ERR_MODULE_NOT_FOUND`.
 
-`muxws.transports.websockets_` stays importable when `websockets` is absent — nothing is imported at
-module scope — which is what makes `except WebsocketsNotInstalledError` writable at all. A module that
-had to import its own dependency to define the class would raise the very `ImportError` the class
-exists to replace. The import itself lives in
-[`require_websockets`](./transports.md#require-websockets-python), which is where this class is raised
-and the only way to ask whether this process can dial without dialling.
+`muxws.transports.websockets_` is importable when `websockets` is absent, because the module imports
+nothing from it at module scope; `except WebsocketsNotInstalledError` therefore works without the
+dependency. The import is in [`require_websockets`](./transports.md#require-websockets-python), which
+raises this class and checks whether this process can dial without dialling.
 
 ### Signature
 
@@ -1940,7 +1919,7 @@ Raises: nothing.
 from muxws import TransportUnsupportedError
 from muxws.transports.websockets_ import WebsocketsNotInstalledError
 
-# The class is importable whether or not `websockets` is - which is the point of it.
+# The class is importable whether or not `websockets` is installed.
 try:
     raise WebsocketsNotInstalledError("connect() needs the websockets library: pip install muxws[websockets]")
 except TransportUnsupportedError as exc:
@@ -1950,16 +1929,16 @@ except TransportUnsupportedError as exc:
 ## `WsUrlError` (TypeScript)
 
 The `ws` package's `WebSocket` constructor refused the URL. Thrown by the `connect()` exported from
-`muxws/node`, and named after the third-party library that owns that dial, exactly as Python's
+`muxws/node`, and named after the third-party library that performs the dial, as Python's
 `WebsocketUrlError` is named after `websockets`.
 
-`ws` reports a URL it cannot read as a real `SyntaxError` — `Invalid URL: nonsense` — which is not a
-`MuxwsError` and is therefore invisible to an application's one handler. It is framed here, with the
-original on `cause` so the wording survives.
+`ws` reports a URL it cannot parse as a `SyntaxError` (`Invalid URL: nonsense`), which is not a
+`MuxwsError` and is not caught by an `instanceof MuxwsError` handler. muxws wraps it in `WsUrlError`
+and keeps the original on `cause`.
 
-A **dial** failure is not a URL failure and is never wrapped: an unreachable host still rejects with
-Node's own `ENOTFOUND`, a refused connection with `ECONNREFUSED`, and a TLS failure with whatever TLS
-said. `TransportUrlError` means the address could not be read, not that nothing answered at it.
+A **dial** failure is not a URL failure and is never wrapped: an unreachable host rejects with
+Node's `ENOTFOUND`, a refused connection with `ECONNREFUSED`, and a TLS failure with the TLS error.
+`TransportUrlError` means the address could not be parsed, not that the connection failed.
 
 ### Signature
 
@@ -2005,16 +1984,15 @@ try {
 `await import('ws')` inside the `muxws/node` dial failed because the optional peer dependency is not
 installed. **The message names the install that fixes it:** `npm install ws`.
 
-Without the class the reader gets `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws' imported
-from …/node_modules/muxws/dist/node.js` — a path they did not write, in a package they did not
-install, naming no remedy.
+Without the class the error is `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws' imported
+from …/node_modules/muxws/dist/node.js`, which names a path inside `node_modules` and no remedy.
 
-Only `ERR_MODULE_NOT_FOUND` is claimed. Any other import failure — a broken install, a syntax error
-inside `ws` itself — is rethrown untouched, because a corrupt package reported as an absent one sends
-the reader to reinstall something that is already there.
+Only `ERR_MODULE_NOT_FOUND` is converted. Any other import failure (a broken install, a syntax error
+inside `ws`) is rethrown unchanged, because reporting it as an absent package would direct the reader
+to reinstall a package that is installed.
 
-The import is dynamic and lives on the dial path alone, which is why `accept()`, `serve()`,
-`handleProtocols()` and `refuseMismatchedUpgrade()` all keep working in a process that never dials.
+The import is dynamic and runs only on the dial path, so `accept()`, `serve()`, `handleProtocols()`
+and `refuseMismatchedUpgrade()` do not import `ws`.
 
 ### Signature
 
@@ -2048,16 +2026,16 @@ Raises: nothing.
 import { TransportUnsupportedError } from 'muxws';
 import { WsNotInstalledError } from 'muxws/node';
 
-// Reachable only in a checkout without `ws`; the class is importable either way, which is what
-// makes `catch (e) { if (e instanceof WsNotInstalledError) }` writable at all.
+// Raised only where `ws` is not installed; the class is importable either way, so
+// `catch (e) { if (e instanceof WsNotInstalledError) }` works in both cases.
 const failure = new WsNotInstalledError("the 'ws' package is not installed: npm install ws");
 console.log(failure.name, failure instanceof TransportUnsupportedError, failure.message.includes('npm install ws'));
 ```
 
 ## See also
 
-- [Codecs](./codec.md) — `CodecError`, `CodecNotRegistered` and `CodecMismatch` all come out of the
-  codec seam.
+- [Codecs](./codec.md) — `CodecError`, `CodecNotRegistered` and `CodecMismatch` are raised by the
+  codec layer.
 - [Unix domain sockets](../guide/transports.md#unix-domain-sockets) — the URL grammar `UnixUrlError`
   enforces, and what each port does on Windows.
 - [Errors](../guide/errors.md#writing-an-adapter-of-your-own) — what to subclass, and where to put

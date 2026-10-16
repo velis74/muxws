@@ -1,11 +1,11 @@
 <!--
-  Three call shapes on one click.
+  The selected symbol: quote, history and full depth.
 
-  The quote is `peer.request()` - one payload out, exactly one back (WSM-API-006). The chart is
-  `for await (... of peer.open(...))` and fills in a point at a time, which is the only reason the
-  backend pauses between points at all. Clicking another row cancels the outstanding history, and the
-  number under the chart is the count the *backend* increments when its generator is stopped
-  (WSM-ERR-012/013) - a frontend that had merely stopped looking could not move it.
+  The quote is `peer.request()`: one payload out, exactly one back (WSM-API-006). The chart is
+  `for await (... of peer.open(...))` and adds one point at a time; the backend pauses between points
+  so the history arrives progressively. Clicking another row cancels the open history, and the number
+  under the chart is the count the backend increments when a cancellation stops its generator
+  (WSM-ERR-012/013).
 -->
 <template>
   <v-card>
@@ -18,14 +18,14 @@
             unary &middot; streaming &middot; fragmented &middot; <span class="text-decoration-underline">?</span>
           </span>
         </template>
-        Three shapes at once, over the socket still carrying every price on the left: the quote is one answer to one
-        question, the history is many answers filling in as they arrive, and full depth is a payload larger than a
-        single frame, reassembled for you.
+        Three call shapes over the socket that also carries the board: the quote is one reply to one request, the
+        history is a stream of points received one at a time, and full depth is a payload larger than one frame,
+        reassembled by the library.
       </v-tooltip>
     </v-card-title>
 
     <v-card-text v-if="store.selected === null" class="text-medium-emphasis">
-      Click a row. The quote arrives as one payload; the chart arrives as a hundred and twenty.
+      Click a row. The quote arrives as one payload; the chart data arrives as 120 payloads.
     </v-card-text>
 
     <template v-else>
@@ -80,8 +80,8 @@
         </div>
         <div v-if="store.depth" class="text-caption mt-2">
           {{ store.depth.levels }} levels, {{ kb(store.depth.bytes) }} on the wire in
-          <strong>{{ store.depth.fragments }}</strong> fragments, reassembled in {{ store.depth.ms }} ms. This component
-          never called a reassembler (WSM-FRG-010).
+          <strong>{{ store.depth.fragments }}</strong> fragments, received in {{ store.depth.ms }} ms. The library
+          reassembled the payload (WSM-FRG-010).
         </div>
       </v-card-text>
     </template>
@@ -116,8 +116,8 @@ const quoteFields = computed(() => {
 });
 
 /**
- * Scaled to the points that have arrived so far, not to the 120 that are coming: the line has to
- * grow while the stream is still open, or the streaming shape looks exactly like the unary one.
+ * Scaled to the points received so far, not to the full 120, so the line grows while the stream is
+ * open.
  */
 const path = computed(() => {
   const points = store.history;

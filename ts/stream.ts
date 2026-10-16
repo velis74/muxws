@@ -1,14 +1,14 @@
 /**
  * `Stream`: one independently addressed, independently cancellable, bidirectional exchange (§5, §9).
  *
- * A port of `muxws/stream.py` - same five states, same claim-on-first-use handle, same three-way
- * distinction on a send that is no longer legal - with the four differences TypeScript forces:
+ * Mirrors `muxws/stream.py`: the same five states, the same claim on first use, and the same three
+ * error classes for a send on a stream that no longer accepts one. TypeScript differs in four points:
  *
  * 1. `Stream<T>` **implements** `PromiseLike<T>`; it does not extend `Promise` (WSM-API-015).
- * 2. The internal answer promise gets its no-op rejection handler in the **constructor**, and the
- *    failure is routed to the peer's error hook (WSM-API-016).
+ * 2. The internal answer promise gets its no-op rejection handler in the constructor, and the
+ *    failure is passed to the peer's error hook (WSM-API-016).
  * 3. `closed` is a `Promise<void>` that resolves and never rejects, and `signal` is an `AbortSignal`
- *    aborted at the same instant (WSM-API-023).
+ *    aborted at the same time (WSM-API-023).
  * 4. Durations are milliseconds and integers.
  */
 
@@ -34,7 +34,7 @@ export enum StreamState {
   CLOSED = 'closed',
 }
 
-/** Which of the two consuming shapes owns this stream, once one of them has taken it. */
+/** How the stream is consumed, once claimed: awaited, iterated, or `notify` (no consumer). */
 export type StreamClaim = 'await' | 'iterate' | 'notify';
 
 /** `send()`'s options object. */
@@ -44,7 +44,7 @@ export interface SendOptions {
   headers?: Record<string, unknown>;
 }
 
-/** `end()`'s options object. TypeScript takes the last payload here rather than positionally. */
+/** `end()`'s options object. The last payload is an option here, not a positional argument. */
 export interface EndOptions {
   payload?: unknown;
   trailers?: Record<string, unknown>;
@@ -62,9 +62,8 @@ export interface ReplyOptions {
 /**
  * `result()`'s options object.
  *
- * `signal` is the TypeScript stand-in for cancelling the awaiting task in Python: abandoning a
- * promise is invisible to the promise, so a consumer that wants WSM-ERR-014's `reset(CANCELLED)`
- * says so with an `AbortSignal`.
+ * `signal` replaces cancelling the awaiting task in Python. A promise cannot detect that nobody awaits
+ * it any more, so a consumer that wants WSM-ERR-014's `reset(CANCELLED)` passes an `AbortSignal`.
  */
 export interface ResultOptions {
   timeoutMs?: number;
@@ -72,30 +71,27 @@ export interface ResultOptions {
 }
 
 /**
- * The half of `Peer` a `Stream` is allowed to reach into.
+ * The part of `Peer` that a `Stream` uses.
  *
- * Declared structurally rather than imported so the two modules do not form an import cycle; the
- * real `Peer` satisfies it by shape.
+ * Declared structurally, not imported, to avoid an import cycle; `Peer` satisfies it structurally.
  */
 export interface StreamPeer {
-  /** @internal Whether a wire still exists - not whether the connection is established. See `Peer`. */
+  /** @internal Whether a socket exists, independent of whether the connection is established. See `Peer`. */
   readonly hasASocket: boolean;
-  /** @internal Synchronous by contract: `open()` must not suspend between allocating and enqueuing. */
+  /** @internal Synchronous, so `open()` does not suspend between allocating a stream id and enqueuing. */
   enqueue(frame: Frame): void;
   /** @internal Drop a closed stream from the live map. */
   forget(stream: Stream<any>): void;
   /**
-   * @internal WSM-API-016's destination: the failure of a stream nobody consumed.
+   * @internal Receives the failure of a stream that has no consumer (WSM-API-016).
    *
-   * Optional so a peer that has not wired it up still type-checks; without it the rejection is
-   * simply swallowed by the constructor's handler, which is the half of the rule that must never
-   * be missing.
+   * Optional; without it the failure is only absorbed by the no-op rejection handler attached in the
+   * constructor.
    */
   reportStreamError?(error: unknown, stream: Stream<any> | null): void;
   /**
-   * @internal WSM-API-028: the leading headers of this peer's answer, as its reply interceptors leave
-   * them. Optional so a peer without interceptors still type-checks; absent, the headers go out as
-   * given.
+   * @internal The leading headers of this peer's answer after its reply interceptors have run
+   * (WSM-API-028). Optional; without it the headers are sent unchanged.
    */
   replyHeadersFor?(headers: Record<string, unknown> | null, stream: Stream<any>): Record<string, unknown> | null;
 }
@@ -103,14 +99,13 @@ export interface StreamPeer {
 /** Sentinel pushed into the iteration queue to end a `for await` cleanly. */
 const END: unique symbol = Symbol('END');
 
-/** Race markers, distinguishable from any value or error the stream itself could produce. */
+/** Rejection markers for `waitGuarded`, distinct from any value or error the stream produces. */
 const EXPIRED: unique symbol = Symbol('EXPIRED');
 const ABANDONED: unique symbol = Symbol('ABANDONED');
 
 /**
- * Method syntax rather than function-typed properties on purpose: a property-typed `resolve` would
- * make `Stream<T>` invariant in `T`, and the peer's `Map<number, Stream>` would then refuse every
- * `Stream<Something>` the application opened.
+ * Method syntax, not function-typed properties: a property-typed `resolve` would make `Stream<T>`
+ * invariant in `T`, and the peer's `Map<number, Stream>` would not accept a `Stream<Something>`.
  */
 interface Deferred<V> {
   promise: Promise<V>;
@@ -129,12 +124,11 @@ function deferred<V>(): Deferred<V> {
 }
 
 /**
- * Guard the one code that is synthesised locally and the numbers this generation does not use.
+ * Return `code` if it may be sent; throw `ProtocolError` otherwise.
  *
- * `CONNECTION_CLOSED` means "the socket under this stream died"; putting it on the wire would tell a
- * remote that *its* connection had died, which is both false and unfalsifiable (§8.1: it MUST NEVER
- * appear on the wire). Reset code 5 is retired and MUST NOT be reused. Anything outside the enum
- * would be this peer inventing wire vocabulary.
+ * `CONNECTION_CLOSED` is synthesised locally when the socket is lost and MUST NEVER appear on the
+ * wire (§8.1). Reset code 5 is retired and MUST NOT be reused. Values outside `ResetCode` are not
+ * defined by this protocol generation.
  */
 function sendableResetCode(code: ResetCode): ResetCode {
   if (code === ResetCode.CONNECTION_CLOSED) {
@@ -153,12 +147,11 @@ function sendableResetCode(code: ResetCode): ResetCode {
 }
 
 /**
- * A fresh instance of the same failure.
+ * A new instance of the same failure.
  *
- * `send()` on a reset stream reports the stream's stored failure. Throwing the stored *instance*
- * hands every caller the same mutable object, with one shared `stack` that no longer describes where
- * it was thrown; a loop that keeps sending would keep handing out the same one. `exceptionForReset`
- * rebuilds exactly the class the failure was built as, so identity checks still hold.
+ * `send()` on a reset stream throws the stream's stored failure. A new instance per throw gives each
+ * caller its own object and a `stack` for its own call site. `exceptionForReset` builds the same
+ * class, so `instanceof` checks are unaffected.
  */
 function freshReset(error: StreamReset): StreamReset {
   if (error instanceof RemoteError) {
@@ -202,35 +195,34 @@ class PayloadQueue {
 export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   readonly id: number;
 
-  /** The `open` frame's headers. The same mapping on both peers: the opener's, as it sent them. */
+  /** The `open` frame's headers, as sent by the opener; the same on both peers. */
   readonly headers: Record<string, unknown>;
 
   /**
-   * The **answering** side's leading headers, empty until there are any (WSM-API-025).
+   * The answering side's leading headers; an empty object until received (WSM-API-025).
    *
-   * The other half of `headers`, and read the same way from either end: the peer that opened the
-   * stream sees what the answer announced, the peer answering sees what it announced itself. Empty
-   * rather than null when nothing was announced, so a caller never has two absences to handle.
+   * The counterpart of `headers`, with the same value on both peers: the opener sees the headers the
+   * answer carried, and the answering peer sees the headers it sent. Empty, not `null`, when none
+   * were sent.
    *
-   * Not `readonly`, because on the opener's side these land when the answer's first frame does -
-   * `replyHeadersArrived` is how a caller knows the value it is reading is the final one.
+   * Not `readonly`: on the opener's side it is set when the answer's first frame arrives.
+   * `replyHeadersArrived` resolves when the value is final.
    */
   replyHeaders: Record<string, unknown> = {};
 
   /**
-   * Resolves when `replyHeaders` can no longer change, and **never rejects** (WSM-API-025).
+   * Resolves when `replyHeaders` can no longer change, and never rejects (WSM-API-025).
    *
-   * That instant is the answering side's first frame on the stream - carrying headers or not, since
-   * a first frame without them means none are coming - or the close of a stream that was never
-   * answered. Both, because the second is the one the remote controls: a stream reset before any
-   * answer, or a socket that dies, would otherwise leave this pending for the rest of the process.
+   * It resolves on the answering side's first frame on the stream, with or without headers (a first
+   * frame without headers means none will be sent), or when the stream closes without an answer
+   * (a reset before any answer, or a lost socket).
    */
   readonly replyHeadersArrived: Promise<void>;
 
   /**
    * The opening payload, already reassembled.
    *
-   * Not `readonly`: the peer fills it in once the last fragment of a fragmented `open` lands.
+   * Not `readonly`: the peer sets it when the last fragment of a fragmented `open` arrives.
    */
   payload: unknown;
 
@@ -238,9 +230,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   trailers: Record<string, unknown> | null = null;
 
   /**
-   * Resolves on every close path, including a reset and socket death, and **never rejects**
-   * (WSM-API-023) - a stream that closed by being reset still closed, and the reset reaches the
-   * awaits and the iterator instead.
+   * Resolves on every close path, including a reset and a lost socket, and never rejects
+   * (WSM-API-023). A reset is reported through the awaited result and the iterator.
    */
   readonly closed: Promise<void>;
 
@@ -251,11 +242,11 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   local: boolean;
 
   /**
-   * @internal True between the first fragment of a *remote* opening payload and the frame that
+   * @internal True from the first fragment of a remote opening payload until the frame that
    * completes it.
    *
-   * Explicit state, never inferred from "is an assembler running on this id": inferring it takes a
-   * wrong-parity `open` for a continuation of whatever reassembly happens to be running.
+   * Explicit state, not inferred from whether an assembler is active on this id; that inference
+   * would treat a wrong-parity `open` as the continuation of a running reassembly.
    */
   opening = false;
 
@@ -263,8 +254,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   assembler = new Assembler();
 
   /**
-   * @internal The controller the peer runs its handler under, so an incoming `reset(CANCELLED)` can
-   * abort it (WSM-ERR-013). It is aborted by `fail()`, exactly where Python cancels the task.
+   * @internal The controller of the handler the peer runs for this stream, so an incoming
+   * `reset(CANCELLED)` aborts it (WSM-ERR-013). Aborted by `fail()`, where Python cancels the task.
    */
   handlerTask: AbortController | null = null;
 
@@ -272,8 +263,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   claim: StreamClaim | null = null;
 
   /**
-   * @internal True once the remote has sent a frame on this stream - the other half of WSM-FRM-016's
-   * one chance. The peer reads it to recognise the answer to a stream it opened (WSM-API-029).
+   * @internal True once the remote has sent a frame on this stream (the receiving side of
+   * WSM-FRM-016). The peer reads it to recognise the answer to a stream it opened (WSM-API-029).
    */
   receivedAFrame = false;
 
@@ -284,16 +275,16 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   private readonly headersGate = deferred<void>();
   private readonly closeController = new AbortController();
 
-  /** @internal True once this side has put any frame on this stream - the one chance of WSM-FRM-016. */
+  /** @internal True once this side has sent a frame on this stream (WSM-FRM-016). */
   private sentAFrame = false;
 
-  /** True once `replyHeadersArrived` has been resolved; it resolves exactly once, from three places. */
+  /** True once `replyHeadersArrived` has been resolved. */
   private headersSettled = false;
 
-  /** True once the memoized promise has been settled, either way. It settles exactly once. */
+  /** True once the memoized promise has been resolved or rejected. */
   private answerSettled = false;
 
-  /** True once something has asked for the memoized promise - the analogue of Python's lazy future. */
+  /** True once the memoized promise has been requested; corresponds to Python's lazily created future. */
   private answerRequested = false;
 
   /** How the stream ended: `null` while live, `'normal'` when both ends ended, else the failure. */
@@ -312,25 +303,23 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     this.closed = this.closeGate.promise;
     this.replyHeadersArrived = this.headersGate.promise;
 
-    // Each side's one chance at leading headers (WSM-FRM-016) is spent by its first frame, and one
-    // of the two is already gone: a locally opened stream was created by the `open` this peer had
-    // just enqueued, a remotely opened one by the `open` it had just read.
+    // Leading headers are allowed only on each side's first frame (WSM-FRM-016). The opener's first
+    // frame is the `open`: for a local stream this peer has sent it, for a remote stream it has
+    // received it.
     if (options.local) this.sentAFrame = true;
     else this.receivedAFrame = true;
 
-    // WSM-API-016: attached **here**, not on the first `then`. By the time a caller reaches for the
-    // stream the rejection may already have been reported to the runtime as unhandled, and there is
-    // no way to un-report it. Where the failure of a stream nobody consumed actually goes is
-    // `reportUnconsumed`, called from `fail()`; this handler is the guarantee that it can never
-    // reach the console on the way.
+    // WSM-API-016: attached in the constructor, not on the first `then`, because a rejection before
+    // the first `then` would already be reported as unhandled. The failure of an unconsumed stream
+    // is passed to `reportUnconsumed` from `fail()`.
     void this.answer.promise.catch(() => undefined);
   }
 
   /**
-   * Aborted at the same instant `closed` resolves, on every close path.
+   * Aborted when `closed` resolves, on every close path.
    *
-   * This is what a TypeScript handler observes in place of Python's `CancelledError` (WSM-ERR-013):
-   * there is no way to interrupt a running function, so the handler is told and cooperates.
+   * Replaces Python's `CancelledError` (WSM-ERR-013): JavaScript cannot interrupt a running function,
+   * so a handler observes the signal and stops.
    */
   get signal(): AbortSignal {
     return this.closeController.signal;
@@ -351,11 +340,11 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * Announce this side's leading headers with no payload at all (WSM-API-024).
+   * Send this side's leading headers without a payload (WSM-API-024).
    *
-   * The frame that carries them is a `data` with nothing in it, which is what lets an answering peer
-   * say what is coming before it has computed any of it. It spends this side's one chance either
-   * way, so a later `send({ headers })` on the same stream raises.
+   * The headers are carried by a `data` frame without a payload, so an answering peer can send them
+   * before it has a payload. This is this side's first frame, so a later `send({ headers })` on the
+   * same stream throws.
    */
   async sendHeaders(headers: Record<string, unknown>): Promise<void> {
     this.raiseIfNotSendable();
@@ -384,18 +373,17 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     this.localEnd();
   }
 
-  /** `send` plus `end`, which is what a unary handler wants. */
+  /** Send `payload` with `end`; for unary handlers. */
   async reply(payload: unknown, options: ReplyOptions = {}): Promise<void> {
     await this.end({ payload, trailers: options.trailers, headers: options.headers });
   }
 
   /**
-   * WSM-FRM-016's sending half: headers ride this side's first frame on the stream, or nothing.
+   * The sending side of WSM-FRM-016: headers are allowed only on this side's first frame.
    *
-   * Called on the way to **every** frame this side sends, headers or not, because the rule is about
-   * which frame is first and not about which call carried a `headers` argument. Refusing rather than
-   * dropping is the point of WSM-API-024: a sender whose second set vanished quietly would believe
-   * it had announced something the remote never saw.
+   * Called for every frame this side sends, with or without headers, so the first frame is
+   * recorded. Headers passed after the first frame raise `ProtocolError` instead of being dropped
+   * (WSM-API-024).
    */
   private leadingHeaders(headers: Record<string, unknown> | undefined): Record<string, unknown> | null {
     if (headers !== undefined && this.sentAFrame) {
@@ -408,17 +396,18 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     }
     let leading = headers ?? null;
     if (!this.sentAFrame && !this.local && this.peer.replyHeadersFor !== undefined) {
-      // Before the first frame is spent: an interceptor that throws leaves it unspent (WSM-API-028).
+      // Runs before `sentAFrame` is set, so if an interceptor throws, the first frame is still unsent
+      // (WSM-API-028).
       leading = this.peer.replyHeadersFor(leading, this);
     }
     this.sentAFrame = true;
-    // This peer is the one answering, so what it announces is what `replyHeaders` means on both
-    // ends: a handler reads back what it sent, exactly as the opener reads back what it received.
+    // On the answering side `replyHeaders` holds the headers this peer sent, matching what the opener
+    // receives.
     if (!this.local) this.acceptReplyHeaders(leading);
     return leading;
   }
 
-  /** WSM-ERR-009: three different outcomes, three different classes. */
+  /** Throw per WSM-ERR-009: a fresh `StreamReset` subclass after a reset, `StreamClosed` after a normal close. */
   private raiseIfNotSendable(): void {
     if (this.closeCause === null) return;
     if (this.closeCause !== 'normal') throw freshReset(this.closeCause);
@@ -427,7 +416,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
 
   // ------------------------------------------------------------------ resetting
 
-  /** `reset(CANCELLED)`, closing locally at once without waiting for acknowledgement. */
+  /** `reset(CANCELLED)`. Closes locally immediately, without waiting for acknowledgement. */
   async cancel(reason?: string): Promise<void> {
     await this.reset(ResetCode.CANCELLED, reason);
   }
@@ -435,15 +424,14 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /**
    * Terminate the stream in both directions.
    *
-   * A no-op once the stream is closed - including after socket death, where there is nothing to send
-   * it on (WSM-RCN-041).
+   * A no-op once the stream is closed, including after the socket is lost (WSM-RCN-041).
    */
   async reset(code: ResetCode, reason?: string): Promise<void> {
     const sendable = sendableResetCode(code);
     if (this.state === StreamState.CLOSED) return;
-    // `hasASocket`, not `isOpen`: the question here is whether a wire exists, and the hello window
-    // makes `isOpen` false while the socket is perfectly alive (WSM-RCN-043). Asking the wrong one
-    // loses the `reset` for any stream the acceptor pushed inside that window.
+    // `hasASocket`, not `isOpen`: during the hello window `isOpen` is false while the socket is open
+    // (WSM-RCN-043). Checking `isOpen` would drop the `reset` for a stream the acceptor opened in that
+    // window.
     if (this.peer.hasASocket) {
       this.peer.enqueue({ type: 'reset', stream: this.id, code: sendable, reason: reason ?? null });
     }
@@ -453,38 +441,36 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   // ------------------------------------------------------------------ receiving
 
   /**
-   * @internal WSM-FRM-016's receiving half. Returns false when the frame breaks it.
+   * @internal The receiving side of WSM-FRM-016. Returns false when the frame violates it.
    *
-   * Called for every stream-level frame the remote sends, headers or not: what makes a set of
-   * headers legal is being on the remote's **first** frame, so the first frame has to be recognised
-   * even when it carries none - and recognising it is also what lets `replyHeadersArrived` settle then
-   * rather than waiting for a second set that the rule says can never come.
+   * Called for every stream-level frame from the remote, with or without headers, so the remote's
+   * first frame is recorded even without headers; `replyHeadersArrived` then resolves on that frame.
    */
   noteRemoteFrame(headers: Record<string, unknown> | null | undefined): boolean {
     const first = !this.receivedAFrame;
     this.receivedAFrame = true;
     if (!first) return headers === null || headers === undefined;
-    // The remote's first frame on a stream **this** peer opened is its answer, so these are the
-    // reply headers. On a stream the remote opened, its first frame was the `open`, whose headers
-    // are `headers` and were read at construction - an opener has no reply to announce.
+    // On a stream this peer opened, the remote's first frame is the answer and carries the reply
+    // headers. On a stream the remote opened, its first frame was the `open`, whose headers were set
+    // as `headers` at construction.
     if (this.local) this.acceptReplyHeaders(headers);
     return true;
   }
 
-  /** `replyHeaders` and its gate move together, whichever side of the stream produced them. */
+  /** Set `replyHeaders` (if `headers` is present) and resolve `replyHeadersArrived`. */
   private acceptReplyHeaders(headers: Record<string, unknown> | null | undefined): void {
     if (headers !== null && headers !== undefined) this.replyHeaders = headers;
     this.settleHeaders();
   }
 
-  /** `replyHeadersArrived` resolves exactly once, from the answering side's first frame or the close. */
+  /** Resolve `replyHeadersArrived`, once. */
   private settleHeaders(): void {
     if (this.headersSettled) return;
     this.headersSettled = true;
     this.headersGate.resolve();
   }
 
-  /** @internal Deliver one reassembled payload to whichever shape is consuming this stream. */
+  /** @internal Deliver one reassembled payload to the stream's consumer. */
   acceptPayload(payload: unknown): void {
     if (this.answerRequested) this.settleAnswer(payload as T);
     this.queue.put(payload);
@@ -504,7 +490,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     }
   }
 
-  /** @internal Close because of a reset - local or remote - or because the socket died. */
+  /** @internal Close because of a local or remote reset, or a lost socket. */
   fail(error: StreamReset): void {
     if (this.state === StreamState.CLOSED) return;
     this.state = StreamState.CLOSED;
@@ -519,21 +505,20 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * WSM-API-016's other half: a failure with nobody to hand it to goes to the peer's hook.
+   * Pass the failure of a stream without a consumer to the peer's hook (WSM-API-016).
    *
-   * A stream that was awaited or iterated has a consumer, and that consumer gets the failure through
-   * the promise or the iterator; anything else - a stream nobody took, or the fire-and-forget stream
-   * behind `notify()`, which has no handle at all - would otherwise lose it silently.
+   * An awaited or iterated stream reports the failure through the promise or the iterator. An
+   * unclaimed stream, or the stream behind `notify()`, which has no handle, reports it through the
+   * hook.
    *
-   * The hook is a diagnostic on a close path, so it is not allowed to take the close path down with
-   * it if an application's handler throws.
+   * An exception thrown by the hook is caught, so it does not interrupt the close.
    */
   private reportUnconsumed(error: StreamReset): void {
     if (this.claim === 'await' || this.claim === 'iterate') return;
     try {
       this.peer.reportStreamError?.(error, this);
     } catch {
-      // Nothing sensible to do with it, and re-throwing here would abort a read loop.
+      // Ignored: re-throwing here would abort the read loop.
     }
   }
 
@@ -551,16 +536,16 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     this.peer.forget(this);
   }
 
-  /** `closed` and `signal` move together, on every close path (WSM-API-023). */
+  /** Resolve `closed` and abort `signal`, on every close path (WSM-API-023). */
   private markClosed(reason?: StreamReset): void {
-    // A stream that closes before it was ever answered is the path WSM-API-025 cares about: no reply
-    // headers are coming, so the wait for them ends here rather than never.
+    // A stream that closes without an answer receives no reply headers, so `replyHeadersArrived`
+    // resolves here (WSM-API-025).
     this.settleHeaders();
     this.closeGate.resolve();
     if (!this.closeController.signal.aborted) this.closeController.abort(reason);
   }
 
-  /** A stream that ends without ever producing a payload must not leave an await hanging. */
+  /** Reject a pending await with `ProtocolError` when the stream ends without a payload. */
   private failAnswerIfEmpty(): void {
     this.failAnswer(new ProtocolError(`stream ${this.id} ended without producing a payload`));
   }
@@ -568,10 +553,9 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /**
    * Reject the memoized promise, if there is one to reject.
    *
-   * Gated on the promise having been asked for, exactly as Python gates on the future having been
-   * created: a promise nobody requested must not be rejected, because a rejection nobody retrieves
-   * is a warning the application did not cause and cannot act on. A late await still gets the answer
-   * - `resolveFromCurrentState` reads it back off `closeCause`.
+   * Only if the promise has been requested, as Python checks whether the future exists. A rejection
+   * that nobody retrieves would produce a warning. A later await still receives the failure:
+   * `resolveFromCurrentState` reads it from `closeCause`.
    */
   private failAnswer(error: unknown): void {
     if (!this.answerRequested) return;
@@ -608,7 +592,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     this.claim = use;
   }
 
-  /** One promise per stream, handed its answer on first use and settled exactly once (WSM-API-010/011). */
+  /** The stream's single answer promise, created on first use and settled once (WSM-API-010/011). */
   private memoizedAnswer(): Promise<T> {
     if (!this.answerRequested) {
       this.answerRequested = true;
@@ -618,11 +602,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * Hand the memoized promise whatever answer the stream already has.
+   * Settle the memoized promise from the stream's current state.
    *
-   * The first await may arrive long after the answer did - a payload, a reset, or an end with no
-   * payload at all. Every one of those must settle it at once; leaving it pending is the spinner that
-   * never stops which WSM-INV-011 names.
+   * The first await may come after a payload, a reset, or an end without payload has arrived; in each
+   * case the promise settles immediately instead of staying pending (WSM-INV-011).
    */
   private resolveFromCurrentState(): void {
     if (this.answerSettled) return;
@@ -641,9 +624,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /**
    * `PromiseLike`, not a `Promise` subclass (WSM-API-015).
    *
-   * Subclassing would make species semantics construct a `Stream` for every derived promise - a
-   * `stream.then(...).then(...)` chain of objects each claiming to be an addressable exchange with an
-   * id, none of which is one. This returns an ordinary `Promise` instead.
+   * With a `Promise` subclass, species semantics would construct a `Stream` for every derived promise
+   * in a `stream.then(...).then(...)` chain. `then` returns an ordinary `Promise`.
    */
   then<R1 = T, R2 = never>(
     onOk?: ((value: T) => R1 | PromiseLike<R1>) | null,
@@ -665,15 +647,15 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
    * The same promise with a deadline, and optionally an `AbortSignal`, wrapped around the wait
    * (WSM-API-012).
    *
-   * Never a second source of the value: `await stream` and `await stream.result()` resolve from one
-   * place, so a second read returns the first read's value rather than the next payload.
+   * `await stream` and `await stream.result()` share one promise, so a second read returns the first
+   * read's value, not the next payload.
    */
   async result(options: ResultOptions = {}): Promise<T> {
     this.claimFor('await');
     return this.wait(options);
   }
 
-  /** The one wait both `await stream` and `result()` go through. */
+  /** The wait shared by `await stream` and `result()`. */
   private wait(options: ResultOptions = {}): Promise<T> {
     const answer = this.memoizedAnswer();
     if (options.timeoutMs === undefined && options.signal === undefined) return answer;
@@ -683,8 +665,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /**
    * Race the memoized promise against the caller's deadline and signal.
    *
-   * `Promise.race` is the natural shield: losing the race does not settle the memoized promise, so a
-   * second await still gets the same answer (WSM-API-011).
+   * Losing the `Promise.race` does not settle the memoized promise, so a second await still receives
+   * the same answer (WSM-API-011).
    */
   private async waitGuarded(answer: Promise<T>, options: ResultOptions): Promise<T> {
     const { timeoutMs, signal } = options;
@@ -717,8 +699,8 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * WSM-ERR-014: a consumer that walked away resets the stream, rather than leaving the remote
-   * producing for nobody, and the abort keeps propagating rather than being swallowed.
+   * WSM-ERR-014: a consumer that aborts resets the stream with `CANCELLED`, so the remote stops
+   * producing, and the abort reason is re-thrown.
    */
   private async abandon(signal: AbortSignal): Promise<never> {
     await this.reset(ResetCode.CANCELLED, 'consumer cancelled');
@@ -731,10 +713,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   private async *iterate(): AsyncGenerator<T> {
-    // A `break`, a `return`, or a throw out of the loop body finalises the generator here. That is
-    // the one form of "the consumer walked away" TypeScript can actually observe, so it is the one
-    // WSM-ERR-014 is honoured on; `reset()` is a no-op if the stream is already closed, so a loop
-    // that exited because of a reset does not send a second one.
+    // A `break`, `return` or throw in the loop body finalises the generator here. This is the only
+    // way TypeScript observes that the consumer stopped iterating, so WSM-ERR-014's reset is sent
+    // here. `reset()` is a no-op on a closed stream, so a loop that ended because of a reset does not
+    // send a second one.
     let walkedAway = true;
     try {
       for (;;) {

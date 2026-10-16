@@ -86,7 +86,7 @@ describe('JsonCodec', () => {
     expect(() => codec.encodePayload({ blob: new Uint8Array([0, 255]) })).toThrow(/WSM-CDC-008/);
   });
 
-  it('refuses everything else JSON cannot represent, rather than losing it silently', () => {
+  it('refuses every other value JSON cannot represent', () => {
     expect(() => codec.encodePayload(Number.NaN)).toThrow(TypeError);
     expect(() => codec.encodePayload(Number.POSITIVE_INFINITY)).toThrow(TypeError);
     expect(() => codec.encodePayload({ big: 1n })).toThrow(TypeError);
@@ -107,7 +107,7 @@ describe('JsonCodec', () => {
     expect(() => codec.decodePayload('{truncated')).toThrow(/reassembled/);
   });
 
-  it('emits compact, un-escaped JSON, which is what lets the ports agree on strings - WSM-FRG-016', () => {
+  it('emits compact, un-escaped JSON, so both ports encode strings identically - WSM-FRG-016', () => {
     const encoded = codec.encode({ type: 'data', stream: 1, payload: { a: 1, b: 'č' } });
     expect(encoded).not.toContain(' ');
     expect(encoded).not.toContain('\\u');
@@ -133,12 +133,12 @@ describe('JsonCodec', () => {
 
 describe('number forms', () => {
   /**
-   * The other half of the pinned WSM-FRG-016 divergence. Python spells these differently, so a
-   * payload carrying one is fragmented at different boundaries by the two ports. Invisible on the
-   * wire - the sender chooses the cuts and the receiver only concatenates - but it bounds what the
-   * shared boundary corpus may contain. See GAPS.md.
+   * The TypeScript side of the pinned WSM-FRG-016 divergence. Python encodes these numbers
+   * differently, so the two ports fragment a payload containing one at different boundaries. This is
+   * not visible on the wire, because the sender chooses the boundaries and the receiver only
+   * concatenates, but the shared boundary corpus must not contain such payloads. See GAPS.md.
    */
-  it('spells some numbers differently from Python, deliberately and knowably', () => {
+  it('encodes some numbers differently from Python, as pinned by WSM-FRG-016', () => {
     const cases: [number, string, string][] = [
       [1.0, '1', '1.0'],
       [-0.0, '0', '-0.0'],

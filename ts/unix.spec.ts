@@ -1,26 +1,25 @@
 /**
  * `ws+unix:` end to end: the same muxws handshake, carried over a filesystem socket.
  *
- * The claim under test is a negative one - that dialling a unix-domain socket changes **nothing**.
- * `ts/node.ts` has one branch for it and no more: the url is split into a file and a request target,
- * and `ws` is handed an ordinary `ws:` url plus a `createConnection` that opens the file. So the bytes
- * on the wire are the GET + `Upgrade` + `Sec-WebSocket-Protocol: muxws.v1.<codec>` every TCP test
- * already pins, and the answer is still 101 or 400. The refusal path in particular runs through
- * `unexpected-response`, an event whose contract over an AF_UNIX request is nowhere written down.
+ * The tests assert that dialling a unix-domain socket changes **nothing** in the protocol.
+ * `ts/node.ts` has one branch for it: the url is split into a file and a request target, and `ws`
+ * receives an ordinary `ws:` url plus a `createConnection` that opens the file. The bytes on the wire
+ * are the GET + `Upgrade` + `Sec-WebSocket-Protocol: muxws.v1.<codec>` the TCP tests pin, and the
+ * answer is 101 or 400. The refusal path runs through `unexpected-response`, an event whose behaviour
+ * over an AF_UNIX request is not documented by `ws`.
  *
- * `ws+unix:` is one url naming two things, and the two ports must read it the same way or a deployment
- * that pastes it into both configurations reaches two different request targets with no error
- * anywhere. Every url shape whose reading differs between `ws`'s own split and
- * `muxws/transports/unix.py`'s is pinned below against the target the acceptor actually saw, which is
- * the only place the agreement is observable.
+ * A `ws+unix:` url names both a socket file and a request target, and the two ports must parse it
+ * identically; otherwise the same url in both configurations reaches two different request targets
+ * without an error. Every url shape that `ws`'s own split and `muxws/transports/unix.py` parse
+ * differently is pinned below against the target the acceptor received.
  *
- * The witnesses are the ones `ts/node.spec.ts` uses over TCP - a raw HTTP status read off the upgrade,
- * and the acceptor's `connection` counter left at zero (WSM-CDC-022) - plus a full round trip through
- * `connect()`, because a transport that handshakes and then cannot carry a frame would satisfy every
- * status assertion.
+ * The checks are those `ts/node.spec.ts` uses over TCP (a raw HTTP status read from the upgrade, and
+ * the acceptor's `connection` counter left at zero, WSM-CDC-022) plus a full round trip through
+ * `connect()`, because a transport that completes the handshake and then cannot carry a frame would
+ * pass every status assertion.
  *
- * The whole unix half skips on Windows, which has no AF_UNIX. The browser-entry block at the bottom
- * does not: it never opens anything.
+ * The unix tests are skipped on Windows, which has no AF_UNIX. The browser-entry block at the bottom
+ * is not skipped: it opens no socket.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -35,14 +34,14 @@ import { type Codec, JsonCodec } from './codec';
 import { CodecMismatch, MuxwsError, TransportUnsupportedError, TransportUrlError } from './errors';
 import { Reconnect, UnixUrlError, WsUrlError, connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
 
-// Importing the browser entry point is also what registers the JSON codec (WSM-CDC-004), which
-// `ts/node.ts` deliberately does not do; here it is imported for its `connect` as well - the two
-// entry points disagree about `ws+unix:` on purpose, and this file asserts both halves.
+// Importing the browser entry point registers the JSON codec (WSM-CDC-004), which `ts/node.ts` does
+// not do. It is also imported for its `connect`: the two entry points handle `ws+unix:` differently,
+// and this file tests both.
 import { UnixSocketsUnsupportedError, connect as platformConnect } from './index';
 
 // --------------------------------------------------------------------------- the harness
 
-/** The request target and `Host` the acceptor was actually given, which is half of what is claimed. */
+/** The request target and `Host` the acceptor received. */
 interface Seen {
   url: string | undefined;
   host: string | undefined;
@@ -62,18 +61,18 @@ interface UnixAcceptor {
 }
 
 /**
- * A real `ws` acceptor on a socket file, built the way the documentation tells an application to.
+ * A real `ws` acceptor on a socket file, built as the documentation describes for applications.
  *
- * `WebSocketServer` cannot listen on a path itself, so this is the recipe: an `http.Server` bound to
- * the socket file, `{ server }` rather than `{ port }`, and both handshake hooks - `handleProtocols`
- * to select and `refuseMismatchedUpgrade` to refuse, of which no acceptor may install only half.
+ * `WebSocketServer` cannot listen on a path itself, so the acceptor uses an `http.Server` bound to
+ * the socket file, `{ server }` instead of `{ port }`, and both handshake hooks: `handleProtocols`
+ * to select and `refuseMismatchedUpgrade` to refuse. An acceptor must install both.
  *
  * The directory comes from `mkdtemp` under the OS temp dir with a two-character prefix: `sun_path`
- * caps a socket address at ~108 bytes, and an overrun produces `EINVAL: invalid argument <the whole
- * path>`, which never mentions the length.
+ * limits a socket address to ~108 bytes, and a longer path produces `EINVAL: invalid argument <the
+ * whole path>`, which does not mention the length.
  *
- * `existing` is for the one test that needs two acceptors at the same path in sequence: a socket file
- * is not a port, and a reconnect has to reach the **new** inode a restarted acceptor binds there.
+ * `existing` is for the test that needs two acceptors at the same path in sequence: a reconnect must
+ * reach the **new** inode a restarted acceptor binds at that path.
  */
 async function startUnixAcceptor(existing?: string): Promise<UnixAcceptor> {
   let handshakes = 0;
@@ -87,8 +86,8 @@ async function startUnixAcceptor(existing?: string): Promise<UnixAcceptor> {
   server.on('connection', (socket, request) => {
     handshakes += 1;
     seen = { url: request.url, host: request.headers.host };
-    // The `.catch` belt `ts/node.spec.ts` explains: `serve()` returns quietly on `CodecMismatch`, and
-    // an unhandled rejection out of a `ws` connection handler takes the process with it.
+    // Redundant `.catch`, as in `ts/node.spec.ts`: `serve()` returns on `CodecMismatch`, and an
+    // unhandled rejection in a `ws` connection handler terminates the process.
     void serve(socket, {
       handler: (payload, stream) => {
         received.push(payload);
@@ -104,12 +103,11 @@ async function startUnixAcceptor(existing?: string): Promise<UnixAcceptor> {
     handshakes: () => handshakes,
     seen: () => seen,
     received: () => received,
-    // Both servers, in this order: `wss.close()` does not close a server it was merely handed.
-    // Closing the `http.Server` is also what unlinks the socket file, so a leaked one is a stale file
-    // the next run binds against - and it does not finish while a connection is still open, which is
-    // why the live ones are terminated first rather than waited for. The directory outlives this call
-    // on purpose: the reconnect test closes one acceptor and binds the next at the same path, so
-    // removing it here would take the path with it. `afterEach` owns the directory.
+    // Both servers, in this order: `wss.close()` does not close a server passed to it. Closing the
+    // `http.Server` unlinks the socket file; a server left open leaves a stale file for the next run.
+    // It does not finish while a connection is open, so open connections are terminated first. The
+    // directory is kept: the reconnect test closes one acceptor and binds the next at the same path.
+    // `afterEach` removes the directory.
     close: async () => {
       server.clients.forEach((client) => client.terminate());
       server.close();
@@ -126,9 +124,9 @@ interface Answer {
 /**
  * `ts/node.spec.ts`'s `upgrade()` with `socketPath` where the host and port were.
  *
- * That one substitution is the entire difference between the two transports at the HTTP layer, and
- * spelling it out here is the point: the request, the headers and the two events answering it are
- * unchanged, so a status code is available as a witness over a socket file exactly as it is over TCP.
+ * This substitution is the only difference between the two transports at the HTTP layer: the
+ * request, the headers and the two response events are unchanged, so the status code can be read
+ * over a socket file as over TCP.
  */
 function upgradeOverUnix(socketPath: string, path: string, offered: string): Promise<Answer> {
   return new Promise<Answer>((resolve, reject) => {
@@ -160,7 +158,7 @@ function upgradeOverUnix(socketPath: string, path: string, offered: string): Pro
   });
 }
 
-/** Poll until `predicate` holds, as `ts/reconnect.spec.ts` does: a supervisor answers on its own clock. */
+/** Poll until `predicate` holds, as `ts/reconnect.spec.ts` does: a supervisor runs on its own timers. */
 async function until(predicate: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -169,7 +167,7 @@ async function until(predicate: () => boolean, what: string, timeoutMs = 2000): 
   }
 }
 
-/** A codec whose only interesting property is its **name**, so the dialer offers `muxws.v1.msgpack`. */
+/** A codec used only for its **name**, so the dialer offers `muxws.v1.msgpack`. */
 function msgpackish(): Codec {
   const json = new JsonCodec();
   return {
@@ -194,9 +192,9 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   afterEach(async () => {
     vi.restoreAllMocks();
     await acceptor.close();
-    // `mkdtemp` has no context manager to lean on the way Python's `TemporaryDirectory` does in
-    // `websockets_test.py`, so without this the suite leaves one empty directory per test in the OS
-    // temp dir. `force` because a test that failed before the socket was bound must still tear down.
+    // `mkdtemp` has no context manager like Python's `TemporaryDirectory` in `websockets_test.py`, so
+    // without this the suite leaves one empty directory per test in the OS temp dir. `force`, because
+    // a test that failed before the socket was bound must still clean up.
     rmSync(acceptor.directory, { recursive: true, force: true });
   });
 
@@ -209,20 +207,19 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
       await peer.close();
     }
 
-    // A handshake actually happened here, on this acceptor. Without the counter a dial that had
-    // somehow reached anything else would satisfy the assertion above just as well.
+    // The handshake happened on this acceptor. Without the counter, a dial that reached another
+    // server would also satisfy the assertion above.
     expect(acceptor.handshakes()).toBe(1);
-    // And the two halves of the url arrived where they belong: the part before the ':' opened the
-    // file, the part after it became the request target. The `Host` is node's default for an empty
-    // authority, and it is the value the Python port synthesises as `uri="ws://localhost<route>"` -
-    // which is what makes the two ports put the same bytes on the wire for the same url.
+    // The part of the url before the ':' opened the file, and the part after it became the request
+    // target. The `Host` is node's default for an empty authority and equals the value the Python
+    // port builds as `uri="ws://localhost<route>"`, so both ports send the same bytes for the same url.
     expect(acceptor.seen()).toEqual({ url: '/route', host: 'localhost' });
   });
 
   it('defaults the request target to / when the url carries no route', async () => {
-    // `ws+unix:///path.sock` with no ':' at all is the short form the documentation shows first.
-    // `unixTarget` supplies the '/' rather than leaving the target empty, so the two ports send the
-    // same request line for the same url.
+    // `ws+unix:///path.sock` without ':' is the short form the documentation shows first.
+    // `unixTarget` supplies '/' instead of an empty target, so the two ports send the same request
+    // line for the same url.
     const peer = await connect(`ws+unix://${acceptor.path}`);
 
     try {
@@ -235,10 +232,10 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it('splits on the first colon only, so a target may contain one', async () => {
-    // The row `only-the-first-colon-splits` in `muxws/transports/unix_test.py` is the Python half of
-    // this claim: the two ports must reach the same request target for the same url. Handed to `ws`
-    // unparsed these would be `/ws` and `/r?t=a` - `ws` runs `opts.path.split(':')` and keeps
-    // `parts[1]` - a truncation invisible from the dialling end.
+    // The row `only-the-first-colon-splits` in `muxws/transports/unix_test.py` is the Python
+    // counterpart: both ports must reach the same request target for the same url. Passed to `ws`
+    // unparsed these would become `/ws` and `/r?t=a` (`ws` runs `opts.path.split(':')` and keeps
+    // `parts[1]`), a truncation the dialer does not see.
     for (const [route, expected] of [
       [':/ws:v2', '/ws:v2'],
       [':/r?t=a:b', '/r?t=a:b'],
@@ -255,21 +252,18 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it('refuses a request target that is not an absolute path, by name', async () => {
-    // The twin of `test_a_request_target_that_is_not_an_absolute_path_is_refused`, and the reason
-    // both ports check it rather than letting the dial happen: `ws://localhost` + `ws` is
-    // `ws://localhostws`, a valid url, so the target folds into the authority and the dial reaches the
-    // right file asking for `/` with a `Host` nobody chose. Against an acceptor that does not route -
-    // this one, and `unix_serve` - that handshake *succeeds*. Handed to `ws` instead it becomes
-    // `GET route HTTP/1.1`, which node answers 400 and `dialWs` reads as a refused codec, pointing at
-    // `MUXWS_CODEC` for a typo in a url. Neither outcome is acceptable, so the url never becomes a
-    // request.
+    // Counterpart of `test_a_request_target_that_is_not_an_absolute_path_is_refused`. Both ports
+    // refuse the url before dialling: `ws://localhost` + `ws` is `ws://localhostws`, a valid url, so
+    // the target becomes part of the authority and the dial requests `/` from the correct file with
+    // an unintended `Host`. Against an acceptor that does not route (this one, and `unix_serve`) that
+    // handshake succeeds. Passed to `ws` directly, it becomes `GET route HTTP/1.1`, which node answers
+    // with 400 and `dialWs` reports as a refused codec, pointing at `MUXWS_CODEC` for a url typo.
     const caught = await connect(`ws+unix://${acceptor.path}:route`).then(
       () => null,
       (error: unknown) => error,
     );
 
-    // A `MuxwsError`, so an application wrapping its dials in one `instanceof MuxwsError` handler
-    // catches this one too (WSM-ERR-016).
+    // A `MuxwsError`, so an `instanceof MuxwsError` handler around a dial catches it (WSM-ERR-016).
     expect(caught).toBeInstanceOf(UnixUrlError);
     expect(caught).toBeInstanceOf(TransportUrlError);
     expect(caught).toBeInstanceOf(MuxwsError);
@@ -279,11 +273,10 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it('refuses a url that names no socket file, before `ws` is asked to read it', async () => {
-    // `ws+unix://` parses - the authority is empty and so is the path - and there is nothing in it to
-    // open. Left to `ws` it comes back as `SyntaxError: The URL's pathname is empty`, which is true
-    // of the string and silent about the shape a ws+unix: url is supposed to have; the reader who
-    // wrote `ws+unix://run`, putting the file in the authority, needs the shape. Refused here for
-    // the same reason `parse_unix_url` refuses it, and by the same class name.
+    // `ws+unix://` parses with an empty authority and an empty path, so it names no file. `ws`
+    // reports `SyntaxError: The URL's pathname is empty`, which does not describe the expected form
+    // of a ws+unix: url; a caller who wrote `ws+unix://run`, with the file in the authority, needs
+    // that form. Refused here as `parse_unix_url` refuses it, with the same class name.
     const caught = await connect('ws+unix://').then(
       () => null,
       (error: unknown) => error,
@@ -296,10 +289,10 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it('answers a mismatched offer with HTTP 400 on the upgrade - WSM-CDC-022', async () => {
-    // The direct twin of the Python proof, and the assertion no dial in this language can make: a
-    // dialer reports `CodecMismatch` whether the acceptor refused the upgrade with 400 or completed
-    // it and was caught afterwards by WSM-CDC-028. Only the raw status tells the two apart, so only
-    // this test can show that a unix socket did not quietly demote the refusal to the later check.
+    // Counterpart of the Python test. A dialer reports `CodecMismatch` both when the acceptor refused
+    // the upgrade with 400 and when it completed the upgrade and WSM-CDC-028 detected the mismatch
+    // afterwards. Only the raw status distinguishes the two, so this test checks that the refusal
+    // over a unix socket is a 400.
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(await upgradeOverUnix(acceptor.path, '/route', 'muxws.v1.msgpack')).toEqual({
@@ -308,7 +301,7 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
     });
     expect(acceptor.handshakes(), 'a refused upgrade must never reach the connection handler').toBe(0);
 
-    // Without this the 400 above is also what an acceptor refusing everybody would answer.
+    // Control: an acceptor that refuses every offer would also pass the 400 test above.
     expect(await upgradeOverUnix(acceptor.path, '/route', 'muxws.v1.json')).toEqual({
       status: 101,
       protocol: 'muxws.v1.json',
@@ -325,9 +318,9 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
     );
 
     expect(caught).toBeInstanceOf(CodecMismatch);
-    // The full diagnostic, not just the class: this is the `unexpected-response` branch of `dialWs`,
-    // which reads the status off the response object, and the whole question here is whether that
-    // event still carries one when the request rode an AF_UNIX socket instead of a TCP one.
+    // The full diagnostic, not only the class: this is the `unexpected-response` branch of `dialWs`,
+    // which reads the status from the response object. The test checks that the event carries a
+    // status when the request uses an AF_UNIX socket instead of TCP.
     const message = (caught as Error).message;
     expect(message).toContain('msgpack');
     expect(message).toContain('MUXWS_CODEC');
@@ -335,10 +328,8 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it('leaves a socket file that does not exist as its own error', async () => {
-    // The unix twin of the ECONNREFUSED tests in `ts/node.spec.ts`, and for the same reason: `dialWs`
-    // must not read a missing acceptor as a codec mismatch. Nothing is listening, so nothing refused
-    // anything, and sending the reader off to check MUXWS_CODEC on both ends would be a wrong answer
-    // delivered confidently.
+    // Unix counterpart of the ECONNREFUSED tests in `ts/node.spec.ts`: `dialWs` must not report a
+    // missing acceptor as a codec mismatch. Nothing is listening, so no codec was refused.
     const caught = await connect(`ws+unix://${acceptor.directory}/missing.sock:/route`).then(
       () => null,
       (error: unknown) => error,
@@ -350,9 +341,9 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it("rejects wss+unix:, which is not a scheme, as this port's own grammar error", async () => {
-    // Left to `ws` the refusal lists the schemes **`ws`** takes, which reads as though `ws+unix:` were
-    // `ws`'s feature rather than muxws's grammar. The refusal is this module's, so the class is too
-    // (WSM-ERR-016), and it says why there is no TLS to offer rather than only that there is none.
+    // The refusal from `ws` lists the schemes **`ws`** accepts, as if `ws+unix:` were a `ws` feature
+    // and not muxws url syntax. The refusal comes from this module, so the class does too
+    // (WSM-ERR-016), and the message states why there is no TLS variant.
     const caught = await connect(`wss+unix://${acceptor.path}:/route`).then(
       () => null,
       (error: unknown) => error,
@@ -365,12 +356,11 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
   });
 
   it('reconnects across a re-created socket file - WSM-RCN-020/030', async () => {
-    // The twin of `test_a_peer_reconnects_across_a_re_created_socket_file`: a socket file is not a
-    // port. The acceptor's file is unlinked when it closes and the next acceptor binds a *new* inode
-    // at the same name, so a dialer that resolved the path once - to a descriptor, or to anything
-    // else - reconnects to a socket nobody is listening on and hangs. The dial closure re-runs
-    // `unixTarget` and `net.connect` from the url every time, and this is what stops the connector
-    // being hoisted out of it.
+    // Counterpart of `test_a_peer_reconnects_across_a_re_created_socket_file`. The acceptor's file is
+    // unlinked when it closes and the next acceptor binds a new inode at the same name, so a dialer
+    // that resolved the path once (to a descriptor or anything else) reconnects to a socket nothing
+    // listens on and hangs. The dial closure runs `unixTarget` and `net.connect` from the url on every
+    // dial; this test fails if the connector is moved out of the closure.
     const path = acceptor.path;
     const reconnects: number[] = [];
     const peer = await connect(`ws+unix://${path}:/route`, {
@@ -384,13 +374,13 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
       expect(acceptor.received()).toEqual([{ tab: 'abc' }]);
 
       await acceptor.close();
-      // Reassigned so `afterEach` closes the live acceptor and not the corpse: closing a
-      // `WebSocketServer` twice emits an `error` with nothing listening for it.
+      // Reassigned so `afterEach` closes the running acceptor and not the closed one: closing a
+      // `WebSocketServer` twice emits an `error` with no listener.
       acceptor = await startUnixAcceptor(path);
 
       await until(() => reconnects.length === 1, 'onReconnect');
       expect(acceptor.received(), 'the hello is replayed verbatim on the new inode').toEqual([{ tab: 'abc' }]);
-      // And the new connection is a working one, not merely an open one.
+      // The new connection carries a request, not only opens.
       expect(await peer.request({ after: 'the reconnect' })).toEqual({ echo: { after: 'the reconnect' } });
     } finally {
       await peer.close();
@@ -401,25 +391,23 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
 // --------------------------------------------------------------------------- the url, without a socket
 
 describe('the ws+unix: grammar, where no socket is needed to read it', () => {
-  // No skip: `new URL()` is the same parser everywhere, which is the whole point of the test below.
+  // No skip: `new URL()` is the same parser on every platform.
   it('cannot address a Windows named pipe, whatever the platform', async () => {
-    // `net.connect({ path })` does open a named pipe on Windows, but `\\.\pipe\name` cannot be got
-    // into a url at all: a backslash is a forbidden code point in the authority of a non-special
-    // scheme, so the WHATWG parser rejects the string on Linux exactly as it would on Windows. The
-    // near misses fail too, and are recorded here so nobody re-derives them: `ws+unix:///\\.\pipe\name`
-    // parses to the socket path `/\\.\pipe\name`, which has a leading slash and is not a pipe name,
-    // and percent-encoding the backslashes collapses the authority instead. So `muxws/node` has no
-    // Windows named-pipe transport to protect, and no `UnixSocketsUnsupportedError` to raise: what a
-    // Windows reader gets for a POSIX-looking path is a connect error naming the path.
+    // `net.connect({ path })` opens a named pipe on Windows, but `\\.\pipe\name` cannot be written as
+    // a url: a backslash is a forbidden code point in the authority of a non-special scheme, so the
+    // WHATWG parser rejects the string on Linux as on Windows. Similar forms also fail:
+    // `ws+unix:///\\.\pipe\name` parses to the socket path `/\\.\pipe\name`, which has a leading slash
+    // and is not a pipe name, and percent-encoding the backslashes collapses the authority. Therefore
+    // `muxws/node` has no Windows named-pipe transport and raises no `UnixSocketsUnsupportedError`; on
+    // Windows, a POSIX-style path produces a connect error naming the path.
     const caught = await connect(String.raw`ws+unix://\\.\pipe\name:/route`).then(
       () => null,
       (error: unknown) => error,
     );
 
-    // `unixTarget` cannot read it either, so it is not this port's grammar that refuses it: the
-    // string reaches `ws`, `ws` says `Invalid URL`, and that sentence is framed rather than replaced
-    // (WSM-ERR-016). The `cause` is where the platform's own diagnosis is kept - a translation that
-    // dropped it would leave a reader with muxws's paraphrase of a parse it did not perform.
+    // `unixTarget` cannot parse it either, so the refusal does not come from this port's url syntax:
+    // the string reaches `ws`, `ws` reports `Invalid URL`, and that message is wrapped, not replaced
+    // (WSM-ERR-016). The platform's error is kept as `cause`.
     expect(caught).toBeInstanceOf(WsUrlError);
     expect(caught).toBeInstanceOf(TransportUrlError);
     expect(caught).toBeInstanceOf(MuxwsError);
@@ -433,8 +421,8 @@ describe('the ws+unix: grammar, where no socket is needed to read it', () => {
 // --------------------------------------------------------------------------- the other entry point
 
 describe('the platform entry point refuses ws+unix: before it opens anything', () => {
-  // No skip: the guard is a string comparison, so it is as true on Windows as anywhere, and a
-  // developer there must still get the message rather than a platform DOMException.
+  // No skip: the guard is a string comparison and behaves identically on Windows, where a developer
+  // must also get this message and not a platform DOMException.
   it('names muxws/node as the entry point that can dial a socket file', async () => {
     const caught = await platformConnect('ws+unix:///run/app.sock:/route').then(
       () => null,
@@ -442,22 +430,22 @@ describe('the platform entry point refuses ws+unix: before it opens anything', (
     );
 
     // A `UnixSocketsUnsupportedError`, not a `TransportUrlError`: the url is correct and `muxws/node`
-    // dials it, so there is nothing here for the reader to retype (WSM-ERR-016).
+    // dials it (WSM-ERR-016).
     expect(caught).toBeInstanceOf(UnixSocketsUnsupportedError);
     expect(caught).toBeInstanceOf(TransportUnsupportedError);
     expect(caught).toBeInstanceOf(MuxwsError);
     expect(caught).not.toBeInstanceOf(TransportUrlError);
-    // Asserted on **our** words only. What the platform says instead differs by runtime - undici says
-    // `expected a ws: or wss: url`, jsdom says the scheme must be 'ws' or 'wss' - and both leave the
-    // reader to discover on their own that a subpath export exists which would have worked.
+    // Asserted on the muxws message only. The platform message differs by runtime (undici:
+    // `expected a ws: or wss: url`; jsdom: the scheme must be 'ws' or 'wss'), and neither names the
+    // subpath export that can dial the url.
     expect((caught as Error).message).toContain('muxws/node');
     expect((caught as Error).message).toContain('ws+unix:');
   });
 
-  it('folds the scheme and ignores surrounding space, because the url parser would have', async () => {
-    // `new URL('WS+UNIX://...')` normalises the scheme and strips leading whitespace, so a guard that
-    // compared raw text would wave through exactly the urls the platform is about to refuse anyway -
-    // and the reader would be back to reading someone else's prose for a typo of muxws's own feature.
+  it('compares the scheme case-insensitively and ignores surrounding space, as the url parser does', async () => {
+    // `new URL('WS+UNIX://...')` normalises the scheme and strips leading whitespace. A guard that
+    // compared raw text would pass these urls to the platform, which refuses them with its own
+    // message.
     const caught = await platformConnect('  WS+Unix:///run/app.sock').then(
       () => null,
       (error: unknown) => error,
@@ -468,22 +456,20 @@ describe('the platform entry point refuses ws+unix: before it opens anything', (
   });
 
   it('leaves every other url to the platform, malformed ones included', async () => {
-    // The guard must not become the library's url validator. `new URL('nonsense')` throws
-    // `ERR_INVALID_URL`, which is a different error for a different mistake, and replacing the
-    // platform's diagnostic for every bad url with one about unix sockets would be a net loss.
+    // The guard is not a general url validator. `new URL('nonsense')` throws `ERR_INVALID_URL`, a
+    // different error for a different mistake, and the platform's diagnostic is kept.
     const caught = await platformConnect('nonsense').then(
       () => null,
       (error: unknown) => error,
     );
 
-    // Not `toBeInstanceOf(Error)`: what comes back is whatever the runtime threw, and under jsdom
-    // that is a `DOMException` which is not an `Error` at all. Pinning its class would pin the test
-    // environment; the claim is only that muxws did not intercept it.
+    // Not `toBeInstanceOf(Error)`: the rejection is whatever the runtime threw, and under jsdom that
+    // is a `DOMException`, which is not an `Error`. The test asserts only that muxws did not intercept
+    // it.
     expect(caught).not.toBeNull();
     expect(caught).not.toBeInstanceOf(TypeError);
-    // The scheme guard did not claim a url that was merely malformed: a `ws+unix:` refusal names an
-    // entry point that would have worked, and saying that about `nonsense` would be a wrong answer
-    // delivered confidently.
+    // The scheme guard does not handle a malformed url: a `ws+unix:` refusal names another entry
+    // point, which would be wrong for `nonsense`.
     expect(caught).not.toBeInstanceOf(UnixSocketsUnsupportedError);
     expect(String((caught as Error).message)).not.toContain('muxws/node');
   });

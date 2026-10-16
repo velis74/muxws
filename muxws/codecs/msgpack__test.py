@@ -1,10 +1,9 @@
 """The msgpack codec: round-trip only, no pinned bytes, and no registration on import.
 
-Every assertion here is `decode(encode(frame)) == frame` (WSM-CDC-006). Not one of them compares
-against a byte string, and none may ever: this library and `@msgpack/msgpack` make different but
-equally valid choices about integer width and map format, so a pinned wire would fail a legal
-encoder. The logical corpus is shared with the JSON tests, which is the point - the same frames go
-through a second codec and come back the same frames.
+Every assertion here is `decode(encode(frame)) == frame` (WSM-CDC-006). None compares against a byte
+string: this library and `@msgpack/msgpack` make different but valid choices about integer width and
+map format, so a pinned wire would fail a conforming encoder. The logical corpus is shared with the
+JSON tests, so the same frames pass through a second codec.
 """
 
 from __future__ import annotations
@@ -19,9 +18,8 @@ from typing import Any
 
 import pytest
 
-# `msgpack` is an optional extra (WSM-PKG-002) and the suite must pass with it absent, so the
-# decision to skip has to be taken before anything that imports it. That is what puts the remaining
-# imports below this line, and why they carry E402.
+# `msgpack` is an optional extra (WSM-PKG-002) and the suite must pass without it, so the skip runs
+# before anything that imports it. The remaining imports follow this line and carry E402.
 msgpack = pytest.importorskip("msgpack", reason="msgpack is an optional extra (WSM-PKG-002)")
 
 from muxws.codecs import get_codec, register_codec, registered_codecs  # noqa: E402
@@ -48,8 +46,8 @@ def registered() -> Any:
     """Register msgpack for the duration of one test, and unregister it afterwards.
 
     The registry is process state (WSM-CDC-013), and `codecs/registry_test.py` asserts that
-    `get_codec("msgpack")` raises. A test that left the name behind would make that one pass or fail
-    depending on collection order.
+    `get_codec("msgpack")` raises. A registration left behind would make that test depend on
+    collection order.
     """
     from muxws.codecs import _REGISTRY
 
@@ -74,9 +72,9 @@ def test_binary_is_declared_true(codec: MsgpackCodec):
 def test_round_trip_over_the_whole_frame_corpus(case: dict[str, Any], codec: MsgpackCodec):
     """WSM-CDC-006: the only conformance a non-JSON codec gets is `decode(encode(frame)) == frame`.
 
-    `case["json_wire"]` is deliberately not read. It is the JSON codec's contract, and asserting a
-    second codec against it - or against a msgpack wire of our own - would pin bytes that a legal
-    encoder is entitled to spell differently.
+    `case["json_wire"]` is not read. It is the JSON codec's contract, and asserting a second codec
+    against it, or against a pinned msgpack wire, would pin bytes that a conforming encoder may
+    encode differently.
     """
     frame = from_mapping(case["frame"])
     encoded = codec.encode(frame)
@@ -85,11 +83,10 @@ def test_round_trip_over_the_whole_frame_corpus(case: dict[str, Any], codec: Msg
 
 
 def test_the_corpus_covers_every_v1_frame_type():
-    """A corpus that shrank would leave every parametrized test above trivially green.
+    """Every v1 frame type is in the corpus, so the parametrized test above covers all of them.
 
-    Asserted here and not only in the JSON tests, because this is the file whose whole content is
-    "the corpus, through a second codec": if it were down to three entries the round-trip above
-    would still be a green tick.
+    Asserted here as well as in the JSON tests, because this file runs the corpus through the second
+    codec, and the round-trip test above passes for a corpus of any size.
     """
     assert len(CORPUS) > 10
     assert len({case["name"] for case in CORPUS}) == len(CORPUS)
@@ -99,11 +96,10 @@ def test_the_corpus_covers_every_v1_frame_type():
 def test_no_msgpack_wire_is_pinned_anywhere_in_the_corpus():
     """WSM-CDC-006: the corpus may pin a JSON wire and nothing else.
 
-    Greps for the key rather than for a byte pattern, because the way this rule gets broken is
-    somebody adding a fourth column - `msgpack_wire`, `wire_hex` - next to `json_wire`, not somebody
-    smuggling raw bytes into a JSON string. `max_frame_bytes` is not a wire at all: it is the
-    runner's construction argument (WSM-FRG-005), which is why the match is on the suffix and not on
-    the word "bytes".
+    Searches for keys rather than byte patterns: a pinned msgpack wire would be a key such as
+    `msgpack_wire` or `wire_hex` next to `json_wire`. `max_frame_bytes` is not a wire but the
+    runner's construction argument (WSM-FRG-005), so the match is on the key suffix and not on the
+    word "bytes".
     """
     offenders: list[str] = []
     for path in sorted(_CONFORMANCE.rglob("*.json")):
@@ -121,7 +117,7 @@ def _every_key(node: Any) -> list[str]:
     return []
 
 
-# ---------------------------------------------------------------------- the deliberate kwargs
+# ---------------------------------------------------------------------- packer and unpacker options
 
 
 def test_decoded_strings_are_text_not_bytes(codec: MsgpackCodec):
@@ -133,13 +129,12 @@ def test_decoded_strings_are_text_not_bytes(codec: MsgpackCodec):
 
 
 def test_a_payload_with_an_integer_map_key_decodes_rather_than_killing_the_connection(codec: MsgpackCodec):
-    """`strict_map_key=False`. The default raises on a non-string key, which is not muxws's call.
+    """`strict_map_key=False`. The msgpack default raises on a non-string map key.
 
-    muxws does not police what an application puts in a payload; a `ValueError` from the unpacker
-    would surface as a decode failure and take the whole connection down (WSM-FRM-005) over a map
-    the sender was entitled to build. `@msgpack/msgpack` accepts such a key by default, so this is
-    also what keeps the two ports agreeing on which payloads are decodable at all - though not on
-    the result, since a JavaScript object key is a string. See GAPS.md.
+    muxws does not restrict the content of an application payload; a `ValueError` from the unpacker
+    would be a decode failure and close the connection (WSM-FRM-005) for a valid map.
+    `@msgpack/msgpack` accepts such a key by default, so with this setting both ports decode the same
+    payloads, though with different results, since a JavaScript object key is a string.
     """
     assert codec.decode_payload(codec.encode_payload({1: "a"})) == {1: "a"}
 
@@ -167,8 +162,8 @@ def test_bytes_payload_survives_msgpack_round_trip(codec: MsgpackCodec):
 
 
 def test_bytes_and_text_stay_distinguishable(codec: MsgpackCodec):
-    """`use_bin_type=True`. Collapsing bin into str would round-trip inside one language and only
-    fail against the other port, which is the worst place to discover it."""
+    """`use_bin_type=True`. Collapsing bin into str would round-trip within one language and fail
+    only against the other port."""
     assert codec.decode_payload(codec.encode_payload(b"ab")) == b"ab"
     assert codec.decode_payload(codec.encode_payload("ab")) == "ab"
 
@@ -176,8 +171,8 @@ def test_bytes_and_text_stay_distinguishable(codec: MsgpackCodec):
 def test_json_codec_refuses_bytes_rather_than_base64_encoding_them():
     """WSM-CDC-008's other half: under JSON, bytes are not a payload type and muxws does not invent one.
 
-    The base64 of `b"\\x00\\xff"` is `AP8=`; asserting it is absent is what makes this test fail if
-    somebody "helpfully" adds an encoder rather than a refusal.
+    The base64 of `b"\\x00\\xff"` is `AP8=`; asserting its absence makes this test fail if the codec
+    encodes bytes instead of refusing them.
     """
     json_codec = JsonCodec()
     with pytest.raises(TypeError, match="WSM-CDC-008") as info:
@@ -187,8 +182,7 @@ def test_json_codec_refuses_bytes_rather_than_base64_encoding_them():
     with pytest.raises(TypeError, match="WSM-CDC-008"):
         json_codec.encode_payload({"blob": b"\x00\xff"})
 
-    # And the same bytes that JSON refuses are ordinary payload under msgpack. One codec's refusal
-    # is the other's feature; that contrast is the rule.
+    # The same bytes that JSON refuses are an ordinary payload under msgpack.
     assert MsgpackCodec().decode_payload(MsgpackCodec().encode_payload(b"\x00\xff")) == b"\x00\xff"
 
 
@@ -221,8 +215,8 @@ def test_a_non_map_message_is_a_protocol_error(codec: MsgpackCodec):
 def test_a_text_message_is_a_protocol_error_not_a_recoding(codec: MsgpackCodec):
     """WSM-CDC-002: a binary codec is chosen by declaration, so text on the wire is the remote's bug.
 
-    There is no recoding that could recover the bytes - the transport has already lost them - so
-    inventing one would turn a detectable violation into silent corruption.
+    No recoding can recover the bytes, because the transport has already lost them, so a recoding
+    would turn a detectable violation into silent corruption.
     """
     with pytest.raises(ProtocolError, match="text"):
         codec.decode('{"type":"ping"}')
@@ -249,10 +243,9 @@ def test_msgpack_codec_does_not_register_itself_on_import():
 
     assert "msgpack" not in registered_codecs()
 
-    # Importing it a second time must not register it either - and in Python an import that already
-    # happened is a no-op, so the registry check above cannot see a module-scope call on its own.
-    # Reading where the call is written is what actually decides it, exactly as `registry_test.py`
-    # does for the JSON codec.
+    # A repeated import is a no-op in Python, so the registry check above cannot detect a
+    # module-scope `register_codec` call. The source is read instead, as `registry_test.py` does for
+    # the JSON codec.
     tree = ast.parse(inspect.getsource(module))
     module_scope_calls = [
         node
@@ -274,12 +267,10 @@ def test_no_dynamic_import_machinery_in_the_codec_module():
     for forbidden in ("import_module", "entry_points", "find_spec", "__import__", "pkgutil"):
         assert forbidden not in source
 
-    # The names above catch the machinery that is spelled out; this catches the one that is not, and
-    # it is the likelier violation - the honest reason to reach for it is "let the suite pass without
-    # the extra installed". A guarded import indents its `import` under `try:`, and a lazy import
-    # indents it inside a function, so `col_offset` is the whole tell: no forbidden literal can match
-    # either spelling, because the import that follows `try:` is itself indented. Both turn
-    # WSM-INV-015's loud startup failure into a deployment that believes it runs msgpack and does not.
+    # The names above detect explicit import machinery. The check below detects a guarded import
+    # (`import` under `try:`) and a lazy import (inside a function), both of which have a non-zero
+    # `col_offset`; no forbidden literal matches either. Both would replace WSM-INV-015's startup
+    # failure with a deployment configured for msgpack that does not run it.
     nested = [
         node
         for node in ast.walk(ast.parse(source))
@@ -294,12 +285,11 @@ def test_no_dynamic_import_machinery_in_the_codec_module():
 def test_msgpack_fragment_boundaries_are_byte_boundaries(codec: MsgpackCodec):
     """WSM-FRG-003: under a binary codec the length that matters is the produced buffer's.
 
-    `len()` on the encoded bytes here rather than `encoded_length`, so the assertion measures the
-    thing the rule names instead of trusting the helper it is meant to police, and the two bounds
-    catch the two ways of getting it wrong. Under-counting - decoding the buffer to text and
-    counting characters - puts a fragment over the cap. Over-counting - measuring `repr()`, or
-    UTF-16 units - keeps every fragment legal but shrinks it, so the constant slice size is what
-    fails. Neither would be visible from the cap check alone.
+    Uses `len()` on the encoded bytes rather than `encoded_length`, so the assertion does not depend
+    on the helper under test. The two bounds detect two errors. Under-counting (decoding the buffer
+    to text and counting characters) puts a fragment over the cap. Over-counting (measuring `repr()`
+    or UTF-16 units) keeps every fragment under the cap but makes it smaller, so the constant slice
+    size check fails. The cap check alone detects neither.
     """
     cap = 512
     blob = bytes(range(256)) * 12
@@ -309,8 +299,8 @@ def test_msgpack_fragment_boundaries_are_byte_boundaries(codec: MsgpackCodec):
     sizes = [len(codec.encode(part)) for part in parts]
     assert max(sizes) <= cap
 
-    # The indivisible unit under a binary codec is one byte (WSM-FRG-012), so the splitter takes a
-    # whole budget of them every time and only the last fragment is short.
+    # The indivisible unit under a binary codec is one byte (WSM-FRG-012), so every fragment except
+    # the last carries a full budget.
     carried = [len(part.fragment) for part in parts]
     assert len(set(carried[:-1])) == 1, f"fragments carry different amounts of payload: {carried}"
     assert carried[0] >= cap // 4, f"fragments are far under the cap, so something over-counts: {carried}"
@@ -330,9 +320,8 @@ def test_msgpack_fragment_boundaries_are_byte_boundaries(codec: MsgpackCodec):
 class _SpySocket:
     """A `SocketAdapter` that records which send method the peer reached for.
 
-    It delegates to a real `MemorySocket` rather than swallowing the traffic, so the peer on the
-    other end still answers and the test that watches the send path is the same test that proves the
-    connection works.
+    It delegates to a real `MemorySocket`, so the peer on the other end answers and the same test
+    checks both the send method and a working connection.
     """
 
     def __init__(self, inner: MemorySocket) -> None:
@@ -359,12 +348,12 @@ class _SpySocket:
         await self._inner.close(code, reason)
 
 
-class _LyingCodec(MsgpackCodec):
+class _MisdeclaredCodec(MsgpackCodec):
     """Declares `binary = True` and returns `str` anyway.
 
-    Nothing ships like this. It exists because WSM-CDC-002 says the peer MUST NOT sniff the encoded
-    value's type, and the only way to observe the difference between "declared" and "inferred" is a
-    codec where the two disagree.
+    Test-only. WSM-CDC-002 says the peer MUST NOT inspect the encoded value's type, and the
+    difference between "declared" and "inferred" is observable only with a codec where the two
+    disagree.
     """
 
     def encode(self, frame: Frame) -> Any:
@@ -378,10 +367,9 @@ async def _echo(payload: Any, stream: Stream) -> None:
 async def test_binary_codec_uses_send_bytes_never_send_text(registered: MsgpackCodec):
     """WSM-CDC-002 through the real `Peer`: `binary` selects the send method, and nothing else does.
 
-    This is the wiring test. It builds the peers the way an application does - `register_codec`,
-    then `get_codec`, then `Peer` - and asserts on the `SocketAdapter` spy, because the in-memory
-    transport accepts a `str` on `send_bytes` without complaining and would therefore hide a peer
-    that picked the wrong branch.
+    Builds the peers the way an application does (`register_codec`, then `get_codec`, then `Peer`)
+    and asserts on the `SocketAdapter` spy, because the in-memory transport accepts a `str` on
+    `send_bytes` and would not detect a peer that chose the wrong method.
     """
     left, right = memory_pair()
     spy = _SpySocket(left)
@@ -400,10 +388,10 @@ async def test_binary_codec_uses_send_bytes_never_send_text(registered: MsgpackC
 
 
 async def test_a_binary_codec_that_returns_text_still_goes_out_over_send_bytes():
-    """WSM-CDC-002: the declaration decides, not the value. A peer that sniffed would switch here."""
+    """WSM-CDC-002: the declaration selects the send method, not the value's type."""
     left, right = memory_pair()
     spy = _SpySocket(left)
-    peer = Peer(spy, codec=_LyingCodec(), is_dialer=True)
+    peer = Peer(spy, codec=_MisdeclaredCodec(), is_dialer=True)
     task = asyncio.create_task(peer.serve())
 
     try:
@@ -445,6 +433,5 @@ async def _stop(tasks: list[asyncio.Task[None]], *sockets: MemorySocket) -> None
     for task in tasks:
         task.cancel()
     for task in tasks:
-        # A cancelled serve() is the expected end of a test; anything it raises on the way out is
-        # teardown noise, not a result.
+        # serve() is cancelled at the end of a test; exceptions it raises while cancelled are ignored.
         await asyncio.gather(task, return_exceptions=True)

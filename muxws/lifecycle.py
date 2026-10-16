@@ -1,12 +1,11 @@
 """Connection liveness and orderly shutdown (§6).
 
-There is **no post-socket handshake**. A connection is established the moment the socket is open with
-the subprotocol accepted (WSM-CON-030), and this module adds nothing a peer must send or wait for
-before anything else. What it adds is a defined *end*: liveness that does not depend on WebSocket
-control frames a browser cannot see, and a shutdown that lets in-flight work finish.
+There is no handshake after the WebSocket upgrade. A connection is established when the socket is
+open with the subprotocol accepted (WSM-CON-030). This module provides liveness checks that do not
+depend on WebSocket control frames, which browsers do not expose, and the state for a shutdown that
+lets in-flight streams finish.
 
-There is no `settings` frame anywhere in this project (WSM-CON-031), so there is no value object
-here holding an announced/effective pair and no ack bookkeeping.
+There is no `settings` frame (WSM-CON-031), so no settings state or acknowledgement is tracked.
 """
 
 from __future__ import annotations
@@ -16,27 +15,25 @@ import secrets
 
 from dataclasses import dataclass, field
 
-#: The largest stream id the protocol allows. The next allocation past it is impossible, so the
-#: exhausting peer shuts the connection down in an orderly way rather than wrapping (WSM-SID-007).
+#: The largest stream id the protocol allows. A peer that allocates the last id of its parity shuts
+#: the connection down in an orderly way instead of wrapping (WSM-SID-007).
 MAX_STREAM_ID = 2**31 - 1
 
 
 def new_nonce() -> str:
     """A ping nonce.
 
-    `secrets` rather than `random`: this one is cheap and there is no reason to make a nonce
-    guessable. The reconnect jitter in `reconnect.py` is the opposite case and uses `random`.
+    16 hex characters from `secrets`, so the nonce is not guessable. The reconnect jitter in
+    `reconnect.py` uses `random`.
     """
     return secrets.token_hex(8)
 
 
 class PingRegistry:
-    """Outstanding pings, keyed by **nonce rather than by order**.
+    """Outstanding pings, keyed by nonce.
 
-    Order would be wrong: a `pong` may arrive after its ping's deadline has already expired and been
-    given up on, and matching by position would then credit it to the next ping and report a
-    round-trip time that never happened. An unknown nonce is simply dropped (it is a late echo, not
-    an error).
+    A `pong` may arrive after its ping's deadline has expired. Matching by order would then assign it
+    to the next ping and report a wrong round-trip time. A pong with an unknown nonce is dropped.
     """
 
     __slots__ = ("_pending",)
@@ -50,9 +47,7 @@ class PingRegistry:
     def open(self, nonce: str) -> asyncio.Future[float]:
         """Start waiting for the pong carrying `nonce`; the future resolves with the round trip.
 
-        Keyed by nonce and not by arrival order, so two pings in flight cannot settle each
-        other's future - and a pong for a nonce nobody is waiting for is dropped rather than
-        matched to whatever happens to be pending.
+        Keyed by nonce, so a pong settles only the ping that carried the same nonce.
         """
         future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
         self._pending[nonce] = future
@@ -70,7 +65,7 @@ class PingRegistry:
         self._pending.pop(nonce, None)
 
     def fail_all(self, error: BaseException) -> None:
-        """Socket death: nobody is going to answer, so nobody should keep waiting."""
+        """Socket death: fail every outstanding ping with `error` and clear the registry."""
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(error)
@@ -79,18 +74,17 @@ class PingRegistry:
 
 @dataclass(slots=True)
 class GoawayState:
-    """What each peer knows about the other's intention to stop.
+    """The `goaway` state of one connection, per direction.
 
-    The two directions are tracked separately because they mean different things. Having *sent* one
-    means this peer refuses new work (WSM-CON-021); having *received* one means `open()` raises here
-    (WSM-CON-022) and that streams above the remote's `last_stream` were never processed and are safe
-    to retry elsewhere (WSM-CON-023).
+    After sending `goaway` this peer refuses new streams (WSM-CON-021). After receiving one, `open()`
+    raises (WSM-CON-022), and this peer's streams above the remote's `last_stream` were not processed
+    and are safe to retry elsewhere (WSM-CON-023).
     """
 
     sent: bool = False
     received: bool = False
-    #: The highest id **the remote opened** that it promises to still complete. Their parity, not
-    #: ours - getting that backwards silently resets everything on every drain.
+    #: The `last_stream` of the received `goaway`: the highest id this peer opened that the remote
+    #: processed and will complete. It has this peer's parity.
     remote_last_stream: int | None = None
     sent_code: int | None = None
     received_code: int | None = None
@@ -102,11 +96,11 @@ class GoawayState:
         return self.sent or self.received
 
     def survives_drain(self, stream_id: int) -> bool:
-        """True when a stream of ours is at or below what the remote promised to finish.
+        """True when a stream this peer opened is at or below the remote's `last_stream`.
 
-        With no `last_stream` known - a `goaway` we sent rather than received - every live stream is
-        allowed its drain window; the remote has told us nothing that would cut it short.
+        True for every stream when no `goaway` has been received.
         """
+
         if self.remote_last_stream is None:
             return True
         return stream_id <= self.remote_last_stream

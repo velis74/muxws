@@ -52,37 +52,33 @@ describe('the exception hierarchy', () => {
   });
 
   it('places the two transport bases under MuxwsError and outside StreamReset - WSM-ERR-016', () => {
-    // The claim an application relies on: one `instanceof MuxwsError` handler around a dial catches a
-    // url the transport cannot open and a transport this build cannot provide, whichever transport
-    // was named and without importing it. Python reaches the same place through
-    // `TransportUrlError(MuxwsError, ValueError)`; here `MuxwsError` is the only branch of that
-    // diamond a single prototype chain can keep, and it is the one that matters.
+    // One `instanceof MuxwsError` handler around a dial catches both a url the transport cannot open
+    // and a transport this build cannot provide, for any transport and without importing it. Python
+    // declares `TransportUrlError(MuxwsError, ValueError)`; a single prototype chain can keep only one
+    // base, and here it is `MuxwsError`.
     [new TransportUrlError(), new TransportUnsupportedError()].forEach((error) => {
       expect(error).toBeInstanceOf(MuxwsError);
       expect(error).toBeInstanceOf(Error);
-      // Neither is a stream failure: nothing was ever opened, so there is no stream to reset and no
-      // reset code to carry.
+      // Neither is a stream failure: no stream was opened, so there is no stream to reset and no
+      // reset code.
       expect(error).not.toBeInstanceOf(StreamReset);
     });
 
-    // And they are siblings, not a chain. Collapsing them would tell a reader whose url is fine and
-    // whose runtime cannot dial it to go and retype the url - the one wrong answer this split exists
-    // to prevent.
+    // The two are siblings, not a chain. A url error tells the caller to correct the url; an
+    // unsupported-transport error tells the caller the runtime cannot dial it.
     expect(new TransportUrlError()).not.toBeInstanceOf(TransportUnsupportedError);
     expect(new TransportUnsupportedError()).not.toBeInstanceOf(TransportUrlError);
   });
 
   it('chains the original on a transport base, and invents no chain when there was none', () => {
-    // WSM-ERR-016 requires the underlying library's own throw to survive translation: `ws` names the
-    // offending text, jsdom and undici word the same refusal differently, and a frame that dropped
-    // any of it would leave the reader with muxws's paraphrase of a diagnosis it did not make.
+    // WSM-ERR-016 requires the underlying library's error to be kept as `cause`: `ws` names the
+    // offending text, and jsdom and undici word the same refusal differently.
     const original = new SyntaxError('Invalid URL: nonsense');
 
     expect(new TransportUrlError('framed', { cause: original }).cause).toBe(original);
     expect(new TransportUnsupportedError('framed', { cause: original }).cause).toBe(original);
-    // `undefined` and absent are different answers to "what caused this": the second is the honest
-    // one for a refusal muxws composed itself, and `new Error(msg, { cause: undefined })` would give
-    // the first.
+    // A refusal composed by muxws itself has no `cause` property. `new Error(msg, { cause: undefined })`
+    // would define the property with the value `undefined`.
     expect('cause' in new TransportUrlError('composed here')).toBe(false);
   });
 
@@ -109,18 +105,17 @@ describe('the exception hierarchy', () => {
   });
 
   it('defines no concrete transport error, because each one belongs to its transport - WSM-ERR-016', async () => {
-    // A concrete class that drifted into the shared module would be invisible to every behavioural
-    // test - the throw sites would go on passing - and a third party writing an adapter against the
-    // public seam (WSM-API-021) cannot add a class to `ts/errors.ts`, so the convention has to be
-    // one anybody can keep.
+    // Behavioural tests do not detect a concrete class defined in the shared module, because the
+    // throw sites still pass. A third party writing an adapter against the public transport interface
+    // (WSM-API-021) cannot add a class to `ts/errors.ts`, so concrete transport errors live in their
+    // transport modules.
     const errors = await import('./errors');
 
-    // Enumerated, not listed. A name list can only see the classes somebody remembered to add to it,
-    // so a *new* concrete error written into the shared module walks straight past it. Python's twin,
+    // The module exports are enumerated, so a new concrete error added to the shared module is
+    // detected without updating a name list. The Python counterpart,
     // `errors_test.py::test_every_muxws_error_defined_outside_errors_py_derives_from_a_transport_base`,
-    // recurses through `MuxwsError.__subclasses__()` for the same reason, and this is the prototype
-    // chain saying the same thing: anything in this module that *extends* either base is a concrete
-    // transport class in the one file that must hold none.
+    // recurses through `MuxwsError.__subclasses__()`. Any export of this module that extends either
+    // base is a concrete transport class, and this module must contain none.
     const concreteInSharedModule = Object.entries(errors)
       .filter(
         ([, value]) =>
@@ -133,18 +128,17 @@ describe('the exception hierarchy', () => {
       .map(([name]) => name);
     expect(concreteInSharedModule, 'a concrete transport error belongs to its transport, not here').toEqual([]);
 
-    // The name list stays as the non-vacuity control, exactly as the Python test keeps
-    // `_TRANSPORT_ERRORS_THAT_MUST_EXIST`: the walk above is a comparison of two empty lists unless
-    // the four classes it is meant to keep out really do exist somewhere else. `UnixSocketsUnsupportedError`
-    // is `ts/transports/browser-socket.ts`'s, because the platform-WebSocket transport is what refuses
-    // a `ws+unix:` url; the other three are `muxws/node`'s. None of the four is here.
+    // Non-vacuity control, as `_TRANSPORT_ERRORS_THAT_MUST_EXIST` in the Python test: the four
+    // concrete classes exist in other modules. `UnixSocketsUnsupportedError` is defined in
+    // `ts/transports/browser-socket.ts`, because the platform-WebSocket transport refuses a
+    // `ws+unix:` url; the other three are defined in `muxws/node`. None of the four is in this module.
     const elsewhere = { ...(await import('./index')), ...(await import('./node')) };
     ['UnixSocketsUnsupportedError', 'UnixUrlError', 'WsUrlError', 'WsNotInstalledError'].forEach((name) => {
       expect(name in errors, `${name} belongs to its transport's module, not to the shared one`).toBe(false);
       expect(name in elsewhere, `${name} must exist, or the walk above proves nothing`).toBe(true);
     });
-    // And the same assertion against a name that *is* here, so a typo in the import cannot make the
-    // loop pass by testing an empty module.
+    // The same assertion against a name defined in this module, so a wrong import path cannot make
+    // the loop pass by testing an empty module.
     expect('TransportUrlError' in errors).toBe(true);
   });
 });

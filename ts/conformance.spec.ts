@@ -1,25 +1,21 @@
 /**
  * The TypeScript conformance runner: `conformance/sequences/` and `conformance/invalid/`.
  *
- * The twin of `muxws/conformance_test.py`, reading the same files under the same schema
- * (`conformance/README.md`). If one runner needs a field the other does not read, the fixture is
- * wrong.
+ * Counterpart of `muxws/conformance_test.py`; both read the same files under the same schema
+ * (`conformance/README.md`). A field that only one runner reads indicates a defective fixture.
  *
- * Two corpora, two shapes of proof:
+ * The two corpora test different things:
  *
- * - **`sequences/`** - both peers are real, nothing is injected, and the fixture is a script of
- *   ordinary API calls with assertions interleaved. What it proves is that the ports agree about
- *   *sequences* - which frame goes out when, which stream survives which event - and not merely
- *   about how one frame is spelled. Every fixture is replayed **twice, with the roles swapped**,
- *   which is what `stream_ref`-as-an-ordinal buys and the whole point of the corpus: a raw id would
- *   bake one side's parity in, and the second pass is what proves it did not.
- * - **`invalid/`** - one real peer, fed messages no correct implementation would send, asserting
- *   both which frame goes out and whether the connection survives. The survival column is the point:
- *   it is the difference between "the peers can still agree about every other stream" and "they
- *   cannot" (WSM-STM-024).
+ * - **`sequences/`** - both peers are real, nothing is injected, and the fixture is a script of ordinary API calls
+ * with interleaved assertions. It checks that the ports agree about *sequences* - which frame is sent when, which
+ * stream survives which event - and not only about the encoding of single frames. Every fixture is replayed
+ * **twice, with the roles swapped**. `stream_ref` is an ordinal so that this is possible: a raw id would fix one
+ * side's parity, and the second pass detects that. - **`invalid/`** - one real peer, fed messages no correct
+ * implementation sends, asserting which frame goes out and whether the connection survives. The survival column
+ * distinguishes "the peers can still agree about every other stream" from "they cannot" (WSM-STM-024).
  *
- * Nothing here may change peer behaviour. A failing fixture means a rule is implemented wrongly; the
- * fix belongs to the code that owns the rule, not to a fixture edit.
+ * Nothing here changes peer behaviour. A failing fixture means a rule is implemented incorrectly; the fix belongs
+ * in the code that implements the rule, not in the fixture.
  */
 
 import { createHash } from 'node:crypto';
@@ -54,16 +50,16 @@ const SEQUENCE_FILES = fixtureFiles(SEQUENCES_DIR);
 const INVALID_FILES = fixtureFiles(INVALID_DIR);
 
 /**
- * Both runners carry these two numbers and both assert them, and the Python runner reads *these two
- * lines* to prove the counts still agree. A fixture that stopped being collected would otherwise be
- * a suite that passes by testing nothing, so keep the declarations on one line each.
+ * Both runners declare and assert these two numbers, and the Python runner reads *these two lines* to check that
+ * the counts agree. Without this, a fixture that is no longer collected leaves a suite that passes without testing
+ * it. Keep each declaration on one line.
  */
 const EXPECTED_SEQUENCE_FIXTURES = 14;
 const EXPECTED_INVALID_FIXTURES = 9;
 
 /**
- * The nine cases WSM-TST-003 enumerates, **by name**. Enumerated rather than counted: a count alone
- * passes when one case is deleted and another duplicated under a new name.
+ * The nine cases WSM-TST-003 enumerates, **by name**. A count alone passes when one case is deleted and another
+ * duplicated under a new name.
  */
 const REQUIRED_INVALID_CASES = [
   'data-above-high-water-mark',
@@ -78,11 +74,10 @@ const REQUIRED_INVALID_CASES = [
 ];
 
 /**
- * WSM-CON-031, WSM-CON-009, WSM-PKG-005: no limit and no version, in any frame, in any form. Checked
- * against the **envelope keys on the wire** rather than against a decoded `Frame`, because
- * `fromMapping` drops unknown keys - decoding first would hide exactly the key this is looking for.
- * `muxws/conformance_test.py` carries the same two lists against the same corpus; a rule only one
- * port checks is a rule that drifts, which is the whole reason the corpus exists.
+ * WSM-CON-031, WSM-CON-009, WSM-PKG-005: no limit and no version, in any frame, in any form. Checked against the
+ * **envelope keys on the wire** rather than a decoded `Frame`, because `fromMapping` drops unknown keys and
+ * decoding first would hide the key this looks for. `muxws/conformance_test.py` checks the same two lists against
+ * the same corpus, so both ports enforce the rule.
  */
 const FORBIDDEN_ENVELOPE_KEYS = [
   'ack',
@@ -130,9 +125,9 @@ interface InvalidFixture {
 }
 
 /**
- * `expect_error` names a class rather than a code, because the class is the part WSM-ERR-004 fixes
- * across the two languages. A predicate per name rather than a map of constructors: the subclasses
- * do not share one construct signature, and `instanceof` is the whole of what this needs.
+ * `expect_error` names a class rather than a code, because WSM-ERR-004 makes the class identical across the two
+ * languages. One predicate per name rather than a map of constructors: the subclasses do not share one construct
+ * signature, and only `instanceof` is needed.
  */
 const ERROR_CLASSES: Record<string, (error: unknown) => boolean> = {
   ConnectionLost: (error) => error instanceof ConnectionLost,
@@ -145,9 +140,8 @@ const ERROR_CLASSES: Record<string, (error: unknown) => boolean> = {
 /**
  * The envelope defaults, mirroring the module-private `FIELD_DEFAULTS` of `frames.ts`.
  *
- * A matcher must read a field the frame left out as that field's default, exactly as Python's
- * dataclass does. Reading it as `undefined` instead would make `{"end": false}` fail here and pass
- * there - one corpus, quietly meaning two different things.
+ * A matcher reads a field the frame omits as that field's default, as Python's dataclass does. Reading it as
+ * `undefined` would make `{"end": false}` fail here and pass in Python, so one corpus would have two meanings.
  */
 const FIELD_DEFAULTS: Record<string, unknown> = {
   stream: null,
@@ -181,16 +175,15 @@ function render(value: unknown): string {
 }
 
 /**
- * Resolve every `{"$bytes": [...]}` placeholder into the `ArrayBuffer` those integers spell.
+ * Resolve every `{"$bytes": [...]}` placeholder into the `ArrayBuffer` those integers encode.
  *
- * JSON has no byte type, so a fixture that needs one under a binary codec (WSM-CDC-008) has to spell
- * it. This is fixture *notation*, resolved before the first step runs; it is never a payload shape
- * and never reaches the wire. A runner that passed the mapping through unresolved would send
- * `{"$bytes": [...]}` as an ordinary object and pass the fixture while testing nothing, which is
- * what `resolves the $bytes placeholder before a step runs` exists to prevent.
+ * JSON has no byte type, so a fixture that needs one under a binary codec (WSM-CDC-008) uses this notation. It is
+ * resolved before the first step runs; it is never a payload shape and never reaches the wire. A runner that passed
+ * the mapping through unresolved would send `{"$bytes": [...]}` as an ordinary object and pass the fixture without
+ * testing bytes; `resolves the $bytes placeholder before a step runs` checks for that.
  *
- * Only an object whose **sole** key is `$bytes` is a placeholder; `$bytes` alongside anything else
- * is an ordinary payload key, so an application object can still carry one.
+ * Only an object whose **sole** key is `$bytes` is a placeholder; `$bytes` alongside other keys is an ordinary
+ * payload key, so an application object can still carry one.
  */
 function substituteBytes(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => substituteBytes(item));
@@ -228,16 +221,15 @@ async function settle(rounds = 12): Promise<void> {
   }
 }
 
-/** Python reaches for `asyncio.wait_for`; this is the same guard with the same purpose. */
+/** Equivalent of Python's `asyncio.wait_for`, with the same purpose. */
 async function withTimeout<T>(work: Promise<T>, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(STEP_EXPIRED), STEP_TIMEOUT_MS);
   });
   try {
-    // Racing rather than cancelling, which is also what the Python runner's `shield` buys: a step
-    // that gives up must not tear down the call underneath it, or the failure reported would be a
-    // reset this fixture never asked for.
+    // Racing rather than cancelling, as the Python runner's `shield` does: a step that times out must not abort the
+    // call underneath it, otherwise the reported failure would be a reset the fixture did not request.
     return await Promise.race([work, deadline]);
   } catch (error) {
     if (error === STEP_EXPIRED) throw new Error(`${what} did not settle within ${STEP_TIMEOUT_MS}ms`);
@@ -267,9 +259,9 @@ class Replay {
   private readonly refs = new Map<string, Stream>();
 
   /**
-   * `as` labels bound to work already in flight - a `request`, an `iterate` - which is a different
-   * thing from a stream: the value those steps assert is the call's return, and the call was started
-   * rather than awaited so that the steps after it could run.
+   * `as` labels bound to work already in flight - a `request`, an `iterate`. These differ from stream labels: the
+   * asserted value is the call's return, and the call was started without awaiting so that the following steps
+   * could run.
    */
   private readonly tasks = new Map<string, Promise<unknown>>();
 
@@ -286,9 +278,8 @@ class Replay {
     private readonly swapped: boolean,
     codec?: Codec,
   ) {
-    // The codec is a parameter, not a constant, because WSM-CDC-007 requires every shipped codec to
-    // run this corpus with a real peer at each end - a corpus only the default codec ever replays
-    // proves nothing about the seam it is supposed to prove.
+    // The codec is a parameter because WSM-CDC-007 requires every shipped codec to run this corpus with a real peer
+    // at each end; a corpus replayed only under the default codec does not test the codec interface.
     this.codec = codec ?? new JsonCodec();
     const [dialerSocket, acceptorSocket] = memoryPair();
     this.sockets = { dialer: dialerSocket, acceptor: acceptorSocket };
@@ -299,9 +290,8 @@ class Replay {
       maxFrameBytes: fixture.max_frame_bytes,
       maxConcurrentStreams: fixture.max_concurrent_streams,
     };
-    // The two roles keep their names; which of them holds the odd parity is what swaps. That is the
-    // whole of a role swap, and it is why a fixture may never write a raw stream id: every id in the
-    // second pass is the other one (WSM-TST-002).
+    // The two roles keep their names; only the assignment of odd parity swaps. Because every id in the second pass
+    // has the other parity, a fixture may never contain a raw stream id (WSM-TST-002).
     this.peers = {
       dialer: new Peer(dialerSocket, { ...options, isDialer: !swapped }),
       acceptor: new Peer(acceptorSocket, { ...options, isDialer: swapped }),
@@ -313,15 +303,14 @@ class Replay {
   start(): void {
     (['dialer', 'acceptor'] as Who[]).forEach((who) => {
       this.peers[who].onStream(async (payload: unknown, stream: Stream) => {
-        // Record the stream, then hold it open. WSM-STM-035 ends a stream the moment its handler
-        // returns, so a handler that returned here would close every inbound stream before the
-        // script could `reply` on it.
+        // Record the stream, then hold it open. WSM-STM-035 ends a stream when its handler returns, so a handler
+        // that returned here would close every inbound stream before the script could `reply` on it.
         this.byId[who].set(stream.id, stream);
-        // The `{"handler": "raise"}` payload is the only way a script of ordinary API calls can
-        // reach the handler-failure path of WSM-STM-034 - `stream.reset(APPLICATION_ERROR)` sends
-        // the same code but carries no serialized error object, which is the half a fixture pins.
-        // `Error` and not a subclass: the serializer sends the class name, and Python raises a class
-        // spelled `Error` for the same reason, so that the pinned payload is one value not two.
+        // The `{"handler": "raise"}` payload is the only way a script of ordinary API calls reaches the
+        // handler-failure path of WSM-STM-034. `stream.reset(APPLICATION_ERROR)` sends the same code but no
+        // serialized error object, which is what the fixture asserts. `Error` and not a subclass: the serializer
+        // sends the class name, and Python raises a class named `Error` too, so the asserted payload is the same
+        // value in both ports.
         const asked = payload as { handler?: string; message?: string } | null;
         if (asked !== null && typeof asked === 'object' && asked.handler === 'raise') {
           throw new Error(asked.message ?? 'the handler raised');
@@ -338,9 +327,9 @@ class Replay {
   async stop(): Promise<void> {
     this.sockets.dialer.drop();
     await settle();
-    // Nothing to cancel: a `serve()` whose socket is gone returns, a `close()` left in flight
-    // settles on the same event, and a collector still iterating a stream ends when the stream
-    // fails. Their rejections were absorbed when they were started.
+    // Nothing to cancel: a `serve()` whose socket is gone returns, a `close()` still in flight settles on the same
+    // event, and a collector still iterating a stream ends when the stream fails. Their rejections were handled
+    // when they were started.
     await Promise.race([Promise.all(this.served), turn()]);
   }
 
@@ -395,9 +384,8 @@ class Replay {
       await handler(step);
       return;
     }
-    // `raises` is how a fixture states that the *call* fails - a producer whose stream the consumer
-    // cancelled, say. The alternative is asserting on frames, which cannot see that the local handle
-    // refuses to send at all (WSM-ERR-009).
+    // `raises` states that the *call* fails, for example a producer whose stream the consumer cancelled. Assertions
+    // on frames cannot show that the local handle refuses to send (WSM-ERR-009).
     let caught: unknown = NOTHING_THROWN;
     try {
       await handler(step);
@@ -418,18 +406,17 @@ class Replay {
   /**
    * `peer.request(...)`, **started and not awaited** (WSM-API-006).
    *
-   * The steps after a `request` are the assertions about the frames it produced, so awaiting it here
-   * would deadlock every fixture that uses it. The stream it allocated is then discovered through
-   * the public `peer.streams` map rather than returned, because `request()` deliberately hands back
-   * a value and not a handle.
+   * The steps after a `request` assert the frames it produced, so awaiting it here would deadlock every fixture
+   * that uses it. The stream it allocated is found through the public `peer.streams` map, because `request()`
+   * returns a value and not a handle.
    */
   private async callRequest(step: Step): Promise<void> {
     const peer = this.peers[step.peer as Who];
     const before = new Set(peer.streams.keys());
     const task = peer.request(step.payload ?? null, {
       headers: step.headers,
-      // Milliseconds here and in the corpus; the Python runner is the one that converts, because
-      // Python's durations are seconds (WSM-CON-012).
+      // Milliseconds here and in the corpus; the Python runner converts, because Python's durations are seconds
+      // (WSM-CON-012).
       timeoutMs: step.timeout_ms as number | undefined,
     });
     void task.catch(() => undefined);
@@ -480,8 +467,8 @@ class Replay {
   /**
    * Start consuming a stream as an async iterator; the collected list is the ref's value.
    *
-   * Started rather than awaited, and bound to a label, so that iteration and the frames that feed it
-   * can be asserted in the same script: `expect_result` on the label compares the whole list.
+   * Started without awaiting and bound to a label, so that iteration and the frames that feed it can be asserted in
+   * the same script: `expect_result` on the label compares the whole list.
    */
   private async callIterate(step: Step): Promise<void> {
     const stream = this.streamFor(step.peer as Who, Number(step.stream_ref));
@@ -503,8 +490,8 @@ class Replay {
       drainMs: step.drain_ms as number | undefined,
     });
     void closing.catch(() => undefined);
-    // Started rather than awaited: `close()` sends `goaway`, *then* drains, and the steps after this
-    // one are what the drain window is there to let happen (WSM-CON-025).
+    // Started without awaiting: `close()` sends `goaway`, *then* drains, and the steps after this one run inside
+    // the drain window (WSM-CON-025).
     this.closing.set(who, closing);
   }
 
@@ -524,16 +511,15 @@ class Replay {
   }
 
   /**
-   * The stream a call opened without handing it back, found through the public map.
+   * The stream a call opened without returning it, found through the public map.
    *
-   * A bounded poll rather than a single read: `request()` reaches its `open()` synchronously here,
-   * but in Python it is a coroutine that does not run until the task is first scheduled - exactly
-   * the kind of difference a shared corpus must not be able to see.
+   * A bounded poll rather than a single read: `request()` reaches its `open()` synchronously here, but in Python it
+   * is a coroutine that does not run until the task is first scheduled, and the shared corpus must not depend on
+   * that difference.
    *
-   * The stream comes back **boxed**, and that is not decoration. `Stream` is a thenable, so a
-   * promise resolved with one adopts it: `await discover(...)` would await the stream itself,
-   * claiming it for `await` and making every later `iterate` on it fail as a second consumer
-   * (WSM-API-014). A box is not thenable and cannot be adopted.
+   * The stream is returned **boxed**. `Stream` is a thenable, so a promise resolved with one adopts it: `await
+   * discover(...)` would await the stream itself, claiming it for `await` and making every later `iterate` on it
+   * fail as a second consumer (WSM-API-014). A box is not thenable and is not adopted.
    */
   private async discover(peer: Peer, before: Set<number>): Promise<{ stream: Stream }> {
     for (let round = 0; round < POLL_TURNS; round += 1) {
@@ -548,10 +534,9 @@ class Replay {
   /**
    * Deliver one message **to** the named peer, as if its remote had sent it.
    *
-   * The envelope is encoded as it is written, without passing through `fromMapping`, which is the
-   * whole point for the two extension-point fixtures: `fromMapping` drops unknown keys
-   * (WSM-FRM-001), so a frame built through it could never carry the unknown field whose toleration
-   * is being asserted.
+   * The envelope is encoded as written, without passing through `fromMapping`. The two extension-point fixtures
+   * depend on this: `fromMapping` drops unknown keys (WSM-FRM-001), so a frame built through it cannot carry the
+   * unknown field whose tolerance is being asserted.
    */
   private inject(step: Step): void {
     const who = step.peer as Who;
@@ -591,10 +576,10 @@ class Replay {
   }
 
   /**
-   * Every message both peers actually put on the wire, undecoded.
+   * Every message both peers put on the wire, undecoded.
    *
-   * Undecoded on purpose: `fromMapping` drops unknown keys (WSM-FRM-001), so reading a decoded
-   * `Frame` would discard exactly the key `puts no limit and no version on the wire` looks for.
+   * Undecoded because `fromMapping` drops unknown keys (WSM-FRM-001), so a decoded `Frame` would not contain the
+   * key `puts no limit and no version on the wire` looks for.
    */
   wire(): string[] {
     return (['dialer', 'acceptor'] as Who[]).flatMap((who) => this.sockets[who].sent.map((message) => String(message)));
@@ -618,7 +603,7 @@ class Replay {
     );
   }
 
-  /** Not "not yet", but "not at all": the whole of that peer's wire is searched. */
+  /** Asserts absence from the whole of that peer's wire, not only from the frames seen so far. */
   private expectNoFrame(step: Step): void {
     const who = step.peer as Who;
     const wanted = this.resolve(step.expect_no_frame as Record<string, unknown>);
@@ -641,23 +626,22 @@ class Replay {
   }
 
   private async expectResult(spec: Step): Promise<void> {
-    // `deepEqual` rather than `toEqual`, because vitest's `toEqual` compares two `ArrayBuffer`s by
-    // byte *length* and calls buffers of equal length equal whatever they contain. Under a binary
-    // codec a payload is an `ArrayBuffer` (WSM-CDC-008), so `toEqual` would pass this assertion for
-    // a peer that delivered the right number of entirely wrong bytes.
+    // `deepEqual` rather than `toEqual`, because vitest's `toEqual` compares two `ArrayBuffer`s by byte *length*
+    // and treats buffers of equal length as equal regardless of content. Under a binary codec a payload is an
+    // `ArrayBuffer` (WSM-CDC-008), so `toEqual` would pass for a peer that delivered the right number of wrong
+    // bytes.
     const value = await this.valueOf(spec.ref as string);
     expect(deepEqual(value, spec.value), `${String(spec.ref)} produced ${render(value)}`).toBe(true);
   }
 
   /**
-   * What a peer ended up **holding**, which no assertion on frames can see (WSM-API-025).
+   * What a peer **holds**, which assertions on frames cannot see (WSM-API-025).
    *
-   * `expect_frame` proves the headers went out; this proves they were surfaced, on the attribute
-   * that is theirs. `of` is required rather than defaulted, because the two attributes are the whole
-   * distinction the step exists to check and a fixture that omitted it would be asserting whichever
-   * one this runner happened to prefer. For `reply` the wait is on `replyHeadersArrived` rather than
-   * on a settle count: that event fires the moment the value stops changing, and a fixture that
-   * slept instead would pass against a port that never fired it at all.
+   * `expect_frame` checks that the headers were sent; this checks that they were exposed on the correct attribute.
+   * `of` is required rather than defaulted, because the step exists to distinguish the two attributes, and a
+   * fixture that omitted it would assert whichever one this runner defaulted to. For `reply` the wait is on
+   * `replyHeadersArrived` rather than on a settle count: that event fires when the value stops changing, and a
+   * fixture that slept instead would pass against a port that never fires it.
    */
   private async expectHeaders(spec: Step): Promise<void> {
     const stream = this.streamFor(spec.peer as Who, Number(spec.stream_ref));
@@ -688,8 +672,8 @@ class Replay {
       throw new Error(`${String(spec.ref)} failed with ${String(caught)}, expected ${String(spec.error)}`);
     }
     if (spec.code !== undefined) expect((caught as StreamReset).code).toBe(spec.code);
-    // `deepEqual` for the same reason `expect_result` uses it: a serialized error payload may carry
-    // bytes under a binary codec, and `toEqual` cannot tell two `ArrayBuffer`s of one length apart.
+    // `deepEqual` for the same reason as in `expect_result`: a serialized error payload may contain bytes under a
+    // binary codec, and `toEqual` does not distinguish two `ArrayBuffer`s of the same length.
     if (spec.payload !== undefined) {
       const carried = (caught as RemoteError).payload;
       expect(deepEqual(carried, spec.payload), `${String(spec.ref)} carried ${render(carried)}`).toBe(true);
@@ -731,13 +715,12 @@ async function replay(fileName: string, swapped: boolean, codec?: Codec): Promis
 }
 
 /**
- * A fixture written for another codec is **skipped with a reason**, never quietly passed.
+ * A fixture written for another codec is **skipped with a reason**, never passed silently.
  *
- * `bytes-payload-under-binary-codec` is the one that needs it: bytes are a payload type only under a
- * binary codec (WSM-CDC-008), and there is nothing a JSON-configured pass can assert about it. A skip
- * nobody can see is the same as a missing test, so the reason is in the test's own name and the set
- * of skipped fixtures is itself pinned by a test below - and the msgpack suite skips nothing, which
- * is what stops this from being a fixture every configuration skips (WSM-CDC-007).
+ * `bytes-payload-under-binary-codec` is that fixture: bytes are a payload type only under a binary codec
+ * (WSM-CDC-008), and a JSON-configured pass has nothing to assert about it. The reason is in the test's name, the
+ * set of skipped fixtures is asserted by a test below, and the msgpack suite skips nothing, so no fixture is
+ * skipped by every configuration (WSM-CDC-007).
  */
 function skipReason(fixture: Fixture, codecName: string = CODEC_NAME): string | null {
   const required = fixture.requires_codec;
@@ -753,9 +736,8 @@ describe('conformance/sequences', () => {
     [false, true].forEach((swapped) => {
       const assignment = swapped ? 'roles swapped' : 'dialer opens';
       if (reason !== null) {
-        // The second pass is not decoration. Every stream id in it is the other parity, so a fixture
-        // that wrote a raw id - or a runner that resolved an ordinal to a constant - fails there and
-        // only there (WSM-TST-002).
+        // Every stream id in the second pass has the other parity, so a fixture that contains a raw id, or a runner
+        // that resolves an ordinal to a constant, fails in that pass only (WSM-TST-002).
         it.skip(`skips ${fileName} [${assignment}]: it ${reason}`, () => undefined);
         return;
       }
@@ -766,17 +748,16 @@ describe('conformance/sequences', () => {
   });
 
   it('collects the corpus, and the same number of fixtures as the Python runner', () => {
-    // An empty `conformance/sequences/` is a suite that passes by testing nothing.
+    // An empty `conformance/sequences/` would pass without testing anything.
     expect(SEQUENCE_FILES.length).toBeGreaterThan(0);
     expect(SEQUENCE_FILES.length).toBe(EXPECTED_SEQUENCE_FIXTURES);
-    // `muxws/conformance_test.py` pins the same two numbers and reads them out of this file.
+    // `muxws/conformance_test.py` asserts the same two numbers and reads them from this file.
   });
 
   it('runs every fixture under some configured codec, skipping none everywhere', () => {
-    // WSM-CDC-007. Asserted about the corpus rather than trusted to the two suites, because the
-    // failure it guards against is silent: a `requires_codec` naming a codec no suite is configured
-    // with produces a fixture every configuration skips, which reads in the report as covered while
-    // being reachable by no line of the library.
+    // WSM-CDC-007. Asserted over the corpus rather than left to the two suites, because the failure is silent: a
+    // `requires_codec` naming a codec no suite is configured with produces a fixture that every configuration
+    // skips, which the report shows as covered although no library code runs it.
     const configured = [CODEC_NAME, BINARY_CODEC_NAME];
     SEQUENCE_FILES.forEach((fileName) => {
       const required = loadSequence(fileName).requires_codec;
@@ -789,10 +770,9 @@ describe('conformance/sequences', () => {
   });
 
   it('resolves the $bytes placeholder before a step runs', () => {
-    // `{"$bytes": [...]}` is notation, never a payload shape (WSM-CDC-008). A runner that left it as
-    // an object would send an ordinary object, both codecs would carry it happily, and the fixture
-    // would pass while asserting nothing about bytes. So assert both halves: the corpus really does
-    // carry the placeholder, and loading really does resolve it.
+    // `{"$bytes": [...]}` is notation, never a payload shape (WSM-CDC-008). A runner that left it as an object
+    // would send an ordinary object, both codecs would carry it, and the fixture would pass without testing bytes.
+    // Both parts are asserted: the corpus contains the placeholder, and loading resolves it.
     const fileName = 'bytes-payload-under-binary-codec.json';
     expect(readFileSync(join(SEQUENCES_DIR, fileName), 'utf-8')).toContain('"$bytes"');
 
@@ -821,12 +801,11 @@ describe('conformance/sequences', () => {
 /**
  * WSM-CDC-007: the second shipped codec runs the whole corpus with a real peer at each end.
  *
- * Not a duplicate of the suite above. A codec that ships without this is a codec whose only proof is
- * `decode(encode(frame)) === frame` over a bag of frames - which cannot see anything a *sequence*
- * exposes: the send path picking `sendBytes` from `codec.binary` (WSM-CDC-002), fragment sizes
- * measured as buffer length rather than character count (WSM-FRG-003), or a payload type JSON does
- * not have surviving both directions (WSM-CDC-008). It is also the suite that runs
- * `bytes-payload-under-binary-codec`, which every JSON-configured suite skips.
+ * This suite covers what the codec's round-trip tests (`decode(encode(frame)) === frame` over a set of frames)
+ * cannot, because only a *sequence* exercises it: the send path choosing `sendBytes` from `codec.binary`
+ * (WSM-CDC-002), fragment sizes measured as buffer length rather than character count (WSM-FRG-003), and a payload
+ * type JSON does not have surviving both directions (WSM-CDC-008). It also runs `bytes-payload-under-binary-codec`,
+ * which every JSON-configured suite skips.
  */
 describe('conformance/sequences under msgpack', () => {
   SEQUENCE_FILES.forEach((fileName) => {
@@ -858,12 +837,10 @@ describe('conformance/sequences', () => {
   }
 
   it('puts no limit and no version on the wire', async () => {
-    // WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay everything and look at what actually went out.
-    // There is no `settings` frame and no announced limit of any kind; the `muxws.v1.` subprotocol
-    // prefix is the only version anywhere. There is no extension advertisement to look for either:
-    // WSM-FRM-003 is retired, because there is no `settings` frame to advertise in.
-    // `muxws/conformance_test.py` asserts the same thing over the same corpus - an assertion one port
-    // makes and the other does not is the divergence the corpus exists to catch.
+    // WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay everything and inspect what was sent. There is no `settings`
+    // frame and no announced limit of any kind; the `muxws.v1.` subprotocol prefix is the only version. There is no
+    // extension advertisement either: WSM-FRM-003 is retired, because there is no `settings` frame to advertise in.
+    // `muxws/conformance_test.py` asserts the same over the same corpus.
     for (const [fileName, message] of await wireOfTheWholeCorpus()) {
       const envelope = JSON.parse(message) as Record<string, unknown>;
       expect(FORBIDDEN_FRAME_TYPES, `${fileName} put a ${String(envelope.type)} frame on the wire`).not.toContain(
@@ -877,9 +854,8 @@ describe('conformance/sequences', () => {
   }, 20_000);
 
   it('never sends window_update', async () => {
-    // WSM-BPR-001: separate from the test above, though it replays the same corpus, because it is a
-    // separate promise. Flow control is *reserved*, not merely unannounced, and the day someone
-    // implements it this is the test that must be deleted on purpose.
+    // WSM-BPR-001: a separate test from the one above, although it replays the same corpus, because it is a
+    // separate rule. Flow control is *reserved*, not only unannounced; implementing it requires removing this test.
     for (const [fileName, message] of await wireOfTheWholeCorpus()) {
       expect((JSON.parse(message) as Record<string, unknown>).type, `${fileName} sent a window_update`).not.toBe(
         'window_update',
@@ -888,7 +864,7 @@ describe('conformance/sequences', () => {
   }, 20_000);
 
   it('skips exactly the fixtures written for another codec, and says why', () => {
-    // Pinned, because a skip that spread to a second fixture would be a corpus quietly shrinking.
+    // Asserted, so that a skip applying to a second fixture is detected.
     const skipped = SEQUENCE_FILES.map((file) => [file, skipReason(loadSequence(file))]).filter(
       ([, reason]) => reason !== null,
     );
@@ -903,13 +879,13 @@ describe('conformance/sequences', () => {
 /**
  * `expect_out` is an ordered subset match: the listed keys must appear, in order, on some frame.
  *
- * Asserting equality instead would make every fixture invalid the moment an optional field is added,
- * which is the opposite of what WSM-FRM-001 asks of a receiver.
+ * An equality match would invalidate every fixture whenever an optional field is added, contrary to what
+ * WSM-FRM-001 requires of a receiver.
  */
 function assertExpectedFrames(emitted: Frame[], fixture: InvalidFixture): void {
   if (fixture.expect_out.length === 0) {
-    // Not "no assertion": `data-for-closed-id` needs to say that a late frame below the high-water
-    // mark provokes **nothing at all** (WSM-STM-002), and this is the only way to.
+    // An empty list is an assertion: `data-for-closed-id` states that a late frame below the high-water mark causes
+    // **nothing** (WSM-STM-002), and an empty `expect_out` is how a fixture says so.
     expect(emitted, `${fixture.name}: nothing should have gone out`).toEqual([]);
     return;
   }
@@ -926,21 +902,19 @@ function assertExpectedFrames(emitted: Frame[], fixture: InvalidFixture): void {
 
 describe('conformance/invalid', () => {
   INVALID_FILES.forEach((fileName) => {
-    it(`answers ${fileName} as declared, and survives or does not`, async () => {
-      // Four of these fixtures are messages that kill the connection on purpose, and a peer that
-      // meets one is required to log it (§12) - the console line is the implementation working. It
-      // is silenced for this describe and nowhere wider, on the same reasoning as the ILL-C cells in
-      // `ts/stream.spec.ts`: a log from a test that never provoked one is a signal worth keeping.
+    it(`answers ${fileName} as declared, and keeps or drops the connection as declared`, async () => {
+      // Four of these fixtures send messages that kill the connection, and a peer that receives one must log it
+      // (§12), so the console line is expected. It is silenced for this describe only, as for the ILL-C cells in
+      // `ts/stream.spec.ts`: a log from any other test indicates an unexpected failure.
       const level = logger.level;
       logger.level = 'silent';
       const fixture = JSON.parse(readFileSync(join(INVALID_DIR, fileName), 'utf-8')) as InvalidFixture;
       expect(fixture.name).toBe(fileName.replace(/\.json$/, ''));
       const codec = new JsonCodec();
 
-      // The peer under test is an acceptor (even ids); the misbehaving remote is a dialer (odd ids).
-      // Deliberately **not** role-swappable, unlike a sequence fixture: the whole point is
-      // hand-written messages no API call on either side could have produced, and an ordinal cannot
-      // name a stream that was never opened.
+      // The peer under test is an acceptor (even ids); the misbehaving remote is a dialer (odd ids). **Not**
+      // role-swappable, unlike a sequence fixture: the fixtures are hand-written messages no API call on either
+      // side can produce, and an ordinal cannot name a stream that was never opened.
       const [, acceptorSocket] = memoryPair();
       const peer = new Peer(acceptorSocket, {
         codec,
@@ -975,7 +949,7 @@ describe('conformance/invalid', () => {
   });
 
   it('has a fixture for every one of the nine cases of WSM-TST-003, by name', () => {
-    // Without this, a deleted fixture is a silently passing suite.
+    // Without this, a deleted fixture leaves a suite that passes.
     expect(INVALID_FILES.map((file) => file.replace(/\.json$/, ''))).toEqual(REQUIRED_INVALID_CASES);
     expect(INVALID_FILES.length).toBe(EXPECTED_INVALID_FIXTURES);
   });
@@ -985,10 +959,10 @@ describe('conformance/invalid', () => {
 
 describe('conformance/frames', () => {
   it('hashes to the one digest checked in to the Python runner', () => {
-    // sha256 over `conformance/frames/`, sorted by file name, each file contributing `name`, a NUL,
-    // its bytes, a NUL. There is exactly one checked-in digest and both ports compute it from the
-    // bytes they themselves read, so a port that reads a different corpus fails here. Changing the
-    // JSON wire after 1.0 means editing that literal, deliberately, in the same commit.
+    // sha256 over `conformance/frames/`, sorted by file name, each file contributing `name`, a NUL, its bytes, a
+    // NUL. There is one checked-in digest and both ports compute it from the bytes they read, so a port that reads
+    // a different corpus fails here. A change to the JSON wire format requires changing that literal in
+    // the same commit.
     const digest = createHash('sha256');
     fixtureFiles(FRAMES_DIR).forEach((fileName) => {
       digest.update(fileName, 'utf-8');

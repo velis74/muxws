@@ -1,15 +1,11 @@
-"""The shape of a `demo.bench` run, asserted where a figure cannot be.
+"""Structure of a `demo.bench` run; no measured value is compared.
 
-`run_matrix` measures a machine, so every number it produces is a property of that machine and of
-whatever else is running on it. A shared CI runner reports a fraction of an idle laptop's throughput
-and is not broken, so nothing here compares a rate, a ratio or a duration: the assertions are that
-every mode produced a `Result`, that each one carries the cell it was asked for, and that
-`format_report` turns them into text. That still covers the harness - a subprocess that no longer
-starts, a dialer whose JSON no longer parses, a cell that silently yields no result - and every one
-of those fails below without a number being compared to anything.
+The numbers `run_matrix` produces depend on the machine and its load, so these tests do not compare
+rates, ratios or durations. They assert that every mode produces a `Result`, that each result carries
+the requested cell, and that `format_report` renders them as text. This covers subprocesses that do
+not start, dialer output that does not parse, and cells that produce no result.
 
-The budget is a fraction of `DEFAULT_SECONDS`: long enough that a cell runs, short enough that the
-file costs seconds.
+The time budget per cell is a fraction of `DEFAULT_SECONDS`.
 """
 
 from __future__ import annotations
@@ -31,7 +27,7 @@ SECONDS = 0.05
 PAYLOAD = 128
 
 
-#: Whatever `on_progress` was told during the module's one run, in order.
+#: The lines passed to `on_progress` during the module's run, in order.
 PROGRESS: list[str] = []
 
 
@@ -68,8 +64,7 @@ def test_each_mode_moved_messages_and_reported_a_rate(
 ):
     """Every result carries a positive message count and rates derived from it.
 
-    A mode that never connected, or one whose row was assembled without the dialer's answer, arrives
-    here as a zero and is otherwise indistinguishable from a slow machine.
+    A mode that never connected, or a row built without the dialer's report, has a zero count.
     """
     results, _round_trips, _notes = smoke
 
@@ -84,9 +79,8 @@ def test_the_payload_length_reported_is_the_one_all_three_modes_carried(
 ):
     """`payload_bytes` is the encoded length actually sent, and it is the same length in every mode.
 
-    The table decomposes the cost of the envelope, which it can only do if the three rows carry the
-    same application payload. A mode that counted its own framing as payload would leave the MB/s
-    columns incomparable while still reading as a measurement.
+    The three rows are comparable only if they carry the same application payload. A mode that
+    counted its own framing as payload would report a different length.
     """
     results, _round_trips, _notes = smoke
 
@@ -100,10 +94,9 @@ def test_the_payload_length_reported_is_the_one_all_three_modes_carried(
 def test_on_progress_is_told_about_every_cell_before_it_is_measured(
     smoke: tuple[list[Result], list[RoundTrip], list[str]],
 ):
-    """The hook reports each cell and then the round trip, which is the whole of what the run does.
+    """The hook is called once per cell and once for the round trip.
 
-    A caller's only view of a run that takes minutes and prints nothing until it ends. What it says
-    is not asserted beyond the mode names: it is a line for a human, not a record.
+    Only the mode names in the lines are asserted; the text is meant for a human reader.
     """
     results, _round_trips, _notes = smoke
 
@@ -117,8 +110,7 @@ def test_the_report_renders_the_results_as_text_naming_every_mode(
 ):
     """`format_report` returns the whole report as a string and names each mode in it.
 
-    The names are the only thing asserted: a row's numbers are the machine's, and a report checked
-    against them would fail on a loaded runner.
+    Only the names are asserted; the numbers depend on the machine.
     """
     results, round_trips, notes = smoke
 
@@ -130,7 +122,7 @@ def test_the_report_renders_the_results_as_text_naming_every_mode(
 
 
 class Hooks:
-    """The whole of what a `SendWindow` uses a peer for: two hooks it registers at construction."""
+    """A peer stand-in with the two hooks a `SendWindow` registers at construction."""
 
     def __init__(self) -> None:
         self.frame = lambda *_arguments: None
@@ -149,11 +141,10 @@ def written(kind: str) -> SimpleNamespace:
 
 
 async def test_the_send_window_raises_rather_than_waiting_on_a_connection_that_is_gone():
-    """A muxws cell whose acceptor died ends as an error instead of spinning until something kills it.
+    """A close reported by the peer makes a pending wait raise `ConnectionError`.
 
-    `Stream.send()` enqueues and returns, so a lost connection reaches this loop as frames that stop
-    being written rather than as an exception - and the peer redials nothing, so nothing ever writes
-    them. The wait needs an exit that is not the arrival of the frame it is waiting for.
+    `Stream.send()` enqueues and returns, so after a lost connection frames are not written and
+    nothing raises; the wait ends on the close notification instead.
     """
     peer = Hooks()
     window = SendWindow(peer, MUXWS_SEND_WINDOW_BYTES)
@@ -168,11 +159,10 @@ async def test_the_send_window_raises_rather_than_waiting_on_a_connection_that_i
 
 
 async def test_the_send_window_counts_payloads_and_not_the_frames_that_carry_no_payload():
-    """Only `data` frames free room, so the window is the same size whatever else the peer sent.
+    """Only `data` frames free room in the window; `open` and `ping` frames do not.
 
-    An `open` frame carries a payload the window never counted as sent, and a ping carries none at
-    all. Counting either as written would widen the window by one payload per stream, so a cell at
-    twenty streams would run with a different allowance from the same cell at one.
+    The window does not count the `open` payload as sent, and a ping carries no payload. Counting
+    either as written would enlarge the window by one payload per stream.
     """
     peer = Hooks()
     window = SendWindow(peer, MUXWS_SEND_WINDOW_BYTES)
@@ -191,9 +181,8 @@ async def test_the_send_window_counts_payloads_and_not_the_frames_that_carry_no_
 def test_the_unix_transport_without_af_unix_is_a_note_rather_than_an_exception(monkeypatch: pytest.MonkeyPatch):
     """Asking for a transport the platform does not have skips its cells and says so.
 
-    The absence is simulated with monkeypatch rather than the test being skipped, so the branch is
-    executed on the machines that do have `AF_UNIX` - which is every machine this suite normally runs
-    on. `raising=False` so the removal reads the same on the platform the branch is about.
+    The absence is simulated with monkeypatch, so the branch runs on machines that have `AF_UNIX`.
+    `raising=False` makes the removal succeed on platforms without it.
     """
     monkeypatch.delattr(socket, "AF_UNIX", raising=False)
 

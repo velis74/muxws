@@ -5,8 +5,8 @@
  * otherwise.
  *
  * `onStream` is passed to `connect()` rather than registered after it returns, because the acceptor
- * may push a stream the instant it sees this dialer: a handler registered one `await` later would
- * meet that push with `reset(REFUSED)`.
+ * may push a stream as soon as the connection is established. A stream that arrives before a handler is
+ * registered is reset with `REFUSED`.
  */
 
 import 'muxws';
@@ -38,10 +38,10 @@ const peer = await connect(url, {
 });
 
 try {
-  // One-shot: `notify()` sends a payload and ends the stream, and hands back no handle to await,
-  // because there is nothing coming back on it.
+  // One-shot: `notify()` sends a payload, ends the stream and returns nothing to await; no response
+  // is expected.
   await peer.notify({ subscribe: 'ticks' });
-  // 10000 milliseconds, and only so a stuck example fails rather than hangs.
+  // 10000 milliseconds, so a stuck example fails instead of hanging.
   const deadline = new Promise<never>((_resolve, reject) => {
     setTimeout(() => {
       reject(new Error('the push never arrived within 10000 milliseconds'));

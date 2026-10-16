@@ -4,30 +4,29 @@ outline: deep
 
 # accept
 
-`accept()` is the acceptor's entry point: it turns one inbound WebSocket into a `Peer`. `serve()` is
-`accept()` plus "register this handler and run the read loop until the socket closes", which is the
-whole of most acceptors.
+`accept()` is the acceptor's entry point: it turns one inbound WebSocket into a `Peer`. `serve()`
+calls `accept()`, registers a stream handler and runs the read loop until the socket closes.
 
-The acceptor is the peer that did not dial. It is otherwise identical to the dialer: the same `Peer`
-type, the same `open()`, the same cancellation. What it does not have is a reconnect helper - it has
-nothing to dial - and what it does have is the handshake, because the acceptor is the only party that
-can decide which subprotocol to select.
+The acceptor is the peer that did not dial. It uses the same `Peer` type as the dialer, with the same
+`open()` and the same cancellation. It has no reconnect helper, because it does not dial. It performs
+the handshake, because only the acceptor selects the subprotocol.
 
-Two things are worth knowing before the tables:
+Behaviour common to every function on this page:
 
-- **`max_payload_bytes`, `max_concurrent_streams` and `error_serializer` belong to this peer alone.**
-  Nothing about them is announced or negotiated. The remote learns of a limit only from the reset it
-  provokes, so raising a limit is done on the *receiving* peer; the sender has no say.
-- **The upgrade is refused, not accepted-then-closed.** A dialer offering a codec this acceptor does
-  not speak gets HTTP 400 wherever the transport allows one, which is what
-  `select_subprotocol` (Python, `websockets`), `accept()` (Python, Starlette) and
-  `refuseMismatchedUpgrade` (TypeScript, `ws`) exist to do.
+- **`max_payload_bytes`, `max_concurrent_streams` and `error_serializer` apply to this peer only.**
+  None of them is sent to or negotiated with the remote. The remote observes a limit only as the
+  reset it receives when it exceeds the limit, so a limit is raised on the *receiving* peer.
+- **A mismatched codec is refused at the upgrade.** A dialer offering a codec this acceptor is not
+  configured for receives HTTP 400 wherever the transport supports it, instead of a completed
+  handshake followed by a close. `select_subprotocol` (Python, `websockets`), `accept()` (Python,
+  Starlette) and `refuseMismatchedUpgrade` (TypeScript, `ws`) send that 400.
 
-An acceptor on a Unix domain socket is an ordinary acceptor. In Python it is
+An acceptor on a Unix domain socket uses the same functions. In Python it is
 `websockets.asyncio.server.unix_serve(handler, path, select_subprotocol=muxws.select_subprotocol)`;
 in Node it is a `WebSocketServer` attached to an `http.Server` that listens on a socket file. Both
-hand these functions the same connection object a TCP listener does, and nothing on this page changes
-— see [Unix domain sockets](/guide/transports#unix-domain-sockets) for the two runnable acceptors.
+pass these functions the same connection object a TCP listener does, and everything on this page
+applies unchanged. See [Unix domain sockets](/guide/transports#unix-domain-sockets) for the two
+runnable acceptors.
 
 ## `accept()` (Python)
 
@@ -55,12 +54,12 @@ async def accept(
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `socket` | `SocketAdapter \| Any` | required | One of three things: a Starlette/FastAPI `WebSocket`, which is **upgraded here** because `accept()` is the only party that knows which subprotocol to select; a `websockets` connection, which has already handshaken and is only verified; or anything that already implements `SocketAdapter`, which is taken as it is. |
+| `socket` | `SocketAdapter \| Any` | required | One of three kinds: a Starlette/FastAPI `WebSocket`, which is **upgraded here** because `accept()` selects the subprotocol; a `websockets` connection, which has already handshaken and is only verified; or anything that already implements `SocketAdapter`, which is taken as it is. |
 | `max_payload_bytes` | `int` | `67_108_864` | The largest reassembled payload this peer accepts, in bytes of encoded output. Checked as fragments arrive, not after reassembly. Local and never announced. |
-| `max_concurrent_streams` | `int` | `100` | How many streams the **remote** may have open here at once. The excess `open` is answered `reset(REFUSED)` without the handler running, so the opener may safely take it elsewhere. Local and never announced. |
+| `max_concurrent_streams` | `int` | `100` | How many streams the **remote** may have open here at once. An `open` beyond the limit is answered `reset(REFUSED)` without the handler running, so the opener can retry it elsewhere. Local and never announced. |
 | `error_serializer` | `ErrorSerializer \| None` | `None` | Turns a handler's exception into the payload of the `reset(APPLICATION_ERROR)` frame. `None` means `default_error_serializer`, which puts the class name and `str(exc)` **on the wire**; a public-facing acceptor should replace it with a redacting one. |
 | `codec` | `Codec \| None` | `None` | An explicit codec, which wins over `settings.codec`. `None` looks the configured name up in the registry and never falls back to JSON. |
-| `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | Test-only. The frame cap is a protocol constant; the conformance runner lowers it to exercise fragmentation without megabyte fixtures. A value too small to hold an envelope plus one indivisible unit is rejected here. |
+| `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | For tests only. The frame cap is a protocol constant; a lower value makes small payloads fragment, which the conformance runner uses. A value too small to hold an envelope plus one indivisible unit raises `ProtocolError`. |
 | `open_interceptors` | `Sequence[OpenInterceptor]` | `()` | Registered in order with [`peer.intercept_open()`](./peer.md#peer-intercept-open-python) on the peer this returns. |
 | `reply_headers_interceptors` | `Sequence[ReplyHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python). |
 | `incoming_headers_interceptors` | `Sequence[IncomingHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_incoming_headers()`](./peer.md#peer-intercept-incoming-headers-python). |
@@ -76,10 +75,10 @@ hello to wait for), but its read loop is not running: call `peer.on_stream(...)`
 - `CodecNotRegistered` — the configured codec name was never registered. Raised before the socket is
   touched.
 - `CodecMismatch` — the dialer's offer does not carry `muxws.v1.<this codec>`. For a Starlette socket
-  the ASGI 400 has already gone out when this is raised. For a `websockets` connection nothing has
-  been sent and nothing is closed: the check runs on an already-open socket, and closing it is the
-  caller's job. An acceptor that installs `select_subprotocol` refuses the mismatch at the handshake
-  instead and never reaches this.
+  the ASGI 400 has been sent when this is raised. For a `websockets` connection nothing is sent and
+  the socket is not closed: the check runs on an already-open socket, and the caller closes it. An
+  acceptor that installs `select_subprotocol` refuses the mismatch at the handshake, and `accept()`
+  does not raise this for it.
 - `ProtocolError` — the Starlette socket had already been accepted by the application (muxws performs
   the upgrade itself), or the object is neither a `SocketAdapter` nor a socket muxws knows how to
   upgrade, or `max_frame_bytes` is too small to hold an envelope plus one unit of payload.
@@ -118,8 +117,8 @@ asyncio.run(main())
 
 ## `serve()` (Python)
 
-Accept, register `handler`, and run the read loop until the socket closes. This is the body of a
-FastAPI WebSocket route.
+Accept, register `handler`, and run the read loop until the socket closes. A FastAPI WebSocket route
+can consist of this one call.
 
 ### Signature
 
@@ -133,7 +132,7 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 |---|---|---|---|
 | `socket` | `SocketAdapter \| Any` | required | The same three kinds `accept()` takes. |
 | `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async, called once per incoming stream. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`. |
-| `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`, `open_interceptors`, `reply_headers_interceptors`, `incoming_headers_interceptors`. The interceptors are the only way to register any on the peer `serve()` builds. An unknown name raises `TypeError` from `accept()`. |
+| `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`, `open_interceptors`, `reply_headers_interceptors`, `incoming_headers_interceptors`. Interceptors for the peer `serve()` builds can be registered only here. An unknown name raises `TypeError` from `accept()`. |
 
 ### Return
 
@@ -146,11 +145,11 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
   is too small to hold an envelope plus one unit of payload.
 - `TypeError` — an unknown keyword in `**peer_options`.
 
-It **swallows** two and returns instead. `CodecMismatch`: there is no peer, and raising would put a
-traceback in the application's route for an ordinary misconfiguration. Where the socket was a
-Starlette one the 400 has already gone out; where it was a `websockets` connection nothing was sent
-and nothing was closed, so that socket is still open and still the application's to close.
-`ConnectionClosed`: a socket that ends is how this function is supposed to finish.
+Two exceptions are caught, and `serve()` returns `None` instead:
+
+- `CodecMismatch` — no peer exists. For a Starlette socket the 400 has been sent. For a `websockets`
+  connection nothing is sent and the socket is not closed; the application closes it.
+- `ConnectionClosed` — the socket closed, which is the normal end of `serve()`.
 
 ### Example
 
@@ -190,18 +189,18 @@ asyncio.run(main())
 
 ## `select_subprotocol()` (Python)
 
-The handshake hook for the `websockets` library: which subprotocol to select, or a refusal.
+The handshake hook for the `websockets` library: returns the subprotocol to select, or refuses.
 
 Install it as `websockets.serve(..., select_subprotocol=muxws.select_subprotocol)`. `websockets`
-completes the handshake before calling the connection handler, so the decision has to be handed to it
-up front.
+completes the handshake before it calls the connection handler, so the selection is made in this
+hook.
 
-The refusal is **raised, not returned**. Returning `None` here would answer 101 with no
-`Sec-WebSocket-Protocol` header and leave the mismatch to be discovered on an already-open socket;
-raising `NegotiationError` is what `websockets` turns into the HTTP 400 the protocol asks for.
+A refusal is **raised, not returned**. `websockets` answers a `None` return with 101 and no
+`Sec-WebSocket-Protocol` header, and a raised `NegotiationError` with the HTTP 400 the protocol
+requires.
 
-It is a thin wrapper over `muxws.subprotocol`, whose public names are the pieces every hook in either
-port is built from: `PREFIX` (`"muxws.v1."`), `offer(codec_name, extra=None)` for the list a dialer
+It wraps `muxws.subprotocol`, whose public names are the building blocks of every hook in both
+ports: `PREFIX` (`"muxws.v1."`), `offer(codec_name, extra=None)` for the list a dialer
 sends, `select(offered, configured)` for the entry an acceptor picks or `None` to refuse,
 `find_offer(offered)` for the single `muxws.v1.*` entry in an offer, `generation_of(entry)` for the
 generation number in one, and `mismatch_error(configured)` for the `CodecMismatch` a dialer composes
@@ -217,8 +216,8 @@ def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `connection` | `Any` | required | The `websockets` server connection. muxws ignores it entirely - the decision depends only on what was offered and on `settings.codec`. Present because `websockets` passes it. |
-| `subprotocols` | `list[str]` | required | The `Sec-WebSocket-Protocol` entries the dialer offered, in order. Only the one carrying the `muxws.v1.` prefix is read; every other entry belongs to the application and is left alone. |
+| `connection` | `Any` | required | The `websockets` server connection. Not read: the selection depends only on the offer and on `settings.codec`. The parameter exists because `websockets` passes it. |
+| `subprotocols` | `list[str]` | required | The `Sec-WebSocket-Protocol` entries the dialer offered, in order. Only the entry carrying the `muxws.v1.` prefix is read; other entries are ignored. |
 
 ### Return
 
@@ -268,15 +267,15 @@ asyncio.run(main())
 
 ## `accept()` (TypeScript, `muxws/node`)
 
-Wrap an accepted `ws` connection in a peer. The connection has already handshaken by the time `ws`
-hands it over, so the subprotocol is verified on the open socket and the socket is closed with 1008
-if it disagrees.
+Wrap an accepted `ws` connection in a peer. `ws` passes the connection after the handshake has
+completed, so the subprotocol is verified on the open socket, and the socket is closed with 1008 if it
+does not match.
 
-It takes a `ws` `WebSocket` and nothing else — it reads `socket.protocol` and wraps the argument in a
-`WsSocket`. Python's `accept()` also takes anything already implementing `SocketAdapter`; the
-TypeScript way to use an adapter of your own is `new Peer(adapter, { codec, isDialer: false })`.
+It takes only a `ws` `WebSocket`: it reads `socket.protocol` and wraps the argument in a `WsSocket`.
+Python's `accept()` also takes any `SocketAdapter`; in TypeScript, a custom adapter is used with
+`new Peer(adapter, { codec, isDialer: false })`.
 
-There is no browser `accept()`: a browser cannot accept a WebSocket.
+There is no browser `accept()`, because a browser cannot accept a WebSocket.
 
 ### Signature
 
@@ -289,7 +288,7 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `socket` | `WebSocket` (from `ws`) | required | The connection `WebSocketServer` emitted. Its `protocol` must be `muxws.v1.<codec>`. |
-| `options` | `AcceptOptions` | `{}` | The four local settings plus the codec override. See [`AcceptOptions`](#acceptoptions-typescript). |
+| `options` | `AcceptOptions` | `{}` | The local limits, the error serializer, the codec override and the interceptors. See [`AcceptOptions`](#acceptoptions-typescript). |
 
 ### Return
 
@@ -300,11 +299,11 @@ call `peer.serve()`, or use `serve()` below.
 
 Rejects with:
 
-- `CodecNotRegistered` — the configured codec name is not in the registry. `muxws/node` registers
-  nothing itself: the JSON registration is a side effect of importing `muxws`, so a Node-only process
-  must import `muxws` or call `registerCodec` during bootstrap.
-- `CodecMismatch` — the negotiated subprotocol is not `muxws.v1.<codec>`. The socket has been closed
-  with 1008 by the time this rejects.
+- `CodecNotRegistered` — the configured codec name is not in the registry. `muxws/node` registers no
+  codec; JSON is registered as a side effect of importing `muxws`, so a process that imports only
+  `muxws/node` must import `muxws` or call `registerCodec` during bootstrap.
+- `CodecMismatch` — the negotiated subprotocol is not `muxws.v1.<codec>`. The socket is closed with
+  1008 before the promise rejects.
 - `ProtocolError` — `maxFrameBytes` is too small to hold an envelope plus one indivisible unit.
 
 ### Example
@@ -350,20 +349,19 @@ export async function serve(socket: NodeWebSocket, options: AcceptOptions & { ha
 |---|---|---|---|
 | `socket` | `WebSocket` (from `ws`) | required | The connection `WebSocketServer` emitted. |
 | `options.handler` | `StreamHandler` | required | `(payload, stream)`, called once per incoming stream. Returning without ending the stream ends it implicitly; throwing resets it with `APPLICATION_ERROR`. |
-| `options` (rest) | `AcceptOptions` | `{}` | `maxPayloadBytes`, `maxConcurrentStreams`, `errorSerializer`, `codec`, `maxFrameBytes`, passed through to `accept()`. |
+| `options` (rest) | `AcceptOptions` | `{}` | `maxPayloadBytes`, `maxConcurrentStreams`, `errorSerializer`, `codec`, `maxFrameBytes`, `openInterceptors`, `replyHeadersInterceptors`, `incomingHeadersInterceptors`, passed through to `accept()`. |
 
 ### Return
 
-`Promise<void>` — resolves when the socket closes, and also resolves on a `CodecMismatch`, which it
-swallows exactly as Python's `serve()` does. `accept()` has closed the socket with 1008 by then, so
-there is nothing left to do with it, and rejecting inside a `ws` connection handler surfaces as an
-unhandled rejection that takes the process down.
+`Promise<void>` — resolves when the socket closes. It also resolves on a `CodecMismatch`, as Python's
+`serve()` returns. `accept()` has already closed the socket with 1008 at that point; a rejection inside
+a `ws` connection handler would be an unhandled rejection, which terminates the Node process.
 
 ### Raises
 
 Rejects with everything `accept()` rejects with **except** `CodecMismatch`: `CodecNotRegistered`,
-`ProtocolError`, plus whatever `peer.serve()` fails with - a read loop that dies takes the peer down
-first and then rejects with the same error.
+`ProtocolError`, plus whatever `peer.serve()` rejects with. When the read loop fails, the peer is
+closed first and `serve()` then rejects with the same error.
 
 ### Example
 
@@ -424,11 +422,11 @@ export interface AcceptOptions {
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `maxPayloadBytes` | `number` | `67_108_864` | The largest reassembled payload this peer accepts, in bytes. Enforced on the fragment that crosses it. Local, never announced. |
-| `maxConcurrentStreams` | `number` | `100` | How many streams the remote may hold open here at once. The excess is refused without the handler running. Local, never announced. |
+| `maxPayloadBytes` | `number` | `67_108_864` | The largest reassembled payload this peer accepts, in bytes. Enforced on the fragment that exceeds it. Local, never announced. |
+| `maxConcurrentStreams` | `number` | `100` | How many streams the remote may hold open here at once. An `open` beyond the limit is refused without the handler running. Local, never announced. |
 | `errorSerializer` | `ErrorSerializer` | `defaultErrorSerializer` | Turns a handler's failure into the `reset(APPLICATION_ERROR)` payload. The default puts the error's `name` and `message` **on the wire**; replace it with a redacting one on a public-facing acceptor. |
 | `codec` | `Codec` | `getCodec(settings.codec)` | An explicit codec, which wins over the configured name. |
-| `maxFrameBytes` | `number` | `MAX_FRAME_BYTES` (65536) | Test-only lowering of the protocol frame cap. |
+| `maxFrameBytes` | `number` | `MAX_FRAME_BYTES` (65536) | Lowers the protocol frame cap; for tests only. |
 | `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) on the peer `accept()` returns or `serve()` builds. |
 | `replyHeadersInterceptors` | `readonly ReplyHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript). |
 | `incomingHeadersInterceptors` | `readonly IncomingHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptIncomingHeaders()`](./peer.md#peer-interceptincomingheaders-typescript). |
@@ -463,11 +461,10 @@ console.log(options.maxPayloadBytes, options.maxConcurrentStreams, options.error
 
 The **selection** hook for a `ws` server: which subprotocol to echo back.
 
-It is the closest thing in TypeScript to Python's `select_subprotocol`, and it is deliberately only
-half the job: `ws` decides the subprotocol here, but returning `false` selects nothing rather than
-refusing - `ws` still answers 101, just without a `Sec-WebSocket-Protocol` header. Refusing with 400
-is `refuseMismatchedUpgrade`'s job, and an acceptor that installs only this hook completes handshakes
-it should have rejected.
+It corresponds to Python's `select_subprotocol` for selection only. `ws` takes the subprotocol from
+this hook, and a `false` return selects nothing without refusing: `ws` still answers 101, without a
+`Sec-WebSocket-Protocol` header. `refuseMismatchedUpgrade` sends the 400; an acceptor that installs
+only this hook completes handshakes with mismatched codecs.
 
 ### Signature
 
@@ -479,7 +476,7 @@ export function handleProtocols(protocols: Set<string>): string | false;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `protocols` | `Set<string>` | required | The offered subprotocol entries, as `ws` supplies them. Only the `muxws.v1.` entry is read; the rest belong to the application. |
+| `protocols` | `Set<string>` | required | The offered subprotocol entries, as `ws` supplies them. Only the `muxws.v1.` entry is read; other entries are ignored. |
 
 ### Return
 
@@ -488,8 +485,8 @@ which case `ws` selects nothing.
 
 ### Raises
 
-Raises: nothing. A mismatch is reported by the return value and logged by `select` through the muxws
-logger, at error level, so `logger.level` can turn it down.
+Raises: nothing. A mismatch is reported by the return value, and `select` logs it at error level
+through the muxws logger; `logger.level` controls whether it is emitted.
 
 ### Example
 
@@ -514,9 +511,9 @@ server.close();
 
 Install the **refusal** on a `ws` server, so a codec it does not speak is answered HTTP 400.
 
-`handleProtocols` cannot do this: whatever it returns, `ws` completes the handshake with 101.
-`shouldHandle` is the hook that aborts an upgrade with a status, so the acceptor needs both. The
-inherited `shouldHandle` runs first, so a server constructed with `path` keeps that check.
+`ws` completes the handshake with 101 for every `handleProtocols` return value. `shouldHandle` is
+the `ws` hook that aborts an upgrade with a status, so an acceptor installs both. The server's
+existing `shouldHandle` runs first, so a server constructed with `path` keeps that check.
 
 ### Signature
 
@@ -563,10 +560,10 @@ server.close();
 
 ## `select()` (TypeScript)
 
-The decision both TypeScript hooks are built on: the value an acceptor selects, or `null` to refuse.
-Its Python twin is `muxws.subprotocol.select`, which `select_subprotocol` wraps.
+The selection function both TypeScript hooks call: returns the entry an acceptor selects, or `null`
+to refuse. The Python equivalent is `muxws.subprotocol.select`, which `select_subprotocol` wraps.
 
-Use it directly only when you are writing an adapter for a server muxws does not ship a hook for.
+Call it directly when writing a hook for a server that muxws has no hook for.
 
 ### Signature
 
@@ -584,15 +581,15 @@ export function select(offered: readonly string[], configured: string): string |
 ### Return
 
 `string | null` — `muxws.v1.<configured>` when the offer carries exactly that entry, `null` otherwise.
-`null` means refuse the handshake: a mismatched codec, a different muxws generation and an offer with
-no muxws entry at all are one answer, because muxws never negotiates a fallback.
+`null` means refuse the handshake. A mismatched codec, a different muxws generation and an offer with
+no muxws entry all return `null`; muxws does not negotiate a fallback.
 
 ### Raises
 
 Raises: nothing. A refusal is a `null` return plus one error-level line through the muxws
 [`logger`](./types.md#logger-and-loglevel-typescript), naming what was offered, what is configured,
-and which environment variable to change. It reaches `console.error` at the default level and is
-silenced by lowering `logger.level`.
+and which environment variable to change. It is written to `console.error` at the default level (`'warn'`)
+and is suppressed by setting `logger.level` to `'silent'`.
 
 ### Example
 

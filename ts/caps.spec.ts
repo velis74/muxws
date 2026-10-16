@@ -1,13 +1,12 @@
 /**
  * The three receive-side caps, and the observability hooks (§4.3, §12).
  *
- * A mirror of `muxws/caps_test.py`, test for test. All three caps are **local defences**. None is
- * announced, none has a remote counterpart to consult, and a sender learns of one only from the reset
- * it provokes (WSM-CON-031, WSM-FRG-035, WSM-STM-036).
+ * Mirrors `muxws/caps_test.py` test for test. All three caps are **local limits**: none is announced, none has a
+ * remote counterpart, and a sender learns of one only from the reset it causes (WSM-CON-031, WSM-FRG-035,
+ * WSM-STM-036).
  *
- * Where an assertion is spelled differently here it is because JavaScript offers a different witness
- * of the same fact - a `console` spy where Python reads `caplog`, `Function.prototype.toString` where
- * Python reads `inspect.getsource` - and each of those places says so.
+ * Where an assertion differs from Python it uses the JavaScript observable for the same fact - a `console` spy for
+ * Python's `caplog`, `Function.prototype.toString` for `inspect.getsource` - and a comment at that place names it.
  */
 
 // `describe`/`it`/`expect` are configured as globals; `vi` is imported because the shared eslint
@@ -88,12 +87,11 @@ class Pair {
 }
 
 /**
- * One peer, fed frames from the wire by hand - the mirror of `conftest.py`'s `Lone`.
+ * One peer, fed frames by hand - the counterpart of `conftest.py`'s `Lone`.
  *
- * A live pair cannot test a receiver's reaction to a frame no correct sender would produce: the
- * counterpart peer sees the answer, cannot account for it, and kills the connection - correctly, and
- * entirely beside the point. Injecting into a peer with no counterpart is how the conformance runner
- * does it, and it is what these tests need too.
+ * A live pair cannot test how a receiver handles a frame no correct sender produces: the counterpart peer receives
+ * the answer, cannot match it to anything, and kills the connection, which is unrelated to the assertion. The
+ * conformance runner also injects into a peer with no counterpart.
  */
 class Lone {
   private served: Promise<void> | null = null;
@@ -175,8 +173,8 @@ function makeLone(options: Caps = {}): Lone {
 }
 
 /**
- * The peer's private bookkeeping. Python reads `_max_payload_bytes` and `_remote_stream_count()`;
- * both are statements about what the peer holds locally, which no wire observation can witness.
+ * The peer's private bookkeeping. Python reads `_max_payload_bytes` and `_remote_stream_count()`; both describe
+ * what the peer holds locally, which the wire does not show.
  */
 interface PeerInternals {
   maxPayloadBytes: number;
@@ -212,7 +210,7 @@ function allLogLines(): string[] {
   return LEVELS.flatMap((level) => logged[level]);
 }
 
-/** Python's `_hold`: keep the stream open until somebody else closes it. */
+/** Python's `_hold`: keep the stream open until the other side closes it. */
 async function hold(payload: unknown, stream: Stream): Promise<void> {
   await stream.closed;
 }
@@ -222,7 +220,7 @@ async function replyNow(payload: unknown, stream: Stream): Promise<void> {
   await stream.reply({ ok: true });
 }
 
-/** `pytest.raises`, as a value: the rejection reason, or a failure if there was none. */
+/** Equivalent of `pytest.raises`: the rejection reason, or a test failure if the promise resolves. */
 async function rejection(work: PromiseLike<unknown>): Promise<unknown> {
   try {
     await work;
@@ -268,13 +266,13 @@ describe('the frame-size cap', () => {
   });
 
   it('does not measure the fragment field alone - WSM-FRG-031', async () => {
-    // WSM-FRG-031 says the entire encoded message, envelope included - never the field.
+    // WSM-FRG-031 measures the entire encoded message, envelope included, never the field alone.
     const lone = makeLone({ maxFrameBytes: 512 });
     lone.peer.onStream(hold);
     lone.start();
 
     const { codec } = lone;
-    // A fragment field comfortably under the cap, in an envelope that pushes the message over it.
+    // A fragment field well under the cap, in an envelope that puts the message over it.
     const fragment = 'y'.repeat(400);
     const frame: Frame = { type: 'open', stream: 1, fragment, more: true, headers: { h: 'z'.repeat(300) } };
     expect(encodedLength(fragment)).toBeLessThan(512);
@@ -286,7 +284,7 @@ describe('the frame-size cap', () => {
   });
 
   it('rejects a cap below the envelope floor at construction - WSM-FRG-034', () => {
-    // Found here, not later as an infinite split loop.
+    // Rejected at construction; otherwise the split loop would never terminate.
     const [, socket] = memoryPair();
     expect(() => new Peer(socket, { codec: new JsonCodec(), isDialer: false, maxFrameBytes: 16 })).toThrow(
       /WSM-FRG-034/,
@@ -301,9 +299,9 @@ describe('the frame-size cap', () => {
 
 describe('maxPayloadBytes', () => {
   it('resets on the crossing fragment - WSM-FRG-032/WSM-INV-017 (spec)', async () => {
-    // The reset goes out **before the final fragment arrives**. A receiver that assembled the payload
-    // in order to measure it has already spent everything the limit existed to protect. The partial
-    // buffer is dropped in the same step, for the same reason.
+    // The reset is sent **before the final fragment arrives**. A receiver that assembled the payload to measure it
+    // would already have used the memory the limit protects. The partial buffer is dropped in the same step for the
+    // same reason.
     const lone = makeLone({ maxFrameBytes: 512, maxPayloadBytes: 2000 });
     lone.peer.onStream(hold);
     lone.start();
@@ -334,7 +332,7 @@ describe('maxPayloadBytes', () => {
   });
 
   it('defaults to 64 MiB and is never announced - WSM-FRG-035', async () => {
-    // A local receiver setting, and a sender may learn it only from a reset.
+    // A local receiver setting; a sender learns it only from a reset.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();
@@ -415,9 +413,9 @@ describe('the concurrency limit', () => {
   });
 
   it('is never announced and never checked by the sender - WSM-STM-036/WSM-INV-007', async () => {
-    // A sender that counted its own opens has rebuilt the announced quota. Python reads
-    // `inspect.getsource(Peer.open)`; `Function.prototype.toString` is the same witness here, and the
-    // spec build is not minified, so the identifier survives into what it returns.
+    // A sender that counted its own opens would reimplement an announced quota. Python reads
+    // `inspect.getsource(Peer.open)`; here `Function.prototype.toString` returns the source, and the spec build is
+    // not minified, so the identifier is present in it.
     expect(Peer.prototype.open.toString(), 'open() must not consult the concurrency limit').not.toContain(
       'maxConcurrent',
     );
@@ -458,7 +456,7 @@ describe('observability', () => {
     expect(seen[0][0]).toBe('tx');
     expect(seen.some((entry) => entry[0] === 'rx')).toBe(true);
     seen.forEach(([direction, frame, length]) => {
-      // The hook sees the logical frame, not bytes: it can be re-encoded, which bytes could not be.
+      // The hook receives the logical frame, not bytes, so it can be re-encoded.
       expect(typeof frame.type).toBe('string');
       expect(length, `${direction} length was not the encoded one`).toBe(encodedLength(codec.encode(frame)));
     });
@@ -508,7 +506,7 @@ describe('observability', () => {
   });
 
   it('never sends window_update - WSM-BPR-001', async () => {
-    // Reserved in v1, and the only flow control is the two local defences.
+    // Reserved in v1; the only flow control is the two local limits.
     const pair = makePair({ maxConcurrentStreams: 2, maxPayloadBytes: 4000 });
     pair.acceptor.onStream(replyNow);
     pair.start();

@@ -89,24 +89,22 @@ def test_absent_payload_is_not_null(codec: JsonCodec):
 
 
 def test_v1_frame_types_is_exactly_the_six_of_the_specification():
-    """WSM-FRM-012/013: the set is closed, and what it leaves out is the point.
+    """WSM-FRM-012/013: the set is closed.
 
-    Asserted by **equality**, never by membership. Every other reference to this set in the suite
-    asks whether a type it already has is in it, which a seventh member satisfies just as well - so
-    an `end` type, a `trailers` type, a `settings` type or an implemented `window_update` could be
-    added and nothing anywhere would fail. Each of those absences is a deliberate design decision
-    (end and trailers are flags; there is no negotiation frame), and a decision no test can lose is
-    the only kind that survives a wire freeze.
+    Asserted by equality, not membership. Every other reference to this set in the suite checks
+    whether a type is in it, which a seventh member also satisfies, so an added `end`, `trailers` or
+    `settings` type or an implemented `window_update` would fail no other test. End and trailers are
+    flags, and there is no negotiation frame.
     """
     assert V1_FRAME_TYPES == {"open", "data", "reset", "ping", "pong", "goaway"}
 
 
 def test_end_and_trailers_are_flags_and_not_frame_types(codec: JsonCodec):
-    """WSM-FRM-012/013: the positive half - a flag exists, so a frame type was never needed.
+    """WSM-FRM-012/013: end and trailers are flags on a `data` frame.
 
-    The negative alone would also be satisfied by a peer that simply cannot say "I am done". These
-    two shapes are what an `end` frame type and a trailers frame type would otherwise be for, and
-    both are ordinary `data`.
+    The absence of the frame types alone would also hold for a peer that cannot signal the end of a
+    stream. The two frames below carry what an `end` frame type and a trailers frame type would carry,
+    and both are ordinary `data` frames.
     """
     from dataclasses import fields
 
@@ -119,11 +117,11 @@ def test_end_and_trailers_are_flags_and_not_frame_types(codec: JsonCodec):
     assert finished == Frame("data", stream=7, end=True)
     assert finished.payload is ABSENT
 
-    # WSM-FRM-013: trailers ride on the frame carrying `end: true`, never on one of their own.
+    # WSM-FRM-013: trailers are carried on the frame with `end: true`, never on a frame of their own.
     trailing = codec.decode('{"type":"data","stream":7,"end":true,"payload":{"rows":4},"trailers":{"checksum":"d"}}')
     assert (trailing.type, trailing.end, trailing.trailers) == ("data", True, {"checksum": "d"})
 
-    # And the corpus - the thing a third port is built against - contains neither type either.
+    # The conformance corpus, which further implementations are built against, contains neither type.
     assert {case["frame"]["type"] for case in CORPUS} <= V1_FRAME_TYPES
 
 
@@ -151,13 +149,13 @@ def test_frame_is_frozen_and_compares_by_value():
 
 
 def test_absent_sentinel_is_falsy_and_names_itself():
-    """D1: ABSENT reads well in a condition and in a test failure."""
+    """D1: ABSENT is falsy, and its repr names it in a test failure."""
     assert not ABSENT
     assert repr(ABSENT) == "ABSENT"
 
 
-def test_corpus_covers_the_shapes_the_brief_requires():
-    """The corpus is an acceptance criterion of its own; a silently shrinking one is worthless."""
+def test_corpus_covers_the_required_shapes():
+    """The corpus contains every required frame shape, so removing one fails this test."""
     names = {case["name"] for case in CORPUS}
     required = {
         "unary-open-with-end",

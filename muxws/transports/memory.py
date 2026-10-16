@@ -1,7 +1,7 @@
-"""Two socket adapters wired to each other, with no socket anywhere.
+"""Two in-memory socket adapters connected to each other, with no network socket.
 
-Part of the installed package rather than the test tree: the conformance runner and any application
-test that wants a peer pair without a listening socket import it as public API.
+Part of the installed package, so the conformance runner and application tests can create a peer pair
+without a listening socket.
 """
 
 from __future__ import annotations
@@ -59,7 +59,8 @@ class MemorySocket:
             await self._peer_socket._inbox.put(None)
 
     async def drop(self) -> None:
-        """Simulate socket death: no close frame, no warning, both ends simply stop."""
+        """Simulate socket death: both ends' receives raise `ConnectionClosed` (code 1006); no close frame."""
+
         await self.close(code=1006, reason="dropped")
 
     def inject(self, message: str | bytes) -> None:

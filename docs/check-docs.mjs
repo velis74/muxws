@@ -2,9 +2,9 @@
 /**
  * The documentation completeness checker.
  *
- * Run it with `npm run docs:check`. It exits non-zero, naming every offence, when any of the five
- * checks below fails. It reads the source of truth rather than a snapshot of it, so a symbol added
- * to `ts/index.ts` without a page entry fails here on the next run rather than in a reader's editor.
+ * Run it with `npm run docs:check`. It exits non-zero and lists every failure when any of the five
+ * checks below fails. It reads the TypeScript sources directly, so a symbol added to `ts/index.ts`
+ * without a page entry fails the next run.
  *
  *   api-coverage           every symbol exported from `ts/index.ts`, `ts/node.ts` (`muxws/node`)
  *                          and `ts/msgpack.ts` (`muxws/msgpack`) has an entry in `docs/api/`, and
@@ -14,13 +14,13 @@
  *   no-unitless-durations  no parameter-table row naming a timeout, an interval or a delay states
  *                          its number without `seconds` or `milliseconds`.
  *   no-dead-links          `ignoreDeadLinks` in the VitePress config is limited to
- *                          `[/^http:\/\/localhost/]`, so the build fails on a broken internal link -
- *                          plus a resolution of every internal link and heading anchor here, because
+ *                          `[/^http:\/\/localhost/]`, so the build fails on a broken internal link;
+ *                          this check also resolves every internal link and heading anchor, because
  *                          VitePress checks the path and not the fragment.
  *   spec-is-linked-once    `SPEC.md` is linked from `guide/architecture.md` and from nowhere else.
  *
- * The Python half of coverage is `muxws/docs_test.py`: this file enumerates the TypeScript surface
- * only, because `__all__` and `inspect.signature` are reachable from pytest and not from node.
+ * `muxws/docs_test.py` checks the Python API. This file enumerates the TypeScript API only, because
+ * `__all__` and `inspect.signature` are available in pytest and not in node.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -39,13 +39,13 @@ const ENTRY_POINTS = [
   { specifier: 'muxws/msgpack', file: join(ROOT, 'ts', 'msgpack.ts') },
 ];
 
-/** The five sections every API entry must carry, spelled exactly as the brief spells them. */
+/** The five sections every API entry must have, with their exact heading text. */
 const REQUIRED_SECTIONS = ['Signature', 'Parameters', 'Return', 'Raises', 'Example'];
 
 /**
- * Backticked spans in an entry heading that are not symbol names. `len(registry)` is how Python
- * spells `PeerRegistry.__len__`, and `muxws` / `muxws/node` name the entry point an overloaded
- * symbol was reached through - neither is a name anything exports.
+ * Backticked spans in an entry heading that are not symbol names. `len(registry)` is the Python
+ * spelling of `PeerRegistry.__len__`, and `muxws` / `muxws/node` name the entry point of an
+ * overloaded symbol. Neither is an exported name.
  */
 const PROSE_HEADING_SPANS = new Set(['len(registry)', ...ENTRY_POINTS.map((entry) => entry.specifier)]);
 
@@ -53,7 +53,7 @@ const PROSE_HEADING_SPANS = new Set(['len(registry)', ...ENTRY_POINTS.map((entry
 // Markdown reading
 // ---------------------------------------------------------------------------------------------
 
-/** Every published Markdown page. `design/` is `srcExclude`d by the VitePress config, so it is not the site. */
+/** Every published Markdown page. `design/` is in `srcExclude` of the VitePress config and is not published. */
 function sitePages() {
   const pages = [];
   const walk = (dir) => {
@@ -72,8 +72,8 @@ function sitePages() {
 }
 
 /**
- * Blank out fenced code blocks, keeping line numbering intact. Every scan below is about the prose:
- * a `## heading` or a `| table |` inside a fence is sample text, not site structure.
+ * Blank out fenced code blocks, keeping line numbering intact. The scans below read prose only: a
+ * `## heading` or a `| table |` inside a fence is sample text, not page structure.
  */
 function withoutFences(text) {
   const lines = text.split('\n');
@@ -94,7 +94,7 @@ function withoutFences(text) {
     .join('\n');
 }
 
-/** The YAML frontmatter is configuration, not prose; drop it before scanning for links or headings. */
+/** Remove the YAML frontmatter before scanning for links or headings. */
 function withoutFrontmatter(text) {
   if (!text.startsWith('---\n')) return text;
   const end = text.indexOf('\n---', 4);
@@ -115,8 +115,8 @@ function headings(text) {
 
 /**
  * VitePress's heading anchors, which are `@mdit-vue/shared`'s `slugify` applied to the raw heading
- * text. Reproduced rather than imported because VitePress bundles that package rather than
- * installing it; `validateSlugifier` below proves the reproduction against a built site when one is
+ * text. Reimplemented here because VitePress bundles that package instead of installing it as a
+ * dependency; `validateSlugifier` below compares this implementation with a built site when one is
  * present.
  */
 function slugify(text) {
@@ -154,7 +154,7 @@ function headingSymbols(headingText) {
       continue;
     }
     span = span.replace(/\(\)$/, '');
-    // Anything left holding a bracket is a call with arguments, i.e. prose.
+    // A span that still contains a bracket is a call with arguments, not a symbol name.
     if (/[()[\]<>]/.test(span)) continue;
     const dot = span.lastIndexOf('.');
     if (dot === -1) entries.push({ receiver: null, member: span, full: span });
@@ -207,10 +207,9 @@ function withoutComments(source) {
 }
 
 /**
- * Statically declared exports, including the type-only ones. A runtime import cannot see
- * `export type { Codec }` at all, and roughly a third of this library's public surface is
- * interfaces and type aliases, so the static parse is the authority and the runtime import below is
- * its check.
+ * Statically declared exports, including type-only ones. A runtime import does not see
+ * `export type { Codec }`, and part of the public API consists of interfaces and type aliases, so
+ * coverage is measured against this static parse. The runtime import below verifies the parse.
  */
 function staticExports(file) {
   const source = withoutComments(readFileSync(file, 'utf8'));
@@ -230,10 +229,9 @@ function staticExports(file) {
 }
 
 /**
- * What the module system actually hands a consumer, plus the shape of each class, obtained by
- * importing the TypeScript sources through `tsx` in a child process. `node docs/check-docs.mjs` has
- * no TypeScript loader of its own, and `dist/` is not committed, so the child is how the real
- * objects are reached.
+ * The runtime exports of each entry point, plus the members of each class, obtained by importing
+ * the TypeScript sources through `tsx` in a child process. `node docs/check-docs.mjs` has no
+ * TypeScript loader and `dist/` is not committed.
  */
 function runtimeSurface() {
   const script = join(tmpdir(), `muxws-docs-exports-${process.pid}.mjs`);
@@ -288,10 +286,10 @@ function tsSources() {
 }
 
 /**
- * The body of `class <name>`, so that a documented member can be looked for where it would be
- * declared. The prototype tells us about methods and accessors; a field initialised in the
- * constructor - `readonly tags: Record<string, unknown> = {}` - exists on instances only, and this
- * is how those are reached without constructing a peer.
+ * The source body of `class <name>`, searched for documented member declarations. The prototype
+ * lists methods and accessors; a field initialised in the constructor
+ * (`readonly tags: Record<string, unknown> = {}`) exists on instances only and is found here without
+ * constructing a peer.
  */
 function classBodies() {
   const bodies = new Map();
@@ -343,8 +341,8 @@ function checkApiCoverage() {
     return { name: 'api-coverage', failures, notes };
   }
 
-  // The static parse is what the coverage requirement is measured against, so it must not miss a
-  // name the module system really exports. If it does, this checker is wrong before the site is.
+  // Coverage is measured against the static parse, so every runtime export must appear in it. A
+  // runtime export the parse misses is a failure of this checker's parser.
   const shapes = new Map();
   for (const [file, exportsOfFile] of Object.entries(runtime)) {
     for (const [name, shape] of Object.entries(exportsOfFile)) {
@@ -369,8 +367,7 @@ function checkApiCoverage() {
       }
     }
   }
-  // Two pages carrying an entry for the same symbol is not a coverage failure - the site is still
-  // complete - but it is how two copies start to drift, so it is reported.
+  // An entry for the same symbol on two pages is reported as a note, not a failure.
   for (const [key, entries] of documented) {
     const pages = [...new Set(entries.map((e) => relative(DOCS, e.path)))];
     if (pages.length > 1) duplicates.push(`duplicate entry: \`${key}\` is documented on ${pages.join(' and ')}`);
@@ -396,9 +393,8 @@ function checkApiCoverage() {
     failures.push(`\`${name}\` is exported from ${specifiers.join(', ')} but has no entry in docs/api/`);
   }
 
-  // Reverse: every TypeScript symbol an entry claims still exists. Entries tagged `(Python)` or
-  // untagged are the Python mirror's business - `muxws/docs_test.py` resolves those against the
-  // module itself, which node cannot do.
+  // Reverse: every TypeScript symbol an entry names is exported. Entries tagged `(Python)` or
+  // untagged are checked by `muxws/docs_test.py` against the Python module.
   const bodies = classBodies();
   for (const path of apiPages()) {
     for (const entry of entriesOf(path)) {
@@ -460,15 +456,14 @@ function checkEntryShape() {
           `${relative(DOCS, path)}:${entry.line} entry "${entry.heading}" is missing ${missing.map((s) => `### ${s}`).join(', ')}`,
         );
       }
-      // An entry may carry more than the five - `api/types.md`'s `Frame` adds an envelope-field
-      // table - but never fewer.
+      // Additional sections are allowed (`api/types.md`'s `Frame` adds an envelope-field table).
     }
   }
   return { name: 'entry-shape', failures, notes: [`${entryCount} entries checked`] };
 }
 
 // ---------------------------------------------------------------------------------------------
-// Check 8 - no-unitless-durations
+// Check 3 - no-unitless-durations
 // ---------------------------------------------------------------------------------------------
 
 const DURATION_NAME = /timeout|interval|delay|deadline/i;
@@ -505,9 +500,8 @@ function checkNoUnitlessDurations() {
   for (const path of sitePages()) {
     const text = readFileSync(path, 'utf8');
     for (const table of tablesIn(text)) {
-      // A parameter table is one that states types or defaults. The reset-code table's "required
-      // reaction" column says "otherwise after a delay" and has a TIMEOUT row; it is prose about
-      // behaviour, not a parameter list, and check 8 is scoped to parameter tables for that reason.
+      // Only parameter tables (with a `Type` or `Default` column) are checked. Other tables, such as
+      // the reset-code table with its TIMEOUT row and "otherwise after a delay" text, are skipped.
       const typeColumn = table.header.findIndex((c) => /^type$/i.test(c));
       const isParameterTable = typeColumn !== -1 || table.header.some((c) => /^default$/i.test(c));
       if (!isParameterTable) continue;
@@ -515,8 +509,8 @@ function checkNoUnitlessDurations() {
       for (const row of table.rows) {
         const name = row.cells[0] ?? '';
         if (!DURATION_NAME.test(name)) continue;
-        // The type column is where the unit belongs; a table that states defaults without types may
-        // put it anywhere in the row.
+        // The unit must be in the type column; in a table with defaults and no type column it may be
+        // anywhere in the row.
         const where = typeColumn === -1 ? row.cells.join(' | ') : (row.cells[typeColumn] ?? '');
         if (!UNIT.test(where)) {
           failures.push(
@@ -532,13 +526,13 @@ function checkNoUnitlessDurations() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Check 9 - no-dead-links
+// Check 4 - no-dead-links
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Prove the reproduced slugifier against a built site, when `docs:build` has left one behind.
- * Only pages whose HTML is newer than their Markdown are compared: a stale page would report a
- * disagreement that is really just an edit the last build did not see.
+ * Compare the slugifier with a built site, when `docs:build` output exists. Only pages whose HTML
+ * is newer than their Markdown are compared, so edits made after the last build are not reported as
+ * mismatches.
  */
 function validateSlugifier() {
   const dist = join(DOCS, '.vitepress', 'dist');
@@ -577,7 +571,7 @@ function checkNoDeadLinks() {
     );
   }
 
-  // The anchors VitePress does not check. Everything the site can be linked to, by page and by id.
+  // Heading anchors, which VitePress does not check: every linkable id, by page route.
   const anchors = new Map();
   for (const path of sitePages()) {
     const route = `/${relative(DOCS, path).replace(/\.md$/, '')}`.replace(/\/index$/, '/');
@@ -627,7 +621,7 @@ function checkNoDeadLinks() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Check 10 - spec-is-linked-once
+// Check 5 - spec-is-linked-once
 // ---------------------------------------------------------------------------------------------
 
 function checkSpecIsLinkedOnce() {
@@ -636,14 +630,14 @@ function checkSpecIsLinkedOnce() {
   const sightings = [];
   for (const path of sitePages()) {
     const text = withoutFences(withoutFrontmatter(readFileSync(path, 'utf8')));
-    // A link, not a mention: `[SPEC.md](…/SPEC.md)` is one link whose text happens to repeat the
-    // file name. What must not multiply is the number of places the site points a reader at.
+    // Links are counted, not mentions: `[SPEC.md](…/SPEC.md)` is one link whose text repeats the
+    // file name.
     for (const match of text.matchAll(/\[[^\]]*\]\(([^)\s]*SPEC\.md[^)\s]*)\)/g)) {
       sightings.push({ path, line: text.slice(0, match.index).split('\n').length, target: match[1] });
     }
   }
-  // Off the architecture page, any mention at all is the offence: a page that names SPEC.md is a
-  // page that has started paraphrasing it, whether or not it links.
+  // On every page other than the architecture page, any mention of SPEC.md fails, with or without a
+  // link.
   for (const path of sitePages()) {
     if (path === owner) continue;
     const text = withoutFences(withoutFrontmatter(readFileSync(path, 'utf8')));

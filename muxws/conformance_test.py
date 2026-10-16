@@ -1,23 +1,21 @@
 """The Python conformance runner: `conformance/sequences/` and `conformance/invalid/`.
 
-`ts/conformance.spec.ts` is this file's twin and reads the same files, under the same schema
-(`conformance/README.md`). If one runner needs a field the other does not read, the fixture is wrong.
+`ts/conformance.spec.ts` is the TypeScript counterpart and reads the same files under the same
+schema (`conformance/README.md`). A field that only one runner reads indicates a defective fixture.
 
-Two corpora, two shapes of proof:
+The two corpora test different things:
 
 - **`sequences/`** - both peers are real, nothing is injected, and the fixture is a script of
-  ordinary API calls with assertions interleaved. What it proves is that the ports agree about
-  *sequences* - which frame goes out when, which stream survives which event - and not merely about
-  how one frame is spelled. Every fixture is replayed **twice, with the roles swapped**, which is
-  what `stream_ref`-as-an-ordinal buys and the whole point of the corpus: a raw id would bake one
-  side's parity in, and the second pass is what proves it did not.
-- **`invalid/`** - one real peer, fed messages no correct implementation would send, asserting both
-  which frame goes out and whether the connection survives. The survival column is the point: it is
-  the difference between "the peers can still agree about every other stream" and "they cannot"
-  (WSM-STM-024).
+  ordinary API calls with interleaved assertions. It checks that the implementations agree about
+  sequences (which frame is sent when, which stream survives which event), not only about the
+  encoding of single frames. Every fixture runs twice, with the roles swapped. `stream_ref` is an
+  ordinal rather than a raw id, so a fixture does not depend on either side's parity.
+- **`invalid/`** - one real peer receives messages no correct implementation sends; the fixture
+  asserts which frame is sent and whether the connection survives. Connection survival determines
+  whether the peers still agree about every other stream (WSM-STM-024).
 
-Nothing here may change peer behaviour. A failing fixture means a rule is implemented wrongly; the
-fix belongs in the implementation of that rule, not in an edit to the fixture.
+The runner does not change peer behaviour. A failing fixture indicates a wrongly implemented rule;
+the fix belongs in the implementation, not in the fixture.
 """
 
 from __future__ import annotations
@@ -50,15 +48,14 @@ FRAMES_DIR = CONFORMANCE / "frames"
 SEQUENCES = sorted(SEQUENCES_DIR.glob("*.json"))
 INVALID = sorted(INVALID_DIR.glob("*.json"))
 
-#: Both runners carry these two numbers and both assert them, and
-#: `test_both_runners_collect_the_same_number_of_fixtures` reads the TypeScript file to prove they
-#: still agree. A fixture that stopped being collected would otherwise be a suite that passes by
-#: testing nothing.
+#: Both runners declare and assert these two numbers, and
+#: `test_both_runners_collect_the_same_number_of_fixtures` reads the TypeScript file to check that
+#: they agree. A fixture that is no longer collected fails the count.
 EXPECTED_SEQUENCE_FIXTURES = 14
 EXPECTED_INVALID_FIXTURES = 9
 
-#: The nine cases WSM-TST-003 enumerates, **by name**. Enumerated rather than counted: a count alone
-#: passes when one case is deleted and another duplicated under a new name.
+#: The nine cases WSM-TST-003 enumerates, by name. A count alone passes when one case is deleted and
+#: another is duplicated under a new name.
 REQUIRED_INVALID_CASES = frozenset(
     {
         "open-wrong-parity",
@@ -73,22 +70,22 @@ REQUIRED_INVALID_CASES = frozenset(
     }
 )
 
-#: The freeze. sha256 over `conformance/frames/`, sorted by file name, each file contributing
-#: `name`, a NUL, its bytes, a NUL. `ts/conformance.spec.ts` recomputes the same digest from the same
-#: bytes and reads **this** literal out of this file, so there is exactly one checked-in digest and a
-#: port that reads a different corpus fails. Changing the JSON wire after 1.0 means editing the line
-#: below, deliberately, in the same commit as the change.
+#: Digest of the frozen JSON wire corpus: sha256 over `conformance/frames/`, sorted by file name, each
+#: file contributing `name`, a NUL, its bytes, a NUL. `ts/conformance.spec.ts` computes the same
+#: digest and reads this literal from this file, so there is one checked-in digest and an
+#: implementation that reads a different corpus fails. A change to the JSON wire requires
+#: updating this line in the same commit.
 JSON_WIRE_DIGEST = "c9d11fccae5fb76273f7328274ccda66968297e5ed2527f8ce40ae360ccb8d49"
 
-#: Wall-clock ceiling on any one waiting step. A fixture that cannot make progress must fail as a
-#: named assertion rather than hang the suite.
+#: Wall-clock limit, in seconds, on any one waiting step. A fixture that cannot make progress fails
+#: with a named assertion instead of hanging the suite.
 STEP_TIMEOUT = 2.0
 
 #: How many turns of the event loop a bounded poll is given before it gives up.
 POLL_TURNS = 400
 
-#: `expect_error` names a class rather than a code, because the class is the part WSM-ERR-004 fixes
-#: across the two languages.
+#: `expect_error` names a class rather than a code, because WSM-ERR-004 defines the same class names in
+#: both languages.
 ERROR_CLASSES: dict[str, type[BaseException]] = {
     "ConnectionLost": ConnectionLost,
     "RemoteError": RemoteError,
@@ -97,9 +94,8 @@ ERROR_CLASSES: dict[str, type[BaseException]] = {
     "StreamTimeout": StreamTimeout,
 }
 
-#: WSM-CON-031, WSM-CON-009, WSM-PKG-005: no limit and no version, in any frame, in any form. Checked
-#: against the **envelope keys on the wire** rather than against a decoded `Frame`, because
-#: `from_mapping` drops unknown keys - decoding first would hide exactly the key this is looking for.
+#: WSM-CON-031, WSM-CON-009, WSM-PKG-005: no frame carries a limit or a version. Checked against the
+#: envelope keys on the wire, not a decoded `Frame`, because `from_mapping` drops unknown keys.
 FORBIDDEN_ENVELOPE_KEYS = frozenset(
     {"ack", "protocol_version", "extensions", "max_frame_bytes", "max_concurrent_streams", "max_payload_bytes"}
 )
@@ -109,12 +105,12 @@ FORBIDDEN_FRAME_TYPES = frozenset({"settings", "window_update"})
 
 
 class Error(Exception):
-    """What a fixture's `{"handler": "raise"}` payload makes the receiving handler raise.
+    """The exception the receiving handler raises for a fixture's `{"handler": "raise"}` payload.
 
-    The class name is load-bearing and is why this is not a `RuntimeError`. The default error
-    serializer sends `type(exc).__name__` (Python) and `error.name` (TypeScript), so the
-    `reset(APPLICATION_ERROR)` payload a fixture pins is only the same in both languages if the class
-    is spelled the same in both. `Error` is the one name that already exists in JavaScript.
+    The class name appears on the wire: the default error serializer sends `type(exc).__name__`
+    (Python) and `error.name` (TypeScript), so the `reset(APPLICATION_ERROR)` payload a fixture
+    asserts is the same in both languages only if the class name is. `Error` is the JavaScript
+    built-in name.
     """
 
 
@@ -125,14 +121,13 @@ def _load(path: Path) -> dict[str, Any]:
 def substitute_bytes(value: Any) -> Any:
     """Resolve every `{"$bytes": [...]}` placeholder into the byte string those integers spell.
 
-    JSON has no byte type, so a fixture that needs one under a binary codec (WSM-CDC-008) has to
-    spell it. This is fixture *notation*, resolved before the first step runs; it is never a payload
-    shape and never reaches the wire. A runner that passed the mapping through unresolved would send
-    `{"$bytes": [...]}` as an ordinary object and pass the fixture while testing nothing, which is
-    what `test_the_bytes_placeholder_is_resolved_before_a_step_runs` exists to prevent.
+    JSON has no byte type, so a fixture that needs bytes under a binary codec (WSM-CDC-008) uses this
+    notation. It is resolved before the first step runs and never reaches the wire. An unresolved
+    placeholder would be sent as an ordinary object and the fixture would not test bytes;
+    `test_the_bytes_placeholder_is_resolved_before_a_step_runs` checks the resolution.
 
-    Only a mapping whose **sole** key is `$bytes` is a placeholder; `$bytes` alongside anything else
-    is an ordinary payload key, so an application object can still carry one.
+    Only a mapping whose sole key is `$bytes` is a placeholder; `$bytes` alongside other keys is an
+    ordinary payload key.
     """
     if isinstance(value, dict):
         if set(value) == {"$bytes"}:
@@ -157,9 +152,8 @@ class Replay:
     def __init__(self, fixture: dict[str, Any], *, swapped: bool = False, codec: Any = None) -> None:
         self.fixture = fixture
         self.swapped = swapped
-        # The codec is a parameter, not a constant, because WSM-CDC-007 requires every shipped codec
-        # to run this corpus with a peer at each end - a corpus only the default codec ever replays
-        # proves nothing about the seam it is supposed to prove.
+        # The codec is a parameter, because WSM-CDC-007 requires every shipped codec to run this
+        # corpus with a peer at each end.
         self.codec = JsonCodec() if codec is None else codec
 
         options: dict[str, Any] = {}
@@ -170,9 +164,9 @@ class Replay:
 
         dialer_socket, acceptor_socket = memory_pair()
         self.sockets: dict[str, MemorySocket] = {"dialer": dialer_socket, "acceptor": acceptor_socket}
-        # The two roles keep their names; which of them holds the odd parity is what swaps. That is
-        # the whole of a role swap, and it is why a fixture may never write a raw stream id: every
-        # id in the second pass is the other one (WSM-TST-002).
+        # The two roles keep their names; a role swap changes only which of them has the odd parity.
+        # Every id in the second pass has the other parity, so a fixture never contains a raw stream
+        # id (WSM-TST-002).
         self.peers: dict[str, Peer] = {
             "dialer": Peer(dialer_socket, codec=self.codec, is_dialer=not swapped, **options),
             "acceptor": Peer(acceptor_socket, codec=self.codec, is_dialer=swapped, **options),
@@ -184,9 +178,8 @@ class Replay:
         self.by_id: dict[str, dict[int, Stream]] = {"dialer": {}, "acceptor": {}}
         #: `as` labels bound to a stream, for a later `expect_result` / `expect_error`.
         self.refs: dict[str, Stream] = {}
-        #: `as` labels bound to work already in flight - a `request`, an `iterate` - which is a
-        #: different thing from a stream: the value those steps assert is the call's return, and the
-        #: call was started rather than awaited so that the steps after it could run.
+        #: `as` labels bound to calls in flight (`request`, `iterate`). The asserted value is the
+        #: call's return value; the call is started, not awaited, so that the following steps run.
         self.tasks: dict[str, asyncio.Task[Any]] = {}
         #: In-flight `close()` calls, awaited by an `await_close` step.
         self.closing: dict[str, asyncio.Task[None]] = {}
@@ -204,12 +197,12 @@ class Replay:
     def _recorder(self, who: str) -> Callable[[Any, Stream], Coroutine[Any, Any, None]]:
         """The one incoming-stream handler: record the stream, then hold it open.
 
-        Holding matters. WSM-STM-035 ends a stream the moment its handler returns, so a handler that
-        returned here would close every inbound stream before the script could `reply` on it.
+        WSM-STM-035 ends a stream when its handler returns, so the handler waits; otherwise every
+        inbound stream would close before the script could `reply` on it.
 
-        The `{"handler": "raise"}` payload is the only way a script of ordinary API calls can reach
-        the handler-failure path of WSM-STM-034 - `stream.reset(APPLICATION_ERROR)` sends the same
-        code but carries no serialized error object, which is the half the fixture is pinning.
+        The `{"handler": "raise"}` payload makes the handler raise, which reaches the handler-failure
+        path of WSM-STM-034. `stream.reset(APPLICATION_ERROR)` sends the same code but no serialized
+        error object, which the fixture asserts.
         """
 
         async def handler(payload: Any, stream: Stream) -> None:
@@ -227,8 +220,8 @@ class Replay:
         for task in pending:
             task.cancel()
         for task in pending:
-            # Whatever a cancelled serve(), close() or collector raises on the way out is teardown
-            # noise: the fixture's assertions have already run.
+            # Exceptions from a cancelled serve(), close() or collector during teardown are ignored;
+            # the fixture's assertions have already run.
             await asyncio.gather(task, return_exceptions=True)
 
     async def settle(self, rounds: int = 12) -> None:
@@ -267,7 +260,7 @@ class Replay:
             raise AssertionError(f"no step kind in {step!r}")
 
     async def do_call(self, step: dict[str, Any]) -> None:
-        """Dispatch one `call` step. An unimplemented call is a hard failure, never a skip."""
+        """Dispatch one `call` step. An unimplemented call fails the test; it is not skipped."""
         call = step["call"]
         handler = getattr(self, f"call_{call}", None)
         if handler is None:
@@ -277,9 +270,9 @@ class Replay:
         if expected is None:
             await handler(step)
             return
-        # `raises` is how a fixture states that the *call* fails - a producer whose stream the
-        # consumer cancelled, say. The alternative is asserting on frames, which cannot see that the
-        # local handle refuses to send at all (WSM-ERR-009).
+        # `raises` states that the call itself fails, for example a send by a producer whose stream
+        # the consumer cancelled. Frames do not show that the local handle refused to send
+        # (WSM-ERR-009).
         with pytest.raises(ERROR_CLASSES[expected]):
             await handler(step)
 
@@ -291,10 +284,9 @@ class Replay:
     async def call_request(self, step: dict[str, Any]) -> None:
         """`peer.request(...)`, **started and not awaited** (WSM-API-006).
 
-        The steps after a `request` are the assertions about the frames it produced, so awaiting it
-        here would deadlock every fixture that uses it. The stream it allocated is then discovered
-        through the public `peer.streams` map rather than returned, because `request()` deliberately
-        hands back a value and not a handle.
+        The steps after a `request` assert on the frames it produced, so awaiting it here would
+        deadlock. The stream it allocated is found through the public `peer.streams` map, because
+        `request()` returns a value, not a handle.
         """
         peer = self.peers[step["peer"]]
         timeout = step.get("timeout_ms")
@@ -344,8 +336,8 @@ class Replay:
     async def call_iterate(self, step: dict[str, Any]) -> None:
         """Start consuming a stream as an async iterator; the collected list is the ref's value.
 
-        Started rather than awaited, and bound to a label, so that iteration and the frames that feed
-        it can be asserted in the same script: `expect_result` on the label compares the whole list.
+        Started, not awaited, and bound to a label, so the script can also assert on the frames that
+        feed the iteration; `expect_result` on the label compares the whole list.
         """
         stream = self.stream_for(step["peer"], step["stream_ref"])
 
@@ -357,11 +349,11 @@ class Replay:
     async def call_close(self, step: dict[str, Any]) -> None:
         peer = self.peers[step["peer"]]
         # Durations are milliseconds in the corpus and in TypeScript, seconds in Python
-        # (WSM-CON-012); the runner converts so the fixture does not have to carry both.
+        # (WSM-CON-012); the runner converts them.
         drain = float(step.get("drain_ms", 10_000)) / 1000
         code = ResetCode(step.get("code", int(ResetCode.NO_ERROR)))
-        # Started rather than awaited: `close()` sends `goaway`, *then* drains, and the steps after
-        # this one are what the drain window is there to let happen (WSM-CON-025).
+        # Started, not awaited: `close()` sends `goaway` and then drains, and the following steps run
+        # during the drain window (WSM-CON-025).
         self.closing[step["peer"]] = asyncio.create_task(peer.close(code, step.get("reason"), drain))
 
     async def call_await_close(self, step: dict[str, Any]) -> None:
@@ -384,10 +376,9 @@ class Replay:
     async def _discover(self, peer: Peer, before: set[int]) -> Stream:
         """The stream a call opened without handing it back, found through the public map.
 
-        A bounded poll rather than a single read: `request()` is a coroutine, so in Python the
-        `open()` inside it does not run until the task is first scheduled. TypeScript reaches the
-        same `open()` synchronously, which is exactly the kind of difference a shared corpus must not
-        be able to see.
+        A bounded poll, not a single read: `request()` is a coroutine, so in Python the `open()`
+        inside it runs only when the task is first scheduled. TypeScript calls `open()`
+        synchronously; the poll keeps the fixture independent of that difference.
         """
         for _ in range(POLL_TURNS):
             fresh = [stream for stream_id, stream in peer.streams.items() if stream_id not in before]
@@ -399,10 +390,8 @@ class Replay:
     def inject(self, step: dict[str, Any]) -> None:
         """Deliver one message **to** the named peer, as if its remote had sent it.
 
-        The envelope is encoded as it is written, without passing through `from_mapping`, which is
-        the whole point for the two extension-point fixtures: `from_mapping` drops unknown keys
-        (WSM-FRM-001), so a frame built through it could never carry the unknown field whose
-        toleration is being asserted.
+        The envelope is encoded as written, without `from_mapping`: `from_mapping` drops unknown keys
+        (WSM-FRM-001), and the two extension-point fixtures send an unknown field.
         """
         who = step["peer"]
         self.sockets[who].inject(self.codec.encode_payload(self.resolve(step["inject"])))
@@ -455,7 +444,7 @@ class Replay:
         raise AssertionError(f"{who} sent no frame matching {wanted}; it sent {frames[self.cursor[who] :]}")
 
     def expect_no_frame(self, step: dict[str, Any]) -> None:
-        """Not "not yet", but "not at all": the whole of that peer's wire is searched."""
+        """Assert that no matching frame was sent; the whole of that peer's wire is searched."""
         who = step["peer"]
         wanted = self.resolve(step["expect_no_frame"])
         offending = [frame for frame in self.frames_sent_by(who) if self.matches(frame, wanted)]
@@ -468,8 +457,7 @@ class Replay:
         """Await whatever the label was bound to: a call in flight, or a stream's own result."""
         task = self.tasks.get(ref)
         if task is not None:
-            # Shielded: a step that times out must not cancel the call underneath it, or the failure
-            # reported would be a reset this fixture never asked for.
+            # Shielded: a step that times out does not cancel the call, which would reset the stream.
             return await asyncio.wait_for(asyncio.shield(task), STEP_TIMEOUT)
         stream = self.refs.get(ref)
         if stream is None:
@@ -482,13 +470,12 @@ class Replay:
             raise AssertionError(f"{spec['ref']} produced {value!r}, expected {spec['value']!r}")
 
     async def expect_headers(self, spec: dict[str, Any]) -> None:
-        """What a peer ended up **holding**, which no assertion on frames can see (WSM-API-025).
+        """Assert the headers a peer's stream handle exposes (WSM-API-025).
 
-        `expect_frame` proves the headers went out; this proves they were surfaced, on the attribute
-        that is theirs. `of` is required rather than defaulted, because the two attributes are the
-        whole distinction the step exists to check. For `reply` the wait is on
-        `reply_headers_arrived` rather than on a settle count: that event fires the moment the value
-        stops changing, and a fixture that slept instead would pass against a port that never set it.
+        `expect_frame` checks that headers were sent; this checks the attribute that exposes them.
+        `of` is required and selects the attribute. For `reply` the step waits on
+        `reply_headers_arrived`, which is set when the value is final; waiting a fixed number of turns
+        would pass against an implementation that never sets the event.
         """
         stream = self.stream_for(spec["peer"], spec["stream_ref"])
         of = spec["of"]
@@ -515,7 +502,7 @@ class Replay:
             raise AssertionError(f"{spec['ref']} carried {getattr(caught.value, 'payload', None)!r}")
 
     async def expect_closed(self, spec: dict[str, Any]) -> None:
-        """A bounded poll, not a single read: the other end learns of a close one turn later."""
+        """A bounded poll, not a single read: the other end observes a close one turn later."""
         who = spec["peer"]
         want_socket = bool(spec.get("socket", False))
         for _ in range(POLL_TURNS):
@@ -545,13 +532,10 @@ async def replay(path: Path, *, swapped: bool, codec: Any = None) -> Replay:
 
 
 def _skip_unless_this_codec_can_run(fixture: dict[str, Any], codec_name: str) -> None:
-    """A fixture written for another codec is **skipped with a reason**, never quietly passed.
+    """A fixture written for another codec is skipped with a reason naming the fixture and both codecs.
 
-    `bytes-payload-under-binary-codec` is the one that needs it: bytes are a payload type only under
-    a binary codec (WSM-CDC-008), and there is nothing a JSON-configured pass can assert about it. A
-    skip nobody can see is the same as a missing test, so the reason names the fixture and both
-    codecs - and the msgpack pass below skips nothing, which is what stops this from being a fixture
-    every configuration skips (WSM-CDC-007).
+    `bytes-payload-under-binary-codec` requires a binary codec: bytes are a payload type only under a
+    binary codec (WSM-CDC-008). The msgpack pass below runs it (WSM-CDC-007).
     """
     required = fixture.get("requires_codec")
     if required is not None and required != codec_name:
@@ -563,8 +547,8 @@ def _skip_unless_this_codec_can_run(fixture: dict[str, Any], codec_name: str) ->
 async def test_sequence_corpus_replays_in_both_role_assignments(path: Path, swapped: bool):
     """WSM-TST-002: the script replays step for step, in both role assignments.
 
-    The second pass is not decoration. Every stream id in it is the other parity, so a fixture that
-    wrote a raw id - or a runner that resolved an ordinal to a constant - fails here and only here.
+    Every stream id in the second pass has the other parity, so a fixture with a raw id, or a runner
+    that resolves an ordinal to a constant, fails here.
     """
     await replay(path, swapped=swapped)
 
@@ -574,11 +558,10 @@ async def test_sequence_corpus_replays_in_both_role_assignments(path: Path, swap
 async def test_sequence_corpus_replays_under_msgpack(path: Path, swapped: bool):
     """WSM-CDC-007: the second shipped codec runs the whole corpus with a real peer at each end.
 
-    Not a duplicate of the pass above. A codec that ships without this is a codec whose only proof is
-    `decode(encode(frame)) == frame` over a bag of frames - which cannot see anything a *sequence*
-    exposes: the send path picking `send_bytes` from `codec.binary` (WSM-CDC-002), fragment sizes
-    measured as buffer length rather than character count (WSM-FRG-003), or a payload type JSON does
-    not have surviving both directions (WSM-CDC-008). It is also the pass that runs
+    A round-trip test `decode(encode(frame)) == frame` does not cover what a sequence exercises: the
+    send path choosing `send_bytes` from `codec.binary` (WSM-CDC-002), fragment sizes measured as
+    buffer length rather than character count (WSM-FRG-003), and a payload type JSON does not have
+    arriving unchanged in both directions (WSM-CDC-008). This pass also runs
     `bytes-payload-under-binary-codec`, which every JSON-configured pass skips.
     """
     await replay(path, swapped=swapped, codec=MsgpackCodec())
@@ -587,10 +570,9 @@ async def test_sequence_corpus_replays_under_msgpack(path: Path, swapped: bool):
 def test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere():
     """The fixture the JSON pass skips must be a fixture some pass runs (WSM-CDC-007).
 
-    Written as an assertion about the corpus rather than trusted to the parametrization above,
-    because the failure it guards against is silent: a `requires_codec` naming a codec no pass is
-    configured with produces a fixture every configuration skips, which reads in the report as
-    covered while being reachable by no line of the library.
+    Asserted over the corpus, not left to the parametrization above: a `requires_codec` naming a
+    codec no pass is configured with produces a fixture every configuration skips, which the report
+    does not flag as a failure.
     """
     configured = {JsonCodec.name, MsgpackCodec.name}
     for path in SEQUENCES:
@@ -604,10 +586,9 @@ def test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere():
 def test_the_bytes_placeholder_is_resolved_before_a_step_runs():
     """`{"$bytes": [...]}` is notation, never a payload shape (WSM-CDC-008).
 
-    A runner that left the placeholder as a mapping would send an ordinary object, JSON and msgpack
-    would both carry it happily, and the fixture would pass while asserting nothing about bytes. So
-    assert both halves: the corpus really does carry the placeholder, and loading really does
-    resolve it.
+    An unresolved placeholder would be sent as an ordinary object, which JSON and msgpack both carry,
+    and the fixture would not test bytes. The test asserts that the corpus contains the placeholder
+    and that loading resolves it.
     """
     raw = json.dumps(_load(SEQUENCES_DIR / "bytes-payload-under-binary-codec.json"))
     assert '"$bytes"' in raw, "the fixture no longer carries the placeholder this test is about"
@@ -631,28 +612,26 @@ def test_the_bytes_placeholder_is_resolved_before_a_step_runs():
 
 
 def test_the_sequence_corpus_is_collected():
-    """An empty `conformance/sequences/` is a suite that passes by testing nothing."""
+    """`conformance/sequences/` is not empty."""
     assert SEQUENCES, f"no sequence fixtures were collected from {SEQUENCES_DIR}"
     assert len(SEQUENCES) == EXPECTED_SEQUENCE_FIXTURES
 
 
 def test_the_only_fixture_the_json_pass_skips_is_the_binary_codec_one():
-    """A skip nobody can see is the same as a missing test, so the skip set itself is pinned.
+    """The set of fixtures the JSON pass skips is fixed.
 
-    `pytest -rs` names the fixture and the reason; this is what stops a second fixture quietly
-    acquiring a `requires_codec` and shrinking the corpus without anyone noticing. The msgpack pass
-    skips nothing, so this names the JSON pass rather than "this runner".
+    `pytest -rs` names the fixture and the reason; this test fails when another fixture acquires a
+    `requires_codec`. The msgpack pass skips nothing, so this names the JSON pass.
     """
     declared = {path.stem: _load(path)["requires_codec"] for path in SEQUENCES if "requires_codec" in _load(path)}
     assert declared == {"bytes-payload-under-binary-codec": "msgpack"}
 
 
 def test_both_runners_collect_the_same_number_of_fixtures():
-    """One corpus, two runners: the counts must be the same number, not two claims about it.
+    """Both runners declare the same fixture counts.
 
-    Read out of the TypeScript source rather than asserted twice in parallel, because two independent
-    constants drift silently - which is the whole failure mode `conformance/README.md` exists to
-    prevent.
+    The TypeScript counts are read from its source, so the two declarations cannot differ without
+    this test failing (`conformance/README.md`).
     """
     source = (ROOT / "ts" / "conformance.spec.ts").read_text(encoding="utf-8")
     for name, mine in (
@@ -679,12 +658,11 @@ async def _wire_of_the_whole_corpus() -> list[tuple[str, str | bytes]]:
 
 
 async def test_no_limit_and_no_version_appears_on_the_wire():
-    """WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay everything and look at what actually went out.
+    """WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay the whole corpus and check every sent envelope.
 
-    There is no `settings` frame and no announced limit of any kind; the `muxws.v1.` subprotocol
-    prefix is the only version anywhere; WSM-FRM-003 is retired, because there is no `settings` frame
-    to advertise in. The **envelope on the wire** is what is read, not a decoded `Frame`, which would
-    drop the offending key before the assertion ever saw it.
+    There is no `settings` frame and no announced limit; the `muxws.v1.` subprotocol prefix is the
+    only version; WSM-FRM-003 is retired because there is no `settings` frame. The envelope on the
+    wire is checked, not a decoded `Frame`, which drops unknown keys.
     """
     for name, message in await _wire_of_the_whole_corpus():
         envelope = json.loads(message)
@@ -696,9 +674,8 @@ async def test_no_limit_and_no_version_appears_on_the_wire():
 async def test_window_update_is_never_sent():
     """WSM-BPR-001: `window_update` is a reserved frame type in v1 and nothing may send it.
 
-    Separate from the test above, though it replays the same corpus, because it is a separate promise:
-    flow control is *reserved*, not merely unannounced, and the day someone implements it this is the
-    test that must be deleted on purpose.
+    Separate from the test above, though it replays the same corpus: flow control is reserved, and
+    this test is removed when flow control is implemented.
     """
     for name, message in await _wire_of_the_whole_corpus():
         assert json.loads(message)["type"] != "window_update", f"{name} sent a window_update frame"
@@ -720,9 +697,8 @@ async def test_invalid_corpus_produces_the_declared_frame_and_survival(path: Pat
     codec = JsonCodec()
 
     # The peer under test is an acceptor (even ids); the misbehaving remote is a dialer (odd ids).
-    # Deliberately **not** role-swappable, unlike a sequence fixture: the whole point is hand-written
-    # messages no API call on either side could have produced, and an ordinal cannot name a stream
-    # that was never opened.
+    # Unlike sequence fixtures, these are not role-swappable: the messages are hand-written, no API
+    # call produces them, and an ordinal cannot name a stream that was never opened.
     _, acceptor_socket = memory_pair()
     peer = Peer(
         acceptor_socket,
@@ -754,13 +730,13 @@ async def test_invalid_corpus_produces_the_declared_frame_and_survival(path: Pat
 def _assert_expected_frames(emitted: list[Frame], fixture: dict[str, Any]) -> None:
     """`expect_out` is an ordered subset match: the listed keys must appear, in order, on some frame.
 
-    Asserting equality instead would make every fixture invalid the moment an optional field is
-    added, which is the opposite of what WSM-FRM-001 asks of a receiver.
+    With an equality match, adding an optional field would invalidate every fixture; WSM-FRM-001
+    requires receivers to ignore unknown fields.
     """
     expected = fixture["expect_out"]
     if not expected:
-        # Not "no assertion": `data-for-closed-id` needs to say that a late frame below the
-        # high-water mark provokes **nothing at all** (WSM-STM-002), and this is the only way to.
+        # An empty list asserts that nothing is sent: `data-for-closed-id` requires that a late frame
+        # below the high-water mark causes no response (WSM-STM-002).
         assert emitted == [], f"{fixture['name']}: nothing should have gone out, got {emitted}"
         return
 
@@ -775,7 +751,7 @@ def _assert_expected_frames(emitted: list[Frame], fixture: dict[str, Any]) -> No
 
 
 def test_every_invalid_case_of_wsm_tst_003_has_a_fixture():
-    """The nine cases, by name. Without this, a deleted fixture is a silently passing suite."""
+    """The nine required cases are present, by name."""
     assert {path.stem for path in INVALID} == set(REQUIRED_INVALID_CASES)
     assert len(INVALID) == EXPECTED_INVALID_FIXTURES
 
@@ -784,10 +760,10 @@ def test_every_invalid_case_of_wsm_tst_003_has_a_fixture():
 
 
 def corpus_digest() -> str:
-    """sha256 over `conformance/frames/`, defined so that two languages compute the same number.
+    """sha256 over `conformance/frames/`, computed identically in both languages.
 
-    File name, a NUL, the file's bytes, a NUL, in file-name order. The name is hashed too, so that
-    renaming a file is a change to the corpus rather than a no-op.
+    File name, a NUL, the file's bytes, a NUL, in file-name order. The name is hashed, so renaming a
+    file changes the digest.
     """
     digest = hashlib.sha256()
     for path in sorted(FRAMES_DIR.glob("*.json"), key=lambda p: p.name):
@@ -799,19 +775,19 @@ def corpus_digest() -> str:
 
 
 def test_json_wire_is_frozen():
-    """The freeze is a test, not a promise.
+    """The JSON wire corpus matches `JSON_WIRE_DIGEST`.
 
-    The JSON wire form is frozen at 1.0. Adding or changing a triple changes this digest - that is
-    the point: the change is then a deliberate edit of the line above, in the same commit, rather
-    than something that slips through because every other assertion compares parsed objects.
+    The JSON wire form of `muxws.v1.json` is frozen. Adding or changing a triple changes this digest, so the
+    change requires editing `JSON_WIRE_DIGEST` in the same commit. Other assertions compare parsed
+    objects and do not detect byte-level changes.
     """
     assert corpus_digest() == JSON_WIRE_DIGEST, (
-        "the conformance/frames/ corpus changed. If that was deliberate, update JSON_WIRE_DIGEST in "
-        "this file; the JSON wire form is frozen at 1.0 and ts/conformance.spec.ts reads this literal."
+        "the conformance/frames/ corpus changed. If the change is intended, update JSON_WIRE_DIGEST in "
+        "this file; the JSON wire form of muxws.v1.json is frozen and ts/conformance.spec.ts reads this literal."
     )
 
 
 def test_the_digest_covers_every_file_in_the_frames_corpus():
-    """A digest over an empty glob is a digest that can never fail."""
+    """`conformance/frames/` is not empty, so the digest covers files."""
     covered = sorted(path.name for path in FRAMES_DIR.glob("*.json"))
     assert covered == ["v1-fragment-boundaries.json", "v1-frames.json"]

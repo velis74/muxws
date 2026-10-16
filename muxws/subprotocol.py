@@ -1,8 +1,7 @@
 """The `muxws.v1.<codec>` subprotocol assertion (§2.3, WSM-CDC-020..029).
 
-This is an **assertion, not a negotiation**. There is no fallback encoding, no list of acceptable
-alternatives, no per-connection multi-codec support and no runtime codec branching anywhere in the
-peer (WSM-CDC-023).
+The dialer offers one muxws codec entry and the acceptor accepts it or refuses the handshake. There is no
+fallback encoding, no per-connection codec choice, and no codec branching in the peer (WSM-CDC-023).
 """
 
 from __future__ import annotations
@@ -14,9 +13,9 @@ from muxws.errors import CodecMismatch
 
 logger = logging.getLogger("muxws.codec")
 
-#: The generation prefix. The version component of this name is the **only** version on the wire
-#: (WSM-CON-009); a change requiring the remote to act on a new frame type bumps it, and a v1
-#: acceptor then rejects the offer at the handshake (WSM-CDC-025).
+#: The generation prefix. Its version component is the only version on the wire (WSM-CON-009). A
+#: change that requires the remote to act on a new frame type increments it, and a v1 acceptor then
+#: refuses the offer at the handshake (WSM-CDC-025).
 PREFIX = "muxws.v1."
 
 
@@ -29,8 +28,8 @@ def offer(codec_name: str, extra: list[str] | None = None) -> list[str]:
     return [f"{PREFIX}{codec_name}", *(extra or [])]
 
 
-#: Any generation, so an offer from a future peer can be named as such rather than reported as an
-#: absent muxws entry. WSM-CDC-025 makes rejecting it the acceptor's job; saying *why* is this one's.
+#: Matches a muxws entry of any generation, so the refusal log can name an offer of another
+#: generation instead of reporting no muxws entry (WSM-CDC-025).
 _ANY_GENERATION = re.compile(r"^muxws\.v(\d+)\.")
 
 
@@ -43,8 +42,8 @@ def generation_of(entry: str) -> int | None:
 def find_offer(offered: list[str]) -> str | None:
     """The single offered entry carrying the muxws prefix, or None.
 
-    Every other value is left entirely alone: it belongs to the application's authentication, and
-    interpreting it here would be muxws deciding something that is not its business (WSM-CDC-021).
+    Other entries are ignored; they belong to the application, typically its authentication
+    (WSM-CDC-021).
     """
     for entry in offered:
         if entry.startswith(PREFIX):
@@ -55,10 +54,9 @@ def find_offer(offered: list[str]) -> str | None:
 def select(offered: list[str], configured: str) -> str | None:
     """The value an acceptor selects, or None to refuse the handshake (WSM-CDC-022).
 
-    Refusal is the answer for a mismatched codec, for a different generation, and for an offer with
-    no muxws entry at all. The acceptor logs the failure itself (WSM-CDC-029): this is the half of
-    the diagnostic readable where a response body is readable, and the dialer's half (WSM-CDC-024)
-    is not complete on its own.
+    Refuses a mismatched codec, a different generation, and an offer with no muxws entry. Logs the
+    refusal at ERROR on the acceptor (WSM-CDC-029); the dialer composes its own error
+    (WSM-CDC-024), because a browser cannot read the rejection response.
     """
     wanted = f"{PREFIX}{configured}"
     entry = find_offer(offered)
@@ -91,8 +89,9 @@ def _describe(offered: list[str], entry: str | None) -> str:
 def mismatch_error(configured: str) -> CodecMismatch:
     """The error a dialer composes **for itself** when its handshake is refused (WSM-CDC-024).
 
-    A browser cannot read a rejection body, so the diagnostic cannot come from the server. It names
-    both environment variables, because the reader does not yet know which end is wrong.
+    A browser cannot read a rejection body, so the dialer builds the message itself. It names both
+    environment variables, because either end may be misconfigured.
+
     """
     return CodecMismatch(
         f"the acceptor refused the muxws handshake for codec {configured!r}. Both ends must be "

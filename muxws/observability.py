@@ -20,8 +20,9 @@ class CloseReason:
     code: int
     reason: str
     was_clean: bool
-    #: False only when `max_attempts` is exhausted or `close()` was called deliberately. A peer
-    #: driven without the reconnect helper never dials again, so it is always False there.
+    #: True when the reconnect helper will dial again. False when `max_attempts` is exhausted, after
+    #: `close()`, and always for a peer without the reconnect helper.
+
     will_retry: bool = False
 
 
@@ -31,12 +32,11 @@ logger = logging.getLogger("muxws.frames")
 def log_frame(connection_id: str, direction: str, frame: Frame, byte_length: int) -> None:
     """One line per frame at DEBUG, under the `muxws.frames` logger (WSM-OBS-001).
 
-    `conn=` is `peer.id` - a per-process prefix plus a per-connection counter (WSM-API-009) - so two
-    lines carrying the same `conn=` are always the same connection, and a reconnect shows as a new
-    one rather than as a continuation.
+    `conn=` is `peer.id`, a per-process prefix plus a per-connection counter (WSM-API-009): lines
+    with the same `conn=` belong to the same connection, and a reconnect has a new `conn=`.
 
-    The payload's **contents** never appear, at any level. Application data routinely holds secrets,
-    and a frame line is emitted for every frame (WSM-OBS-002).
+    Payload contents are never logged, at any level, because application data may contain secrets
+    (WSM-OBS-002).
     """
     if not logger.isEnabledFor(logging.DEBUG):
         return

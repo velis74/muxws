@@ -1,15 +1,15 @@
 /**
- * Two socket adapters wired to each other, with no socket anywhere.
+ * Two socket adapters connected to each other in memory, without a network socket.
  *
- * Mirrors `muxws/transports/memory.py`. Shipped in the package rather than the test tree because the
- * reconnect tests and the conformance sequence runner both need it (D2).
+ * Mirrors `muxws/transports/memory.py`. Part of the package, not the test tree, because the reconnect
+ * tests and the conformance sequence runner use it (D2).
  */
 
 import { ConnectionClosed } from '../errors';
 
 import type { SocketAdapter } from './index';
 
-/** What travels between the two ends. One WebSocket message, already encoded by the codec. */
+/** One WebSocket message passed between the two ends, already encoded by the codec. */
 type Message = string | ArrayBuffer;
 
 /** The inbox's end-of-stream marker. `receive()` turns it into `ConnectionClosed`, never returns it. */
@@ -19,7 +19,7 @@ type Inbound = Message | typeof END;
 
 /** One end of an in-memory pair. Implements `SocketAdapter`. */
 export class MemorySocket implements SocketAdapter {
-  /** Every message this side put on the wire, in order. The conformance runner reads it. */
+  /** Every message this side sent, in order. Read by the conformance runner. */
   readonly sent: Message[] = [];
 
   private readonly inbox: Inbound[] = [];
@@ -47,8 +47,8 @@ export class MemorySocket implements SocketAdapter {
 
   /** Close this side cleanly, waking both ends' pending receives. */
   close(code = 1000, reason = ''): void {
-    // The pair has no wire, so neither value travels anywhere; the parameters exist because the
-    // port declares them (memory.py discards them the same way).
+    // The pair sends no close frame, so both values are discarded, as in memory.py; the parameters
+    // exist because `SocketAdapter` declares them.
     void code;
     void reason;
     if (this.closed) return;
@@ -61,7 +61,7 @@ export class MemorySocket implements SocketAdapter {
     }
   }
 
-  /** Simulate socket death: no close frame, no warning, both ends simply stop. */
+  /** Simulate an abrupt socket loss: both ends close without a close frame. */
   drop(): void {
     this.close(1006, 'dropped');
   }
@@ -69,13 +69,13 @@ export class MemorySocket implements SocketAdapter {
   /**
    * Push a raw message into this side's inbox, bypassing the other peer.
    *
-   * The conformance runner uses it to deliver frames no correct implementation would send.
+   * The conformance runner uses it to deliver frames a conforming implementation does not send.
    */
   inject(message: Message): void {
     this.put(message);
   }
 
-  /** @internal Wire this end to its twin. `memoryPair` is the only caller. */
+  /** @internal Connect this end to the other end of the pair. Called only by `memoryPair`. */
   wireTo(twin: MemorySocket): void {
     this.peerSocket = twin;
   }
@@ -98,8 +98,9 @@ export class MemorySocket implements SocketAdapter {
   private take(): Promise<Inbound> {
     const queued = this.inbox.shift();
     if (queued !== undefined) return Promise.resolve(queued);
-    // A closed and drained inbox answers immediately rather than parking forever: the Python queue
-    // holds exactly one sentinel too, and a promise that never settles hangs a test runner.
+    // A closed, drained inbox returns END immediately on every call. The inbox holds a single END
+    // (as the Python queue holds a single sentinel), so without this check a second `receive()`
+    // after close would never settle.
     if (this.closed) return Promise.resolve(END);
     return new Promise<Inbound>((resolve) => {
       this.waiting.push(resolve);
@@ -107,7 +108,7 @@ export class MemorySocket implements SocketAdapter {
   }
 }
 
-/** Two adapters wired to each other. `drop()` on either simulates socket death. */
+/** Two adapters connected to each other. `drop()` on either simulates an abrupt socket loss. */
 export function memoryPair(): [MemorySocket, MemorySocket] {
   const left = new MemorySocket();
   const right = new MemorySocket();

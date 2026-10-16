@@ -3,18 +3,18 @@
 `docs/check-docs.mjs` enumerates the TypeScript surface, which node can import. This module is the
 mirror for Python, and it does the one thing node cannot: it resolves each documented signature to
 the real callable and compares them parameter by parameter, so a renamed argument or a changed
-default fails here rather than in a reader's editor.
+default fails this test.
 
-Two tests, deliberately separate:
+Two separate tests:
 
 * `test_every_public_python_symbol_is_documented` - the surface has an entry at all.
-* `test_documented_signatures_match_the_source` - the entry still describes the thing it names. A
-  documented symbol that no longer resolves fails this test, which is the reverse direction of
-  coverage: the site cannot keep an entry for something that was deleted.
+* `test_documented_signatures_match_the_source` - the entry describes the thing it names. A
+  documented symbol that does not resolve fails this test, so the site cannot keep an entry for a
+  symbol that does not exist.
 
 Optional extras (starlette, websockets, msgpack) are imported lazily; a block that needs one that is
-not installed is skipped individually, and the test asserts a floor on how many comparisons actually
-ran so that a stripped environment cannot quietly turn this file into a no-op.
+not installed is skipped individually, and the test asserts a minimum number of comparisons, so it
+fails when an environment without extras compares too few signatures.
 """
 
 import ast
@@ -36,8 +36,8 @@ from muxws import Peer, PeerRegistry, Stream
 DOCS_API = Path(__file__).resolve().parent.parent / "docs" / "api"
 
 #: Where a documented name may live when it is not re-exported from the package root. `memory_pair`
-#: is `muxws.transports.memory`, `exception_for_reset` is `muxws.errors`, and the site says so at
-#: each site; this list is how the test follows them.
+#: is `muxws.transports.memory`, `exception_for_reset` is `muxws.errors`, and the site names the module
+#: at each entry; the test resolves names through this list.
 SEARCH_MODULES = [
     "muxws",
     "muxws.api",
@@ -69,10 +69,10 @@ OPTIONAL_MODULES = {
     "muxws.transports.websockets_": "websockets",
 }
 
-#: A floor under `test_documented_signatures_match_the_source`, so that a resolution bug or a
-#: stripped environment shows up as a failure rather than as a green run that compared nothing.
-#: 106 comparisons run with every extra installed; the three optional-extra pages account for about
-#: sixteen of them, so this floor still bites in the leanest environment the library supports.
+#: Minimum number of comparisons `test_documented_signatures_match_the_source` must make, so a
+#: resolution bug or an environment without extras fails instead of comparing nothing. With every
+#: extra installed 106 comparisons run; the three optional-extra pages account for about sixteen of
+#: them, so the minimum holds in an environment without extras.
 MINIMUM_SIGNATURES_COMPARED = 85
 
 #: Dunders the site documents under a name of their own. `len(registry)` is not a symbol.
@@ -551,7 +551,7 @@ def _visit_function(
         owner = f"{owner_class}." if owner_class else ""
         problems.append(
             f"{entry.page.name}:{entry.line} {entry.heading} documents `{owner}{node.name}`, "
-            "which no longer exists in the source"
+            "which does not exist in the source"
         )
         return 0
     _compare_function(entry, node, target, problems)
@@ -569,7 +569,7 @@ def _visit_class(
     except LookupError:
         problems.append(
             f"{entry.page.name}:{entry.line} {entry.heading} documents class `{node.name}`, "
-            "which no longer exists in the source"
+            "which does not exist in the source"
         )
         return 0
 
@@ -598,7 +598,7 @@ def _visit_constant(entry: Entry, node: ast.AnnAssign, problems: list[str], skip
     except LookupError:
         problems.append(
             f"{entry.page.name}:{entry.line} {entry.heading} documents `{node.target.id}`, "
-            "which no longer exists in the source"
+            "which does not exist in the source"
         )
         return 0
     _compare_constant(entry, node, target, problems)
@@ -607,6 +607,6 @@ def _visit_constant(entry: Entry, node: ast.AnnAssign, problems: list[str], skip
 
 @pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)
 def test_every_api_page_has_entries(page: Path) -> None:
-    """A page that lost its content would otherwise make both tests above quietly easier."""
+    """A page without entries would make both tests above pass without checking it."""
     entries = [e for e in _entries() if e.page == page and e.heading != "See also"]
     assert entries, f"{page.name} has no `##` symbol entries"

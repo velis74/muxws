@@ -8,27 +8,24 @@ A `Stream` is one independently addressed, independently cancellable, bidirectio
 connection that is carrying many of them. `peer.open()` returns one synchronously; an `on_stream`
 handler is handed one.
 
-The two facts that shape the whole type:
-
 - **A stream is both awaitable and async-iterable, and the first use claims it.** `await stream`
-  gives the first payload; `async for` / `for await` gives every payload. Whichever you use first
-  owns the stream, and the other then raises `StreamAlreadyConsumed`. A second `await` returns the
-  *first* await's value, not the next payload - there is one memoized answer per stream, never a
-  second read of the wire.
-- **`closed` is not the same type in the two languages.** In Python it is an `asyncio.Event` you
-  `await stream.closed.wait()`. In TypeScript it is a `Promise<void>` you `await stream.closed`, and
-  it **resolves rather than rejecting** when the stream is reset - a stream that closed by being
-  reset still closed. The failure reaches the awaits and the iterator, not `closed`.
+  gives the first payload; `async for` / `for await` gives every payload. The shape used first owns
+  the stream, and the other then raises `StreamAlreadyConsumed`. A second `await` returns the
+  *first* await's value, not the next payload: each stream has one memoized answer.
+- **`closed` has a different type in each language.** In Python it is an `asyncio.Event`, waited on
+  with `await stream.closed.wait()`. In TypeScript it is a `Promise<void>`, awaited with
+  `await stream.closed`, and it **resolves, not rejects,** when the stream is reset. The reset error
+  is delivered to the awaits and the iterator, not to `closed`.
 
-Deadlines belong here rather than on `open()`: `stream.result(timeout=)` takes seconds as a float,
+Deadlines are set on the stream, not on `open()`: `stream.result(timeout=)` takes seconds as a float,
 `stream.result({ timeoutMs })` takes milliseconds as an integer.
 
 ## `stream.id` (Python)
 
 The stream id, unique for the life of one connection.
 
-The dialer allocates odd ids, the acceptor even ones, and each side's ids strictly increase; that is
-the whole of how two peers open streams at the same instant without colliding. Ids are **not** reused
+The dialer allocates odd ids, the acceptor even ones, and each side's ids strictly increase, so two
+peers can open streams concurrently without an id collision. Ids are **not** reused
 after a stream closes, and the id space starts empty again after a reconnect.
 
 ### Signature
@@ -176,8 +173,8 @@ None — a readonly field.
 
 ### Return
 
-`Record<string, unknown>` — `{}` when the `open` frame carried none. (The source comment on this
-field says it is empty for locally opened streams; it is not - the opener sees what it passed.)
+`Record<string, unknown>` — `{}` when the `open` frame carried none. On the opening side it holds
+the headers passed to `open()`.
 
 ### Raises
 
@@ -216,8 +213,8 @@ the peer answering sees what it announced itself, as its reply headers intercept
 [`stream.reply_headers_arrived`](#stream-reply-headers-arrived-python) to know that the value you are
 reading is the final one.
 
-muxws never reads them (WSM-AUT-002). There is no status field on the wire and this is not one: a
-failed exchange is a `reset` with a code (§2.4), not a header a receiver has to remember to check.
+muxws never reads them (WSM-AUT-002). muxws defines no status field; a failed exchange is signalled
+by a `reset` frame with a code (§2.4).
 
 ### Signature
 
@@ -320,13 +317,12 @@ await dialer.close({ drainMs: 100 });
 
 Set at the instant `reply_headers` can no longer change.
 
-That instant is the answering side's first frame on the stream - carrying headers or not, since a
-first frame without them means none are coming - or the close of a stream that was never answered.
-Both, because the second is the one the remote controls: a stream it resets before answering, or a
-socket that dies, would otherwise leave a wait here pending forever (WSM-INV-011).
+It is set by the answering side's first frame on the stream, with or without headers (a first frame
+without headers means none will follow), or by the close of a stream that was never answered. The
+second case covers a reset before any answer and socket death; without it, a wait would never end
+(WSM-INV-011).
 
-Waiting on it is what makes announcing worth anything: a consumer that learns the content type only
-after the body has started has learned it too late.
+A consumer waits on it to read metadata, such as a content type, before it reads the first payload.
 
 ### Signature
 
@@ -449,8 +445,8 @@ self.payload: Any = payload
 
 ### Parameters
 
-None — a plain instance attribute. The peer fills it in when the last fragment of a fragmented `open`
-lands, which is also when the handler is finally started.
+None — a plain instance attribute. For a fragmented `open`, the peer sets it when the last fragment
+arrives, and starts the handler at the same point.
 
 ### Return
 
@@ -540,10 +536,10 @@ await dialer.close({ drainMs: 100 });
 
 Metadata that arrives **with** the end of the stream, rather than before it.
 
-Trailers ride the `end` flag on the last frame; there is no trailer frame. They are the place for
-anything that is only known once the response is complete - a row count, a checksum, a page token.
-They are populated just before the stream closes, so read them after the iteration finishes, not
-during it.
+Trailers are carried on the frame that has the `end` flag set; there is no separate trailer frame.
+They hold values known only when the response is complete, such as a row count, a checksum or a page
+token. They are set when the remote's final frame arrives, so read them after the iteration
+finishes.
 
 ### Signature
 
@@ -649,9 +645,8 @@ await dialer.close({ drainMs: 100 });
 An `asyncio.Event` set on **every** close path: a normal end, a local or remote reset, and socket
 death.
 
-It is an `Event` and not a future, so it carries no outcome: it says *that* the stream closed, never
-*why*. The why reaches whoever was awaiting or iterating the stream, and `stream.state` is `CLOSED`
-either way.
+It is an `Event`, not a future, and carries no outcome. The cause of the close is delivered to the
+await or the iterator consuming the stream; `stream.state` is `CLOSED` in every case.
 
 ### Signature
 
@@ -712,9 +707,8 @@ asyncio.run(main())
 A `Promise<void>` that **resolves** on every close path - a normal end, a reset, socket death - and
 **never rejects**.
 
-That is deliberate and it is the difference a reader must not guess wrong: a stream that closed by
-being reset still closed, so `await stream.closed` returns rather than throwing. The reset itself
-reaches the await on the stream and the `for await` loop, and `stream.signal` is aborted with it.
+After a reset, `await stream.closed` returns without throwing. The reset error is delivered to the
+await on the stream and to the `for await` loop, and `stream.signal` is aborted with it as reason.
 
 ### Signature
 
@@ -760,10 +754,9 @@ await dialer.close({ drainMs: 100 });
 
 An `AbortSignal` aborted at the same instant `closed` resolves, on every close path.
 
-This is what a TypeScript handler observes in place of Python's `asyncio.CancelledError`: there is no
-way to interrupt a running function in JavaScript, so the handler is *told* and cooperates. A handler
-doing real work should check `stream.signal.aborted` between steps, or pass the signal to whatever it
-calls.
+A TypeScript handler observes it in place of Python's `asyncio.CancelledError`. JavaScript cannot
+interrupt a running function, so the handler must check `stream.signal.aborted` between steps, or
+pass the signal to the functions it calls.
 
 There is no Python twin: Python cancels the handler's task instead.
 
@@ -924,9 +917,8 @@ await dialer.close({ drainMs: 100 });
 
 Whether **this** peer opened the stream.
 
-It is what the concurrency limit counts: `max_concurrent_streams` bounds the streams the *remote*
-opened here, because the limit exists to bound work the other side can impose. A peer's own opens do
-not consume it.
+The concurrency limit `max_concurrent_streams` counts only streams with `local` false, i.e. the
+streams the *remote* opened on this peer. A peer's own opens do not count toward it.
 
 ### Signature
 
@@ -1026,13 +1018,11 @@ await dialer.close({ drainMs: 100 });
 
 The `asyncio.Task` running the `on_stream` handler for this stream, on the receiving side.
 
-It is held here so that an incoming `reset(CANCELLED)` can cancel it: cancelling the stream is
-cancelling the work, which is the whole point of per-stream cancellation. The handler observes an
-`asyncio.CancelledError` at its next await. The TypeScript port holds an `AbortController` here
-instead and the handler observes `stream.signal`.
+An incoming `reset(CANCELLED)` cancels this task, and the handler receives `asyncio.CancelledError`
+at its next await. The TypeScript port holds an `AbortController` instead, and the handler observes
+`stream.signal`.
 
-An application rarely touches it; it is documented because it is public and because it is what makes
-cancellation real rather than advisory.
+Applications normally do not access it directly.
 
 ### Signature
 
@@ -1109,8 +1099,8 @@ async def send(self, payload: Any, *, end: bool = False, headers: dict[str, Any]
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `payload` | `Any` | required | The value to send. It is encoded by the codec and fragmented automatically if the encoded form exceeds the 64 KiB frame cap; a stream holds at most one unsent fragment, and the writer round-robins, so a large payload cannot starve another stream. |
-| `end` | `bool` | `False` | Half-close this side in the same frame. `end` is a flag, never a frame of its own. |
+| `payload` | `Any` | required | The value to send. It is encoded by the codec and fragmented automatically if the encoded form exceeds the frame cap (`max_frame_bytes`, 64 KiB by default). A stream holds at most one unsent fragment and the writer serves streams round-robin, so a large payload does not delay other streams' frames indefinitely. |
+| `end` | `bool` | `False` | Half-close this side in the same frame. `end` is a flag on a frame, not a separate frame. |
 | `headers` | `dict[str, Any] \| None` | `None` | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). Later ones raise; see [`stream.send_headers()`](#stream-send-headers-python). |
 
 ### Return
@@ -1120,14 +1110,13 @@ the socket.
 
 ### Raises
 
-Three different outcomes with three different classes, which is the point:
+Each cause raises a different class:
 
-- `StreamClosed` — the stream ended **normally**, or this side already sent `end`. An expected race
-  when a close and a last send cross, not a bug.
+- `StreamClosed` — the stream ended **normally**, or this side already sent `end`.
 - `StreamReset` (or `RemoteError`, `StreamRefused`, `StreamTimeout`) — the stream was reset. A fresh
-  instance of the stored failure is raised each time.
-- `ConnectionLost` — the socket died. It is itself a `StreamReset`, because the stream really did end
-  early; `ConnectionClosed` is not, because it describes the connection rather than a stream.
+  instance of the stored failure is raised on each call.
+- `ConnectionLost` — the socket died. `ConnectionLost` is a subclass of `StreamReset`;
+  `ConnectionClosed` is not, because it describes the connection rather than a stream.
 - `ProtocolError` — `headers` was passed on a frame that is not this side's first on the stream.
 - whatever a reply headers interceptor raises, and `TypeError` for an awaitable it returned or a
   non-`str` key it left, when this is this side's first frame on a stream the remote opened (see
@@ -1196,8 +1185,8 @@ async send(payload: unknown, options: SendOptions = {}): Promise<void>;
 
 ### Raises
 
-Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`, exactly as Python does and
-for the same three reasons — plus `ProtocolError` when `headers` rides a frame that is not this side's
+Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`, under the same conditions
+as in Python, and also with `ProtocolError` when `headers` rides a frame that is not this side's
 first on the stream, and whatever a reply headers interceptor throws (or `TypeError` for a thenable it
 returned or a symbol key it left) when this is this side's first frame on a stream the remote opened
 (see [`interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript)). Nothing is sent,
@@ -1237,14 +1226,12 @@ await dialer.close({ drainMs: 100 });
 
 Announce this side's leading headers with no payload at all.
 
-This is what a handler calls when it knows *what* is coming before it has produced any of it: the
-frame it puts on the wire is a `data` with headers and nothing else, so the opener can read
-`reply_headers` while the first row is still being computed. Riding them along with the first payload
-instead is `send(..., headers=...)` or `reply(..., headers=...)`; the difference is only whether the
-announcement waits for the body.
+It sends a `data` frame that carries headers and no payload, so the opener can read `reply_headers`
+before the handler has produced the first payload. To send the headers on the same frame as the first
+payload, use `send(..., headers=...)` or `reply(..., headers=...)`.
 
-Each peer gets **one** chance per stream, and it is spent by that peer's first frame whether or not
-that frame carried headers (WSM-FRM-016). On a stream this peer opened, the first frame was the
+Each peer can send leading headers only on its first frame on a stream, whether or not that frame
+carries headers (WSM-FRM-016). On a stream this peer opened, the first frame was the
 `open`, so the headers belong to `peer.open(headers=...)` and this call raises.
 
 ### Signature
@@ -1609,7 +1596,7 @@ await dialer.close({ drainMs: 100 });
 
 `send` plus `end` in one call, which is what a unary handler wants.
 
-It is exactly `end(payload, trailers=trailers)`, spelled the way a request/response handler reads.
+It is equivalent to `end(payload, trailers=trailers, headers=headers)`.
 
 ### Signature
 
@@ -1773,9 +1760,9 @@ await dialer.close({ drainMs: 100 });
 Cancel the stream: `reset(CANCELLED)`, closing locally **at once** and without waiting for any
 acknowledgement.
 
-There is no acknowledgement to wait for, by design. The remote's handler is cancelled - it sees an
-`asyncio.CancelledError` at its next await - and the local side is closed the instant this returns.
-Cancelling one stream costs the connection nothing and affects no other stream.
+The protocol defines no acknowledgement for a reset. The remote's handler is cancelled and receives
+`asyncio.CancelledError` at its next await; the local side is closed when this call returns.
+Cancelling a stream does not affect the connection or any other stream.
 
 ### Signature
 
@@ -1907,9 +1894,9 @@ await dialer.close({ drainMs: 100 });
 
 Terminate the stream in both directions with an explicit reset code.
 
-`cancel()` is this with `CANCELLED`. Use `reset()` when the code carries information the remote can
-act on - `TIMEOUT`, `PAYLOAD_TOO_LARGE`, `APPLICATION_ERROR` - and remember that `REFUSED` is a
-promise that nothing ran.
+`cancel()` is `reset(CANCELLED)`. Use `reset()` when the code carries information the remote can act
+on, such as `TIMEOUT`, `PAYLOAD_TOO_LARGE` or `APPLICATION_ERROR`. `REFUSED` tells the remote that no
+handler ran for the stream.
 
 ### Signature
 
@@ -1921,7 +1908,7 @@ async def reset(self, code: ResetCode, reason: str | None = None) -> None:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `code` | `ResetCode` | required | The reset code. `CONNECTION_CLOSED` is rejected: it is synthesised locally when a socket dies and must never appear on the wire, because it would tell the remote that *its* connection had died. |
+| `code` | `ResetCode` | required | The reset code. `CONNECTION_CLOSED` is rejected: it is synthesised locally when a socket dies and must never appear on the wire (§8.1). |
 | `reason` | `str \| None` | `None` | Free text carried on the `reset` frame. |
 
 ### Return
@@ -1999,8 +1986,8 @@ async reset(code: ResetCode, reason?: string): Promise<void>;
 
 Rejects with `ProtocolError` for `ResetCode.CONNECTION_CLOSED` and for any number this generation
 does not define, including the retired 5. The check runs before anything is sent and before the
-already-closed short-circuit — but `reset` is an `async` method, so the failure arrives as a
-rejection rather than as a throw at the call site.
+already-closed check. `reset` is an `async` method, so the failure is a rejection of the returned
+promise, not a synchronous throw.
 
 ### Example
 
@@ -2040,9 +2027,8 @@ await dialer.close({ drainMs: 100 });
 What makes `await stream` work: it claims the stream for the await shape and resolves with the
 **first** payload the remote sends.
 
-There is one memoized answer per stream. A second `await` returns that same value rather than the
-next payload - a stream is not a queue you can pull twice - and a stream that has already been
-iterated raises instead.
+There is one memoized answer per stream. A second `await` returns the same value, not the next
+payload. Awaiting a stream that is already being iterated raises.
 
 ### Signature
 
@@ -2113,10 +2099,9 @@ asyncio.run(main())
 What makes `await stream` work: `Stream` implements `PromiseLike`, so awaiting it claims it for the
 await shape and resolves with the first payload.
 
-It **implements** `PromiseLike` rather than extending `Promise`, deliberately: subclassing would make
-`stream.then(...).then(...)` construct a `Stream` for every derived promise - a chain of objects each
-claiming to be an addressable exchange with an id, none of which is one. `then` returns an ordinary
-`Promise`.
+It **implements** `PromiseLike` and does not extend `Promise`. A `Promise` subclass would construct a
+`Stream` for every derived promise in `stream.then(...).then(...)` (species semantics). `then`
+returns an ordinary `Promise`.
 
 ### Signature
 
@@ -2275,8 +2260,8 @@ await dialer.close({ drainMs: 100 });
 
 The same memoized answer as `await stream`, with a deadline wrapped around the wait.
 
-It is never a second source of the value: `await stream` and `await stream.result()` resolve from one
-place, so a second read returns the first read's value rather than the next payload.
+`await stream` and `await stream.result()` resolve from the same memoized answer, so a second read
+returns the first read's value, not the next payload.
 
 ### Signature
 
@@ -2288,7 +2273,7 @@ async def result(self, timeout: float | None = None) -> Any:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `timeout` | `float \| None` — seconds | `None` | The deadline, in seconds. `None` waits forever. On expiry the stream is reset with `TIMEOUT` **before** `StreamTimeout` is raised, so the remote is told to stop working rather than finishing into a caller that has gone. |
+| `timeout` | `float \| None` — seconds | `None` | The deadline, in seconds. `None` waits forever. On expiry the stream is reset with `TIMEOUT` **before** `StreamTimeout` is raised, so the remote stops processing the stream. |
 
 ### Return
 
@@ -2374,9 +2359,8 @@ async result(options: ResultOptions = {}): Promise<T>;
 Rejects with `StreamTimeout` (after the remote has been sent `reset(TIMEOUT)`), `ProtocolError` (the
 stream ended without a payload), a `StreamReset` subclass, or `ConnectionLost`. An aborted `signal`
 rejects with the signal's own `reason` after resetting the stream with `CANCELLED`. It also rejects
-with `StreamAlreadyConsumed` when the stream is already being iterated: `result` is an `async`
-method, so unlike `then`, which throws that one at the call site, this one hands it to you as a
-rejection.
+with `StreamAlreadyConsumed` when the stream is already being iterated. `result` is an `async`
+method, so this is a rejection, whereas `then` throws it synchronously.
 
 ### Example
 
@@ -2391,8 +2375,7 @@ const codes: number[] = [];
 acceptor.onStream(async (payload: unknown, stream: Stream) => {
   if (payload === 'slow') {
     // Never answers, and waits on the stream rather than on a clock: `closed` resolves when the
-    // caller's deadline resets it (WSM-API-023). A timer would keep this process alive for ten
-    // seconds after the last line had been printed.
+    // caller's deadline resets it (WSM-API-023).
     await stream.closed;
     return;
   }
@@ -2434,7 +2417,7 @@ export interface ResultOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `timeoutMs` | `number` — milliseconds | none (waits forever) | The deadline in milliseconds. On expiry the stream is reset with `TIMEOUT` before `StreamTimeout` is thrown. |
-| `signal` | `AbortSignal` | none | The TypeScript stand-in for cancelling the awaiting task: abandoning a promise is invisible to the promise, so a consumer that wants the stream reset when it gives up says so with a signal. An abort resets the stream with `CANCELLED` and then throws the signal's `reason`. A signal that is already aborted takes that path immediately. |
+| `signal` | `AbortSignal` | none | The TypeScript equivalent of cancelling the awaiting task in Python. A promise cannot detect that its consumer stopped waiting, so the consumer passes a signal. An abort resets the stream with `CANCELLED` and then throws the signal's `reason` (or a `StreamReset` with code `CANCELLED` when `reason` is unset). A signal that is already aborted does this immediately. |
 
 ### Return
 
@@ -2457,10 +2440,8 @@ const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true }
 const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
 
 acceptor.onStream(async (_payload: unknown, stream: Stream) => {
-  // Slower than the consumer's patience, and no slower: the abort below lands at 50 ms, so this is
-  // late by any measure. It is a plain sleep rather than a wait on `closed` because the point of the
-  // example is the reply that arrives *after* the stream is gone - and ten seconds of it would only
-  // be ten seconds of a process with nothing left to do.
+  // Replies after 200 ms; the abort below fires at 50 ms, so the reply arrives after the stream is
+  // closed.
   await new Promise<void>((resolve) => setTimeout(resolve, 200));
   await stream.reply('too late');
 });
@@ -2484,13 +2465,10 @@ await dialer.close({ drainMs: 100 });
 `stream.send()`'s options object, re-exported from the package root under this name; inside the
 module it is `SendOptions`.
 
-It carries one field, and the field is the whole of muxws's "end" story: **`end` is a flag on a frame,
-never a frame of its own** (WSM-FRM-014). `send(payload, { end: true })` is one frame that both
-delivers and half-closes, which is why it is one call rather than a `send` followed by an `end`.
+**`end` is a flag on a frame, not a separate frame** (WSM-FRM-014). `send(payload, { end: true })`
+sends one frame that delivers the payload and half-closes this side.
 
-Python has no counterpart because Python takes a keyword argument: `await stream.send(payload,
-end=True)`. The asymmetry is deliberate — a TypeScript positional boolean reads as `send(x, true)` at
-the call site, which says nothing.
+Python has no counterpart; it takes a keyword argument: `await stream.send(payload, end=True)`.
 
 ### Signature
 
@@ -2550,8 +2528,8 @@ await acceptor.close();
 What makes `async for item in stream` work: it claims the stream for the iterate shape and yields
 every payload the remote sends, ending when the remote ends the stream.
 
-Leaving the loop early - `break`, `return`, an exception - is not observed by Python here, so a
-consumer that stops early should `cancel()` the stream itself. Cancelling the *task* that is
+Leaving the loop early (`break`, `return`, an exception) does not reset the stream in Python, so a
+consumer that stops early should call `cancel()` on the stream. Cancelling the *task* that is
 iterating is observed: the stream is reset with `CANCELLED` before the cancellation propagates.
 
 ### Signature
@@ -2626,9 +2604,9 @@ asyncio.run(main())
 What makes `for await (const item of stream)` work: it claims the stream for the iterate shape and
 yields every payload.
 
-Unlike Python's, this one **does** observe a consumer that walks away: a `break`, a `return` or a
-throw out of the loop body finalises the generator, and the stream is reset with `CANCELLED` on the
-way out. A loop that exited because the stream was reset does not send a second one.
+Unlike in Python, leaving the loop early resets the stream: a `break`, a `return` or a throw out of
+the loop body finalises the generator, which resets the stream with `CANCELLED`. A loop that exits
+because the stream was reset does not send a second reset.
 
 ### Signature
 
@@ -2751,8 +2729,8 @@ None — it is a string enum.
 
 ### Return
 
-`StreamState` — the member. Because it is a string enum, `stream.state === 'open'` compares equal to
-`stream.state === StreamState.OPEN`.
+`StreamState` — the member. It is a string enum whose values are the strings in the signature, so
+`stream.state === 'open'` is equivalent to `stream.state === StreamState.OPEN`.
 
 ### Raises
 

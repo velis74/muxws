@@ -41,10 +41,10 @@ describe('the v1 frame set', () => {
    * Section 2.3 verbatim, written out here so the assertion below is a **set equality** rather than
    * a membership check.
    *
-   * A membership check cannot fail for a type that should not be there, and the two facts most worth
-   * policing are absences: there is no `end` frame type (WSM-FRM-012) and no trailers frame type
-   * (WSM-FRM-013). Both are flags on `data` - a `V1_FRAME_TYPES` that grew an `end` entry would
-   * satisfy every membership assertion in this file and still be a different protocol.
+   * A membership check does not fail for an extra type. The rules checked here are absences: there
+   * is no `end` frame type (WSM-FRM-012) and no trailers frame type (WSM-FRM-013); both are flags on
+   * `data`. A `V1_FRAME_TYPES` with an added `end` entry would pass every membership assertion in this
+   * file and define a different protocol.
    */
   const SECTION_2_3 = ['open', 'data', 'reset', 'ping', 'pong', 'goaway'];
 
@@ -63,8 +63,8 @@ describe('the v1 frame set', () => {
   });
 
   it('spells end and trailers as flags on data - WSM-FRM-012/WSM-FRM-013', () => {
-    // The positive half of the same pair of rules: what a peer with nothing left to say actually
-    // sends is a `data` frame, and trailers ride on the frame carrying `end: true`.
+    // A peer ends a stream with a `data` frame carrying `end: true`, and trailers are carried on that
+    // frame.
     const closing: Frame = { type: 'data', stream: 7, end: true, trailers: { checksum: 'deadbeef' } };
     expect(V1_FRAME_TYPES.has(closing.type)).toBe(true);
     expect(codec.encode(closing)).toBe('{"type":"data","stream":7,"end":true,"trailers":{"checksum":"deadbeef"}}');
@@ -74,10 +74,10 @@ describe('the v1 frame set', () => {
   });
 
   it('is the only vocabulary the shared corpus uses - WSM-FRM-012/WSM-FRM-013', () => {
-    // The corpus is the fixture both ports read, so this is the one place a divergence between the
-    // two `V1_FRAME_TYPES` constants would show up as a wire fact rather than as a local opinion.
-    // Every pinned frame must be one of the six, and the corpus must actually exercise the flags -
-    // otherwise "no end frame type" would be trivially true of a corpus that never ends a stream.
+    // Both ports read the corpus, so a divergence between the two `V1_FRAME_TYPES` constants shows up
+    // here as a difference in pinned wire frames. Every pinned frame must be one of the six, and the
+    // corpus must contain frames with the `end` flag; otherwise "no end frame type" is trivially true of
+    // a corpus that never ends a stream.
     const types = new Set(corpus.map((entry) => (entry as { frame: { type: string } }).frame.type));
     types.forEach((type) => expect(V1_FRAME_TYPES.has(type), `${type} is pinned but is not a v1 type`).toBe(true));
 

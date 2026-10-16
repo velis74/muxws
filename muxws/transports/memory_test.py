@@ -1,4 +1,4 @@
-"""The transport itself, so a failure in it is never misread as a peer bug."""
+"""The in-memory transport, tested separately so a transport failure is not reported as a peer bug."""
 
 from __future__ import annotations
 

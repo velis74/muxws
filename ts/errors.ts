@@ -2,21 +2,20 @@
  * Reset codes and the muxws exception hierarchy (WSM-ERR-002..009, §8.1-8.2).
  *
  * Mirrors `muxws/errors.py` class for class. Every class sets `name`, so a cross-language test can
- * assert on error identity the way Python asserts on `__class__` (WSM-ERR-004).
+ * assert on error identity as Python asserts on `__class__` (WSM-ERR-004).
  *
- * No concrete transport error is defined here. The two transport bases at the bottom of this file are
- * shared because an application must be able to catch them without importing a transport;
- * `UnixUrlError`, `WsUrlError` and the rest belong to the one transport that produces them and are
- * exported from the entry point that ships it (WSM-ERR-016). `ConnectionClosed` stays shared for the
- * opposite reason: the `SocketAdapter` contract *requires* it of every adapter (WSM-API-021), so the
- * seam owns it. Ownership decides, not who throws.
+ * No concrete transport error is defined here. The two transport base classes at the end of this
+ * file are defined here so an application can catch them without importing a transport;
+ * `UnixUrlError`, `WsUrlError` and the other concrete classes are defined in the transport that
+ * throws them and exported from the entry point that ships it (WSM-ERR-016). `ConnectionClosed` is
+ * defined here because the `SocketAdapter` contract requires every adapter to throw it (WSM-API-021).
  */
 
 /**
  * Numeric on the wire, named in both APIs; shared by `reset` and `goaway`.
  *
- * There are **nine** members. `5` is retired (it was `STREAM_LIMIT`, WSM-STM-022): the number MUST
- * NOT be reused and MUST NOT appear on the wire, so no name maps to it.
+ * There are nine members. `5` is retired (WSM-STM-022): it MUST NOT be reused and MUST NOT appear
+ * on the wire, so no name maps to it.
  */
 export enum ResetCode {
   NO_ERROR = 0,
@@ -24,7 +23,7 @@ export enum ResetCode {
   APPLICATION_ERROR = 2,
   PROTOCOL_ERROR = 3,
   REFUSED = 4,
-  // 5 is retired - see the doc comment above.
+  // 5 is retired; see the doc comment above.
   TIMEOUT = 6,
   PAYLOAD_TOO_LARGE = 7,
   INTERNAL_ERROR = 8,
@@ -82,8 +81,8 @@ export class StreamAlreadyConsumed extends MuxwsError {
 /**
  * `send()`/`end()`/`reply()` on a stream that closed **normally**.
  *
- * Deliberately neither a `StreamReset` nor a `ProtocolError` (WSM-ERR-009): a normal close racing a
- * last `send()` is an expected outcome, not a failure and not a caller bug.
+ * Not a `StreamReset` and not a `ProtocolError` (WSM-ERR-009): a `send()` that races a normal close
+ * is an expected outcome, not a stream failure or a protocol violation.
  */
 export class StreamClosed extends MuxwsError {
   constructor(message?: string) {
@@ -175,28 +174,25 @@ export class ConnectionLost extends StreamReset {
 /**
  * A transport cannot open the address it was given (WSM-ERR-016).
  *
- * Never thrown directly. It exists so that `error instanceof TransportUrlError` can be written by an
- * application that has not imported - and, in a browser build, cannot import - the transport that
- * refused the url. The concrete classes live in their transport's own module (`UnixUrlError` and
- * `WsUrlError` behind `muxws/node`), because the adapter seam is public (WSM-API-021): a third party
- * writing an adapter cannot add a class to this file.
+ * Never thrown directly. An application can test `error instanceof TransportUrlError` without
+ * importing the transport that refused the url (in a browser build, that transport cannot be
+ * imported). The concrete classes are defined in their transport's module (`UnixUrlError` and
+ * `WsUrlError` in `muxws/node`); third-party adapters (WSM-API-021) define their own subclasses the
+ * same way.
  *
- * Python spells this `TransportUrlError(MuxwsError, ValueError)`. JavaScript has one prototype chain
- * and `MuxwsError` is the half that has to survive, since the rule is that a single
- * `instanceof MuxwsError` handler cannot be leaked through. There is no builtin habit to preserve on
- * this side either: jsdom and undici raise a `DOMException` named `SyntaxError` for a bad WebSocket
- * url and `ws` raises a real `SyntaxError`, neither of which a caller would have written a `catch`
- * for. `name` carries the Python class's identity across instead (WSM-ERR-004), which is why every
- * subclass must set its own.
+ * Python declares `TransportUrlError(MuxwsError, ValueError)`. A JavaScript class has a single
+ * prototype chain, and this one extends `MuxwsError` so that an `instanceof MuxwsError` handler
+ * catches every muxws error. (jsdom and undici throw a `DOMException` named `SyntaxError` for an
+ * invalid WebSocket url, and `ws` throws a `SyntaxError`; there is no corresponding builtin base to
+ * keep.) `name` carries the Python class identity (WSM-ERR-004), so every subclass sets its own.
  */
 export class TransportUrlError extends MuxwsError {
   constructor(message?: string, options: { cause?: unknown } = {}) {
     super(message);
     this.name = 'TransportUrlError';
-    // Assigned rather than passed through `super`: `MuxwsError` takes a message only, and
-    // `new Error(msg, { cause: undefined })` leaves an own `cause` property reading "the original was
-    // nothing" where the truth is "there was no original". WSM-ERR-016 requires the chain when there
-    // is one, and says nothing about inventing one when there is not.
+    // Assigned here, not passed to `super`: `MuxwsError` takes only a message, and
+    // `new Error(msg, { cause: undefined })` would create an own `cause` property with the value
+    // `undefined`. `cause` is set only when there is an underlying error (WSM-ERR-016).
     if (options.cause !== undefined) this.cause = options.cause;
   }
 }
@@ -204,14 +200,12 @@ export class TransportUrlError extends MuxwsError {
 /**
  * This runtime, build or entry point cannot provide the transport at all (WSM-ERR-016).
  *
- * Never thrown directly. The distinction from `TransportUrlError` is the one the caller acts on:
- * a `TransportUrlError` means *retype the url*, this means *the url is fine, change where or how you
- * run it* - an optional dependency that is not installed, a kernel with no `AF_UNIX`, a bundle that
- * WSM-API-022 keeps the dependency out of.
+ * Never thrown directly. A `TransportUrlError` means the url is invalid for the transport; this error
+ * means the url is valid but the environment cannot open it: an optional dependency is not
+ * installed, the kernel has no `AF_UNIX`, or the entry point excludes the dependency (WSM-API-022).
  *
- * Python adds `RuntimeError` to the bases for the same reason `TransportUrlError` adds `ValueError`;
- * here the single prototype chain goes to `MuxwsError` and `name` carries the identity, exactly as
- * for the sibling above.
+ * Python declares `RuntimeError` as a second base. As with `TransportUrlError`, this class extends
+ * only `MuxwsError`, and `name` carries the class identity.
  */
 export class TransportUnsupportedError extends MuxwsError {
   constructor(message?: string, options: { cause?: unknown } = {}) {

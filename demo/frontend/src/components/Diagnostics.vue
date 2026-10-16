@@ -1,15 +1,10 @@
 <!--
-  The strip that watches the connection, and the panel the whole demo exists for.
+  Connection diagnostics, the tick-rate control, the 1 MB export and the kill switch.
 
-  Everything on the left comes from `peer.on_frame`, `peer.ping()` and `peer.streams` - the seams
-  muxws offers an application for exactly this (WSM-OBS-003). The sparkline is the headline: press
-  "1 MB export" and watch a megabyte fragment on one stream while twenty others keep their turn. The
-  number that proves it is not the picture but `interleaved` - tick frames that landed *between* the
-  export's first and last fragment (WSM-INV-004).
-
-  The panel prints what it counted and never a number arranged to look right: `interleaved` is the
-  one figure here that a FIFO writer cannot produce, so a demo that massaged it would be witnessing
-  nothing at all.
+  The metrics come from `peer.onFrame`, `peer.ping()` and `peer.streams` (WSM-OBS-003). The sparkline
+  shows tick lateness while the 1 MB export is fragmented on one stream. `interleaved` counts tick
+  frames received between the export's first and last fragment (WSM-INV-004); with a FIFO writer it
+  would be zero. All values shown are the counted values.
 -->
 <template>
   <v-card>
@@ -40,10 +35,9 @@
 
       <v-divider class="my-3" />
 
-      <!-- The pacing control, and the reason it is on the screen at all: the board's default rate is
-           a sleep in the backend's generator, and without a way to change it a reader reasonably
-           reads four-a-second as what muxws can do. Turn it up and watch frames/second, not the
-           board - the rows blur long before the socket notices. -->
+      <!-- Tick interval control. The default rate of four ticks a second per symbol is a sleep in the
+           backend's generator, not a transport limit. At 10 ms the frames/s readout increases while
+           rendering is coalesced to the display's frame rate. -->
       <div class="d-flex flex-wrap align-center ga-3 mb-3">
         <span class="text-caption text-medium-emphasis">push symbols every</span>
         <v-btn-toggle
@@ -69,7 +63,7 @@
           <strong>{{ store.exportReport.worstLatencyMs }} ms</strong>
         </span>
         <span v-else class="text-caption text-medium-emphasis">
-          a megabyte on one stream, while twenty others keep ticking
+          1 MB on one stream while twenty tick streams continue
         </span>
 
         <v-spacer />
@@ -80,9 +74,8 @@
       </div>
 
       <div v-if="store.lastStreamEnd" class="text-caption text-medium-emphasis mt-2">
-        the last socket took {{ store.streamsLost }} stream(s) with it, raising
-        <strong>{{ store.lastStreamEnd }}</strong> - nothing was resumed and the board above is a new subscription
-        (WSM-RCN-030/031)
+        {{ store.streamsLost }} stream(s) failed on socket loss with <strong>{{ store.lastStreamEnd }}</strong> - no
+        stream is resumed, and the board above consists of new streams (WSM-RCN-030/031)
       </div>
 
       <v-divider class="my-3" />
@@ -102,15 +95,15 @@ import { computed } from 'vue';
 
 import { killBackend, resetLatencyWorst, runExport, setTickInterval, store } from '../muxws';
 
-/** Two orders of magnitude apart on purpose: the point is the range, not fine control. */
+/** Selectable tick intervals in milliseconds, spanning more than an order of magnitude. */
 const intervals = [250, 50, 10] as const;
 
 const intervalMs = computed(() => Math.round(store.tickInterval * 1000));
 
 const metrics = computed(() => [
   { label: 'state', value: store.connection },
-  // Changes on every reconnection, on purpose: two sockets under one name would read as one
-  // connection in a log (WSM-API-009).
+  // Changes on every reconnection, so log lines of different sockets carry different ids
+  // (WSM-API-009).
   { label: 'peer.id', value: store.peerId || '-' },
   { label: 'reconnects', value: store.reconnects },
   { label: 'ping RTT', value: store.rttMs === null ? '-' : `${store.rttMs} ms` },
@@ -119,13 +112,12 @@ const metrics = computed(() => [
   { label: 'streams ended by a failure', value: store.streamsLost },
   { label: 'frames/s', value: `${store.framesInPerSecond} in / ${store.framesOutPerSecond} out` },
   { label: 'bytes/s', value: `${kb(store.bytesInPerSecond)} in / ${kb(store.bytesOutPerSecond)} out` },
-  // Not "dropped": every tick arrived, was counted and was timed. This is the count whose row was
-  // superseded before the browser could paint it, and it starts climbing the moment the push rate
-  // passes what a display can show.
+  // Not dropped frames: every tick is received, counted and timed. This counts ticks whose row was
+  // replaced before it was rendered; it increases when the push rate exceeds the display's frame rate.
   { label: 'renders coalesced', value: store.coalesced },
 ]);
 
-/** Fixed at four tick periods so the line does not silently rescale under a stall it is measuring. */
+/** Full scale is four tick intervals, fixed so the scale does not change with the measured values. */
 const sparkScale = computed(() => Math.round(store.tickInterval * 4000));
 
 const spark = computed(() => {

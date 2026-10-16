@@ -1,16 +1,15 @@
 /**
  * The reconnect helper: backoff, heartbeat and hello replay (§7).
  *
- * A port of `muxws/reconnect.py`, structure for structure, including the ordering of the supervisor.
- * Everything that differs does so because JavaScript differs: there is no task cancellation, so every
- * long wait is raced against a gate the stopper opens, and durations are **milliseconds** where
- * Python's are seconds (§9.3).
+ * Mirrors `muxws/reconnect.py` structure for structure, including the order of the supervisor's
+ * steps. Differences: JavaScript has no task cancellation, so every long wait is raced against a gate
+ * that `stop()` opens; durations are milliseconds where Python uses seconds (§9.3).
  *
- * **Dialer only.** An acceptor cannot dial and MUST NOT have one.
+ * Dialer only. An acceptor cannot dial and MUST NOT have a reconnect helper.
  *
- * The helper's entire persistent state is an attempt counter (WSM-RCN-001). Everything else - the
- * delay, the jitter, whether to give up - is computed from it, which is what makes the schedule a
- * pure function that can be tested without a clock (WSM-RCN-003).
+ * The helper's only persistent state is an attempt counter (WSM-RCN-001). The delay, the jitter and
+ * whether to give up are computed from it, so the schedule is a pure function testable without a
+ * clock (WSM-RCN-003).
  */
 
 import type { Codec } from './codec';
@@ -31,7 +30,7 @@ import type { SocketAdapter } from './transports';
 
 // --------------------------------------------------------------------------- backoff options
 
-/** The shape a caller may pass. Every field has a default, so `new Reconnect()` is the whole API. */
+/** Options for `new Reconnect()`. Every field is optional and has a default. */
 export interface ReconnectOptions {
   initialDelayMs?: number;
   factor?: number;
@@ -41,11 +40,11 @@ export interface ReconnectOptions {
 }
 
 /**
- * Backoff options. Milliseconds as numbers, because this is the TypeScript port (§9.3).
+ * Backoff options. Durations are milliseconds (§9.3).
  *
- * A class rather than a bare interface so the defaults live in one place and the three impossible
- * configurations are rejected where they are written rather than where they first misbehave - a
- * `factor` below 1 is a schedule that shrinks, and it would read as a flaky server for a week.
+ * A class, not an interface, so the defaults are defined in one place and invalid values are rejected
+ * in the constructor: `initialDelayMs` not greater than 0, `factor` below 1 (a shrinking schedule),
+ * and `jitter` outside [0, 1].
  */
 export class Reconnect {
   readonly initialDelayMs: number;
@@ -57,8 +56,8 @@ export class Reconnect {
   readonly jitter: number;
 
   /**
-   * `Infinity` means unlimited - Python spells the same thing `None`. Exhausting it fires `onClose`
-   * once with `willRetry` false and never dials again (WSM-RCN-044).
+   * `Infinity` means unlimited (Python: `None`). When it is exhausted, `onClose` fires once with
+   * `willRetry` false and no further dial is made (WSM-RCN-044).
    */
   readonly maxAttempts: number;
 
@@ -69,8 +68,8 @@ export class Reconnect {
     this.jitter = options.jitter ?? 0.3;
     this.maxAttempts = options.maxAttempts ?? Infinity;
 
-    // Python raises `ValueError`; `Error` is the closest thing TypeScript has to one, and a muxws
-    // error class would claim this is a protocol or connection failure, which it is not.
+    // Python raises `ValueError`; here a plain `Error`, because this is an argument error, not a
+    // protocol or connection failure that a muxws error class would indicate.
     if (this.initialDelayMs <= 0) throw new Error('initialDelayMs must be greater than zero');
     if (this.factor < 1) throw new Error('factor must be at least 1');
     if (!(this.jitter >= 0 && this.jitter <= 1)) throw new Error('jitter is a fraction between 0 and 1');
@@ -78,15 +77,15 @@ export class Reconnect {
 }
 
 /**
- * The draw a schedule needs, in [-1, 1). Injected so the schedule can be tested as the pure function
- * WSM-RCN-003 says it is, rather than sampled and hoped about.
+ * A random number in [-1, 1) for jitter. Injectable, so tests can evaluate the schedule as a pure
+ * function (WSM-RCN-003).
  */
 export type RandomDraw = () => number;
 
 /**
- * `Math.random`, deliberately, with `crypto.getRandomValues` ruled out by WSM-RCN-005: reconnect
- * jitter exists to disperse a thundering herd, not to resist an adversary. The ping nonce in
- * `lifecycle.ts` is the opposite case and does use one.
+ * Uses `Math.random`; WSM-RCN-005 excludes `crypto.getRandomValues`, because jitter is used to spread
+ * out simultaneous reconnects, not to resist an adversary. The ping nonce in `lifecycle.ts` uses
+ * `crypto.getRandomValues`.
  */
 function uniform(): number {
   return Math.random() * 2 - 1;
@@ -98,9 +97,8 @@ function uniform(): number {
  *     delay = min(initialDelayMs * factor ** attempts, maxDelayMs)
  *     delay = delay * (1 + uniform(-jitter, +jitter))
  *
- * Jitter is applied to **every** computed delay, including the capped ones (WSM-RCN-002). Without it,
- * N peers whose sockets died at the same instant retry at the same instant, and a server coming back
- * up is knocked over by the reconnection rather than by the load.
+ * Jitter is applied to every computed delay, including capped ones (WSM-RCN-002), so peers that lost
+ * their sockets at the same moment do not all retry at the same moment. The result is never negative.
  */
 export function backoffDelay(attempts: number, options: Reconnect, draw: RandomDraw = uniform): number {
   if (attempts < 0) throw new Error('attempts cannot be negative');
@@ -108,7 +106,7 @@ export function backoffDelay(attempts: number, options: Reconnect, draw: RandomD
   return Math.max(0, base * (1 + options.jitter * draw()));
 }
 
-/** The schedule before jitter and after the cap - the half that is exactly predictable. */
+/** The delay after the cap and before jitter: `min(initialDelayMs * factor ** attempts, maxDelayMs)`. */
 export function unjitteredDelay(attempts: number, options: Reconnect): number {
   return Math.min(options.initialDelayMs * options.factor ** attempts, options.maxDelayMs);
 }
@@ -119,13 +117,12 @@ export function shouldRetry(attempts: number, options: Reconnect): boolean {
 }
 
 /**
- * The helper's entire persistent state (WSM-RCN-001).
+ * The helper's only persistent state (WSM-RCN-001).
  *
- * It resets **only when the connection is established**, where established means both of: the socket
- * is open with the subprotocol accepted (WSM-CON-030), and the hello has been acknowledged
- * (WSM-RCN-004). Resetting on socket-open instead silently converts exponential backoff into a
- * fixed-interval hammer against a server that accepts sockets while its backend is down
- * (WSM-INV-012).
+ * It resets only when the connection is established: the socket is open with the subprotocol
+ * accepted (WSM-CON-030) and the hello has been acknowledged (WSM-RCN-004). Resetting when the socket
+ * opens would turn exponential backoff into fixed-interval retries against a server that accepts
+ * sockets while its backend is down (WSM-INV-012).
  */
 export class AttemptCounter {
   private attempts = 0;
@@ -139,7 +136,7 @@ export class AttemptCounter {
     return this.attempts;
   }
 
-  /** Called at exactly one point: after the subprotocol AND after the hello acknowledgement. */
+  /** Called at one point only: after the subprotocol is accepted and the hello is acknowledged. */
   established(): void {
     this.attempts = 0;
   }
@@ -148,8 +145,8 @@ export class AttemptCounter {
 // --------------------------------------------------------------------------- the hello
 
 /**
- * How long the hello exchange may take before the attempt is failed (WSM-RCN-026), in milliseconds -
- * Python's `timeout=10.0`.
+ * How long the hello exchange may take before the attempt fails (WSM-RCN-026), in milliseconds.
+ * Python: `timeout=10.0`.
  */
 export const DEFAULT_HELLO_TIMEOUT_MS = 10_000;
 
@@ -162,15 +159,13 @@ export interface HelloOptions {
 /**
  * The opening payload replayed on every connection this peer ever makes (WSM-RCN-020).
  *
- * Captured **once**, at `connect()`, and never re-read, recomputed or supplied as a callback. It is
- * deep-copied in and deep-copied out again on every read, so "byte-identical on every replay"
- * (WSM-RCN-027) is true by construction rather than by hoping the application did not mutate its own
- * object after handing it over - and so that the copy one connection handed to the codec cannot be
- * the object the next connection sends.
+ * Captured once, at `connect()`; it is not re-read, recomputed or supplied as a callback. It is
+ * deep-copied on capture and on every read, so every replay is byte-identical (WSM-RCN-027) even if
+ * the application mutates its original object, and no two connections send the same object.
  *
- * It goes out as an ordinary `open(payload, { headers, end: true })` and nothing marks it on the wire
+ * It is sent as an ordinary `open(payload, { headers, end: true })`, with no marker on the wire
  * (WSM-RCN-021). The acknowledgement is the acceptor's handler returning, which ends the stream
- * implicitly (WSM-RCN-022/WSM-STM-035) - no application code is required to send one.
+ * implicitly (WSM-RCN-022/WSM-STM-035); no application code sends it.
  *
  * A credential MUST NOT be carried here: authentication is a handshake concern (WSM-RCN-025,
  * WSM-AUT-001).
@@ -183,20 +178,22 @@ export class Hello {
   private readonly capturedHeaders: Record<string, unknown> | null;
 
   constructor(options: HelloOptions = {}) {
-    // `structuredClone` rather than a hand-rolled walk: it is the platform's own deep copy, and it
-    // throws on a value no codec could have encoded anyway - which surfaces at `connect()`, where the
-    // application can see it, instead of as an unreplayable hello three hours into a reconnect storm.
+    // `structuredClone` is the platform deep copy. It throws for values such as functions, which no
+    // codec can encode, so such a hello fails at `connect()` instead of on a later replay.
     this.capturedPayload = deepCopy(options.payload ?? null);
     this.capturedHeaders = options.headers == null ? null : deepCopy(options.headers);
     this.timeoutMs = options.timeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
   }
 
-  /** A peer given no hello sends none, and is established as soon as the socket is (WSM-RCN-024). */
+  /**
+   * False when neither payload nor headers were given: no hello is sent, and the connection is
+   * established when the socket opens (WSM-RCN-024).
+   */
   get configured(): boolean {
     return this.capturedPayload !== null || this.capturedHeaders !== null;
   }
 
-  /** A **fresh** copy each call. The one handed to a previous send is never handed out twice. */
+  /** A new deep copy on each call. */
   payloadForWire(): unknown {
     return deepCopy(this.capturedPayload);
   }
@@ -206,19 +203,19 @@ export class Hello {
   }
 }
 
-/** Python's `copy.deepcopy`. Reached through `globalThis` because it is a platform global. */
+/** Python's `copy.deepcopy`. Accessed through `globalThis` because it is a platform global. */
 function deepCopy<T>(value: T): T {
   return globalThis.structuredClone(value);
 }
 
-/** Python's `str(exc)`, which is what an f-string interpolating a cause produces. */
+/** Python's `str(exc)`. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 // --------------------------------------------------------------------------- waiting
 
-/** Python's `asyncio.sleep`, in milliseconds. Injected everywhere so tests need no wall clock. */
+/** Python's `asyncio.sleep`, in milliseconds. Injectable, so tests do not depend on the wall clock. */
 export type Sleep = (ms: number) => Promise<void>;
 
 function realSleep(ms: number): Promise<void> {
@@ -228,22 +225,18 @@ function realSleep(ms: number): Promise<void> {
 }
 
 /**
- * The heartbeat's sleep: the same timer, released from Node's event loop.
+ * The heartbeat's sleep: a `setTimeout` that is unref'd in Node.
  *
- * JavaScript cannot cancel a pending `await`, so when `peer.close()` opens the stop gate the
- * heartbeat's loop exits while its `setTimeout` keeps running - and in Node a pending timer holds the
- * whole process open. Without the unref a program that closes its peer and has nothing else to do
- * sits out the rest of the ping interval - twenty seconds on the default - before it exits, where the
- * Python twin returns at once.
+ * A pending `await` cannot be cancelled, so when `peer.close()` opens the stop gate the heartbeat
+ * loop exits while its timer is still pending, and in Node a pending timer keeps the process alive.
+ * Without `unref`, a program that closes its peer would wait for the rest of the ping interval (20 s
+ * by default) before exiting; the Python implementation exits immediately.
  *
- * Only the heartbeat unrefs, never the backoff sleep. While a socket is open the socket's own handle
- * keeps the loop alive, so releasing this timer costs nothing; while the peer is *between* sockets
- * there is no socket handle and the backoff timer is the only thing keeping the program running -
- * which is correct, because the program is waiting to reconnect (WSM-RCN-006). Unref'ing that one
- * would make a client exit silently on its first outage.
+ * The backoff sleep is not unref'd. While a socket is open, its handle keeps the process alive; while
+ * the peer is between sockets, the backoff timer is the only handle, and the process must stay alive
+ * to reconnect (WSM-RCN-006). Unref'ing it would let a client exit on its first outage.
  *
- * `unref` is Node's, and a browser's `setTimeout` returns a number that has no such method - hence
- * the optional call rather than a cast.
+ * `unref` exists only in Node; a browser's `setTimeout` returns a number, hence the optional call.
  */
 function heartbeatSleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -258,9 +251,9 @@ interface Gate {
 }
 
 /**
- * A promise somebody else resolves. This is what `task.cancel()` buys Python: there is no way to
- * interrupt a pending `await` in JavaScript, so every long wait is raced against one of these and the
- * waiter re-checks its flag when the race settles.
+ * A promise resolved by calling `open()`. It replaces Python's `task.cancel()`: a pending `await`
+ * cannot be interrupted in JavaScript, so every long wait is raced against a gate, and the waiter
+ * re-checks its stop flag when the race settles.
  */
 function gate(): Gate {
   let open: () => void = () => undefined;
@@ -278,8 +271,8 @@ export const DEFAULT_PING_INTERVAL_MS = 20_000;
 /**
  * WSM-RCN-011's default: 10 s for the `pong`.
  *
- * Not `peer.ts`'s `DEFAULT_PING_TIMEOUT_MS`, which is the 5 s an explicit `peer.ping()` waits
- * (WSM-CON-012). The two numbers answer different questions and the spec gives them different values.
+ * Distinct from `peer.ts`'s `DEFAULT_PING_TIMEOUT_MS`, the 5 s default of an explicit `peer.ping()`
+ * (WSM-CON-012); the spec defines the two values separately.
  */
 export const DEFAULT_HEARTBEAT_TIMEOUT_MS = 10_000;
 
@@ -290,14 +283,13 @@ export interface HeartbeatOptions {
 }
 
 /**
- * A `ping` on an **idle** socket, and a bounded verdict when no `pong` comes back.
+ * Sends a `ping` on an idle socket and declares the socket dead when no `pong` arrives in time.
  *
- * Idle means idle (WSM-RCN-010): the timer is `peer.lastActivity`, stamped by every frame in either
- * direction, not a fixed schedule - otherwise a busy connection spends a ping every interval to learn
- * what its own traffic already proved.
+ * Idleness is measured from `peer.lastActivity`, which every frame in either direction updates
+ * (WSM-RCN-010); a connection with traffic sends no pings.
  *
- * Detection is therefore bounded by `intervalMs + timeoutMs` (WSM-RCN-011): the ping goes out at most
- * one interval after the last frame, and `ping()` gives up after the deadline.
+ * Detection takes at most `intervalMs + timeoutMs` (WSM-RCN-011): the ping is sent at most one
+ * interval after the last frame, and `ping()` fails after the deadline.
  */
 export class Heartbeat {
   private readonly peer: Peer;
@@ -320,13 +312,11 @@ export class Heartbeat {
   }
 
   async run(): Promise<void> {
-    // Disabled, and disabled at once: a heartbeat is a bounded detection time, not a requirement,
-    // and a deployment with its own liveness signal is allowed to turn it off.
+    // An interval of 0 or less disables the heartbeat, for deployments with their own liveness check.
     if (this.intervalMs <= 0) return;
 
-    // The socket has just been established, and that is the most recent thing that happened on it.
-    // Without this stamp an unused peer reads as infinitely idle and gets a ping the instant the
-    // heartbeat starts, which is the opposite of what "idle for an interval" means.
+    // Counts establishment as activity. Otherwise a peer with no traffic yet would be considered idle
+    // and pinged as soon as the heartbeat starts.
     this.peer.stampActivity();
 
     while (!this.stopped && this.peer.isOpen) {
@@ -339,23 +329,19 @@ export class Heartbeat {
         await this.peer.ping(this.timeoutMs);
       } catch (error) {
         if (!(error instanceof ConnectionClosed)) return;
-        // Python cancels this task, so a stopped heartbeat cannot reach the line below; JavaScript
-        // cannot interrupt the `await` above, so the flag has to be re-read after it settles. Without
-        // this check a `peer.close()` whose drain window outlives one ping deadline is reported to the
-        // application as a swallowed pong rather than as the deliberate close it was - and a heartbeat
-        // stopped because its socket already died would close whatever socket the peer holds *now*,
-        // which by then can be the replacement (WSM-RCN-011/040).
+        // Python cancels this task; here the `await` above cannot be interrupted, so the flag is
+        // re-read after it settles. Without this check, a `peer.close()` whose drain outlasts one ping
+        // deadline would be reported as a missed pong instead of a deliberate close, and a heartbeat
+        // stopped after its socket died could close the peer's replacement socket (WSM-RCN-011/040).
         if (this.stopped) return;
-        // No pong within the deadline. The socket is declared dead **here**, and the supervisor then
-        // takes the same backoff path as a clean close - there must be no second code path for a dead
-        // socket, or the two drift and only one of them fires `onClose` (WSM-RCN-011).
+        // No pong within the deadline: the socket is declared dead here, and the supervisor then
+        // follows the same backoff path as for any other socket loss, so `onClose` fires through a
+        // single code path (WSM-RCN-011).
         //
-        // `die()` first, so `onClose` carries this reason rather than whatever the socket says on the
-        // way out; the local close second, because WSM-RCN-011 asks for both and because without it
-        // the read loop never learns and `serve()` never settles.
-        // `reason` as well as the message: `CloseReason.reason` is the text an application logs
-        // (WSM-RCN-045), and `ConnectionClosed` does not derive one from its message - a close that
-        // arrived with an empty `reason` would tell an operator only that something ended.
+        // `die()` runs first, so `onClose` carries this reason and not the socket's close reason; the
+        // local close follows, as WSM-RCN-011 requires, so the read loop ends and `serve()` settles.
+        // `reason` is set explicitly because `ConnectionClosed` does not derive it from the message,
+        // and `CloseReason.reason` is the text applications log (WSM-RCN-045).
         this.peer.die(
           new ConnectionClosed(`no pong within ${this.timeoutMs}ms`, {
             code: 1006,
@@ -368,7 +354,7 @@ export class Heartbeat {
     }
   }
 
-  /** Python cancels the task; JavaScript cannot, so the loop is told and the pending sleep woken. */
+  /** Set the stop flag and wake the pending sleep (Python cancels the task instead). */
   stop(): void {
     this.stopped = true;
     this.stopGate.open();
@@ -377,13 +363,13 @@ export class Heartbeat {
 
 // --------------------------------------------------------------------------- the driver
 
-/** Dial once and return an open socket, or throw. The transport half of `connect()`. */
+/** Dial once and return an open socket, or throw. The transport-specific part of `connect()`. */
 export type Dial = () => Promise<SocketAdapter>;
 
 /**
- * How many entries `delays` keeps. Test instrumentation, and bounded because of it: the object it
- * hangs off lives as long as the process, and an unbounded record would grow one entry per attempt
- * for as long as a server stays down (WSM-RCN-001 - the counter is the state; this is a log).
+ * How many entries `delays` keeps. `delays` is test instrumentation on an object that can live as
+ * long as the process; without a bound it would grow by one entry per attempt during an outage. It is
+ * a log, not state (WSM-RCN-001).
  */
 const RECORDED_DELAYS = 100;
 
@@ -397,10 +383,10 @@ export interface ConnectionLoopOptions {
 }
 
 /**
- * The reconnect driver. **Dialer only** - constructing one on an acceptor throws.
+ * The reconnect driver. Dialer only; the constructor throws for an acceptor.
  *
- * `establish()` does the hello half of the first connection and raises whatever went wrong;
- * `start()` then supervises, and `stop()` is the deliberate shutdown.
+ * `establish()` performs the hello on the first connection and throws on failure; `start()` then
+ * starts the supervisor, and `stop()` shuts the helper down.
  */
 export class ConnectionLoop {
   private readonly peer: Peer;
@@ -420,10 +406,9 @@ export class ConnectionLoop {
   /**
    * The injected sleep, or `undefined` when none was given.
    *
-   * Kept separately from `sleep` so `startHeartbeat` can hand the `Heartbeat` what the caller
-   * actually passed rather than this loop's resolved default. A test that injects a fake clock
-   * still gets it in both places; a caller that injected nothing lets the heartbeat pick its own
-   * default, which unrefs its timer where this loop's must not.
+   * Kept separately from `sleep` so `startHeartbeat` passes the `Heartbeat` the caller's sleep, not
+   * this loop's default. An injected fake sleep is used by both; without one, the heartbeat uses its
+   * own default, which unrefs its timer (this loop's timer is not unref'd).
    */
   private readonly injectedSleep: Sleep | undefined;
 
@@ -447,8 +432,7 @@ export class ConnectionLoop {
 
   constructor(peer: Peer, dial: Dial, options: ConnectionLoopOptions) {
     if (!peer.isDialer) {
-      // An acceptor has no url to dial and no idea who its remote was. A helper here would be a
-      // server trying to call its clients back, which is not what this protocol does.
+      // An acceptor has no url to dial back to its remote.
       throw new Error('the reconnect helper is dialer-only; an acceptor cannot dial (§7)');
     }
     this.peer = peer;
@@ -468,50 +452,43 @@ export class ConnectionLoop {
   }
 
   /**
-   * The most recent {@link RECORDED_DELAYS} delays actually waited, in order, as a **copy**.
+   * A copy of the most recent {@link RECORDED_DELAYS} backoff delays, in order.
    *
-   * This is the sequence WSM-RCN-004's test reads, and it is instrumentation on an object that lives
-   * as long as the process: against a server that is down for a week with no attempt cap it would
-   * otherwise grow without bound, which is a memory leak in the one component whose job is to
-   * survive a long outage. The copy is so a caller reading it cannot edit the record.
+   * WSM-RCN-004's test reads this sequence. It is bounded so it does not grow without limit during a
+   * long outage with no attempt cap; it is returned as a copy so callers cannot modify the record.
    */
   get delays(): readonly number[] {
     return [...this.delaysTaken];
   }
 
-  /** How many times the connection has been **re**-established. The first one does not count. */
+  /** How many times the connection has been re-established, excluding the first connection. */
   get reconnections(): number {
     return this.reestablished;
   }
 
   /**
-   * The hello half of the FIRST connection. The socket is already on the peer.
+   * Perform the hello on the first connection. The socket is already attached to the peer.
    *
-   * Throws whatever went wrong (WSM-RCN-006/WSM-INV-018): `connect()` does not swallow it and does
-   * not return a peer that is retrying in the background. A typo in the URL, an unreachable host or a
-   * codec mismatch that surfaced nowhere would leave the application holding a peer that looks alive
-   * and retries forever against something that will never answer.
+   * Throws the failure (WSM-RCN-006/WSM-INV-018): `connect()` propagates it and does not return a
+   * peer that retries in the background, so a wrong url, an unreachable host or a codec mismatch is
+   * reported to the caller.
    */
   async establish(): Promise<void> {
-    // The socket is open; the connection is not, until the hello comes back (WSM-RCN-004). `isOpen`
-    // is false for that window and `open()` refuses in it, so the hello cannot be preceded by an
-    // application frame - not even by one sent from an `onStream` handler answering a stream the
-    // acceptor pushed at the hello itself (WSM-RCN-023/043).
+    // The connection is not established until the hello is acknowledged (WSM-RCN-004). Until then
+    // `isOpen` is false and `open()` throws, so no application frame precedes the hello, including
+    // one from an `onStream` handler answering a stream the acceptor opened (WSM-RCN-023/043).
     this.peer.established = !this.hello.configured;
     this.startServing();
     try {
       await this.performHello();
     } catch (error) {
-      // Nothing was established, so there is no loss to report - `connect()` throwing is the report
-      // (WSM-RCN-006), and the caller never got the peer, so there is nobody who could have attached
-      // an `onClose` to hear a second one. The peer is still marked dead deterministically: leaving
-      // `isOpen` to a race between the read loop and the socket close is how a peer whose hello
-      // failed reads as alive.
+      // No connection was established, so `onClose` is not notified; `connect()` throws instead
+      // (WSM-RCN-006), and the caller never receives the peer. The peer is marked dead here so that
+      // `isOpen` does not depend on the order of the read loop and the socket close.
       //
-      // The socket is ours and must not be left open behind the exception either. `peer.close()` is
-      // the wrong tool for it: a connection that never established has no orderly shutdown to
-      // perform, and its ten-second drain window would turn a hello nobody answered into a
-      // `connect()` that takes ten seconds to say so.
+      // The socket is closed before rethrowing. `peer.close()` is not used: there is no established
+      // connection to shut down in order, and its ten-second drain window would delay the error from
+      // `connect()` by ten seconds.
       this.peer.die(
         new ConnectionClosed('the first connection was never established', {
           code: 1006,
@@ -522,24 +499,21 @@ export class ConnectionLoop {
       await this.abandonSocket();
       throw error;
     }
-    // Acknowledged, so the socket is now a connection: `isOpen` is true and `open()` is accepted
-    // from here on (WSM-RCN-004/043).
+    // The hello is acknowledged: `isOpen` is true and `open()` is accepted from here on
+    // (WSM-RCN-004/043).
     this.peer.established = true;
-    // The counter is **not** reset here. It is at its initial value already - `establish()` runs
-    // once, before anything can have failed - and a second reset call site is exactly what
-    // WSM-INV-012 warns about: the two would mask each other, and backoff would flatten into a
-    // fixed-interval hammer. `redial()` is the one place a connection becomes established
-    // (WSM-RCN-004).
+    // The counter is not reset here: it is still 0, because `establish()` runs once, before any
+    // failure. `redial()` is the only reset point (WSM-RCN-004, WSM-INV-012).
     //
-    // Set as soon as the connection is established and never at death: by then `die()` has already
-    // composed the `CloseReason` the application will read (WSM-RCN-040).
+    // `willRetry` is set when the connection is established, not when it dies, because `die()` reads
+    // it to compose the `CloseReason` (WSM-RCN-040).
     this.peer.willRetry = shouldRetry(0, this.options);
   }
 
   /** Start the supervisor. Called only after `establish()` returned. */
   start(): void {
-    // A helper already told to stop must not acquire a supervisor afterwards: it would park on the
-    // live socket and outlive the shutdown that was supposed to have ended it (WSM-RCN-040/044).
+    // A stopped helper does not start a supervisor; it would wait on the live socket and continue
+    // after the shutdown (WSM-RCN-040/044).
     if (this.supervisor !== null || this.stopped) return;
     this.supervisor = this.supervise();
     void this.supervisor.catch((error: unknown) => {
@@ -548,21 +522,18 @@ export class ConnectionLoop {
   }
 
   /**
-   * Deliberate shutdown: no further dial, and the pending sleep is cancelled.
+   * Shut the helper down: no further dial, and the pending backoff sleep is woken.
    *
-   * It does **not** wait for the supervisor. Python cancels the task; JavaScript cannot, and the
-   * supervisor is normally parked inside `peer.serve()` on a socket that is still alive - a socket
-   * this method deliberately does not close, because a deliberate shutdown goes through
-   * `peer.close()`, which calls this *before* closing it. Waiting here would be waiting for the very
-   * close that is waiting for this call. What matters is set synchronously below, so the supervisor
-   * sees it the moment the current socket ends, whenever that is.
+   * It does not wait for the supervisor. The supervisor normally waits in `peer.serve()` on a live
+   * socket, which this method does not close; `peer.close()` calls this method before closing the
+   * socket, so waiting here would deadlock. The stop state is set synchronously, and the supervisor
+   * reads it when the current socket ends.
    */
   async stop(): Promise<void> {
     this.stopped = true;
-    // Not only `stopped`: a socket that dies after this call must report `willRetry` false, and the
-    // peer is what `die()` reads when it composes the `CloseReason` (WSM-RCN-040). `peer.close()`
-    // sets it before calling here, but `stop()` is public and is the deliberate-shutdown seam in its
-    // own right - an application told a retry was coming that nobody intends to make waits forever.
+    // A socket that dies after this call reports `willRetry` false; `die()` reads it from the peer
+    // when it composes the `CloseReason` (WSM-RCN-040). `peer.close()` also sets it, but `stop()`
+    // can be called on its own.
     this.peer.willRetry = false;
     this.stopGate.open();
     this.heartbeat?.stop();
@@ -574,44 +545,39 @@ export class ConnectionLoop {
   /**
    * Serve the current socket, then back off and re-dial until told to stop.
    *
-   * The numbered steps below are ordered, and the order is the rule: nothing dials before the
-   * previous socket's read loop has finished, and nothing gives up before a deliberate `stop()` has
-   * been checked for.
+   * The numbered steps run in order: no dial starts before the previous socket's read loop has
+   * finished, and `stop()` is checked before giving up.
    */
   private async supervise(): Promise<void> {
-    // The first socket's heartbeat starts here rather than in `establish()`: a caller that
-    // establishes and never supervises would otherwise be left with a heartbeat that can declare the
-    // socket dead with nobody to back off and re-dial - a peer that closes itself and stays closed.
+    // The first socket's heartbeat starts here, not in `establish()`, so a heartbeat runs only when
+    // a supervisor exists to redial after it declares the socket dead.
     this.startHeartbeat();
     for (;;) {
-      // 1. Serve the current socket until it dies. `serve()` rejects with whatever killed it; the
-      //    peer is already dead by then and `onClose` has already fired with the `willRetry` set
-      //    when this socket was established.
+      // 1. Serve the current socket until it ends. `serve()` rejects with the cause; by then the
+      //    peer is dead and `onClose` has fired with the `willRetry` set at establishment.
       await this.serving?.catch(() => undefined);
       this.stopHeartbeat();
 
-      // 2. A deliberate `stop()` - which `peer.close()` also calls - never dials again, and neither
-      //    does a helper whose attempt cap is already spent.
+      // 2. No further dial after `stop()` (also called by `peer.close()`) or when the attempt cap is
+      //    exhausted.
       if (this.stopped) return;
       if (!shouldRetry(this.counter.value, this.options)) {
-        // Reached only at `maxAttempts: 0`, where `establish()` has already set `willRetry` false
-        // and the loss itself latched WSM-RCN-044's single report. No test fails if this call is
-        // deleted - the latch suppresses its report - so it is held in place only by
-        // `muxws/reconnect.py` carrying the same branch.
+        // Reached only with `maxAttempts: 0`, where `establish()` set `willRetry` false and the
+        // socket loss already produced WSM-RCN-044's single report; the latch suppresses this one.
+        // The branch matches `muxws/reconnect.py`.
         this.giveUp();
         return;
       }
       if (await this.redial()) continue;
 
-      // 3. `redial` gave up. Either it was stopped mid-backoff - in which case the application asked
-      //    for this and has already been told - or the attempt cap ran out, which has not been
-      //    reported anywhere yet.
+      // 3. `redial` returned false: either `stop()` was called during backoff (no report needed), or
+      //    the attempt cap is exhausted, which `giveUp()` reports.
       if (!this.stopped) this.giveUp();
       return;
     }
   }
 
-  /** One socket loss, backed off until a connection is established or the helper gives up. */
+  /** Back off and redial after a socket loss; true once a connection is established, false on stop or give-up. */
   private async redial(): Promise<boolean> {
     while (!this.stopped && shouldRetry(this.counter.value, this.options)) {
       const delay = backoffDelay(this.counter.value, this.options, this.draw);
@@ -623,27 +589,25 @@ export class ConnectionLoop {
       try {
         socket = await this.dial();
       } catch (error) {
-        // **No `onClose` here.** A dial that never produced a socket is not a socket loss, and
-        // reporting one would tell the application a connection ended that never began.
+        // No `onClose`: a dial that produced no socket is not a socket loss.
         logger.debug(`muxws conn=${this.peer.id} dial attempt ${this.counter.value + 1} failed`, error);
         this.counter.failed();
         continue;
       }
-      // `stop()` - and through it `peer.close()` - cannot cancel a dial already in flight, so a socket
-      // it returns afterwards is closed here instead of adopted (WSM-RCN-040).
+      // `stop()` (and `peer.close()`) cannot cancel a dial in progress, so a socket returned after
+      // `stop()` is closed here, not adopted (WSM-RCN-040).
       if (this.stopped) {
         await socket.close(1000, 'the connection was closed while dialling');
         return false;
       }
 
-      // Before the socket, because this socket may die during the hello and `die()` reads it: what
-      // `CloseReason.willRetry` has to say is whether the helper intends to dial *again*, which for
-      // an attempt that has not established yet is whether one more attempt is left after this one
-      // (WSM-RCN-040/045).
+      // Set before adopting the socket, because the socket may die during the hello and `die()` reads
+      // `willRetry`. For an attempt not yet established, it is whether another attempt remains after
+      // this one (WSM-RCN-040/045).
       this.peer.willRetry = shouldRetry(this.counter.value + 1, this.options);
-      // A socket, not yet a connection: `isOpen` stays false across the hello window, so nothing the
-      // application sends can precede the hello on this socket (WSM-RCN-023/043). `adoptSocket` sets
-      // the socket half true; this is the other half, and only the driver ever writes it.
+      // Not yet established: `isOpen` stays false during the hello, so no application frame precedes
+      // the hello on this socket (WSM-RCN-023/043). `isOpen` requires both a socket (set by
+      // `adoptSocket`) and `established`, which only the driver writes.
       this.peer.established = !this.hello.configured;
       this.peer.adoptSocket(socket);
       this.startServing();
@@ -651,38 +615,35 @@ export class ConnectionLoop {
       try {
         await this.performHello();
       } catch (error) {
-        // A reset hello or a timed-out one is a **failed attempt** (WSM-RCN-026), not a connection.
-        // The socket is closed, the loss is reported through the one death path, the counter is
-        // incremented and `onReconnect` does **not** fire.
+        // A reset or timed-out hello is a failed attempt (WSM-RCN-026). The socket is closed, the
+        // loss is reported through `die()`, the counter is incremented, and `onReconnect` does not
+        // fire.
         //
-        // `die()` before the close, though the rule lists them the other way round: closing first
-        // races the read loop, which would then report the socket's own generic reason instead of
-        // this one, and which of the two an application sees would depend on the scheduler.
+        // `die()` runs before the close (the rule lists them in the other order): closing first
+        // would race the read loop, which could report the socket's generic reason instead of this
+        // one.
         logger.debug(`muxws conn=${this.peer.id} hello failed on attempt ${this.counter.value + 1}`, error);
-        // The cause, not only the shape: `reason` is part of the type an application reads
-        // (WSM-RCN-045), and an operator looking at it wants to know *which* hello failure this was -
-        // a deadline that expired and a hello the acceptor refused are two different outages.
+        // `reason` includes the cause (WSM-RCN-045), distinguishing an expired deadline from a hello
+        // the acceptor reset.
         const detail = `the hello did not complete: ${errorMessage(error)}`;
         this.peer.die(new ConnectionClosed(detail, { code: 1006, reason: detail }));
         await this.abandonSocket();
         this.counter.failed();
         continue;
       }
-      // A hello acknowledged after `stop()` establishes nothing: the attempt is abandoned like a
-      // failed one, so `isOpen` stays false and `onReconnect` does not fire (WSM-RCN-040).
+      // A hello acknowledged after `stop()` does not establish the connection: the socket is
+      // abandoned, `isOpen` stays false and `onReconnect` does not fire (WSM-RCN-040).
       if (this.stopped) {
         await this.abandonSocket();
         return false;
       }
 
-      // Only now. This is the single point where the counter resets (WSM-RCN-004/WSM-INV-012):
-      // resetting it after `dial()` returned is the bug the rule exists to forbid, and it turns
-      // exponential backoff into a fixed-interval hammer against a server that accepts sockets while
-      // its backend is down.
+      // The only point where the counter resets (WSM-RCN-004/WSM-INV-012). Resetting after `dial()`
+      // returns would turn exponential backoff into fixed-interval retries against a server that
+      // accepts sockets while its backend is down.
       this.counter.established();
-      // The same point, and deliberately the same statement block: the hello is acknowledged, so
-      // this socket is a connection - `isOpen` true, `open()` accepted - and the counter resets.
-      // Two rules, one instant (WSM-RCN-004/043).
+      // At the same point the connection becomes established: `isOpen` is true and `open()` is
+      // accepted (WSM-RCN-004/043).
       this.peer.established = true;
       this.reestablished += 1;
       this.peer.willRetry = shouldRetry(0, this.options);
@@ -694,12 +655,11 @@ export class ConnectionLoop {
   }
 
   /**
-   * `maxAttempts` exhausted: fire `onClose` **once** with `willRetry` false, and never dial again
+   * `maxAttempts` is exhausted: fire `onClose` once with `willRetry` false; no further dial is made
    * (WSM-RCN-044).
    *
-   * `notifyClose` rather than `die()`: there is no socket to kill - the last one died attempts ago
-   * and reported itself then. This close says the *helper* has stopped, which is the one thing the
-   * application has not been told and the only thing that distinguishes "still trying" from "gone".
+   * Uses `notifyClose`, not `die()`: there is no socket, and the last socket loss was already
+   * reported. This report tells the application that the helper has stopped retrying.
    */
   private giveUp(): void {
     this.peer.willRetry = false;
@@ -713,7 +673,7 @@ export class ConnectionLoop {
 
   // ------------------------------------------------------------------ the pieces
 
-  /** Keep the newest `RECORDED_DELAYS` and drop the rest - Python's `deque(maxlen=...)`. */
+  /** Keep the newest `RECORDED_DELAYS` entries (Python: `deque(maxlen=...)`). */
   private recordDelay(delay: number): void {
     this.delaysTaken.push(delay);
     if (this.delaysTaken.length > RECORDED_DELAYS) {
@@ -724,19 +684,19 @@ export class ConnectionLoop {
   /** The read loop for the current socket. Never awaited here; the supervisor awaits it. */
   private startServing(): void {
     this.serving = this.peer.serve();
-    // Attached at once, so a socket that dies before the supervisor gets to it is not reported to
-    // the runtime as an unhandled rejection.
+    // Attached immediately, so a socket that dies before the supervisor awaits `serving` does not
+    // cause an unhandled rejection.
     void this.serving.catch(() => undefined);
   }
 
   /**
    * Send the hello and wait for the acceptor's handler to end it (WSM-RCN-022), under
-   * `hello.timeoutMs`. Nothing at all when no hello is configured (WSM-RCN-024).
+   * `hello.timeoutMs`. Does nothing when no hello is configured (WSM-RCN-024).
    *
-   * It is an ordinary `open()` (WSM-RCN-021) and it goes out **before any application frame and
-   * before `onReconnect`** (WSM-RCN-023) - enforced rather than merely arranged: the peer is not
-   * established across this window, so `open()` refuses for everyone else, and this call goes to
-   * `open()`'s own body instead. `fireReconnect` is two statements below the call.
+   * The hello is an ordinary `open()` (WSM-RCN-021) and is sent before any application frame and
+   * before `onReconnect` (WSM-RCN-023). The peer is not established during this window, so `open()`
+   * throws for application code; this method calls `allocateAndEnqueue` directly. `fireReconnect`
+   * runs only after this method returns.
    */
   private async performHello(): Promise<void> {
     if (!this.hello.configured) return;
@@ -746,8 +706,8 @@ export class ConnectionLoop {
       end: true,
     });
     const acknowledged = drain(stream);
-    // The rejection is absorbed here as well as raced below: when the deadline wins, nothing is
-    // consuming `acknowledged` any more, and the stream still fails when the socket is closed.
+    // A no-op handler in addition to the race below: when the deadline wins, `acknowledged` still
+    // rejects when the socket closes, and would otherwise be an unhandled rejection.
     void acknowledged.catch(() => undefined);
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -780,21 +740,19 @@ export class ConnectionLoop {
   }
 
   /**
-   * Give up this socket: close it, **and let its read loop finish** before the next attempt.
+   * Close this socket and wait for its read loop to finish before the next attempt.
    *
-   * The second half is not tidiness. `serve()` tears the peer's write side down in its `finally`, and
-   * a read loop still unwinding when the next attempt has already called `adoptSocket()` tears down
-   * the writer of the *new* socket instead - which sends nothing, so the replayed hello never leaves,
-   * every remaining attempt times out, and the peer reconnects to a server it can no longer talk to.
-   * `_abandon_socket` in `muxws/reconnect.py` waits for the same reason.
+   * `serve()` tears down the peer's write side in its `finally`. If the read loop is still unwinding
+   * after the next attempt has called `adoptSocket()`, it tears down the new socket's writer; the
+   * replayed hello is then never sent and every remaining attempt times out. `_abandon_socket` in
+   * `muxws/reconnect.py` waits for the same reason.
    *
-   * The close code is 1000 and never 1006, for the reason `peer.closeSocketLocally` gives: what the
-   * peer *reports* for this death is 1006; what it *sends* to end the socket is not.
+   * The close code sent is 1000, not 1006 (see `peer.closeSocketLocally`); the peer reports 1006 for
+   * this loss, but 1006 is never sent.
    */
   private async abandonSocket(): Promise<void> {
-    // Through the peer rather than through a socket handle of its own: the peer is what holds the
-    // current socket, and a helper that remembered one separately could close the wrong one after an
-    // `adoptSocket` it did not witness. `muxws/reconnect.py` closes `peer._socket` for the same reason.
+    // Closed through the peer, which holds the current socket; a separately stored handle could be
+    // stale after an `adoptSocket`. `muxws/reconnect.py` closes `peer._socket` likewise.
     await this.peer.closeSocketLocally(1000, 'hello failed');
     await this.serving?.catch(() => undefined);
     this.serving = null;
@@ -804,15 +762,15 @@ export class ConnectionLoop {
 /**
  * Wait for the remote to end the stream, and throw if it resets it instead.
  *
- * Iterating rather than awaiting: `await stream` on a stream that ends without a payload rejects with
- * `ProtocolError`, which is exactly what a hello acknowledgement is - the acceptor's handler
- * returning ends the stream implicitly and sends nothing (WSM-RCN-022/WSM-STM-035). Iteration
- * terminates normally there and throws the `StreamReset` when the hello was refused.
+ * Iterates instead of `await stream`: `await stream` rejects with `ProtocolError` on a stream that
+ * ends without a payload, and a hello acknowledgement is such a stream (the acceptor's handler
+ * returns and the stream ends implicitly, WSM-RCN-022/WSM-STM-035). Iteration ends normally in that
+ * case and throws the `StreamReset` when the hello was refused.
  */
 async function drain(stream: Stream): Promise<void> {
   for await (const payload of stream) {
-    // A hello acknowledgement carries nothing, but an acceptor is free to answer one; muxws does not
-    // interpret what comes back (WSM-RCN-021), so it is read and dropped.
+    // An acceptor may send payloads on the hello stream; muxws does not interpret them
+    // (WSM-RCN-021) and discards them.
     void payload;
   }
 }
@@ -822,8 +780,8 @@ async function drain(stream: Stream): Promise<void> {
 /**
  * `connect()`'s options.
  *
- * `headers` is node-only and lives on `NodeConnectOptions` in `ts/node.ts`: a browser cannot set
- * request headers on a WebSocket handshake, and offering the field there would be a lie.
+ * `headers` is node-only and defined on `NodeConnectOptions` in `ts/node.ts`, because a browser
+ * cannot set request headers on a WebSocket handshake.
  */
 export interface ConnectOptions {
   /** Replayed verbatim on every connection this peer ever makes (WSM-RCN-020). */
@@ -854,14 +812,12 @@ export interface ConnectOptions {
 /**
  * @internal The transport-agnostic half of `connect()`.
  *
- * Both entry points call this: `ts/index.ts` over `BrowserSocket`, `ts/node.ts` over `WsSocket`. The
- * dial closure is the only difference between them, which is the whole point of `SocketAdapter`
- * (WSM-API-021) - and the reason the reconnect driver can dial again without knowing what a
- * WebSocket is.
+ * Both entry points call this: `ts/index.ts` with `BrowserSocket`, `ts/node.ts` with `WsSocket`. Only
+ * the dial closure differs (WSM-API-021), so the reconnect driver redials without transport-specific
+ * code.
  *
- * The first attempt is **awaited by the caller and never retried here** (WSM-RCN-006): `dial()` has
- * already produced `socket` before this is entered, and a hello that fails on it throws rather than
- * starting a background retry.
+ * The first attempt is awaited by the caller and not retried here (WSM-RCN-006): `socket` comes from
+ * the first `dial()`, and a hello that fails on it throws instead of starting a background retry.
  */
 export async function dialAndEstablish(
   socket: SocketAdapter,
@@ -877,8 +833,8 @@ export async function dialAndEstablish(
     maxPayloadBytes: options.maxPayloadBytes,
     maxConcurrentStreams: options.maxConcurrentStreams,
   });
-  // Registered **before** the loop runs, so the acceptor cannot push a stream at the first hello and
-  // find nobody listening. `onClose` and `onReconnect` go on further down, once the connection stands.
+  // Registered before the loop runs, so a stream the acceptor opens during the first hello has a
+  // handler. `onClose` and `onReconnect` are registered after the first connection is established.
   if (options.onStream !== undefined) peer.onStream(options.onStream);
   registerInterceptors(peer, options);
 
@@ -893,22 +849,20 @@ export async function dialAndEstablish(
     pingTimeoutMs: options.pingTimeoutMs,
   });
 
-  // WSM-RCN-006: whatever went wrong on the first connection reaches the caller unaltered, and no
-  // peer that retries in the background is handed back. `establish()` has already closed the socket
-  // it gave up on, so nothing here has to unwind it.
+  // WSM-RCN-006: a first-connection failure reaches the caller unchanged, and no peer is returned.
+  // `establish()` closes the socket before throwing.
   await loop.establish();
 
-  // On **after** the first connection stands, which is what makes a failed `connect()` report itself
-  // exactly once, through the exception. Nothing was established, so nothing was lost, and an
-  // `onClose` fired here would hand a `CloseReason` to an application for a peer it never received -
-  // `muxws/reconnect_test.py::test_first_attempt_failure_raises_with_unlimited_retries_configured`
-  // asserts the same silence on the Python side. Nothing can slip through the gap: the two lines
-  // below run before the supervisor exists, with no await between them and `start()`.
+  // Registered after the first connection is established, so a failed `connect()` is reported only
+  // through the exception, never through `onClose`
+  // (`muxws/reconnect_test.py::test_first_attempt_failure_raises_with_unlimited_retries_configured`
+  // asserts the same in Python). The two registrations and `start()` run with no await between
+  // them, before the supervisor exists, so no event is missed.
   if (options.onClose !== undefined) peer.onClose(options.onClose);
   if (options.onReconnect !== undefined) peer.onReconnect(options.onReconnect);
 
   loop.start();
-  // Held so nothing can collect the supervisor, and so `peer.close()` can tell it to stop.
+  // Stored on the peer so `peer.close()` can stop the loop.
   peer.connectionLoop = loop;
   return peer;
 }

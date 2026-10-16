@@ -44,7 +44,7 @@ async def test_register_indexes_every_key_present_at_call_time(registry: PeerReg
 
 
 async def test_register_passes_over_unhashable_tag_value(registry: PeerRegistry, make_pair):
-    """WSM-REG-011 **(spec)**: the peer is simply not findable by that key - raising would be worse."""
+    """WSM-REG-011 **(spec)**: the peer is not findable by that key, and `register()` does not raise."""
     pair = make_pair()
     pair.dialer.tags.update({"session": "abc", "profile": {"deep": True}, "seen": [1, 2]})
     registry.register(pair.dialer)  # must not raise
@@ -54,7 +54,7 @@ async def test_register_passes_over_unhashable_tag_value(registry: PeerRegistry,
 
 
 async def test_reregister_replaces_entries_wholesale(registry: PeerRegistry, make_pair):
-    """WSM-REG-012 **(spec)**: found under the new values, no longer under the old ones."""
+    """WSM-REG-012 **(spec)**: found under the new values and not under the old ones."""
     pair = make_pair()
     pair.dialer.tags["session"] = "old"
     registry.register(pair.dialer)
@@ -67,7 +67,7 @@ async def test_reregister_replaces_entries_wholesale(registry: PeerRegistry, mak
 
 
 async def test_tag_written_after_register_is_not_found_until_reregister(registry: PeerRegistry, make_pair):
-    """WSM-REG-013 **(spec)**: the registry does not watch the dict, and must not."""
+    """WSM-REG-013 **(spec)**: the registry does not observe writes to the dict."""
     pair = make_pair()
     pair.dialer.tags["session"] = "abc"
     registry.register(pair.dialer)
@@ -82,7 +82,7 @@ async def test_tag_written_after_register_is_not_found_until_reregister(registry
 
 
 async def test_overwriting_a_never_indexed_key_is_free(registry: PeerRegistry, make_pair):
-    """WSM-REG-014 **(spec)**: this is what makes a plain dict provably the right choice.
+    """WSM-REG-014 **(spec)**: writing a key that is not indexed does not touch the registry.
 
     Register under `session`, then overwrite a different, never-looked-up, map-valued key a hundred
     times without re-registering. Every read sees the newest value, the lookup is unchanged
@@ -98,17 +98,16 @@ async def test_overwriting_a_never_indexed_key_is_free(registry: PeerRegistry, m
         assert pair.dialer.tags["watch"] == {"generation": generation}
         assert registry.peers_for(session="abc") == [pair.dialer]
 
-    assert registry.index_size == size_before, "a rewrite must cost the registry nothing"
+    assert registry.index_size == size_before, "writing an unindexed key must not change the index"
 
 
 async def test_reconnect_starts_with_empty_tags(registry: PeerRegistry, dialable_server: DialableServer):
     """WSM-RCN-033/WSM-INV-014 **(spec)**: a reconnect is a new acceptor-side peer, tagless.
 
-    Driven through the real reconnect driver rather than by building two peers by hand, because the
-    claim is about what a *reconnect* leaves behind: the acceptor never learns that the socket it
-    just accepted belongs to the client that was here a moment ago, so there is nowhere for the old
-    peer's tags to come from unless an implementation deliberately carries them - and a tab that
-    silenced something and then died would keep a successor silent that never asked to be.
+    Uses the reconnect driver rather than two hand-built peers, because the assertion concerns the
+    state after a reconnect. The acceptor cannot tell that a newly accepted socket belongs to a client
+    that was connected before, so the old peer's tags reach the new peer only if an implementation
+    copies them. Copied tags would apply settings such as `muted` to a connection that never set them.
     """
 
     async def index_the_tab(payload: Any, stream: Stream) -> None:
@@ -123,7 +122,7 @@ async def test_reconnect_starts_with_empty_tags(registry: PeerRegistry, dialable
     await loop.establish()
     loop.start()
     try:
-        # Something the *application* wrote on this connection, which no hello ever replays.
+        # A tag the application writes on this connection; the hello does not replay it.
         first = dialable_server.acceptors[0]
         first.tags["muted"] = True
         registry.register(first)
@@ -134,10 +133,10 @@ async def test_reconnect_starts_with_empty_tags(registry: PeerRegistry, dialable
         successor = dialable_server.acceptors[-1]
 
         assert successor is not first, "the acceptor side of a reconnect is a new peer object"
-        assert successor.tags == {"tab": "abc"}, "carrying only what this connection itself set"
-        assert "muted" not in successor.tags, "a tab that silenced something must not silence its successor"
+        assert successor.tags == {"tab": "abc"}, "only the tags this connection's hello set"
+        assert "muted" not in successor.tags, "tags set on the previous connection must not carry over"
 
-        # And the dead connection's index entries went with it, so nothing finds it either.
+        # The closed connection's index entries are removed, so no lookup finds it.
         await asyncio.wait_for(_until(lambda: registry.peers_for(tab="abc") == [successor]), 5.0)
         assert registry.peers_for(muted=True) == []
     finally:
@@ -174,7 +173,7 @@ async def test_peers_for_matches_all_given_keys(registry: PeerRegistry, make_pai
 
 
 async def test_close_removes_the_peer_from_the_index_automatically(registry: PeerRegistry, make_pair):
-    """WSM-REG-016: via the peer's own close hook. A consumer never prunes."""
+    """WSM-REG-016: via the peer's own close hook. The consumer does not remove entries."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.dialer.tags["session"] = "abc"
@@ -189,13 +188,12 @@ async def test_close_removes_the_peer_from_the_index_automatically(registry: Pee
         await pair.stop()
 
 
-async def test_reregistering_costs_the_peer_no_bookkeeping_either(registry: PeerRegistry, make_pair):
-    """WSM-REG-001/012/017: a rewrite pays nothing - on the peer as well as in the index.
+async def test_reregistering_installs_one_close_hook_per_peer(registry: PeerRegistry, make_pair):
+    """WSM-REG-001/012/017: re-registering adds no state to the peer, and replaces the index entries.
 
     WSM-REG-017 tells a consumer that both looks up and mutates one key to call `register(peer)`
-    after every write, so this is the documented pattern rather than a pathological one. A hook
-    appended per call would leave a long-lived peer carrying one close handler per write, all of them
-    doing the same already-idempotent deregistration, and nothing anywhere would ever look wrong.
+    after every write. If each call appended a close hook, a long-lived peer would hold one
+    deregistration handler per write.
     """
     peer = make_pair().dialer
     for generation in range(50):
@@ -233,7 +231,7 @@ async def test_an_unhashable_lookup_finds_nothing_rather_than_raising(registry: 
 
 
 def test_the_registry_ships_no_cross_process_backplane():
-    """WSM-REG-018: per-process, and nothing in this module reaches further."""
+    """WSM-REG-018: the registry is per-process; the module contains no cross-process mechanism."""
     import inspect
 
     from muxws import registry as module
@@ -249,6 +247,6 @@ async def _hold(payload: Any, stream: Any) -> None:
 
 
 async def _until(condition: Any) -> None:
-    """Poll until `condition` holds. A reconnect finishes when it finishes, not on a fixed delay."""
+    """Poll until `condition` holds. A reconnect has no fixed duration, so tests poll instead of sleeping."""
     while not condition():
         await asyncio.sleep(0.005)

@@ -1,30 +1,28 @@
 /**
- * Observability: the log seam, the one-line `muxws.frames` logger, and `CloseReason` (§12).
+ * Observability: `logger`, the one-line `muxws.frames` frame log, and `CloseReason` (§12).
  *
- * A mirror of `muxws/observability.py`. Python gets its logger from the standard library and merely
- * names it; TypeScript has no logging module it may depend on - the browser entry point has zero
- * runtime dependencies (WSM-PKG-003) - so the level-filtered `console` shim lives here.
+ * Mirrors `muxws/observability.py`. Python uses a standard-library logger. The browser entry point has
+ * no runtime dependencies (WSM-PKG-003), so the TypeScript implementation defines a level-filtered
+ * `console` wrapper here.
  */
 
 import type { Frame } from './frames';
 
 // --------------------------------------------------------------------------- the logger shim
 
-/** What `logging.getLogger("muxws.frames").setLevel(...)` selects from, spelled as strings. */
+/** Log levels, equivalent to the levels `logging.getLogger("muxws.frames").setLevel(...)` accepts. */
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
 
 /**
- * The whole of `muxws.frames` in TypeScript: four methods over `console`, plus a level.
+ * The `muxws.frames` logger in TypeScript: four methods over `console`, plus a level.
  *
- * `level` starts at `'warn'` because that is what an unconfigured Python logger does - `logger.info`
- * and `logger.debug` on the Python side print nothing until an application configures logging, and a
- * port that spammed every frame to the console by default would not be mirroring it.
+ * `level` defaults to `'warn'`, matching an unconfigured Python logger, which drops `info` and `debug`
+ * records. Frame lines are therefore not printed by default.
  *
- * @internal Exported so a test can raise the level the way `caplog.at_level` does in Python, and so
- * an application can turn frame logging on. Re-exported from `ts/peer.ts`; it is a seam, not public
- * API.
+ * Exported from the package root; setting `logger.level` is how an application enables frame
+ * logging, and how a test raises the level (as `caplog.at_level` does in Python).
  */
 export const logger = {
   level: 'warn' as LogLevel,
@@ -53,8 +51,8 @@ export interface CloseReason {
   readonly reason: string;
   readonly wasClean: boolean;
   /**
-   * False only when `maxAttempts` is exhausted or `close()` was called deliberately. A peer driven
-   * without the reconnect helper never dials again, so it is always false there.
+   * False only when `maxAttempts` is exhausted or `close()` was called. A peer without the reconnect
+   * helper never redials, so for such a peer it is always false.
    */
   readonly willRetry: boolean;
 }
@@ -71,14 +69,12 @@ function isPresent(value: unknown): boolean {
 /**
  * One line per frame at DEBUG, under the `muxws.frames` logger (WSM-OBS-001).
  *
- * `conn=` is `peer.id` - a per-process prefix plus a per-connection counter (WSM-API-009) - so two
- * lines carrying the same `conn=` are always the same connection, and a reconnect shows as a new one
- * rather than as a continuation.
+ * `conn=` is `peer.id`, a per-process prefix plus a per-connection counter (WSM-API-009). Lines with
+ * the same `conn=` belong to the same connection; a reconnect has a new `conn=` value.
  *
- * The payload's **contents** never appear, at any level. Application data routinely holds secrets,
- * and a frame line is emitted for every frame (WSM-OBS-002). Everything below is either a field of
- * the envelope or a count of one; `payload`, `fragment` and `trailers` are read for their shape and
- * never for their value.
+ * Payload contents are never logged, at any level, because application data may contain secrets
+ * (WSM-OBS-002). The line contains only envelope fields and counts; `payload`, `fragment` and
+ * `trailers` are checked for presence or size, never printed.
  */
 export function logFrame(connectionId: string, direction: FrameDirection, frame: Frame, byteLength: number): void {
   if (!logger.isEnabledFor('debug')) return;

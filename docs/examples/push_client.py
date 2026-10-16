@@ -1,11 +1,11 @@
-"""Server push, dialer half: a dialer with an `on_stream` handler of its own.
+"""Server push, dialer side: a dialer with its own `on_stream` handler.
 
 Start `push_server.py` first, then run `python push_client.py`. The URL is `ws://127.0.0.1:8001/ws`
 unless `MUXWS_URL` says otherwise.
 
-The handler is passed to `connect()` rather than registered after it returns, because the acceptor
-may push a stream the instant it sees this dialer: a handler registered one `await` later would meet
-that push with `reset(REFUSED)`.
+The handler is passed to `connect()` instead of being registered after it returns: the acceptor may
+push a stream as soon as the connection is up, and a stream that arrives before a handler is
+registered is answered with `reset(REFUSED)`.
 """
 
 import asyncio
@@ -27,10 +27,10 @@ async def main() -> None:
 
     peer = await connect(URL, on_stream=on_push)
     try:
-        # One-shot: `notify()` sends a payload and ends the stream, and hands back no handle to
-        # await, because there is nothing coming back on it.
+        # One-shot: `notify()` sends a payload, ends the stream, and returns no handle; no reply is
+        # expected.
         await peer.notify({"subscribe": "ticks"})
-        # 10.0 seconds, and only so a stuck example fails rather than hangs.
+        # 10.0 seconds, so that a stuck example fails instead of hanging.
         await asyncio.wait_for(finished.wait(), timeout=10.0)
     finally:
         await peer.close()

@@ -4,32 +4,28 @@ outline: deep
 
 # Codec
 
-The codec is the one seam between muxws and the bytes on the wire. A codec turns a logical `Frame`
-into a WebSocket message and back, and it also encodes and decodes a *payload* on its own, because
-fragmentation is defined over the encoded form of a payload rather than over the frame that carries
-it.
+A codec converts a logical `Frame` to a WebSocket message and back. It also encodes and decodes a
+*payload* on its own, because fragmentation operates on the encoded form of a payload, not on the
+frame that carries it.
 
-Two rules govern the whole module:
-
-- **Both ends must agree.** The WebSocket subprotocol is `muxws.v1.<codec>` — `muxws.v1.json`,
-  `muxws.v1.msgpack` — so the codec name is asserted at the handshake and a mismatch is refused with
-  HTTP 400 rather than discovered on the tenth frame.
-- **Registration is explicit and eager.** There is no dynamic import, no entry-point scan and no
-  probe of whether a module happens to be installed. An unregistered name fails loudly at startup
-  with `CodecNotRegistered`; it never falls back to JSON. A deployment that believes it is running
-  msgpack and silently is not would otherwise never find out.
+- **Both ends must use the same codec.** The WebSocket subprotocol is `muxws.v1.<codec.name>`
+  (`muxws.v1.json`, `muxws.v1.msgpack`). The codec is checked during the handshake, and a mismatch is
+  refused with HTTP 400.
+- **Registration is explicit and eager.** muxws performs no dynamic import, no entry-point scan and
+  no check for installed modules. Looking up an unregistered name raises `CodecNotRegistered`; there
+  is no fallback to JSON.
 
 `json` is registered for you, by the package itself. Everything else you register yourself.
 
 ## `Codec`
 
-The port. Python spells it as a `runtime_checkable` `Protocol`, TypeScript as an `interface`; either
-way any object with these six members is a codec, and there is no base class to inherit.
+The codec interface: a `runtime_checkable` `Protocol` in Python, an `interface` in TypeScript. Any
+object with these six members is a codec; there is no base class.
 
 `binary` is **declared, not inferred**. The peer reads it to choose between the socket's text and
-binary send methods and to know which inbound message type to expect. A peer never sniffs a message
-to decide which branch to take, which is why a text message arriving on a msgpack connection is a
-protocol error rather than something to re-decode.
+binary send methods and to determine which inbound message type to expect. The peer does not inspect
+a message's type to choose a decoder, so a text message on a msgpack connection is a protocol
+error.
 
 ### Signature
 
@@ -65,11 +61,11 @@ The members an implementation must provide:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `name` | `str` / `string` | none — required | The codec's wire name. It becomes the `muxws.v1.<name>` subprotocol, and it is the key it is registered under. |
+| `name` | `str` / `string` | none — required | The codec's wire name. `connect()` and `accept()` offer and verify the subprotocol `muxws.v1.<name>`. Normally equal to the key it is registered under. |
 | `binary` | `bool` / `boolean` | none — required | Declares whether encoded output travels as a binary WebSocket message. Read by the peer to pick `send_bytes` / `sendBytes` over `send_text` / `sendText`. |
 | `encode(frame)` | `(Frame) -> str \| bytes` / `(Frame) => string \| ArrayBuffer` | none — required | Renders one frame as one WebSocket message. Fields still at their default are omitted; keys are ordered `type`, `stream`, then the rest alphabetically. |
 | `decode(message)` | `(str \| bytes) -> Frame` / `(string \| ArrayBuffer) => Frame` | none — required | Parses one WebSocket message back into a `Frame`. Unknown envelope keys are dropped; an unrecognised `type` survives as an ordinary frame for the peer to ignore. |
-| `encode_payload(payload)` / `encodePayload(payload)` | `(Any) -> str \| bytes` / `(unknown) => string \| ArrayBuffer` | none — required | Encodes a bare payload. The sender slices *this* output into fragments, so both language ports must produce the same bytes for the same value or they would cut in different places. |
+| `encode_payload(payload)` / `encodePayload(payload)` | `(Any) -> str \| bytes` / `(unknown) => string \| ArrayBuffer` | none — required | Encodes a bare payload. Its output must equal the bytes that `encode` writes in a frame's payload position. The sender slices this output into fragments. |
 | `decode_payload(data)` / `decodePayload(data)` | `(str \| bytes) -> Any` / `(string \| ArrayBuffer) => unknown` | none — required | Decodes a reassembled payload — the concatenation of every fragment — back into a value. |
 
 ### Return
@@ -158,19 +154,20 @@ console.log(shouty.name, shouty.binary);
 
 ## `JsonCodec`
 
-The interoperability baseline, and the only codec the library registers for you — under the name
-`json`, from the package's own module rather than from `codec.py` / `codec.ts`, because a
-side-effecting import can never be tree-shaken out of a bundle.
+The JSON codec, required for interoperability, and the only codec the library registers. It is
+registered under the name `json` by the package entry point (`muxws/__init__.py` / `ts/index.ts`),
+not by `codec.py` / `codec.ts`, so that importing the codec module has no side effect and can be
+tree-shaken.
 
-`bytes` are **not** a payload type under JSON. `JsonCodec` refuses them with a `TypeError` rather
-than base64-encoding them on your behalf: silently changing the type of a value on its way through a
-transport is worse than refusing it. Encode them in the application, or use a binary codec.
+`bytes` are **not** a payload type under JSON. `JsonCodec` raises `TypeError` for them and does not
+base64-encode them. Encode them in the application, or use a binary codec.
 
 The two ports emit the same bytes for strings, containers, booleans, null and integers up to 2⁵³.
-They do **not** agree on floats or on larger integers — Python writes `1.0`, `-0.0`, `1e+16`,
-`1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`. Nothing on the wire depends on
-that agreement (the sender chooses fragment boundaries and the receiver only concatenates), but it is
-why the shared conformance corpus contains no floats.
+They differ on floats and on larger integers: Python writes `1.0`, `-0.0`, `1e+16`, `1e-07` where
+JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`, and JavaScript rounds an integer beyond 2⁵³
+to the nearest double. Interoperability does not depend on byte equality, because the sender chooses
+fragment boundaries and the receiver only concatenates. The shared conformance corpus contains no
+floats for this reason.
 
 ### Signature
 
@@ -206,7 +203,7 @@ The constructor takes none in either language.
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| *(none)* | — | — | `JsonCodec()` / `new JsonCodec()` takes no arguments. There is nothing to configure: the encoder's settings are fixed so that both ports emit identical bytes. |
+| *(none)* | — | — | `JsonCodec()` / `new JsonCodec()` takes no arguments. The encoder settings are fixed: no whitespace between tokens, no ASCII escaping of non-ASCII characters. |
 
 ### Return
 
@@ -215,10 +212,11 @@ A codec instance whose `name` is `"json"` and whose `binary` is `False` / `false
 ### Raises
 
 The constructor raises nothing. `encode` and `encode_payload` / `encodePayload` raise `TypeError`
-for a value JSON cannot represent — bytes above all, and in TypeScript also `Map`, `Set`, `bigint`,
-functions, symbols, non-finite numbers and circular structures. `decode` and `decode_payload` /
-`decodePayload` raise `ProtocolError` for text that is not JSON, and `decode` also raises it when the
-message decodes to something that is not an object.
+for a value JSON cannot represent: bytes; in Python any other type the standard `json` module does
+not encode; in TypeScript also `Map`, `Set`, `bigint`, functions, symbols, non-finite numbers and
+circular structures. In Python a non-finite float (`nan`, `inf`) or a circular structure raises
+`ValueError`. `decode` and `decode_payload` / `decodePayload` raise `ProtocolError` for text that is
+not JSON, and `decode` also raises it when the message decodes to something that is not an object.
 
 ### Example
 
@@ -255,9 +253,8 @@ try {
 
 ## `MsgpackCodec`
 
-The second codec, and the proof that the seam is a seam. It is an **optional extra** in both
-languages and it lives behind its own import path, so a deployment that never asks for msgpack never
-pays for it:
+The binary codec. It is an **optional extra** in both languages and has its own import path, so
+neither muxws nor a bundle imports the msgpack library unless the application imports this codec:
 
 ```bash
 pip install "muxws[msgpack]"
@@ -277,21 +274,19 @@ Importing `MsgpackCodec` registers nothing. **The application calls
 `register_codec("msgpack", MsgpackCodec())` / `registerCodec('msgpack', new MsgpackCodec())` during
 bootstrap, before it connects.**
 
-This is deliberate in both languages and for two different reasons. In TypeScript, a module with an
-import-time side effect can never be tree-shaken out no matter what `"sideEffects": false` claims, so
-every bundle that touched the subpath would carry `@msgpack/msgpack` whether it used it or not. In
-Python, registration at import time makes the set of available codecs depend on which modules
-happened to be imported and in what order — so a codec that is available in one process and missing
-in another, with the same requirements file, becomes possible.
+In TypeScript, a module with an import-time side effect cannot be tree-shaken, regardless of
+`"sideEffects": false`, so registration at import would put `@msgpack/msgpack` in every bundle that
+references the subpath. In Python, registration at import time would make the set of available codecs
+depend on which modules were imported, and in which order.
 :::
 
-Note also the module name: `msgpack_.py`, with a trailing underscore, because a `msgpack.py` inside
-the package would shadow the third-party module it imports. The public import path is
+The module file is `msgpack_.py`, with a trailing underscore, because a `msgpack.py` inside the
+package would shadow the third-party module it imports. The public import path is
 `muxws.codecs.msgpack_`.
 
-Nothing about msgpack output may be pinned as bytes in a fixture: this library and
-`@msgpack/msgpack` make different but equally valid choices about integer width and map format.
-Round-trip is the only assertion either port makes.
+msgpack output is not pinned as bytes in any fixture: Python's `msgpack` and `@msgpack/msgpack`
+choose integer widths and map formats differently, and both encodings are valid. The tests of both
+ports assert round-trip only.
 
 ### Signature
 
@@ -325,7 +320,7 @@ export class MsgpackCodec implements Codec {
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| *(none)* | — | — | `MsgpackCodec()` / `new MsgpackCodec()` takes no arguments. The pack and unpack options are fixed so that the two ports agree about which payloads are decodable at all. |
+| *(none)* | — | — | `MsgpackCodec()` / `new MsgpackCodec()` takes no arguments. The pack and unpack options are fixed, so that both ports accept the same set of payloads (including maps with integer keys). |
 
 ### Return
 
@@ -334,8 +329,8 @@ A codec instance whose `name` is `"msgpack"` and whose `binary` is `True` / `tru
 ### Raises
 
 The constructor raises nothing. `decode` and `decode_payload` / `decodePayload` raise `ProtocolError`
-for input msgpack cannot parse, **and** for a `str` — a text message on a binary connection means the
-remote sent one, and the transport has already lost the bytes. `decode` also raises `ProtocolError`
+for input msgpack cannot parse, **and** for a `str` / `string`: a text WebSocket message cannot carry
+msgpack, and a text message on a binary connection is a protocol violation by the remote. `decode` also raises `ProtocolError`
 when the message decodes to something that is not a map. `encode` and `encode_payload` /
 `encodePayload` propagate whatever the underlying msgpack library raises for a value it cannot
 represent.
@@ -377,8 +372,8 @@ console.log(new Uint8Array((codec.decode(message).payload as { blob: ArrayBuffer
 ## `register_codec` / `registerCodec`
 
 Puts a codec in the process-wide registry under a name. Call it during bootstrap, before anything
-connects. Registering the same name twice replaces the previous entry; there is no error and no
-warning, because a test that swaps a codec in and out is a legitimate thing to do.
+connects. Registering the same name again replaces the previous entry without an error or a
+warning.
 
 ### Signature
 
@@ -394,7 +389,7 @@ export function registerCodec(name: string, codec: Codec): void;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `name` | `str` / `string` | required | The key to register under. This is the value `MUXWS_CODEC` / `VITE_MUXWS_CODEC` is compared against, and it becomes the `muxws.v1.<name>` subprotocol. It need not equal `codec.name`, but making them differ is asking for a confusing handshake. |
+| `name` | `str` / `string` | required | The key to register under: the value `settings.codec` (`MUXWS_CODEC` / `VITE_MUXWS_CODEC`) is looked up by. The subprotocol is built from `codec.name`, not from this key; register a codec under its own `name` so that the configured value and the negotiated subprotocol match. |
 | `codec` | `Codec` | required | The codec instance. An instance, not a class: the registry stores exactly the object you pass. |
 
 ### Return
@@ -425,8 +420,9 @@ console.log('after: ', registeredCodecs());
 
 ## `get_codec` / `getCodec`
 
-Looks a codec up by name. This is where a misconfiguration surfaces — loudly, before any socket is
-touched, naming the environment variable, the value found and the set that *is* registered.
+Looks a codec up by name. `connect()` and `accept()` call it before opening a socket; on an unknown
+name the error message names the environment variable, the configured value and the registered
+names.
 
 ### Signature
 
@@ -478,7 +474,7 @@ try {
 
 ## `registered_codecs` / `registeredCodecs`
 
-Every registered name, sorted. Useful in a startup log line and in the message of a mismatch.
+Every registered name, sorted.
 
 ### Signature
 
@@ -529,11 +525,10 @@ console.log('registry unchanged:', registeredCodecs());
 
 ## `clearCodecs`
 
-TypeScript only. Forgets every registration. It exists as a **test seam** and the library never calls
-it; a running application that calls it will make the next `connect()` fail with
-`CodecNotRegistered`, including for `json`.
+TypeScript only. Forgets every registration, including `json`. It is intended for tests; the library
+never calls it. After it, `connect()` raises `CodecNotRegistered` until a codec is registered again.
 
-Python has no equivalent, because a Python test can re-register over a name and leave the rest alone.
+Python has no equivalent.
 
 ### Signature
 
@@ -608,23 +603,23 @@ print(resolve_codec(explicit) is explicit)
 
 ## `Settings` and `settings`
 
-The deployment's codec choice. It is read from the environment rather than passed as a call argument
-because both ends of a connection must agree on it, and an argument is decided per call site while an
-environment variable is decided per deployment.
+The deployment's codec choice. It is read from the environment rather than passed as a call
+argument, because both ends of a connection must use the same codec and the choice is made per
+deployment, not per call site.
 
 - Python reads `MUXWS_CODEC`, defaulting to `json`.
 - TypeScript reads `import.meta.env.VITE_MUXWS_CODEC`, defaulting to `json`. The `VITE_` prefix is
   what makes Vite replace the expression statically at build time. Where there is no such environment
   — Node, vitest, a CommonJS consumer — every step is guarded and the default applies.
 
-`settings` is the one singleton, and it is **writable**: an application may set `settings.codec`
-during bootstrap. The environment is read once, when the module is first imported; the *attribute* is
-read afresh by every `connect()` and `accept()`, which is what makes an assignment during bootstrap
-apply to every later connection. Changing the environment variable after import changes nothing until
+`settings` is a singleton and is **writable**: an application may set `settings.codec` during
+bootstrap. The environment is read once, when the module is first imported. `connect()` and
+`accept()` read the attribute on every call, so an assignment during bootstrap applies to every later
+connection. A change to the environment variable after import has no effect until
 `settings.reload()`.
 
-Any string is taken as configured, including the empty one. A name that resolves to no codec fails
-loudly rather than falling back.
+Any string is accepted as the configured name, including the empty string. A name with no registered
+codec raises `CodecNotRegistered` at `connect()` / `accept()`; there is no fallback.
 
 ### Signature
 

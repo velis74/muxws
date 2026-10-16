@@ -1,20 +1,20 @@
 # Interop
 
-muxws is a protocol before it is two libraries. This page is for anyone who has to talk to a muxws
-peer without using one of the reference implementations — a third port, a proxy, a test harness, or a
-service in a language neither reference covers.
+muxws is defined by its wire protocol; the Python and TypeScript libraries are two implementations of
+it. This page is for anyone who communicates with a muxws peer without using one of these reference
+implementations: a further implementation, a proxy, a test harness, or a service in another language.
 
-## The JSON wire form is frozen at 1.0
+## The JSON wire form is frozen
 
-What "frozen" means here: the twelve envelope fields, the six frame types, the defaults, the reset
-codes and the fragmentation rules will not change under the name `muxws.v1.json`. A peer written
-against the 1.0 wire will keep interoperating with every 1.x release of both reference ports.
+The twelve envelope fields, the six frame types, the defaults, the reset codes and the fragmentation
+rules do not change under the subprotocol name `muxws.v1.json`. A peer implemented against this wire
+form interoperates with every release of both reference implementations that offers `muxws.v1.json`.
 
-The frame set is six, and no others:
+There are six frame types:
 
 `open` · `data` · `reset` · `ping` · `pong` · `goaway`
 
-The envelope is twelve fields, and no others:
+The envelope has twelve fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -31,34 +31,35 @@ The envelope is twelve fields, and no others:
 | `nonce` | string | absent |
 | `last_stream` | integer | absent |
 
-Field names are spelled out rather than abbreviated, and stay `snake_case` in **every** language —
-including the TypeScript port, whose own API is camelCase. The wire is one thing; the bindings are
-another.
+Field names are not abbreviated and are `snake_case` in **every** language, including the TypeScript
+implementation, whose own API is camelCase.
 
-Four properties of the encoding that a third implementation has to match:
+Four properties of the encoding apply to every implementation:
 
-**A field at its default is omitted.** Both reference ports emit only the fields carrying a
-non-default value, which is why the pinned wire in the corpus is short. A receiver applies the
-defaults either way, so emitting them explicitly is legal — but you will not match the pinned bytes.
+**A field with its default value is omitted.** Both reference implementations emit only fields with
+non-default values, and the pinned wire strings in the corpus are written that way. A receiver applies
+the defaults either way, so emitting default values explicitly is legal, but the encoded frame then no
+longer parses to the same object as the pinned wire string.
 
-**Key order is `type`, then `stream`, then the rest alphabetically.** This is what makes a
-byte-for-byte fixture possible at all.
+**The canonical key order is `type`, then `stream`, then the remaining keys alphabetically.** The
+reference implementations emit this order so that logged frames can be compared line by line. The
+conformance corpus compares parsed objects, never bytes, so a receiver must accept any key order.
 
 **An absent `payload` key and an explicit `"payload": null` are different frames**, and the corpus
-carries both. A decoder has to keep them apart — the reference ports use an `ABSENT` sentinel — even
-though whether an application cares about the difference is its own business.
+contains both. A decoder must distinguish them (the reference implementations use an `ABSENT`
+sentinel), whether or not the application uses the difference.
 
 **`payload` and `fragment` must never both appear on one frame.** A frame carrying both is a
 connection-level protocol error.
 
-There are two things that are conspicuously *not* on the wire, and their absence is load-bearing:
+Two kinds of information are never sent:
 
-- **No limit, in any form.** No `settings` frame, no capability list, no `max_payload_bytes`, no
-  `max_concurrent_streams`, no `max_frame_bytes`. The frame cap is a protocol constant; the other two
-  are each one receiver's private defence, and a sender learns of them only from the reset it
-  provokes. See [Sizes and fragmentation](/guide/sizes-and-fragmentation).
-- **No vocabulary inside `payload`.** No `kind`, no reserved key, no discriminator of any sort. The
-  payload is the application's, entirely.
+- **Limits.** There is no `settings` frame, no capability list, and no `max_payload_bytes`,
+  `max_concurrent_streams` or `max_frame_bytes` field. The frame cap is a protocol constant; the other
+  two are local limits of each receiver, and a sender learns of them only from the reset it receives
+  when it exceeds one. See [Sizes and fragmentation](/guide/sizes-and-fragmentation).
+- **Payload vocabulary.** muxws reserves no key inside `payload`: no `kind`, no discriminator. The
+  payload belongs entirely to the application.
 
 ## The subprotocol prefix is the only version
 
@@ -67,110 +68,103 @@ muxws.v1.json
 muxws.v1.msgpack
 ```
 
-That is it. There is no version field in any frame, no version handshake, no capability exchange and
-no `protocol_version` anywhere. The `v1` in the subprotocol name is the whole of the versioning story,
-and it does two jobs.
+No frame carries a version field, and there is no version handshake, capability exchange or
+`protocol_version`. The `v1` in the subprotocol name is the only version identifier, and it has two
+functions.
 
-**It pins the breaking-change generation.** A change that requires the remote to *act* on something
-new — a new frame type it must respond to, a field it must honour, a different meaning for an existing
-one — is a new generation: `muxws.v2.<codec>`. A v1 acceptor refuses that offer at the handshake, with
-HTTP 400, before a socket exists. Two peers of different generations do not connect and cannot
-half-connect.
+**It identifies the breaking-change generation.** A change that requires the remote to *act* on
+something new (a new frame type it must respond to, a field it must honour, a different meaning for an
+existing field) is a new generation: `muxws.v2.<codec>`. A v1 acceptor refuses that subprotocol at the
+handshake with HTTP 400, before a socket exists. Peers of different generations do not connect.
 
-**Additive revisions are announced nowhere, because they need no announcement.** A receiver is already
-required to ignore what it does not recognise, on both axes:
+**Additive revisions need no announcement.** A receiver must ignore what it does not recognise:
 
-- **Unknown frame types** are ignored and logged, and are never an error of any kind. The connection
-  continues.
-- **Unknown envelope fields** are ignored. A decoder must *drop* them rather than preserve them —
-  round-tripping an unknown field would make `decode(encode(frame)) == frame` pass on garbage.
+- **Unknown frame types** are ignored and logged, and are never an error. The connection continues.
+- **Unknown envelope fields** are ignored. A decoder must *drop* them rather than preserve them; if it
+  preserved them, `decode(encode(frame)) == frame` would also pass for frames carrying unknown fields.
 
-So an additive extension — a new field on `data`, a new frame type that is safe to miss — is deployed
-by simply sending it. Peers that understand it act on it; peers that do not carry on. There is nothing
-to negotiate, and therefore nothing that can be negotiated wrongly.
+An additive extension, such as a new field on `data` or a new frame type that receivers may ignore, is
+deployed by sending it. Peers that support it act on it; other peers ignore it. Nothing is negotiated.
 
-The corollary is the rule that keeps this honest: **tolerate, never advertise.** There is no mechanism
-for a peer to announce what it supports, deliberately, because the moment such a mechanism exists it
-becomes something both ends must agree on and keep agreeing on forever. `window_update` is reserved by
-name and unimplemented; a v1 peer must not send it.
+A peer has no mechanism to announce what it supports. An announcement mechanism would itself be a
+protocol feature that both ends must implement consistently. `window_update` is reserved as a frame
+name and is not implemented; a v1 peer must not send it.
 
-One name is retired rather than reserved: **reset code 5**. It was `STREAM_LIMIT`, for rejection
-against an announced concurrency limit; there is no announced limit, so there is nothing to reject
-against. The number must never be sent, and must never be reused. A peer receiving it treats it as it
-treats any unknown code — reset that stream, keep the connection. See [Errors](/guide/errors).
+**Reset code 5 is retired**, not reserved. It was `STREAM_LIMIT`, for rejection against an announced
+concurrency limit; muxws announces no limits. Code 5 must never be sent and must never be reused. A
+peer that receives it treats it as any unknown code: it resets that stream and keeps the connection.
+See [Errors](/guide/errors).
 
-## Writing a third implementation
+## Writing a further implementation
 
-The corpus under `conformance/` is the contract. It is plain JSON, read verbatim by both reference
-suites — nothing in it is generated at test time and nothing in it is language-specific. A rule only
-one port checks is a rule that drifts, and a wire disagreement between ports is invisible until two
-peers of different languages meet, at which point it looks like corruption rather than like a bug.
+The corpus under `conformance/` is the conformance contract. It is plain JSON, read verbatim by both
+reference test suites; nothing in it is generated at test time and nothing in it is language-specific.
+A rule that only one implementation tests can diverge between implementations, and a wire
+disagreement between implementations shows up only when peers in different languages connect, where
+it looks like data corruption.
 
-**`conformance/README.md` is the schema.** It is written so that two runners implemented
-independently from it cannot end up reading the same file differently. Read it before the fixtures.
+**`conformance/README.md` is the schema.** It specifies the fixture format precisely enough that two
+independently written runners read every file the same way. Read it before the fixtures.
 
-### What is in there
+### Contents
 
 | Path | What it holds |
 |---|---|
-| `conformance/frames/v1-frames.json` | Frame **triples**: a name, a logical frame, and the exact JSON bytes it must encode to. The round-trip corpus. |
-| `conformance/frames/v1-fragment-boundaries.json` | Fragment **boundary cases**: payloads and caps, with where the cuts must fall. |
-| `conformance/sequences/*.json` | Scripted **exchanges** between two peers: what goes in, what must come out, in order. |
-| `conformance/invalid/*.json` | **Misbehaviour** cases: a bad frame in, and what the peer must do about it — including whether the connection survives. |
+| `conformance/frames/v1-frames.json` | Frame **triples**: a name, a logical frame, and the JSON wire string it must encode to. The round-trip corpus. |
+| `conformance/frames/v1-fragment-boundaries.json` | Fragment **boundary cases**: payloads and caps, with the exact cut points. |
+| `conformance/sequences/*.json` | Scripted **exchanges** between two peers: the calls made, and the frames and results expected, in order. |
+| `conformance/invalid/*.json` | **Misbehaviour** cases: an invalid message in, the peer's required response out, and whether the connection survives. |
 
-The two runners of record are `muxws/conformance_test.py` and `ts/conformance.spec.ts`. They are
-twins, and deliberately cross-checked: the Python file reads the TypeScript one's fixture counts and
-the TypeScript file reads the Python one's frozen digest, so neither suite can drift alone. If you are
-building a third runner, those two are the worked examples.
+The two reference runners are `muxws/conformance_test.py` and `ts/conformance.spec.ts`. They check each
+other: the Python file reads the TypeScript file's fixture count and the TypeScript file reads the
+Python file's frozen digest, so a change to one suite alone fails the other. They are the reference
+examples for a new runner.
 
-### Rules that hold for every fixture
+### Rules for every fixture
 
-These are constraints on the corpus rather than house style, and a third implementation has to
-satisfy every one of them before it adds a case of its own:
+These are constraints on the corpus, and every fixture added by a further implementation must satisfy
+them:
 
-- **No floats.** The two reference ports render them differently — Python writes `1.0`, `-0.0`,
-  `1e+16`, `1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`. Fragment boundaries
-  are cut over the encoded form, so a payload carrying a float is cut in different places by the two
-  ports. Integers are safe only within ±(2^53 − 1). `NaN` and `Infinity` are not JSON, and the codec
-  refuses them rather than emitting tokens no other parser accepts.
+- **No floats.** The two reference implementations render floats differently: Python writes `1.0`,
+  `-0.0`, `1e+16`, `1e-07` where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`. Fragment
+  boundaries are cut over the encoded form, so the two implementations cut a payload containing a
+  float at different places. Integers are safe only within ±(2^53 − 1). `NaN` and `Infinity` are not
+  JSON, and the codec rejects them.
 - **No bytes.** JSON has no byte type, and muxws does not base64-encode bytes on the application's
   behalf. Bytes are a payload type only under a binary codec, and no msgpack byte string may be pinned
-  in a fixture at all: two msgpack libraries make different but equally valid choices about integer
-  width and map format, so pinned bytes would fail a legal encoder. Round-trip is the only assertion
-  there.
-- **No limit and no version appears in any frame** — not even inside a `description` or a `reason`
-  string. A schema test greps the corpus text for those words.
-- **Reset code 5 never appears**, and neither does code 9: `CONNECTION_CLOSED` is synthesised locally
-  when a socket dies and must never be put on the wire.
-- **Every duration is milliseconds, and its key ends in `_ms`.** The corpus is read by a language whose
-  durations are milliseconds and by one whose durations are seconds; the runner converts, and the
-  fixture does not carry both.
-- **A one-object fixture's `name` equals its file basename**, asserted by every runner, so a renamed
-  file cannot silently become a second copy of a case already covered.
+  in a fixture: msgpack libraries make different valid choices of integer width and map format, so a
+  pinned byte string would fail a legal encoder. msgpack fixtures assert only the round trip.
+- **No limit and no version appears in any frame**, including inside a `description` or a `reason`
+  string. A schema test searches the corpus text for those names.
+- **Reset code 5 never appears**, and neither does code 9: `CONNECTION_CLOSED` is generated locally
+  when a socket closes and must never be sent.
+- **Every duration is in milliseconds, and its key ends in `_ms`.** The corpus is read by one language
+  whose durations are milliseconds and one whose durations are seconds; the runner converts.
+- **A fixture that is one object per file has a `name` equal to its file basename**, asserted by every
+  runner, so a renamed copy of a file is detected as a duplicate case.
 
-### The order to build in
+### Implementation order
 
-1. **The envelope.** Encode and decode the twelve fields, omitting defaults, ordering keys, and
-   keeping absent-`payload` apart from `null`-`payload`. `frames/v1-frames.json` passes or it does
-   not, byte for byte.
-2. **Fragmentation.** Slice over the *encoded* form of the payload, on boundaries the codec can
-   represent — for text, whole codepoints, so a surrogate pair is never split. Budget for the
-   envelope, then verify the result fits and re-split if it does not; the budget is a hint, the check
-   is the guarantee. `frames/v1-fragment-boundaries.json` is where an off-by-one shows up.
-3. **The state machine and the id rules.** Dialer ids are odd, acceptor ids are even, each peer's own
-   opens are strictly increasing. A frame for an id below your high-water mark is silently ignored;
-   one above it kills the connection. `sequences/` exercises this.
-4. **Misbehaviour.** `invalid/` is the set that says what must *not* happen: which failures reset one
-   stream and which end the connection. The column that carries the meaning is whether the connection
-   survives.
+1. **The envelope.** Encode and decode the twelve fields, omitting defaults and keeping an absent
+   `payload` distinct from a `null` `payload`. `frames/v1-frames.json` tests this.
+2. **Fragmentation.** Slice the *encoded* form of the payload at boundaries the codec can represent;
+   for text, at whole codepoints, so a surrogate pair is never split. Reserve space for the envelope,
+   then encode each fragment frame, check that it fits the cap, and re-split it if it does not. The
+   reservation is an estimate; the check guarantees the cap. `frames/v1-fragment-boundaries.json`
+   detects off-by-one errors in the cut points.
+3. **The state machine and the id rules.** Dialer ids are odd, acceptor ids are even, and each peer's
+   own opens are strictly increasing. A frame for an id below the high-water mark is silently ignored;
+   a frame for an id above it is a connection error. `sequences/` tests this.
+4. **Misbehaviour.** `invalid/` specifies which failures reset one stream and which end the connection,
+   in the `connection_survives` column.
 
 ### If the schema and a runner disagree
 
-One of them is a defect. Say which; do not quietly pick.
+One of them is wrong. Determine which one and fix it; do not choose one silently.
 
 ## See also
 
 - [`api/types`](/api/types) — `Frame` and every envelope field, `MAX_FRAME_BYTES`
-- [`api/codec`](/api/codec) — the `Codec` port a third wire format plugs into
+- [`api/codec`](/api/codec) — the `Codec` interface a further wire format implements
 - [`api/errors`](/api/errors) — `ResetCode` and all nine members
 - [`api/accept`](/api/accept) — `select_subprotocol`, which enforces the generation at the handshake

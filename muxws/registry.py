@@ -1,10 +1,10 @@
 """`peer.tags` and `PeerRegistry`: finding a peer by keys the application chose (§9.5).
 
-The registry indexes; it does not watch. `tags` is a plain dict: writing a tag is free and costs no
-bookkeeping, and the index only moves when someone says so (WSM-REG-013, WSM-REG-014).
+The registry does not observe `tags`. `tags` is a plain dict; writing a tag does no registry work, and
+the index changes only when `register` or `deregister` is called (WSM-REG-013, WSM-REG-014).
 
-The documented usage rule follows from that: **look up on keys you do not mutate, and mutate keys you
-do not look up.** A consumer needing both on one key calls `register(peer)` after each write.
+Usage rule: **look up on keys you do not mutate, and mutate keys you do not look up.** A consumer that
+needs both on one key calls `register(peer)` after each write.
 """
 
 from __future__ import annotations
@@ -26,17 +26,15 @@ class PeerRegistry:
     """Per-process. muxws does not ship a cross-process backplane (WSM-REG-018)."""
 
     def __init__(self) -> None:
-        #: (key, value) -> the peers registered under it. A value that cannot be hashed never gets
-        #: an entry, so a dict-valued tag costs nothing at all.
+        #: (key, value) -> the peers registered under it. A tag whose value cannot be hashed gets no
+        #: entry.
         self._index: dict[tuple[str, Hashable], set[Peer]] = {}
-        #: The reverse map, so `register` can replace a peer's entries **wholesale** in one pass
-        #: (WSM-REG-012) rather than scanning the index for it.
+        #: The reverse map, so `register` can replace all of a peer's entries without scanning the
+        #: index (WSM-REG-012).
         self._entries: dict[Peer, set[tuple[str, Hashable]]] = {}
-        #: Peers whose close hook is already installed. WSM-REG-017 tells a consumer that both looks
-        #: up and mutates a key to call `register(peer)` after **every** write, so a hook appended
-        #: per call would leave a long-lived peer carrying one handler per write, all of them doing
-        #: the same already-idempotent deregistration - bookkeeping WSM-REG-001 says a rewrite must
-        #: not cost. Weak, so a registry never keeps a peer alive that nothing else holds.
+        #: Peers whose close hook is installed. A consumer may call `register(peer)` after every tag
+        #: write (WSM-REG-017); the hook is installed once per peer, not once per call (WSM-REG-001).
+        #: A weak set, so the registry does not keep a peer alive.
         self._hooked: weakref.WeakSet[Peer] = weakref.WeakSet()
 
     def __len__(self) -> int:
@@ -50,10 +48,10 @@ class PeerRegistry:
     def register(self, peer: Peer) -> None:
         """Index `peer` under **every key its `tags` holds at this moment** (WSM-REG-010).
 
-        It has no notion of which keys matter, and re-registering replaces the previous entries
-        rather than adding to them: found under the new values, no longer under the old ones.
+        Every key is indexed. Registering again replaces the previous entries: the peer is found under
+        the new values and not under the old ones.
 
-        Removal on close is automatic (WSM-REG-016) - a consumer never has to prune the index.
+        The peer is removed automatically when its connection closes (WSM-REG-016).
         """
         self.deregister(peer)
 
@@ -63,9 +61,8 @@ class PeerRegistry:
                 entry = (key, value)
                 hash(entry)
             except TypeError:
-                # A dict or a list cannot serve as a lookup key. Passing over it is deliberate: the
-                # peer is simply not findable by that key, and raising would make an ordinary tag
-                # write into an error (WSM-REG-011).
+                # A dict or a list cannot be a lookup key. The tag is skipped and the peer cannot be
+                # found by it; no error is raised (WSM-REG-011).
                 continue
             entries.add(entry)
             self._index.setdefault(entry, set()).add(peer)
@@ -76,11 +73,10 @@ class PeerRegistry:
             peer.on_close(lambda _reason, target=peer: self._forget_closed(target))
 
     def _forget_closed(self, peer: Peer) -> None:
-        """The one hook per peer, fired by the connection it was registered on.
+        """The close hook: deregister `peer` and mark its hook as no longer installed.
 
-        It forgets that the hook exists as well as the entries, so a `Peer` that survives a reconnect
-        (WSM-RCN-032) and is registered again on its next connection gets a fresh hook rather than a
-        second one.
+        A `Peer` that survives a reconnect (WSM-RCN-032) and is registered again on its next
+        connection gets its hook installed again.
         """
         self._hooked.discard(peer)
         self.deregister(peer)
@@ -107,9 +103,9 @@ class PeerRegistry:
     def peers_for(self, **tags: Any) -> list[Peer]:
         """Every live peer whose `tags` match **all** the given keys.
 
-        A **list** in a stable order, never a set (WSM-REG-015): callers iterate it, and a set's
-        order would vary between runs for no reason anyone can see. Treat it as a snapshot - a peer
-        in it may already be closing.
+        A list sorted by `peer.id`, not a set (WSM-REG-015), so iteration order is reproducible. It is
+        a snapshot: a peer in it may already be closing. With no arguments, every registered peer.
+
         """
         if not tags:
             return sorted(self._entries, key=lambda peer: peer.id)
