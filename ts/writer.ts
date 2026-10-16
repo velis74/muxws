@@ -156,6 +156,16 @@ export class StreamQueue {
     this.prepared = null;
     this.fragments = null;
   }
+
+  /** Drop every unsent frame except an `open` of which no fragment has been sliced. */
+  discardExceptUnsentOpen(): void {
+    const unsentOpen =
+      this.prepared === null && this.fragments === null && this.waiting[0]?.type === 'open'
+        ? (this.waiting.shift() as Frame)
+        : null;
+    this.discard();
+    if (unsentOpen !== null) this.waiting.push(unsentOpen);
+  }
 }
 
 /** Chooses the next frame across streams round-robin, not by arrival order. */
@@ -301,14 +311,19 @@ export class Writer {
     if (queue.hasWork) this.wake.set();
   }
 
-  /** Drop all queued frames of one stream. Called when the stream is reset. */
+  /**
+   * Drop one stream's queued frames, for a reset of that stream (WSM-FRM-014).
+   *
+   * The remainder of a payload whose fragmentation has started is dropped; the `reset` that follows
+   * ends the fragment sequence on the receiver. An `open` of which no fragment has been sliced is
+   * kept: a `reset` for an id above the remote's high-water mark is a connection-level error
+   * (WSM-STM-003).
+   */
   discard(streamId: number): void {
     const queue = this.queues.get(streamId);
     if (queue === undefined) return;
-    this.queues.delete(streamId);
-    queue.discard();
-    const at = this.order.indexOf(streamId);
-    if (at >= 0) this.order.splice(at, 1);
+    queue.discardExceptUnsentOpen();
+    if (!queue.hasWork) this.retire(streamId);
   }
 
   /** Stop the writer. Every subsequent and pending `nextFrame` resolves `null`. */

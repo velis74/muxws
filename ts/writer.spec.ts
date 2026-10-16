@@ -178,6 +178,30 @@ describe('the writer', () => {
     expect(new Set(order)).toEqual(new Set([3]));
   });
 
+  it('drops the remainder of a started payload when a stream is discarded - WSM-FRM-014', () => {
+    const writer = makeWriter();
+    writer.enqueue({ type: 'data', stream: 1, payload: big() });
+    writer.enqueue({ type: 'data', stream: 1, payload: { n: 2 }, end: true });
+    const first = internals(writer).rotate();
+    expect(first?.more).toBe(true);
+    writer.advance(1);
+
+    writer.discard(1);
+    writer.enqueue({ type: 'reset', stream: 1, code: 1 });
+    writer.advance(1);
+    expect(drain(writer).map((frame) => frame.type)).toEqual(['reset']);
+  });
+
+  it('keeps an open none of which was sent when a stream is discarded - WSM-STM-003', () => {
+    const writer = makeWriter();
+    writer.enqueue({ type: 'open', stream: 1, payload: { q: 1 } });
+    writer.enqueue({ type: 'data', stream: 1, payload: big() });
+
+    writer.discard(1);
+    writer.enqueue({ type: 'reset', stream: 1, code: 1 });
+    expect(drain(writer).map((frame) => frame.type)).toEqual(['open', 'reset']);
+  });
+
   it('retires a spent lane - WSM-STM-001', () => {
     const writer = makeWriter();
     writer.enqueue({ type: 'data', stream: 1, payload: { n: 1 } });

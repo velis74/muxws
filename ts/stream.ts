@@ -80,6 +80,8 @@ export interface StreamPeer {
   readonly hasASocket: boolean;
   /** @internal Synchronous, so `open()` does not suspend between allocating a stream id and enqueuing. */
   enqueue(frame: Frame): void;
+  /** @internal Enqueue a stream's `reset` in place of its queued frames (WSM-FRM-014). */
+  enqueueReset(streamId: number, code: ResetCode, reason: string | null): void;
   /** @internal Drop a closed stream from the live map. */
   forget(stream: Stream<any>): void;
   /**
@@ -433,7 +435,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     // (WSM-RCN-043). Checking `isOpen` would drop the `reset` for a stream the acceptor opened in that
     // window.
     if (this.peer.hasASocket) {
-      this.peer.enqueue({ type: 'reset', stream: this.id, code: sendable, reason: reason ?? null });
+      this.peer.enqueueReset(this.id, sendable, reason ?? null);
     }
     this.fail(exceptionForReset(sendable, reason ?? null, { streamId: this.id }));
   }

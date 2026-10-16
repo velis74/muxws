@@ -1762,7 +1762,8 @@ acknowledgement.
 
 The protocol defines no acknowledgement for a reset. The remote's handler is cancelled and receives
 `asyncio.CancelledError` at its next await; the local side is closed when this call returns.
-Cancelling a stream does not affect the connection or any other stream.
+Cancelling a stream does not affect the connection or any other stream. Queued frames of the stream
+are dropped as described under [`stream.reset()`](#stream-reset-python).
 
 ### Signature
 
@@ -1849,6 +1850,8 @@ async cancel(reason?: string): Promise<void>;
 
 `Promise<void>`. A no-op on an already-closed stream. The remote handler observes it as an aborted
 `stream.signal` rather than as a thrown cancellation.
+Queued frames of the stream are dropped as described under
+[`stream.reset()` (Python)](#stream-reset-python).
 
 ### Raises
 
@@ -1897,6 +1900,12 @@ Terminate the stream in both directions with an explicit reset code.
 `cancel()` is `reset(CANCELLED)`. Use `reset()` when the code carries information the remote can act
 on, such as `TIMEOUT`, `PAYLOAD_TOO_LARGE` or `APPLICATION_ERROR`. `REFUSED` tells the remote that no
 handler ran for the stream.
+
+The stream's frames that are queued and not yet sent are dropped, including the unsent fragments of a
+payload of which some fragments are already sent; the `reset` ends that fragment sequence on the
+receiver. An `open` of which no fragment is sent yet is kept and goes out before the `reset`, because
+a `reset` for an id the remote has not seen is a connection-level error (WSM-STM-003). The same
+applies to a `reset` received from the remote: this peer's queued frames for that stream are dropped.
 
 ### Signature
 
@@ -1981,6 +1990,8 @@ async reset(code: ResetCode, reason?: string): Promise<void>;
 ### Return
 
 `Promise<void>`. A no-op once the stream is closed.
+Queued frames of the stream are dropped as described under
+[`stream.reset()` (Python)](#stream-reset-python).
 
 ### Raises
 

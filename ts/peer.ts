@@ -847,6 +847,12 @@ export class Peer {
     this.writer.enqueue(frame);
   }
 
+  /** @internal Enqueue a stream's `reset` in place of its queued frames (WSM-FRM-014, `Writer.discard`). */
+  enqueueReset(streamId: number, code: ResetCode, reason: string | null): void {
+    this.writer.discard(streamId);
+    this.enqueue({ type: 'reset', stream: streamId, code, reason });
+  }
+
   private async runWriter(): Promise<void> {
     for (;;) {
       let frame: Frame | null;
@@ -1413,6 +1419,8 @@ export class Peer {
     }
 
     if (frame.type === 'reset') {
+      // The stream is closed in both directions; its queued frames are not sent (WSM-FRM-014).
+      this.writer.discard(streamId);
       const payload = payloadOf(frame);
       stream.fail(
         this.resetException(frame.code ?? 0, frame.reason ?? null, streamId, isAbsent(payload) ? null : payload),
@@ -1551,7 +1559,7 @@ export class Peer {
   }
 
   private resetStream(stream: Stream, code: ResetCode, reason: string): void {
-    this.enqueue({ type: 'reset', stream: stream.id, code, reason });
+    this.enqueueReset(stream.id, code, reason);
     stream.fail(exceptionForReset(code, reason, { streamId: stream.id }));
   }
 

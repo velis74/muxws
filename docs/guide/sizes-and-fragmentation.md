@@ -138,8 +138,9 @@ Each side observes:
 - **The receiver**: the stream is reset locally; a handler awaiting or iterating it receives a
   `StreamReset` with `ResetCode.PAYLOAD_TOO_LARGE`. The rest of the connection is not affected.
 - **The sender**: a `reset` frame arrives for that stream, and the pending `send`/`await`/`async for`
-  raises `StreamReset` with the same code and the receiver's reason text. The connection stays open.
-  The same payload fails the same way on retry; reduce it or split it in the application.
+  raises `StreamReset` with the same code and the receiver's reason text. The fragments of the payload
+  that are not yet sent when the `reset` arrives are dropped. The connection stays open. The same
+  payload fails the same way on retry; reduce it or split it in the application.
 
 ## `max_payload_bytes` belongs to the receiver
 

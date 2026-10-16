@@ -214,7 +214,7 @@ class Stream:
         # is open (WSM-RCN-043), and the reset of a stream the acceptor pushed in that window must be
         # sent.
         if self._peer._has_a_socket:
-            self._peer._enqueue(Frame("reset", stream=self.id, code=int(code), reason=reason))
+            self._peer._enqueue_reset(self.id, code, reason)
         self._fail(exception_for_reset(code, reason, stream_id=self.id), notify_remote=False)
 
     # ------------------------------------------------------------------ receiving

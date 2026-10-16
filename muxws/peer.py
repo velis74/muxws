@@ -389,6 +389,11 @@ class Peer:
         """Synchronous by contract: `open()` must not suspend between allocating and enqueuing."""
         self._writer.enqueue(frame)
 
+    def _enqueue_reset(self, stream_id: int, code: ResetCode, reason: str | None) -> None:
+        """Enqueue a stream's `reset` in place of its queued frames (WSM-FRM-014, `Writer.discard`)."""
+        self._writer.discard(stream_id)
+        self._writer.enqueue(Frame("reset", stream=stream_id, code=int(code), reason=reason))
+
     async def _write_loop(self) -> None:
         while True:
             try:
@@ -866,6 +871,8 @@ class Peer:
             return True
 
         if frame.type == "reset":
+            # The stream is closed in both directions; its queued frames are not sent (WSM-FRM-014).
+            self._writer.discard(stream_id)
             stream._fail(
                 exception_for_reset(
                     frame.code or 0,
@@ -986,7 +993,7 @@ class Peer:
             return ABSENT
 
     async def _reset_stream(self, stream: Stream, code: ResetCode, reason: str) -> None:
-        self._enqueue(Frame("reset", stream=stream.id, code=int(code), reason=reason))
+        self._enqueue_reset(stream.id, code, reason)
         stream._fail(exception_for_reset(code, reason, stream_id=stream.id), notify_remote=False)
 
     # ------------------------------------------------------------------ ending

@@ -150,6 +150,31 @@ async def test_discarding_one_stream_leaves_the_others_alone(writer: Writer):
     assert set(order) == {3}
 
 
+async def test_discard_drops_the_remainder_of_a_started_payload(writer: Writer):
+    """WSM-FRM-014: discarding a stream mid-fragmentation drops its unsent fragments and later frames."""
+    writer.enqueue(Frame("data", stream=1, payload=_big()))
+    writer.enqueue(Frame("data", stream=1, payload={"n": 2}, end=True))
+    first = writer._rotate()
+    assert first is not None
+    assert first.more is True
+    writer.advance(1)
+
+    writer.discard(1)
+    writer.enqueue(Frame("reset", stream=1, code=1))
+    writer.advance(1)
+    assert [frame.type for frame in await _drain(writer)] == ["reset"]
+
+
+async def test_discard_keeps_an_open_none_of_which_was_sent(writer: Writer):
+    """WSM-STM-003: an unsent `open` stays queued, so a reset that follows names an id the remote knows."""
+    writer.enqueue(Frame("open", stream=1, payload={"q": 1}))
+    writer.enqueue(Frame("data", stream=1, payload=_big()))
+
+    writer.discard(1)
+    writer.enqueue(Frame("reset", stream=1, code=1))
+    assert [frame.type for frame in await _drain(writer)] == ["open", "reset"]
+
+
 async def test_a_spent_lane_is_retired(writer: Writer):
     """WSM-STM-001: nothing is retained per closed stream, including an empty queue."""
     writer.enqueue(Frame("data", stream=1, payload={"n": 1}))

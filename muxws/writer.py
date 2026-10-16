@@ -104,6 +104,15 @@ class StreamQueue:
         self._prepared = None
         self._fragments = None
 
+    def discard_except_unsent_open(self) -> None:
+        """Drop every unsent frame except an `open` of which no fragment has been sliced."""
+        unsent_open = None
+        if self._prepared is None and self._fragments is None and self._waiting and self._waiting[0].type == "open":
+            unsent_open = self._waiting.popleft()
+        self.discard()
+        if unsent_open is not None:
+            self._waiting.append(unsent_open)
+
 
 class Writer:
     """Chooses the next frame across streams by round-robin, and never by arrival order."""
@@ -223,14 +232,19 @@ class Writer:
                 self._wake.set()
 
     def discard(self, stream_id: int) -> None:
-        """Drop one stream's queued frames and its lane."""
-        queue = self._queues.pop(stream_id, None)
-        if queue is not None:
-            queue.discard()
-            try:
-                self._order.remove(stream_id)
-            except ValueError:
-                pass
+        """Drop one stream's queued frames, for a reset of that stream (WSM-FRM-014).
+
+        The remainder of a payload whose fragmentation has started is dropped; the `reset` that follows
+        ends the fragment sequence on the receiver. An `open` of which no fragment has been sliced is
+        kept: a `reset` for an id above the remote's high-water mark is a connection-level error
+        (WSM-STM-003).
+        """
+        queue = self._queues.get(stream_id)
+        if queue is None:
+            return
+        queue.discard_except_unsent_open()
+        if not queue.has_work:
+            self._retire(stream_id)
 
     def stop(self) -> None:
         """Stop the writer. Every later `next_frame` call returns None."""
