@@ -147,7 +147,7 @@ stream, spent by its first frame whether or not that frame carried any; a later 
 and, if a peer puts one on the wire anyway, resets that stream. There is no status field here and
 `headers` is not one - a failed exchange is a `reset` with a code. muxws never reads either set.
 
-## Header interceptors apply to every stream a peer opens
+## Header interceptors apply to every stream a peer opens or answers
 
 Metadata that belongs on every stream - a connection identifier, a trace id taken from ambient
 context - is added once per peer rather than at every `open()` call. An **open interceptor** runs
@@ -173,6 +173,26 @@ const unregister = peer.interceptOpen((headers, payload) => {
 });
 ```
 
+A **reply headers interceptor** does the same for the answering side: it runs on the first frame
+this peer sends on a stream the remote opened, whichever call sends it - `send_headers()`, `send()`,
+`end()`, `reply()`, or the implicit end of a handler that returns - and mutates a copy of that call's
+headers:
+
+```python
+# fragment
+def add_server_time(headers, stream):
+    headers["server-time"] = time.time()
+
+peer.intercept_reply_headers(add_server_time)
+```
+
+```typescript
+// fragment
+peer.interceptReplyHeaders((headers, stream) => {
+  headers['server-time'] = Date.now() / 1000;
+});
+```
+
 An **incoming interceptor** sees the leading headers the remote sends, once per stream: the `open`'s
 on a stream the remote opened (before the handler runs), the answer's on a stream this peer opened
 (before the first payload arrives). `stream.local` tells the two apart, and the headers are
@@ -194,17 +214,25 @@ peer.interceptIncomingHeaders((headers, stream) => {
 });
 ```
 
-Both registrations return a function that removes them and run in registration order. They belong
-to the `Peer`: a dialer keeps them across reconnects, while on the acceptor a reconnect is a new
-`Peer`, which starts with none. An open interceptor that raises fails that `open()` with its exception,
-before any id is spent or any frame is sent. An incoming interceptor that raises is logged and
-changes nothing: the stream and the connection carry on. Interceptors are synchronous; one that
-returns an awaitable fails the open (outgoing) or is logged (incoming).
+Every registration returns a function that removes it, and interceptors of each kind run in
+registration order, the first registered first. They belong to the `Peer`: a dialer keeps them across
+reconnects, while on the acceptor a reconnect is a new `Peer`. `connect()`, `accept()` and `serve()`
+take all three kinds as arguments (`open_interceptors`, `reply_headers_interceptors`,
+`incoming_headers_interceptors`; `openInterceptors`, `replyHeadersInterceptors`,
+`incomingHeadersInterceptors` in TypeScript) and register them before the peer sends or reads a frame.
+That is the only way to put them on the peer `serve()` builds, and the way for a dialer to see a
+stream the acceptor pushes in answer to its hello.
 
-What does not pass through them: the reconnect helper's hello, which is replayed byte for byte, and
-the answering side's own leading headers (`send_headers()` and the `headers=` argument of `send()`,
-`end()` and `reply()`). An interceptor is application code; muxws itself still reads no header. The
-reference entries are [`intercept_open`](/api/peer#peer-intercept-open-python) and
+An open or reply headers interceptor that raises fails the call that was sending, before any frame
+is sent; a reply headers interceptor that raises during the implicit end of a handler fails the
+handler, and the stream is reset with `APPLICATION_ERROR`. An incoming interceptor that raises is
+logged and changes nothing: the stream and the connection carry on. Interceptors are synchronous; one
+that returns an awaitable fails the sending call (outgoing) or is logged (incoming).
+
+The reconnect helper's hello does not pass through them, since it is replayed byte for byte. An
+interceptor is application code; muxws itself still reads no header. The reference entries are
+[`intercept_open`](/api/peer#peer-intercept-open-python),
+[`intercept_reply_headers`](/api/peer#peer-intercept-reply-headers-python) and
 [`intercept_incoming_headers`](/api/peer#peer-intercept-incoming-headers-python).
 
 ## Trailers ride the `end` frame

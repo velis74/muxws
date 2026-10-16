@@ -1168,7 +1168,8 @@ stream id is allocated, and shapes the headers the `open` frame carries.
 
 It receives a fresh mapping holding a shallow copy of the caller's headers and mutates it in place:
 adding, replacing or deleting keys. It cannot touch the rest of the frame. The reconnect helper's
-hello and the answering side's leading headers do not pass through it.
+hello does not pass through it; the leading headers this peer answers with pass through a
+[`ReplyHeadersInterceptor`](#replyheadersinterceptor) instead.
 
 ### Signature
 
@@ -1252,6 +1253,105 @@ acceptor.onStream(async (_payload: unknown, stream: Stream) => stream.reply({ ..
 void dialer.serve();
 void acceptor.serve();
 console.log(await dialer.request('hi', { headers: { trace: 't-1' }, timeoutMs: 2000 }));
+await dialer.close({ drainMs: 100 });
+```
+
+## `ReplyHeadersInterceptor`
+
+The type of an interceptor registered with `peer.intercept_reply_headers(...)` /
+`peer.interceptReplyHeaders(...)`. It is called once per stream the remote opened, synchronously, by
+the call that sends this peer's first frame on it, and shapes the leading headers that frame carries.
+
+It receives a fresh mapping holding a shallow copy of the headers that call was given and mutates it
+in place. It cannot touch the rest of the frame.
+
+### Signature
+
+```python
+ReplyHeadersInterceptor = Callable[[dict[str, Any], Stream], None]
+```
+
+```ts
+export type ReplyHeadersInterceptor = (headers: Record<string, unknown>, stream: Stream) => void;
+```
+
+### Parameters
+
+The parameters of the callable itself:
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `headers` | `dict[str, Any]` / `Record<string, unknown>` | none — positional | The headers this peer's first frame on the stream will carry, as left by the interceptors registered before this one. Mutate it; keys must be strings. Changes made after the call returned have no effect. |
+| `stream` | `Stream` | none — positional | The stream being answered: `stream.headers` and `stream.payload` are the opener's. For reading. |
+
+### Return
+
+`None` / `void`; any other value is ignored, except an awaitable (Python) or a thenable
+(TypeScript), which fails the sending call with `TypeError`.
+
+### Raises
+
+The type raises nothing. An implementation that raises fails the call that sends the first frame
+with that exception: no later interceptor runs, nothing is sent, and the first frame stays unspent.
+In the implicit end of a handler that returns, the stream is reset with `APPLICATION_ERROR` instead.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import JsonCodec, Peer, ReplyHeadersInterceptor, Stream
+from muxws.transports.memory import memory_pair
+
+
+def tag_region(headers: dict, _stream: Stream) -> None:
+    headers["region"] = "eu-1"
+
+
+async def main() -> None:
+    interceptor: ReplyHeadersInterceptor = tag_region
+    left, right = memory_pair()
+    codec = JsonCodec()
+    dialer = Peer(left, codec=codec, is_dialer=True)
+    acceptor = Peer(right, codec=codec, is_dialer=False)
+    acceptor.intercept_reply_headers(interceptor)
+
+    async def handler(_payload: object, stream: Stream) -> None:
+        await stream.reply("ok")
+
+    acceptor.on_stream(handler)
+    tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+    stream = dialer.open("hi", end=True)
+    await stream
+    print(stream.reply_headers)  # {'region': 'eu-1'}
+
+    await dialer.close(drain=0.1)
+    for task in tasks:
+        task.cancel()
+
+
+asyncio.run(main())
+```
+
+```ts
+import { JsonCodec, Peer, type ReplyHeadersInterceptor, type Stream, memoryPair } from 'muxws';
+
+const tagRegion: ReplyHeadersInterceptor = (headers) => {
+  headers.region = 'eu-1';
+};
+
+const [left, right] = memoryPair();
+const codec = new JsonCodec();
+const dialer = new Peer(left, { codec, isDialer: true });
+const acceptor = new Peer(right, { codec, isDialer: false });
+acceptor.interceptReplyHeaders(tagRegion);
+acceptor.onStream(async (_payload: unknown, stream: Stream) => stream.reply('ok'));
+
+void dialer.serve();
+void acceptor.serve();
+const stream = dialer.open('hi', { end: true });
+await stream;
+console.log(stream.replyHeaders); // { region: 'eu-1' }
 await dialer.close({ drainMs: 100 });
 ```
 

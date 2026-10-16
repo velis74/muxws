@@ -1162,6 +1162,55 @@ async def test_connect_registers_its_handlers_before_the_hello_goes_out():
             await peer.close()
 
 
+async def test_connect_and_accept_register_their_interceptors_before_any_frame():
+    """WSM-API-026: the interceptor arguments are registered before the hello and before `serve()`.
+
+    The acceptor pushes a stream the instant it sees the hello, so the dialer's incoming interceptor
+    sees that push only if `connect()` registered it before `establish()` ran.
+    """
+    pushed: list[dict[str, Any]] = []
+    answered: list[dict[str, Any]] = []
+    acceptor_saw: list[dict[str, Any]] = []
+
+    async def handle(connection: Any) -> None:
+        acceptor = await muxws.accept(
+            WebsocketsSocket(connection),
+            open_interceptors=[lambda headers, _payload: headers.update(pushed_by="acceptor")],
+            reply_headers_interceptors=[lambda headers, _stream: headers.update(served_by="acceptor")],
+            incoming_headers_interceptors=[lambda headers, _stream: acceptor_saw.append(dict(headers))],
+        )
+
+        async def handler(payload: Any, stream: Stream) -> None:
+            if isinstance(payload, dict) and "tab" in payload:
+                await acceptor.notify({"backlog": payload["tab"]})
+            await stream.reply("ok")
+
+        acceptor.on_stream(handler)
+        await acceptor.serve()
+
+    def record(headers: Any, stream: Stream) -> None:
+        (answered if stream.local else pushed).append(dict(headers))
+
+    async with websockets.serve(handle, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol) as service:
+        url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        peer = await muxws.connect(
+            url,
+            hello={"tab": "abc"},
+            ping_interval=0.0,
+            on_stream=lambda _payload, _stream: None,
+            open_interceptors=[lambda headers, _payload: headers.update(conn="tab-abc")],
+            incoming_headers_interceptors=[record],
+        )
+        try:
+            await asyncio.wait_for(_until(lambda: pushed == [{"pushed_by": "acceptor"}]), 5.0)
+            assert await asyncio.wait_for(peer.request("q"), 5.0) == "ok"
+            assert acceptor_saw[0] == {}, "the hello passes no open interceptor"
+            assert acceptor_saw[-1] == {"conn": "tab-abc"}
+            assert answered[-1] == {"served_by": "acceptor"}
+        finally:
+            await peer.close()
+
+
 async def test_a_swallowed_pong_on_a_real_socket_re_dials():
     """WSM-RCN-011: the heartbeat's local close must be a code a peer is allowed to send.
 

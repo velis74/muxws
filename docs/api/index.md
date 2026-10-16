@@ -35,7 +35,7 @@ newer: the `ws+unix:` dial is `websockets.asyncio.client.unix_connect`.
 | [Codec](/api/codec) | The codec protocol, the two codecs that ship, the registry, and the settings that select one. |
 | [Registry](/api/registry) | `PeerRegistry`: tagging live peers and looking them up again. |
 | [Transports](/api/transports) | `SocketAdapter` and every adapter that implements it, in both languages, plus the `ws+unix:` URL grammar and the `websockets` dial gates. |
-| [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, the two callback aliases and the two interceptor aliases. |
+| [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, the two callback aliases and the three interceptor aliases. |
 
 New to muxws? Start with the [rationale](/guide/rationale) and the
 [quick start](/guide/getting-started); this reference assumes you have a connection open.

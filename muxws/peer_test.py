@@ -14,6 +14,8 @@ from typing import Any
 
 import pytest
 
+import muxws
+
 from muxws.codecs.json_ import JsonCodec
 from muxws.errors import ConnectionLost, ProtocolError, RemoteError, ResetCode, StreamReset, StreamTimeout
 from muxws.frames import ABSENT, Frame
@@ -1838,7 +1840,7 @@ async def test_open_interceptors_shape_the_headers_of_every_open(make_pair):
 
 
 async def test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing(make_pair):
-    """WSM-API-028: the interceptor's own exception at the call site, no id allocated, nothing enqueued."""
+    """WSM-API-027: the interceptor's own exception at the call site, no id allocated, nothing enqueued."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     later: list[str] = []
@@ -1879,6 +1881,141 @@ async def test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing
         assert pair.dialer.is_open
     finally:
         await pair.stop()
+
+
+async def test_reply_headers_interceptors_shape_the_first_frame_of_every_answer(make_pair):
+    """WSM-API-028: on a copy, once per stream the remote opened, whichever call sends the first frame."""
+    pair = make_pair()
+    seen: list[tuple[dict[str, Any], str]] = []
+    kept: list[dict[str, Any]] = []
+    announced = {"content-type": "text/csv"}
+    on_own_streams: list[Any] = []
+
+    def stamp(headers: dict[str, Any], stream: Stream) -> None:
+        seen.append((dict(headers), stream.payload))
+        headers["served-by"] = "acceptor"
+        headers.pop("drop-me", None)
+        kept.append(headers)
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        if payload == "announce":
+            await stream.send_headers(announced)
+            kept[-1]["late"] = "after return"
+            await stream.send("row")
+            await stream.end("last")
+        elif payload == "reply":
+            await stream.reply("done", headers={"drop-me": 1})
+
+    pair.acceptor.on_stream(handler)
+    unregister = pair.acceptor.intercept_reply_headers(stamp)
+    pair.dialer.intercept_reply_headers(lambda _headers, stream: on_own_streams.append(stream.id))
+    pair.start()
+    try:
+        stream = pair.dialer.open("announce")
+        await stream.end()
+        await asyncio.wait_for(stream.closed.wait(), 5.0)
+        assert stream.reply_headers == {"content-type": "text/csv", "served-by": "acceptor"}
+        assert announced == {"content-type": "text/csv"}, "the caller's mapping is untouched"
+
+        stream = pair.dialer.open("reply", end=True)
+        assert await asyncio.wait_for(stream, 5.0) == "done"
+        assert stream.reply_headers == {"served-by": "acceptor"}
+
+        stream = pair.dialer.open("implicit", end=True)
+        await asyncio.wait_for(stream.closed.wait(), 5.0)
+        assert stream.reply_headers == {"served-by": "acceptor"}, "the implicit end of a returning handler too"
+
+        assert seen == [({"content-type": "text/csv"}, "announce"), ({"drop-me": 1}, "reply"), ({}, "implicit")]
+        assert on_own_streams == [], "never on a stream this peer opened"
+
+        unregister()
+        stream = pair.dialer.open("implicit", end=True)
+        await stream.closed.wait()
+        assert pair.frames_of_type("acceptor", "data")[-1].headers is None, "no interceptor left, no headers field"
+    finally:
+        await pair.stop()
+
+
+async def test_a_reply_headers_interceptor_that_raises_fails_the_call_and_spends_nothing(make_pair):
+    """WSM-API-028: the call raises and sends nothing, the first frame stays unspent, and at the
+    implicit end of a handler the failure is the handler's."""
+    pair = make_pair()
+    sent_before_answer: list[int] = []
+
+    def refuse(_headers: dict[str, Any], _stream: Stream) -> None:
+        raise ValueError("no tenant")
+
+    async def asynchronous(headers: dict[str, Any], _stream: Stream) -> None:
+        headers["late"] = True
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        if payload == "implicit":
+            return
+        unregister = pair.acceptor.intercept_reply_headers(refuse)
+        with pytest.raises(ValueError, match="no tenant"):
+            await stream.send_headers({"a": 1})
+        unregister()
+        unregister = pair.acceptor.intercept_reply_headers(asynchronous)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(TypeError, match="awaitable"):
+                await stream.send("x")
+        assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+        unregister()
+        sent_before_answer.append(len(pair.acceptor_socket.sent))
+        await stream.reply("ok", headers={"a": 1})
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open("explicit", end=True)
+        assert await asyncio.wait_for(stream, 5.0) == "ok"
+        assert sent_before_answer == [0], "a failed call put nothing on the wire"
+        assert stream.reply_headers == {"a": 1}, "and left the first frame for the next call"
+
+        pair.acceptor.intercept_reply_headers(refuse)
+        with pytest.raises(RemoteError, match="no tenant"):
+            await pair.dialer.request("implicit", timeout=5.0)
+        assert pair.dialer.is_open
+        assert pair.acceptor.is_open
+    finally:
+        await pair.stop()
+
+
+async def test_serve_registers_the_interceptors_it_is_given():
+    """WSM-API-026: `serve()` builds its peer itself, so the interceptors are its arguments."""
+    left, right = memory_pair()
+    dialer = Peer(left, codec=JsonCodec(), is_dialer=True)
+    seen: list[Any] = []
+
+    async def echo(_payload: Any, stream: Stream) -> None:
+        await stream.reply(dict(stream.headers))
+
+    tasks = [
+        asyncio.create_task(
+            muxws.serve(
+                right,
+                handler=echo,
+                codec=JsonCodec(),
+                reply_headers_interceptors=[lambda headers, _stream: headers.update(served="yes")],
+                incoming_headers_interceptors=[
+                    lambda headers, _stream: seen.append(dict(headers)),
+                    lambda _headers, _stream: seen.append("second"),
+                ],
+            )
+        ),
+        asyncio.create_task(dialer.serve()),
+    ]
+    try:
+        stream = dialer.open("q", headers={"trace": "t-1"}, end=True)
+        assert await asyncio.wait_for(stream, 5.0) == {"trace": "t-1"}
+        assert stream.reply_headers == {"served": "yes"}
+        assert seen == [{"trace": "t-1"}, "second"]
+    finally:
+        await left.drop()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def test_incoming_interceptors_see_each_streams_leading_headers_once(make_pair):
@@ -1926,7 +2063,7 @@ async def test_incoming_interceptors_see_each_streams_leading_headers_once(make_
 
 
 async def test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing(make_pair, caplog):
-    """WSM-API-030: logged, the next interceptor still runs, and stream and connection carry on."""
+    """WSM-API-029: logged, the next interceptor still runs, and stream and connection carry on."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     after: list[Any] = []

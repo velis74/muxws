@@ -1573,4 +1573,48 @@ describe('header interceptors across a reconnect', () => {
     expect(answered.at(-1)).toEqual({ 'served-by': 2 });
     await loop.stop();
   });
+
+  it("registers connect()'s interceptor arrays before the first hello goes out - WSM-API-026", async () => {
+    const server = new FakeServer();
+    server.handler = async (payload, stream) => {
+      if (payload !== null && typeof payload === 'object' && 'session' in payload) {
+        server.acceptors[server.acceptors.length - 1].open({ pushed: 'at the hello' }, { headers: { by: 'acceptor' } });
+        await settle(20);
+      }
+      await stream.reply('ok');
+    };
+
+    const pushed: Record<string, unknown>[] = [];
+    const answered: Record<string, unknown>[] = [];
+    const socket = await server.dial();
+    const peer = await dialAndEstablish(
+      socket,
+      server.dial,
+      {
+        hello: { session: 'abc' },
+        reconnect: new Reconnect({ initialDelayMs: 10, jitter: 0 }),
+        pingIntervalMs: 0,
+        onStream: () => undefined,
+        openInterceptors: [
+          (headers) => {
+            headers.conn = 'session-abc';
+          },
+        ],
+        incomingHeadersInterceptors: [
+          (headers, stream) => {
+            (stream.local ? answered : pushed).push({ ...headers });
+          },
+        ],
+      },
+      new JsonCodec(),
+    );
+    cleanups.push(() => void peer.close());
+
+    await until(() => pushed.length === 1, 3000, 'the stream pushed at the hello');
+    expect(pushed).toEqual([{ by: 'acceptor' }]);
+    expect(framesOn(server.dialerSockets[0])[0].headers, 'the hello passes no open interceptor').toBeUndefined();
+    expect(await peer.request('q', { timeoutMs: 3000 })).toBe('ok');
+    const opened = framesOn(server.dialerSockets[0]).find((frame) => frame.type === 'open' && frame.payload === 'q');
+    expect(opened?.headers).toEqual({ conn: 'session-abc' });
+  });
 });

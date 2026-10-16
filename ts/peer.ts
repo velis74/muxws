@@ -62,6 +62,13 @@ export type ErrorSerializer = (error: unknown) => unknown;
 export type OpenInterceptor = (headers: Record<string, unknown>, payload: unknown) => void;
 
 /**
+ * `(headers, stream)`, called synchronously by the call that sends this peer's first frame on a stream
+ * the remote opened. It adds, replaces or deletes keys by mutating `headers`; its return value is
+ * ignored (WSM-API-028).
+ */
+export type ReplyHeadersInterceptor = (headers: Record<string, unknown>, stream: Stream) => void;
+
+/**
  * `(headers, stream)`, called once per stream when the remote's first frame on it arrives. `headers`
  * is frozen; the return value is ignored (WSM-API-029).
  */
@@ -270,6 +277,55 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+/**
+ * Run outgoing interceptors over a copy of the caller's headers (WSM-API-027/028).
+ *
+ * Runs before anything is enqueued, so an interceptor that throws leaves nothing on the wire. The
+ * result is copied again, so an object an interceptor kept a reference to cannot change the frame
+ * after it returned. `null` when the caller passed no headers and the interceptors added none, so the
+ * frame carries no `headers` field.
+ */
+function interceptedHeaders<A>(
+  interceptors: Map<symbol, (headers: Record<string, unknown>, argument: A) => void>,
+  headers: Record<string, unknown> | null,
+  argument: A,
+  kind: string,
+): Record<string, unknown> | null {
+  const working: Record<string, unknown> = { ...(headers ?? {}) };
+  [...interceptors.values()].forEach((interceptor) => {
+    const result: unknown = interceptor(working, argument);
+    if (isThenable(result)) {
+      result.then(undefined, () => undefined);
+      throw new TypeError(
+        `a ${kind} interceptor returned a thenable; interceptors are synchronous and nothing awaits them ` +
+          '(WSM-API-027)',
+      );
+    }
+  });
+  if (Object.getOwnPropertySymbols(working).length > 0) {
+    throw new TypeError(`${kind} interceptors left symbol header keys, which no codec carries (WSM-API-027)`);
+  }
+  if (Object.keys(working).length === 0 && headers === null) return null;
+  return { ...working };
+}
+
+/**
+ * @internal The three interceptor arrays `connect()` and `accept()` take, registered on `peer` in
+ * their order, as the matching `peer.intercept*()` calls would (WSM-API-026).
+ */
+export function registerInterceptors(
+  peer: Peer,
+  options: {
+    openInterceptors?: readonly OpenInterceptor[];
+    replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
+    incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
+  },
+): void {
+  (options.openInterceptors ?? []).forEach((interceptor) => peer.interceptOpen(interceptor));
+  (options.replyHeadersInterceptors ?? []).forEach((interceptor) => peer.interceptReplyHeaders(interceptor));
+  (options.incomingHeadersInterceptors ?? []).forEach((interceptor) => peer.interceptIncomingHeaders(interceptor));
+}
+
 /** Add `entry` under a fresh key and return the function that removes exactly that entry. */
 function register<T>(registry: Map<symbol, T>, entry: T): () => void {
   const key = Symbol('registration');
@@ -354,10 +410,12 @@ export class Peer {
 
   /**
    * Keyed by one symbol per registration, so one function registered twice is two registrations and
-   * each unregister function removes only its own. `adoptSocket` leaves both alone: they belong to
-   * the `Peer`, not to its connection (WSM-API-026).
+   * each unregister function removes only its own. `adoptSocket` leaves all three alone: they belong
+   * to the `Peer`, not to its connection (WSM-API-026).
    */
   private readonly openInterceptors = new Map<symbol, OpenInterceptor>();
+
+  private readonly replyInterceptors = new Map<symbol, ReplyHeadersInterceptor>();
 
   private readonly incomingInterceptors = new Map<symbol, IncomingHeadersInterceptor>();
 
@@ -567,10 +625,32 @@ export class Peer {
    *
    * `open()`, `notify()` and `request()` call it synchronously as `(headers, payload)` before an id is
    * allocated; it adds, replaces or deletes keys by mutating `headers`. One that throws fails the open
-   * with that error (WSM-API-028). Returns a function that removes this registration.
+   * with that error. Returns a function that removes this registration.
    */
   interceptOpen(interceptor: OpenInterceptor): () => void {
     return register(this.openInterceptors, interceptor);
+  }
+
+  /**
+   * Register an interceptor for the leading headers this peer answers with (WSM-API-026/028).
+   *
+   * Called once per stream the remote opened, as `(headers, stream)`, by the call that sends this
+   * peer's first frame on it: `sendHeaders()`, `send()`, `end()`, `reply()`, or the implicit end of a
+   * handler that returns. It adds, replaces or deletes keys by mutating `headers`. One that throws
+   * fails that call with that error. Returns a function that removes this registration.
+   */
+  interceptReplyHeaders(interceptor: ReplyHeadersInterceptor): () => void {
+    return register(this.replyInterceptors, interceptor);
+  }
+
+  /**
+   * @internal The leading headers of this peer's answer on `stream`, as the reply interceptors leave
+   * them. Called by the stream before it spends its first frame, so an interceptor that throws leaves
+   * the stream able to send that frame again (WSM-API-028).
+   */
+  replyHeadersFor(headers: Record<string, unknown> | null, stream: Stream): Record<string, unknown> | null {
+    if (this.replyInterceptors.size === 0) return headers;
+    return interceptedHeaders(this.replyInterceptors, headers, stream, 'reply headers');
   }
 
   /**
@@ -578,8 +658,7 @@ export class Peer {
    *
    * Called once per stream as `(headers, stream)` when the remote's first frame on it arrives: the
    * `open` of a stream the remote opened, the first `data` of a stream this peer opened. One that
-   * throws is logged and changes nothing (WSM-API-030). Returns a function that removes this
-   * registration.
+   * throws is logged and changes nothing. Returns a function that removes this registration.
    */
   interceptIncomingHeaders(interceptor: IncomingHeadersInterceptor): () => void {
     return register(this.incomingInterceptors, interceptor);
@@ -626,37 +705,9 @@ export class Peer {
     this.throwIfUnopenable();
     if (this.openInterceptors.size === 0) return this.allocateAndEnqueue<T>(first, second);
     const { payload, headers, end } = resolveCall(first, second, OPEN_OPTION_KEYS);
-    const intercepted = this.interceptedOpenHeaders(headers, payload);
+    // Before the allocation, so an interceptor that throws leaves no id spent (WSM-API-027).
+    const intercepted = interceptedHeaders(this.openInterceptors, headers, payload, 'open');
     return this.allocateAndEnqueue<T>(payload, { headers: intercepted ?? undefined, end });
-  }
-
-  /**
-   * Run the open interceptors over a copy of the caller's headers (WSM-API-027/028).
-   *
-   * Runs before the allocation, so an interceptor that throws leaves no id spent and nothing on the
-   * wire. The result is copied again, so an object an interceptor kept a reference to cannot change
-   * the frame after it returned.
-   */
-  private interceptedOpenHeaders(
-    headers: Record<string, unknown> | null,
-    payload: unknown,
-  ): Record<string, unknown> | null {
-    const working: Record<string, unknown> = { ...(headers ?? {}) };
-    [...this.openInterceptors.values()].forEach((interceptor) => {
-      const result: unknown = interceptor(working, payload);
-      if (isThenable(result)) {
-        result.then(undefined, () => undefined);
-        throw new TypeError(
-          'an open interceptor returned a thenable; interceptors are synchronous and nothing awaits them ' +
-            '(WSM-API-028)',
-        );
-      }
-    });
-    if (Object.getOwnPropertySymbols(working).length > 0) {
-      throw new TypeError('open interceptors left symbol header keys, which no codec carries (WSM-API-028)');
-    }
-    if (Object.keys(working).length === 0 && headers === null) return null;
-    return { ...working };
   }
 
   /**
@@ -1285,7 +1336,10 @@ export class Peer {
       try {
         await stream.end();
       } catch (error) {
-        if (!(error instanceof StreamReset)) throw error;
+        if (error instanceof StreamReset) return;
+        if (error instanceof ConnectionLost) throw error;
+        // A reply interceptor's failure is the handler's (WSM-API-028).
+        this.resetForHandlerError(stream, error);
       }
     }
   }
@@ -1420,7 +1474,7 @@ export class Peer {
   }
 
   /**
-   * Hand the remote's leading headers to every incoming interceptor (WSM-API-029/030).
+   * Hand the remote's leading headers to every incoming interceptor (WSM-API-029).
    *
    * Runs inside the read loop, so each interceptor is isolated: one that throws is logged, and the
    * frame, the stream and the connection carry on as if it had not been registered.
@@ -1440,7 +1494,7 @@ export class Peer {
         result.then(undefined, () => undefined);
         logger.error(
           `muxws conn=${this.id} stream=${stream.id} an incoming headers interceptor returned a thenable; ` +
-            'it is not awaited (WSM-API-030)',
+            'it is not awaited (WSM-API-029)',
         );
       }
     });

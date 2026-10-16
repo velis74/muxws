@@ -7,14 +7,21 @@ startup error.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from muxws.codecs import Codec, get_codec
 from muxws.conf import settings
 from muxws.errors import CodecMismatch, ConnectionClosed, ProtocolError
 from muxws.fragment import MAX_FRAME_BYTES
-from muxws.peer import ErrorSerializer, Peer, StreamHandler
+from muxws.peer import (
+    ErrorSerializer,
+    IncomingHeadersInterceptor,
+    OpenInterceptor,
+    Peer,
+    ReplyHeadersInterceptor,
+    StreamHandler,
+)
 from muxws.reconnect import ConnectionLoop, Hello, Reconnect
 from muxws.subprotocol import mismatch_error, offer, PREFIX
 from muxws.transports import SocketAdapter
@@ -52,6 +59,9 @@ async def connect(
     on_stream: StreamHandler | None = None,
     on_close: Callable[[Any], None] | None = None,
     on_reconnect: Callable[[int, Any], None] | None = None,
+    open_interceptors: Sequence[OpenInterceptor] = (),
+    reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
+    incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
 ) -> Peer:
     """Dial `url` and return a serving peer.
 
@@ -74,6 +84,11 @@ async def connect(
     they are parameters rather than a line the caller writes afterwards: the acceptor may push a
     stream the instant it sees the hello, and a peer whose handler is registered one await later
     answers that push `reset(REFUSED, "no on_stream handler")` (WSM-STM-033).
+
+    `open_interceptors`, `reply_headers_interceptors` and `incoming_headers_interceptors` are
+    registered in the same place and for the same reason: a stream the acceptor pushes after the hello
+    passes the incoming interceptors only if they are registered before the hello goes out
+    (WSM-API-026).
     """
     resolved = resolve_codec(codec)
     dial = _websocket_dialer(url, resolved, headers=headers, subprotocols=subprotocols)
@@ -94,6 +109,7 @@ async def connect(
         peer.on_close(on_close)
     if on_reconnect is not None:
         peer.on_reconnect(on_reconnect)
+    _register_interceptors(peer, open_interceptors, reply_headers_interceptors, incoming_headers_interceptors)
     loop = ConnectionLoop(
         peer,
         dial,
@@ -219,12 +235,15 @@ async def accept(
     error_serializer: ErrorSerializer | None = None,
     codec: Codec | None = None,
     max_frame_bytes: int = MAX_FRAME_BYTES,
+    open_interceptors: Sequence[OpenInterceptor] = (),
+    reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
+    incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
 ) -> Peer:
     """Accept an inbound connection and return a peer that is not yet serving.
 
     A Starlette `WebSocket` is upgraded here, because `accept()` is the only party that knows which
     subprotocol to select (WSM-CDC-026). Anything already implementing `SocketAdapter` is taken as
-    it is.
+    it is. The three interceptor sequences are registered on the peer in order (WSM-API-026).
     """
     resolved = resolve_codec(codec)
     adapter = await _adapt(socket, resolved.name)
@@ -237,7 +256,23 @@ async def accept(
         max_payload_bytes=max_payload_bytes,
         max_concurrent_streams=max_concurrent_streams,
     )
+    _register_interceptors(peer, open_interceptors, reply_headers_interceptors, incoming_headers_interceptors)
     return peer
+
+
+def _register_interceptors(
+    peer: Peer,
+    open_interceptors: Sequence[OpenInterceptor],
+    reply_headers_interceptors: Sequence[ReplyHeadersInterceptor],
+    incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor],
+) -> None:
+    """Register each sequence on `peer` in its order, as the matching `peer.intercept_*()` calls would."""
+    for open_interceptor in open_interceptors:
+        peer.intercept_open(open_interceptor)
+    for reply_interceptor in reply_headers_interceptors:
+        peer.intercept_reply_headers(reply_interceptor)
+    for incoming_interceptor in incoming_headers_interceptors:
+        peer.intercept_incoming_headers(incoming_interceptor)
 
 
 async def _adapt(socket: Any, codec_name: str) -> SocketAdapter:
@@ -279,7 +314,10 @@ def _is_websockets_connection(socket: Any) -> bool:
 
 
 async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_options: Any) -> None:
-    """Accept, register `handler`, and run the read loop until the socket closes."""
+    """Accept, register `handler`, and run the read loop until the socket closes.
+
+    `peer_options` are `accept()`'s keyword arguments, the three interceptor sequences included.
+    """
     try:
         peer = await accept(socket, **peer_options)
     except CodecMismatch:

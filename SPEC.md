@@ -62,7 +62,7 @@ A dialer offers `muxws.v1.<codec>` as its **first** subprotocol entry; an accept
 that value or refuses the upgrade (WSM-CDC-020..022). The `v1` is the generation, and it is the only
 version anywhere on the wire.
 
-```
+```text
 Sec-WebSocket-Protocol: muxws.v1.json, bearer.eyJhbGciOi...   # dialer offers; entry 1 is muxws's
 Sec-WebSocket-Protocol: muxws.v1.json                         # acceptor selects; or HTTP 400
 ```
@@ -263,7 +263,7 @@ The discriminator, when a new case arises: **if the peers can still agree about 
 - **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly two connection-state
   cases: `ConnectionGoingAway` after a received `goaway`, and `ConnectionLost` while the peer is
   between sockets. The only other synchronous failures are those of the peer's open interceptors
-  (WSM-API-028). It MUST NOT queue. There MUST NOT be a `StreamLimit` exception and `open()` MUST NOT fail
+  (WSM-API-027). It MUST NOT queue. There MUST NOT be a `StreamLimit` exception and `open()` MUST NOT fail
   for concurrency: that limit is the receiver's (WSM-STM-036) and surfaces asynchronously as
   `StreamRefused` on the pending await.
 - **WSM-API-005** `notify()` MUST be async and MUST return nothing. It MUST NOT return a `Stream` or
@@ -282,7 +282,7 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   async**, and the two that matter are `peer.open()` (WSM-API-001 — a synchronous open is what makes
   allocation and enqueue one indivisible step, WSM-INV-005/WSM-SID-006) and the four hook
   registrations `on_stream`/`on_frame`/`on_close`/`on_reconnect`, since a registration that suspends
-  is one an acceptor can race a pushed stream against (WSM-STM-033). The two interceptor
+  is one an acceptor can race a pushed stream against (WSM-STM-033). The three interceptor
   registrations of WSM-API-026 belong to the same synchronous half.
   Test: `peer_test.py::test_the_public_api_is_async_exactly_where_the_rule_says`, which compares the
   partition by equality in **both** directions — the enumeration above is the whole rule, so a list
@@ -354,19 +354,30 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   and here it is one the remote can cause.
   Test: `stream_test.py::test_reply_headers_arrived_settles_on_every_path`;
   `ts/stream.spec.ts` *"settles replyHeadersArrived on every path"*.
-- **WSM-API-026** A peer MUST offer two header interceptor registrations, both synchronous:
+- **WSM-API-026** A peer MUST offer three header interceptor registrations, all synchronous:
   `peer.intercept_open(interceptor)` / `peer.interceptOpen(interceptor)` for the headers of every
-  stream this peer opens (WSM-API-027), and `peer.intercept_incoming_headers(interceptor)` /
-  `peer.interceptIncomingHeaders(interceptor)` for the leading headers the remote sends
-  (WSM-API-029). Each call MUST return an unregister function taking no arguments, which removes that
-  one registration; calling it again MUST do nothing. Registering one function twice is two
+  stream this peer opens (WSM-API-027), `peer.intercept_reply_headers(interceptor)` /
+  `peer.interceptReplyHeaders(interceptor)` for the leading headers this peer answers with
+  (WSM-API-028), and `peer.intercept_incoming_headers(interceptor)` /
+  `peer.interceptIncomingHeaders(interceptor)` for the leading headers the remote sends (WSM-API-029).
+  Each call MUST return an unregister function taking no arguments, which removes that one
+  registration; calling it again MUST do nothing. Registering one function twice is two
   registrations. Interceptors MUST run in registration order, and a registration or unregistration
-  made while interceptors are running takes effect from the next open or the next arriving headers.
-  Interceptors belong to the `Peer` object, not to its connection: a dialer that re-establishes its
-  connection keeps every registration (WSM-RCN-032 discards streams, not registrations). An
+  made while interceptors are running takes effect from the next call. Interceptors belong to the
+  `Peer` object, not to its connection: a dialer that re-establishes its connection keeps every
+  registration (WSM-RCN-032 discards streams, not registrations). `connect()`, `accept()` and
+  `serve()` MUST take the three as sequences — `open_interceptors`, `reply_headers_interceptors`,
+  `incoming_headers_interceptors` / `openInterceptors`, `replyHeadersInterceptors`,
+  `incomingHeadersInterceptors` — and register them in order before the peer sends or reads its first
+  frame: `serve()` returns no peer to register on, and a `connect()` caller registering on the
+  returned peer is too late for a stream the acceptor pushes in answer to the hello (WSM-STM-033). An
   interceptor is application code; muxws itself still reads no header (WSM-AUT-002).
   Test: `reconnect_test.py::test_header_interceptors_survive_a_reconnect_and_leave_the_hello_alone`;
-  `ts/reconnect.spec.ts` *"keeps both registrations on the Peer and leaves the hello alone"*.
+  `reconnect_test.py::test_connect_and_accept_register_their_interceptors_before_any_frame`;
+  `peer_test.py::test_serve_registers_the_interceptors_it_is_given`;
+  `ts/reconnect.spec.ts` *"keeps both registrations on the Peer and leaves the hello alone"* and
+  *"registers connect()'s interceptor arrays before the first hello goes out"*;
+  `ts/node.spec.ts` *"runs them on the peer each builds, in order, before its first frame"*.
 - **WSM-API-027** `open()`, and through it `notify()` and `request()`, MUST call every open
   interceptor synchronously, after the checks of WSM-API-004 and before a stream id is allocated, as
   `(headers, payload)`. `headers` is a fresh mutable mapping holding a shallow copy of the caller's
@@ -376,24 +387,37 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   be modified, and a change made to the interceptors' mapping after `open()` returned MUST NOT reach
   the frame. When the caller passed no headers and the interceptors left the mapping empty, the
   `open` frame MUST carry no `headers` field, so interceptors that add nothing leave the wire
-  byte-identical. Interceptors receive the headers and nothing else of the frame: stream id, `end`
-  and payload are set by muxws after they return. The reconnect helper's hello is not opened through
-  `open()` and MUST NOT pass through open interceptors, since it is replayed byte-identical
-  (WSM-RCN-027). The answering side's leading headers (WSM-API-024) are not intercepted.
+  byte-identical. The reconnect helper's hello is not opened through `open()` and MUST NOT pass
+  through open interceptors, since it is replayed byte-identical (WSM-RCN-027).
+  An open interceptor that raises MUST fail the `open()` call synchronously with that exception,
+  unchanged: no later interceptor runs, no stream id is allocated, nothing is enqueued, and the peer
+  stays usable. `notify()` and `request()` raise it from their await. An interceptor that returns an
+  awaitable (a coroutine or other awaitable in Python, a thenable in TypeScript) MUST fail the call
+  the same way with a `TypeError`: interceptors are synchronous and nothing awaits them. Python closes
+  the coroutine first, so no `RuntimeWarning` follows. Any other return value is ignored. After the
+  last interceptor every key of the mapping MUST be a string — the envelope's `headers` has string
+  keys (§2.2) — and a key that is not (a non-`str` key in Python, a symbol key in TypeScript) MUST
+  fail the call the same way with a `TypeError`, rather than reach a codec that would drop or coerce
+  it.
   Test: `peer_test.py::test_open_interceptors_shape_the_headers_of_every_open`;
-  `ts/peer.spec.ts` *"shapes the headers of every open in registration order, on a copy"*.
-- **WSM-API-028** An open interceptor that raises MUST fail the `open()` call synchronously with that
-  exception, unchanged: no later interceptor runs, no stream id is allocated, nothing is enqueued, and
-  the peer stays usable. `notify()` and `request()` raise it from their await. An open interceptor
-  that returns an awaitable (a coroutine or other awaitable in Python, a thenable in TypeScript) MUST
-  fail the open the same way with a `TypeError`: interceptors are synchronous and nothing awaits them.
-  Python closes the coroutine first, so no `RuntimeWarning` follows. Any other return value is
-  ignored. After the last interceptor every key of the mapping MUST be a string — the envelope's
-  `headers` has string keys (§2.2) — and a key that is not (a non-`str` key in Python, a symbol key in
-  TypeScript) MUST fail the open the same way with a `TypeError`, rather than reach a codec that would
-  drop or coerce it.
-  Test: `peer_test.py::test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing`;
-  `ts/peer.spec.ts` *"fails the open with the interceptor error and spends nothing"*.
+  `peer_test.py::test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing`;
+  `ts/peer.spec.ts` *"shapes the headers of every open in registration order, on a copy"* and
+  *"fails the open with the interceptor error and spends nothing"*.
+- **WSM-API-028** Reply headers interceptors MUST be called once per stream the remote opened,
+  synchronously, by the call that sends this peer's first frame on that stream (WSM-FRM-016):
+  `send_headers()` / `sendHeaders()`, `send()`, `end()`, `reply()`, or the implicit end of
+  WSM-STM-035. The call is `(headers, stream)`, with `headers` a fresh mutable mapping holding a
+  shallow copy of the headers that call was given, empty when it was given none. The mapping as the
+  last interceptor left it is what the frame carries and what `stream.reply_headers` /
+  `stream.replyHeaders` holds, under the copy, empty-mapping and failure rules of WSM-API-027, with
+  one addition: a failed call leaves the first frame unspent, so a later call on the stream may still
+  carry headers. A failure during the implicit end of WSM-STM-035 is the handler's, and resets the
+  stream as WSM-STM-034 requires. A frame on a stream this peer opened calls no reply headers
+  interceptor, and neither does a `reset`, which carries no headers.
+  Test: `peer_test.py::test_reply_headers_interceptors_shape_the_first_frame_of_every_answer`;
+  `peer_test.py::test_a_reply_headers_interceptor_that_raises_fails_the_call_and_spends_nothing`;
+  `ts/peer.spec.ts` *"shapes the first frame of every answer, on a copy, whichever call sends it"* and
+  *"fails the call that sends the answer and leaves its first frame unspent"*.
 - **WSM-API-029** Incoming interceptors MUST be called exactly once per stream, synchronously inside
   the read loop, when the remote's first stream-level frame on that stream is accepted. For a stream
   the remote opened that frame is the `open` (the first fragment of a fragmented one), and the call
@@ -405,16 +429,15 @@ The discriminator, when a new case arises: **if the peers can still agree about 
   none) — a `MappingProxyType` in Python, a frozen copy in TypeScript — and `stream.local` tells the
   two cases apart. A `reset` is not an answer and calls no interceptor (WSM-FRM-016); neither does a
   stream that closes unanswered, nor an `open` refused under WSM-STM-036, which creates no stream.
-  Return values are ignored.
+  Return values are ignored. An incoming interceptor that raises MUST be logged and MUST change
+  nothing else: the remaining interceptors still run, the frame is processed as if no interceptor
+  were registered, the stream is not reset, and the connection survives. One that returns an
+  awaitable MUST be logged the same way, and the awaitable is not awaited: Python closes a returned
+  coroutine, TypeScript attaches a rejection handler to a returned thenable.
   Test: `peer_test.py::test_incoming_interceptors_see_each_streams_leading_headers_once`;
-  `ts/peer.spec.ts` *"hands each stream's leading headers to incoming interceptors once, frozen"*.
-- **WSM-API-030** An incoming interceptor that raises MUST be logged and MUST change nothing else:
-  the remaining interceptors still run, the frame is processed as if no interceptor were registered,
-  the stream is not reset, and the connection survives. One that returns an awaitable MUST be logged
-  the same way, and the awaitable is not awaited: Python closes a returned coroutine, TypeScript
-  attaches a rejection handler to a returned thenable.
-  Test: `peer_test.py::test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing`;
-  `ts/peer.spec.ts` *"logs an incoming interceptor that throws and changes nothing else"*.
+  `peer_test.py::test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing`;
+  `ts/peer.spec.ts` *"hands each stream's leading headers to incoming interceptors once, frozen"* and
+  *"logs an incoming interceptor that throws and changes nothing else"*.
 
 **Call shapes.** Unary is `open(end)` → `data(end)`; a streaming response is `open(end)` → `data`…
 `data(end)`, optionally led by a payload-less `data(headers)` announcing what is coming
@@ -599,7 +622,7 @@ one-shot push is `open(end)` with nothing awaited. Durations are **seconds as fl
 The hierarchy, mirrored class-for-class in every port, with a `name` / `__class__` discriminator so a
 cross-language test can assert on error identity:
 
-```
+```text
 MuxwsError
 ├── ProtocolError              # this peer or the remote violated the spec
 ├── ConnectionClosed           # socket died; carries .code, .reason, .was_clean
@@ -953,7 +976,7 @@ prevents.
 - **WSM-OBS-001** Every frame MUST be loggable in one line at `DEBUG` under the `muxws.frames`
   logger:
 
-```
+```text
 muxws conn=a3f-17 dir=tx type=open   stream=7 end=0 bytes=214 headers=1
 muxws conn=a3f-17 dir=rx type=data   stream=7 end=0 bytes=8192 frag=more
 muxws conn=a3f-17 dir=tx type=reset  stream=9 bytes=96 code=1 reason='user navigated away'
@@ -995,7 +1018,7 @@ port to choose; see Appendix B.
 
 The reconnect helper exists on the **dialer only**. An acceptor cannot dial and MUST NOT have one.
 
-```
+```text
 delay = min(initial_delay * factor ** attempts, max_delay)
 delay = delay * (1 + uniform(-jitter, +jitter))
 ```
@@ -1376,7 +1399,7 @@ much as the mutation that kills the witness, and the mutation is given with it.
 
 ### The count
 
-Of the **223** individually numbered rules in §5, **19** have no citing test.
+Of the **222** individually numbered rules in §5, **19** have no citing test.
 
 Of those 19: **fourteen** are exercised by a test that simply does not name them; **one**
 (`WSM-PKG-004`) is enforced by the linters; **two** (`WSM-TST-004`, `WSM-TST-005`) by a CI job; and

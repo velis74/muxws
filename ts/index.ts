@@ -107,6 +107,7 @@ export {
   type OpenOptions,
   Peer,
   type PeerOptions,
+  type ReplyHeadersInterceptor,
   type RequestOptions,
   type StreamHandler,
   defaultErrorSerializer,

@@ -36,6 +36,7 @@ from muxws.peer import (
     IncomingHeadersInterceptor,
     OpenInterceptor,
     Peer,
+    ReplyHeadersInterceptor,
     StreamHandler,
 )
 from muxws.reconnect import backoff_delay, Hello, Reconnect, should_retry, unjittered_delay
@@ -72,6 +73,7 @@ __all__ = [
     "ProtocolError",
     "Reconnect",
     "RemoteError",
+    "ReplyHeadersInterceptor",
     "ResetCode",
     "Settings",
     "SocketAdapter",

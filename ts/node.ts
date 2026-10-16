@@ -18,7 +18,15 @@ import type { ClientOptions, WebSocket as NodeWebSocket, WebSocketServer } from 
 import { type Codec, getCodec } from './codec';
 import { settings } from './conf';
 import { CodecMismatch, TransportUnsupportedError, TransportUrlError } from './errors';
-import { type ErrorSerializer, Peer, type StreamHandler } from './peer';
+import {
+  type ErrorSerializer,
+  type IncomingHeadersInterceptor,
+  type OpenInterceptor,
+  Peer,
+  registerInterceptors,
+  type ReplyHeadersInterceptor,
+  type StreamHandler,
+} from './peer';
 import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
 import { mismatchError, offer, PREFIX, select } from './subprotocol';
 import { WsSocket } from './transports/ws-socket';
@@ -445,6 +453,12 @@ export interface AcceptOptions {
   errorSerializer?: ErrorSerializer;
   codec?: Codec;
   maxFrameBytes?: number;
+  /** Registered on the peer, in order, as `peer.interceptOpen()` would (WSM-API-026). */
+  openInterceptors?: readonly OpenInterceptor[];
+  /** Registered on the peer, in order, as `peer.interceptReplyHeaders()` would (WSM-API-026). */
+  replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
+  /** Registered on the peer, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
+  incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
 }
 
 /**
@@ -506,7 +520,7 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
     throw mismatchError(codec.name);
   }
 
-  return new Peer(new WsSocket(socket), {
+  const peer = new Peer(new WsSocket(socket), {
     codec,
     isDialer: false,
     errorSerializer: options.errorSerializer,
@@ -516,6 +530,8 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
     maxPayloadBytes: options.maxPayloadBytes,
     maxConcurrentStreams: options.maxConcurrentStreams,
   });
+  registerInterceptors(peer, options);
+  return peer;
 }
 
 /**
