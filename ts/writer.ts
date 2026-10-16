@@ -174,11 +174,15 @@ export class Writer {
 
   private readonly wake = new Gate();
 
+  /** Set while the write loop has sent every frame passed to `enqueue`; cleared by `enqueue`. */
+  private readonly idle = new Gate();
+
   private stopped = false;
 
   constructor(codec: Codec, options: { maxFrameBytes?: number } = {}) {
     this.codec = codec;
     this.cap = options.maxFrameBytes ?? MAX_FRAME_BYTES;
+    this.idle.set();
   }
 
   /** Every unsent frame across every lane. */
@@ -208,6 +212,7 @@ export class Writer {
       this.order.push(lane);
     }
     queue.put(frame);
+    this.idle.clear();
     this.wake.set();
   }
 
@@ -222,9 +227,23 @@ export class Writer {
       const frame = this.rotate();
       if (frame !== null) return frame;
       this.wake.clear();
-      if (![...this.queues.values()].some((queue) => queue.hasWork)) await this.wake.wait();
+      if (![...this.queues.values()].some((queue) => queue.hasWork)) {
+        // The caller asks for the next frame only after the previous one was passed to the socket,
+        // so no work here means every enqueued frame has been sent.
+        this.idle.set();
+        await this.wake.wait();
+      }
       if (this.stopped) return null;
     }
+  }
+
+  /**
+   * Resolves once every enqueued frame, including every fragment of a fragmented one, has been sent.
+   *
+   * Also resolves after `stop()` and `discardAll()`, which leave nothing to send.
+   */
+  waitIdle(): Promise<void> {
+    return this.idle.wait();
   }
 
   /**
@@ -295,6 +314,7 @@ export class Writer {
   /** Stop the writer. Every subsequent and pending `nextFrame` resolves `null`. */
   stop(): void {
     this.stopped = true;
+    this.idle.set();
     this.wake.set();
   }
 
@@ -305,6 +325,7 @@ export class Writer {
     });
     this.queues.clear();
     this.order.length = 0;
+    this.idle.set();
     this.wake.set();
   }
 }

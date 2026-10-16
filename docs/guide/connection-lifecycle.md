@@ -163,6 +163,9 @@ except ConnectionGoingAway:
 which the socket is closed whether or not they have finished. The window is a deadline, so a remote
 that keeps a stream open does not prevent the close.
 
+Within the same window the peer sends every frame already queued, including every remaining fragment
+of a large payload, before it closes the socket. A frame still queued at the deadline is not sent.
+
 Streams still live when the deadline expires are handled as on socket death: each fails locally with
 `ConnectionLost`, and no frame is sent for it.
 

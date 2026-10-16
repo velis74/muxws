@@ -13,6 +13,7 @@ import { vi } from 'vitest';
 import { type Codec, JsonCodec } from './codec';
 import {
   ConnectionClosed,
+  ConnectionGoingAway,
   ConnectionLost,
   ProtocolError,
   RemoteError,
@@ -121,12 +122,21 @@ class Pair {
 const built: Pair[] = [];
 
 /** Build a peer pair without starting it, so a test can register handlers first. */
-function makePair(options: { errorSerializer?: ErrorSerializer; codec?: Codec } = {}): Pair {
+function makePair(
+  options: {
+    errorSerializer?: ErrorSerializer;
+    codec?: Codec;
+    maxFrameBytes?: number;
+    /** The adapter the acceptor uses in place of its `MemorySocket`; `sentBy` still reads the `MemorySocket`. */
+    wrapAcceptor?: (socket: MemorySocket) => SocketAdapter;
+  } = {},
+): Pair {
   const [left, right] = memoryPair();
   const codec = options.codec ?? new JsonCodec();
+  const { errorSerializer, maxFrameBytes } = options;
   const pair = new Pair(
-    new Peer(left, { codec, isDialer: true, errorSerializer: options.errorSerializer }),
-    new Peer(right, { codec, isDialer: false, errorSerializer: options.errorSerializer }),
+    new Peer(left, { codec, isDialer: true, errorSerializer, maxFrameBytes }),
+    new Peer(options.wrapAcceptor?.(right) ?? right, { codec, isDialer: false, errorSerializer, maxFrameBytes }),
     left,
     right,
     codec,
@@ -1465,6 +1475,137 @@ describe('edges', () => {
     expect(pair.dialer.isOpen).toBe(false);
     expect(closes).toHaveLength(1);
     expect(stream.signal.aborted).toBe(true);
+  });
+});
+
+// --------------------------------------------------------------------------- shutdown
+
+/** Delegates to a `MemorySocket`. With `suspend`, every send waits 1 ms before it reaches the wire. */
+class WrappedSocket implements SocketAdapter {
+  constructor(
+    private readonly inner: MemorySocket,
+    private readonly options: { suspend?: boolean; failingClose?: boolean } = {},
+  ) {}
+
+  async sendText(text: string): Promise<void> {
+    if (this.options.suspend === true) await sleepMs(1);
+    this.inner.sendText(text);
+  }
+
+  async sendBytes(bytes: ArrayBuffer): Promise<void> {
+    if (this.options.suspend === true) await sleepMs(1);
+    this.inner.sendBytes(bytes);
+  }
+
+  receive(): Promise<string | ArrayBuffer> {
+    return this.inner.receive();
+  }
+
+  close(code?: number, reason?: string): void {
+    this.inner.close(code, reason);
+    if (this.options.failingClose === true) throw new Error('the adapter failed to close');
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** [label, send suspends, reply size]: a socket whose send suspends, and a reply of more than 1000 fragments. */
+const DRAIN_CASES: [string, boolean, number][] = [
+  ['a send that suspends', true, 4_000],
+  ['more than 1000 fragments', false, 200_000],
+];
+
+function expectReplyAndGoawaySent(frames: Frame[]): void {
+  const pieces = frames.filter((frame) => frame.type === 'data');
+  expect(pieces.length, 'the reply must have been fragmented').toBeGreaterThan(1);
+  const last = pieces[pieces.length - 1];
+  expect(last.more === true, 'the last fragment of the reply must be on the wire').toBe(false);
+  expect(last.end).toBe(true);
+  expect(frames.some((frame) => frame.type === 'goaway')).toBe(true);
+}
+
+/** Start `pair` with an acceptor handler that replies with `payload`; resolves once the reply is enqueued. */
+function replyOnce(pair: Pair, payload: unknown): Promise<void> {
+  return new Promise<void>((resolve) => {
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      await stream.reply(payload);
+      resolve();
+    });
+    pair.start();
+  });
+}
+
+describe('shutdown', () => {
+  it.each(DRAIN_CASES)(
+    'close() sends every queued fragment before closing the socket, with %s - WSM-CON-025/WSM-FRG-017',
+    async (_label, suspend, size) => {
+      const pair = makePair({ maxFrameBytes: 200, wrapAcceptor: (socket) => new WrappedSocket(socket, { suspend }) });
+      const blob = { blob: 'x'.repeat(size) };
+      const replied = replyOnce(pair, blob);
+      const stream = pair.dialer.open({ q: 1 }, { end: true });
+      await replied;
+      await pair.acceptor.close({ drainMs: 5000 });
+
+      expectReplyAndGoawaySent(pair.sentBy('acceptor'));
+      expect(await stream.result()).toEqual(blob);
+    },
+    15_000,
+  );
+
+  it.each(DRAIN_CASES)(
+    'a connection failure closes the socket only after goaway and every queued fragment are sent, with %s - ILL-C',
+    async (_label, suspend, size) => {
+      const pair = makePair({ maxFrameBytes: 200, wrapAcceptor: (socket) => new WrappedSocket(socket, { suspend }) });
+      const replied = replyOnce(pair, { blob: 'x'.repeat(size) });
+      pair.dialer.open({ q: 1 }, { end: true });
+      await replied;
+      pair.injectRaw('acceptor', '{"type":"open","code":0}');
+      for (let turn = 0; turn < 2000 && pair.acceptor.isOpen; turn += 1) await sleepMs(1);
+
+      expect(pair.acceptor.isOpen).toBe(false);
+      const frames = pair.sentBy('acceptor');
+      expectReplyAndGoawaySent(frames);
+      expect(frames.filter((frame) => frame.type === 'goaway').map((frame) => frame.code)).toEqual([
+        ResetCode.PROTOCOL_ERROR,
+      ]);
+    },
+    15_000,
+  );
+
+  it('a connection failure refuses local opens while it drains - WSM-CON-021/ILL-C', async () => {
+    const pair = makePair({
+      maxFrameBytes: 200,
+      wrapAcceptor: (socket) => new WrappedSocket(socket, { suspend: true }),
+    });
+    const replied = replyOnce(pair, { blob: 'x'.repeat(40_000) });
+    pair.dialer.open({ q: 1 }, { end: true });
+    await replied;
+    pair.injectRaw('acceptor', '{"type":"open","code":0}');
+    const goawaySent = (): boolean => pair.sentBy('acceptor').some((frame) => frame.type === 'goaway');
+    for (let turn = 0; turn < 2000 && !goawaySent(); turn += 1) await sleepMs(1);
+
+    expect(pair.acceptor.isOpen, 'the drain must still be sending the reply').toBe(true);
+    expect(() => pair.acceptor.open({ q: 2 })).toThrow(ConnectionGoingAway);
+  }, 15_000);
+
+  it('close() marks the peer dead when the adapter close throws - WSM-CON-025/WSM-STM-014', async () => {
+    const pair = makePair({ wrapAcceptor: (socket) => new WrappedSocket(socket, { failingClose: true }) });
+    pair.acceptor.onStream(hold);
+    const closes: CloseReason[] = [];
+    pair.acceptor.onClose((reason) => closes.push(reason));
+    pair.start();
+    const stream = pair.acceptor.open({ q: 1 });
+    await pair.settle();
+    await pair.acceptor.close({ drainMs: 10 });
+
+    expect(pair.acceptor.isOpen).toBe(false);
+    expect(stream.signal.aborted).toBe(true);
+    expect(closes.map((reason) => reason.code)).toEqual([1000]);
+    expect(logged.warn.some((line) => line.includes('closing the socket failed'))).toBe(true);
   });
 });
 

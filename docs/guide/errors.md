@@ -218,9 +218,10 @@ first use claims it, and a second use (awaiting a stream that is being iterated,
 twice) raises. See [Call shapes](/guide/call-shapes).
 
 `ProtocolError` means a peer violated the protocol. When the remote violates it, this peer ends the
-connection with `goaway(PROTOCOL_ERROR)`. When raised locally, it means the call is invalid, for
-example resetting a stream with `CONNECTION_CLOSED`, which must not be sent, or with a number this
-generation does not define.
+connection with `goaway(PROTOCOL_ERROR)`: it sends the frames already queued, for at most 10 seconds,
+then closes the socket, and from the moment `goaway` is queued `open()` raises `ConnectionGoingAway`.
+When raised locally, it means the call is invalid, for example resetting a stream with
+`CONNECTION_CLOSED`, which must not be sent, or with a number this generation does not define.
 
 ## Errors a transport reports, and the two you catch
 

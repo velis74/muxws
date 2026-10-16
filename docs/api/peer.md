@@ -1717,8 +1717,9 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.close()` (Python)
 
-Close the connection in order: send `goaway`, wait up to the drain deadline for live streams to end,
-then close the socket.
+Close the connection in order: send `goaway`, wait up to the drain deadline for live streams to end
+and for every queued frame to be sent, then close the socket. Queued frames include every remaining
+fragment of a fragmented payload.
 
 On a dialer it first stops the reconnect helper, **before** the `is_open` check, so a `close()` called
 while the helper waits out a backoff delay prevents the next dial.
@@ -1735,7 +1736,7 @@ async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None =
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code carried by the `goaway` frame. Positional, unlike most muxws options. |
 | `reason` | `str \| None` | `None` | Free text on the `goaway` and on the WebSocket close frame. |
-| `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish before the socket is closed regardless. The socket is closed at the deadline even if the remote keeps a stream open. Streams still live at the deadline fail locally with `ConnectionLost`. |
+| `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish and queued frames be sent before the socket is closed regardless. The socket is closed at the deadline even if the remote keeps a stream open or frames are still queued. Streams still live at the deadline fail locally with `ConnectionLost`. |
 
 ### Return
 
@@ -1743,8 +1744,8 @@ async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None =
 
 ### Raises
 
-Raises: nothing of its own. An exception raised by the socket adapter's `close()` propagates; the
-TypeScript `close()` catches and logs it instead.
+Raises: nothing. An exception from the socket adapter's `close()` is logged as a warning, and the peer
+is still marked closed.
 
 ### Example
 
@@ -1835,7 +1836,7 @@ export interface CloseOptions {
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code on the `goaway` frame. |
 | `reason` | `string` | `null` | Free text on the `goaway` and the WebSocket close frame. |
-| `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish before closing regardless. The Python equivalent is `drain=10.0` seconds. |
+| `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish and queued frames be sent before closing regardless. The Python equivalent is `drain=10.0` seconds. |
 
 ### Return
 

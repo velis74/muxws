@@ -42,6 +42,9 @@ logger = logging.getLogger("muxws.frames")
 _PROCESS_PREFIX = f"{random.getrandbits(12):03x}"  # noqa: S311
 #: Monotonic and never reused, so no two connections in one process share an id (WSM-API-009).
 _CONNECTION_COUNTER = itertools.count()
+#: Seconds a connection-level protocol error waits for queued frames, `goaway` among them, before it
+#: closes the socket. Equal to `close()`'s default drain.
+_FAILURE_DRAIN = 10.0
 
 StreamHandler = Callable[[Any, Stream], Any]
 ErrorSerializer = Callable[[BaseException], Any]
@@ -584,7 +587,12 @@ class Peer:
     # ------------------------------------------------------------------ shutdown
 
     async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None = None, drain: float = 10.0) -> None:
-        """Send `goaway`, wait up to `drain` seconds for live streams to end, then close the socket (WSM-CON-025)."""
+        """Send `goaway`, drain for up to `drain` seconds, then close the socket (WSM-CON-025).
+
+        The drain waits for live streams to end and for the write loop to send every queued frame,
+        including every remaining fragment of a fragmented payload; one deadline bounds both. An
+        exception from the socket adapter's `close()` is logged, and the peer is marked closed.
+        """
         # The reconnect helper is stopped before the `_is_open` check. Between two sockets `_is_open`
         # is false while the helper waits in its backoff; returning early there would leave the
         # helper running, and it would dial again after `close()` returned (WSM-RCN-040/044).
@@ -595,7 +603,7 @@ class Peer:
             return
         self._send_goaway(code, reason)
         await self._drain(drain)
-        await self._socket.close(1000, reason or "")
+        await self._close_socket(1000, reason or "")
         self._die(ConnectionClosed(reason or "closed", code=1000, reason=reason or "", was_clean=True))
 
     def _send_goaway(self, code: ResetCode, reason: str | None) -> None:
@@ -632,9 +640,10 @@ class Peer:
         return True
 
     async def _drain(self, timeout: float) -> None:
-        """Wait until no stream is live or `timeout` seconds have passed (WSM-CON-024).
+        """Wait until no stream is live and every queued frame is sent, or `timeout` seconds have passed (WSM-CON-024).
 
-        The wait ends at the deadline even if the remote keeps a stream open.
+        The wait ends at the deadline even if the remote keeps a stream open or the socket does not
+        accept the queued frames.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -644,7 +653,7 @@ class Peer:
             await asyncio.sleep(0.005)
         # Streams still live at the deadline fail locally with `ConnectionLost` when the socket
         # closes; no reset is sent for them.
-        await self._drain_outbound()
+        await self._drain_outbound(deadline)
 
     def _exhausted(self) -> bool:
         return self._next_id > MAX_STREAM_ID
@@ -938,6 +947,10 @@ class Peer:
     async def _fail_connection(self, reason: str) -> None:
         """ILL-C: goaway(PROTOCOL_ERROR), close the socket, then fail every live stream."""
         logger.warning("muxws conn=%s connection-level protocol error: %s", self.id, reason)
+        # Marked as sent before the drain, so no stream is opened while the queued frames are sent
+        # (WSM-CON-021).
+        self._goaway.sent = True
+        self._goaway.sent_code = int(ResetCode.PROTOCOL_ERROR)
         self._enqueue(
             Frame(
                 "goaway",
@@ -946,16 +959,35 @@ class Peer:
                 last_stream=self._highest_remote_open,
             )
         )
-        await self._drain_outbound()
-        await self._socket.close(1002, reason)
+        await self._drain_outbound(asyncio.get_running_loop().time() + _FAILURE_DRAIN)
+        await self._close_socket(1002, reason)
         self._die(ConnectionClosed(reason, code=1002, reason=reason, was_clean=False))
 
-    async def _drain_outbound(self) -> None:
-        """Yield up to 200 event-loop turns while the writer has queued frames, so `goaway` is sent."""
-        for _ in range(200):
-            if len(self._writer) == 0:
-                break
-            await asyncio.sleep(0)
+    async def _drain_outbound(self, deadline: float) -> None:
+        """Wait until the write loop has sent every queued frame, the write loop has ended, or `deadline` passes.
+
+        `deadline` is in event-loop time. Every remaining fragment of a fragmented payload counts as
+        queued, including while the write loop awaits the socket's send.
+        """
+        task = self._writer_task
+        if task is not None and task.done():
+            return
+        # Without a write loop yet, `serve()` may be scheduled and not started; the wait is for the
+        # writer alone.
+        idle = asyncio.ensure_future(self._writer.wait_idle())
+        waited: set[asyncio.Future[Any]] = {idle} if task is None else {idle, task}
+        try:
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            await asyncio.wait(waited, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            idle.cancel()
+
+    async def _close_socket(self, code: int, reason: str) -> None:
+        """Close the socket. An exception from the adapter is logged; the caller marks the peer dead regardless."""
+        try:
+            await self._socket.close(code, reason)
+        except Exception:  # noqa: BLE001 - a socket whose close fails is treated as closed
+            logger.warning("muxws conn=%s closing the socket failed", self.id, exc_info=True)
 
     async def _stop_writer(self) -> None:
         if self._writer_task is not None and not self._writer_task.done():

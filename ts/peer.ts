@@ -131,6 +131,12 @@ export const DEFAULT_PING_TIMEOUT_MS = 5000;
 /** `peer.close()`'s default drain window in milliseconds; Python: `drain=10.0` (WSM-CON-024). */
 export const DEFAULT_DRAIN_MS = 10_000;
 
+/**
+ * Milliseconds a connection-level protocol error waits for queued frames, `goaway` among them,
+ * before it closes the socket. Equal to `close()`'s default drain; Python: `_FAILURE_DRAIN`.
+ */
+const FAILURE_DRAIN_MS = DEFAULT_DRAIN_MS;
+
 /** WSM-ERR-006's default. A public-facing deployment should replace it with a redacting one. */
 export function defaultErrorSerializer(error: unknown): unknown {
   if (error instanceof Error) return { type: error.name, message: error.message };
@@ -244,13 +250,6 @@ function checkedFrameCap(cap: number, codec: Codec): number {
     );
   }
   return cap;
-}
-
-/** One turn of the event loop; the equivalent of `await asyncio.sleep(0)`. */
-function yieldToEventLoop(): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, 0);
-  });
 }
 
 /**
@@ -431,15 +430,6 @@ export class Peer {
   private writer: Writer;
 
   private writerTask: Promise<void> | null = null;
-
-  /**
-   * Frames passed to `enqueue` and not yet sent or failed. `drainOutbound` waits for it to reach 0.
-   *
-   * The writer's queues do not include a frame that `nextFrame()` has returned but the write loop
-   * has not yet sent, so the writer's depth alone would let `drainOutbound` return before `goaway`
-   * was sent.
-   */
-  private pendingFrames = 0;
 
   private writerStopped = false;
 
@@ -835,7 +825,6 @@ export class Peer {
 
   /** @internal Called by `Stream` and `Peer`. Synchronous, so `open()` does not suspend mid-allocation. */
   enqueue(frame: Frame): void {
-    this.pendingFrames += 1;
     this.writer.enqueue(frame);
   }
 
@@ -848,7 +837,6 @@ export class Peer {
         if (error instanceof LaneEncodingError) {
           // A codec error inside the writer fails only that lane's stream; the write loop and the
           // connection continue.
-          this.pendingFrames = Math.max(0, this.pendingFrames - 1);
           this.failLane(error);
           continue;
         }
@@ -873,8 +861,6 @@ export class Peer {
         if (error instanceof ConnectionClosed) return;
         logger.error(`muxws conn=${this.id} could not send a ${frame.type} frame`, error);
         this.failUnsendable(frame, error);
-      } finally {
-        this.pendingFrames -= 1;
       }
     }
   }
@@ -1088,14 +1074,20 @@ export class Peer {
 
   // ------------------------------------------------------------------ shutdown
 
-  /** Send `goaway`, drain, then close the socket (WSM-CON-025). */
+  /**
+   * Send `goaway`, drain for up to `drainMs`, then close the socket (WSM-CON-025).
+   *
+   * The drain waits for live streams to end and for the write loop to send every queued frame,
+   * including every remaining fragment of a fragmented payload; one deadline bounds both. An error
+   * from the socket adapter's `close()` is logged, and the peer is marked closed.
+   */
   async close(options: CloseOptions = {}): Promise<void> {
     const { code = ResetCode.NO_ERROR, reason = null, drainMs = DEFAULT_DRAIN_MS } = options;
     // Before the `open_` check: after `close()` the helper never dials again (WSM-RCN-040/044),
     // including when the peer is between sockets and the helper is waiting for the next dial.
     // `willRetry` must be false before `die()` builds the `CloseReason` below.
     this.willRetry = false;
-    void this.connectionLoop?.stop();
+    await this.connectionLoop?.stop();
     if (!this.open_) return;
     this.sendGoaway(code, reason);
     await this.drain(drainMs);
@@ -1140,25 +1132,27 @@ export class Peer {
   }
 
   /**
-   * Wait until every live stream has closed or `timeoutMs` has elapsed, whichever is first
-   * (WSM-CON-024), then wait for queued frames to be sent.
+   * Wait until every live stream has closed and every queued frame is sent, or `timeoutMs` has
+   * elapsed, whichever is first (WSM-CON-024).
    *
-   * Without the deadline a remote that keeps a stream open would prevent the close. Streams still
-   * live at the deadline fail with `ConnectionLost` when `die()` runs; nothing is sent for them.
+   * Without the deadline a remote that keeps a stream open, or a socket that does not accept the
+   * queued frames, would prevent the close. Streams still live at the deadline fail with
+   * `ConnectionLost` when `die()` runs; nothing is sent for them.
    */
   private async drain(timeoutMs: number): Promise<void> {
+    const deadline = monotonicNowMs() + timeoutMs;
     if (this.liveStreams.size > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<void>((resolve) => {
+      const expired = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
       });
       try {
-        await Promise.race([this.allStreamsClosed(), deadline]);
+        await Promise.race([this.allStreamsClosed(), expired]);
       } finally {
         clearTimeout(timer);
       }
     }
-    await this.drainOutbound();
+    await this.drainOutbound(deadline);
   }
 
   /**
@@ -1500,13 +1494,17 @@ export class Peer {
   /** Connection-level protocol error: send goaway(PROTOCOL_ERROR), close the socket, then fail every live stream. */
   private async failConnection(reason: string): Promise<void> {
     logger.warn(`muxws conn=${this.id} connection-level protocol error: ${reason}`);
+    // Marked as sent before the drain, so no stream is opened while the queued frames are sent
+    // (WSM-CON-021).
+    this.goaway.sent = true;
+    this.goaway.sentCode = ResetCode.PROTOCOL_ERROR;
     this.enqueue({
       type: 'goaway',
       code: ResetCode.PROTOCOL_ERROR,
       reason,
       last_stream: this.highestRemoteOpen,
     });
-    await this.drainOutbound();
+    await this.drainOutbound(monotonicNowMs() + FAILURE_DRAIN_MS);
     try {
       await this.socket.close(1002, reason);
     } catch (error) {
@@ -1516,12 +1514,32 @@ export class Peer {
     this.die(new ConnectionClosed(reason, { code: 1002, reason, wasClean: false }));
   }
 
-  /** Wait, for at most 100 event-loop turns, until queued frames (including `goaway`) are sent. */
-  private async drainOutbound(): Promise<void> {
-    for (let turn = 0; turn < 100; turn += 1) {
-      if (this.pendingFrames === 0) return;
-      if (this.writerTask === null || this.writerStopped) return;
-      await yieldToEventLoop();
+  /**
+   * Wait until the write loop has sent every queued frame, the write loop has ended, or `deadline`
+   * (a `monotonicNowMs()` value) passes.
+   *
+   * Every remaining fragment of a fragmented payload counts as queued, including while the write
+   * loop awaits the socket's send.
+   */
+  private async drainOutbound(deadline: number): Promise<void> {
+    if (this.writerStopped) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(0, deadline - monotonicNowMs()));
+    });
+    const waited = [this.writer.waitIdle(), expired];
+    if (this.writerTask !== null) {
+      waited.push(
+        this.writerTask.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+    }
+    try {
+      await Promise.race(waited);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -1623,13 +1641,12 @@ export class Peer {
     this.finalCloseReported = false;
     this.goaway = new GoawayState();
     this.writer = new Writer(this.codec, { maxFrameBytes: this.maxFrameBytes });
-    // `writerTask` corresponds to Python's `_writer_task = None`; `writerStopped` and `pendingFrames`
-    // have no Python counterpart, because Python cancels the task. A `writerTask` still pointing at
-    // the previous socket's loop, or `writerStopped` still true, would make `serve()` on the new
-    // socket send nothing.
+    // `writerTask` corresponds to Python's `_writer_task = None`; `writerStopped` has no Python
+    // counterpart, because Python cancels the task. A `writerTask` still pointing at the previous
+    // socket's loop, or `writerStopped` still true, would make `serve()` on the new socket send
+    // nothing.
     this.writerTask = null;
     this.writerStopped = false;
-    this.pendingFrames = 0;
     this.exhaustionShutdown = null;
     this.open_ = true;
     this.death = null;

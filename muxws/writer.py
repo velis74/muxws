@@ -116,6 +116,9 @@ class Writer:
         #: index into a list, so removing a lane does not shift which lane is asked next.
         self._order: deque[int] = deque()
         self._wake = asyncio.Event()
+        #: Set while the write loop has sent every frame handed to `enqueue`; cleared by `enqueue`.
+        self._idle = asyncio.Event()
+        self._idle.set()
         self._stopped = False
 
     def __len__(self) -> int:
@@ -142,6 +145,7 @@ class Writer:
             self._queues[lane] = queue
             self._order.append(lane)
         queue.put(frame)
+        self._idle.clear()
         self._wake.set()
 
     async def next_frame(self) -> Frame | None:
@@ -157,6 +161,9 @@ class Writer:
                 return frame
             self._wake.clear()
             if not any(queue.has_work for queue in self._queues.values()):
+                # The caller asks for the next frame only after the previous one reached the socket,
+                # so no work here means every enqueued frame has been sent.
+                self._idle.set()
                 await self._wake.wait()
             if self._stopped:
                 return None
@@ -200,6 +207,13 @@ class Writer:
         except ValueError:
             pass
 
+    async def wait_idle(self) -> None:
+        """Return once every enqueued frame, including every fragment of a fragmented one, has been sent.
+
+        Also returns after `stop()` and `discard_all()`, which leave nothing to send.
+        """
+        await self._idle.wait()
+
     def advance(self, stream_id: int) -> None:
         """Slice that stream's next fragment, now that its previous one has reached the socket."""
         queue = self._queues.get(stream_id if stream_id else CONNECTION_LANE)
@@ -221,6 +235,7 @@ class Writer:
     def stop(self) -> None:
         """Stop the writer. Every later `next_frame` call returns None."""
         self._stopped = True
+        self._idle.set()
         self._wake.set()
 
     def discard_all(self) -> None:
@@ -230,4 +245,5 @@ class Writer:
             queue.discard()
         self._queues.clear()
         self._order.clear()
+        self._idle.set()
         self._wake.set()
