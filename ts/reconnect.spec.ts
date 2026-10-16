@@ -1471,9 +1471,7 @@ describe('the reconnect driver', () => {
     };
 
     const pushed: unknown[] = [];
-    const socket = await server.dial();
     const peer = await dialAndEstablish(
-      socket,
       server.dial,
       {
         hello: { session: 'abc' },
@@ -1640,9 +1638,7 @@ describe('header interceptors across a reconnect', () => {
 
     const pushed: Record<string, unknown>[] = [];
     const answered: Record<string, unknown>[] = [];
-    const socket = await server.dial();
     const peer = await dialAndEstablish(
-      socket,
       server.dial,
       {
         hello: { session: 'abc' },

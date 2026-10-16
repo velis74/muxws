@@ -14,9 +14,11 @@
 
 import type { Codec } from './codec';
 import { ConnectionClosed, StreamTimeout } from './errors';
+import { MAX_FRAME_BYTES } from './fragment';
 import type { CloseReason } from './observability';
 import { logger } from './observability';
 import {
+  checkedFrameCap,
   type ErrorSerializer,
   type IncomingHeadersInterceptor,
   type OpenInterceptor,
@@ -816,38 +818,49 @@ export interface ConnectOptions {
  * the dial closure differs (WSM-API-021), so the reconnect driver redials without transport-specific
  * code.
  *
- * The first attempt is awaited by the caller and not retried here (WSM-RCN-006): `socket` comes from
- * the first `dial()`, and a hello that fails on it throws instead of starting a background retry.
+ * The first `dial()` happens here and is not retried (WSM-RCN-006): a hello that fails on it throws
+ * instead of starting a background retry.
+ *
+ * The frame cap (WSM-FRG-034) and the hello copy (`structuredClone`) are checked before the dial, so
+ * an unusable `maxFrameBytes` or an uncloneable hello rejects without opening a socket. Any other
+ * failure after the dial closes the socket before it propagates.
  */
-export async function dialAndEstablish(
-  socket: SocketAdapter,
-  dial: Dial,
-  options: ConnectOptions,
-  codec: Codec,
-): Promise<Peer> {
-  const peer = new Peer(socket, {
-    codec,
-    isDialer: true,
-    errorSerializer: options.errorSerializer,
-    maxFrameBytes: options.maxFrameBytes,
-    maxPayloadBytes: options.maxPayloadBytes,
-    maxConcurrentStreams: options.maxConcurrentStreams,
+export async function dialAndEstablish(dial: Dial, options: ConnectOptions, codec: Codec): Promise<Peer> {
+  checkedFrameCap(options.maxFrameBytes ?? MAX_FRAME_BYTES, codec);
+  const hello = new Hello({
+    payload: options.hello,
+    headers: options.helloHeaders ?? null,
+    timeoutMs: options.helloTimeoutMs,
   });
-  // Registered before the loop runs, so a stream the acceptor opens during the first hello has a
-  // handler. `onClose` and `onReconnect` are registered after the first connection is established.
-  if (options.onStream !== undefined) peer.onStream(options.onStream);
-  registerInterceptors(peer, options);
 
-  const loop = new ConnectionLoop(peer, dial, {
-    options: options.reconnect ?? new Reconnect(),
-    hello: new Hello({
-      payload: options.hello,
-      headers: options.helloHeaders ?? null,
-      timeoutMs: options.helloTimeoutMs,
-    }),
-    pingIntervalMs: options.pingIntervalMs,
-    pingTimeoutMs: options.pingTimeoutMs,
-  });
+  const socket = await dial();
+  let peer: Peer;
+  let loop: ConnectionLoop;
+  try {
+    peer = new Peer(socket, {
+      codec,
+      isDialer: true,
+      errorSerializer: options.errorSerializer,
+      maxFrameBytes: options.maxFrameBytes,
+      maxPayloadBytes: options.maxPayloadBytes,
+      maxConcurrentStreams: options.maxConcurrentStreams,
+    });
+    // Registered before the loop runs, so a stream the acceptor opens during the first hello has a
+    // handler. `onClose` and `onReconnect` are registered after the first connection is established.
+    if (options.onStream !== undefined) peer.onStream(options.onStream);
+    registerInterceptors(peer, options);
+
+    loop = new ConnectionLoop(peer, dial, {
+      options: options.reconnect ?? new Reconnect(),
+      hello,
+      pingIntervalMs: options.pingIntervalMs,
+      pingTimeoutMs: options.pingTimeoutMs,
+    });
+  } catch (error) {
+    // No peer owns the socket yet; `establish()` closes it on its own failures.
+    await socket.close();
+    throw error;
+  }
 
   // WSM-RCN-006: a first-connection failure reaches the caller unchanged, and no peer is returned.
   // `establish()` closes the socket before throwing.

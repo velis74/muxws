@@ -250,13 +250,13 @@ function resolveCall(first: unknown, second: RequestOptions | undefined, keys: R
 }
 
 /**
- * WSM-FRG-034: a cap too small to hold an envelope plus one unit raises `ProtocolError` at
- * construction.
+ * @internal WSM-FRG-034: a cap too small to hold an envelope plus one unit raises `ProtocolError` at
+ * construction. `dialAndEstablish` also calls it before the first dial.
  *
  * The cap is a protocol constant (WSM-FRG-004); a smaller value is passed only through the test-only
  * constructor option of WSM-FRG-005, which the conformance runner uses.
  */
-function checkedFrameCap(cap: number, codec: Codec): number {
+export function checkedFrameCap(cap: number, codec: Codec): number {
   if (cap === MAX_FRAME_BYTES) return cap;
   const probe: Frame = { type: 'data', stream: 1, payload: { a: 'aaaaaaaa' } };
   try {

@@ -103,8 +103,9 @@ returns.
   something other than `muxws.v1.<codec>`. The socket is closed with 1008 in the second case. A
   `ws+unix://` dial takes the same path: the refusal is an HTTP status on an ordinary upgrade.
 - `ProtocolError` — `max_frame_bytes` is too small to hold an envelope plus one indivisible unit.
-  Raised by the `Peer` constructor, which runs **after** the dial; the socket is open at that point and
-  is not closed.
+  Raised before the dial.
+- The `copy.deepcopy` error (typically `TypeError`) — `hello` or `hello_headers` cannot be deep-copied.
+  Raised before the dial.
 - `StreamTimeout` — the hello was not acknowledged within `hello_timeout` seconds.
 - `StreamReset` (or a subclass: `StreamRefused`, `RemoteError`, `ConnectionLost`) — the acceptor reset
   the hello stream, or the socket closed before the hello was acknowledged.
@@ -149,6 +150,9 @@ platform cannot dial it.
 **The first attempt is not retried.** For every `reconnect` value, including `Reconnect()`, a failure
 of the first dial or of the first hello raises from `connect()`. An application that needs the first
 dial retried calls `connect()` in its own loop.
+
+**No socket stays open after a failure.** An exception raised after the dial closes the dialled
+socket before it reaches the caller.
 
 ### Example
 
@@ -221,8 +225,10 @@ Rejects with:
 - `StreamTimeout` — the hello was not acknowledged within `helloTimeoutMs` milliseconds.
 - `StreamReset` (or `StreamRefused`, `RemoteError`, `ConnectionLost`) — the acceptor reset the hello
   stream, or the socket closed before the hello was acknowledged.
-- `ProtocolError` — `maxFrameBytes` is too small to hold an envelope plus one indivisible unit. The
-  `Peer` constructor runs after the dial; the socket is open at that point and is not closed.
+- `ProtocolError` — `maxFrameBytes` is too small to hold an envelope plus one indivisible unit.
+  Thrown before the dial.
+- The `structuredClone` error (a `DOMException` named `DataCloneError`) — `hello` or `helloHeaders`
+  holds a value `structuredClone` cannot copy, such as a function. Thrown before the dial.
 - `UnixSocketsUnsupportedError` — the URL's scheme is `ws+unix:` (compared case-insensitively, after
   trimming leading whitespace). Rejected before the codec lookup and before any socket is opened.
   `connect()` is an `async function`, so the error arrives as a rejected promise, not as a synchronous
@@ -241,6 +247,9 @@ from nowhere else; `TransportUrlError` and `TransportUnsupportedError` are the r
 catch when the concrete class does not matter.
 
 **The first attempt is not retried**, for every `reconnect` value; its failure rejects the promise.
+
+**No socket stays open after a failure.** An error thrown after the dial closes the dialled socket
+before the promise rejects.
 
 ### Example
 

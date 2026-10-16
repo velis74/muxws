@@ -191,7 +191,8 @@ def verify_negotiated(negotiated: str | None, configured: str) -> None:
 
     if negotiated != f"{PREFIX}{configured}":
         logger.error(
-            "muxws negotiated subprotocol is %r, expected %r; closing with %d",
+            "muxws negotiated subprotocol is %r, expected %r; closing with %d. Both ends must be configured for "
+            "the same codec: VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on the server (WSM-CDC-028/029).",
             negotiated,
             f"{PREFIX}{configured}",
             POLICY_VIOLATION,

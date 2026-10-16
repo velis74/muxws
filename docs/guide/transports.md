@@ -130,7 +130,8 @@ def select(connection, subprotocols):  # fragment
 
 `accept()` takes the `websockets` connection directly: it recognises the type, checks that the
 negotiated subprotocol matches this peer's codec, and wraps it. The handshake is already complete when
-the handler is called, so this check cannot produce a 400; only the hook above can.
+the handler is called, so this check cannot produce a 400; only the hook above can. On a mismatch it
+logs one error line, closes the socket with 1008 and raises `CodecMismatch`.
 
 ## `websockets` dialer
 
@@ -252,11 +253,13 @@ receives HTTP 400. A server that installs only `handleProtocols` completes hands
 refused. The wrapper calls the inherited `shouldHandle` first, so a server constructed with `path`
 keeps that check.
 
-Without `refuseMismatchedUpgrade`, the acceptor reports no error, and the connection completes. The
-dialer's error depends on its language: a Python dialer detects the mismatch on the open socket and
-raises `CodecMismatch`, while a browser or Node dialer is rejected by its own WebSocket client before
-muxws runs, with a message such as `Server sent no subprotocol` that names neither codec. If a
-cross-language dial fails this way while the acceptor reports no error, check this hook first.
+Without `refuseMismatchedUpgrade`, the upgrade is answered with 101 instead of 400 and the connection
+completes. `accept()` then finds no matching subprotocol on the open socket, logs one error line,
+closes the socket with 1008 and throws `CodecMismatch`; `serve()` resolves. The dialer's error depends
+on its language: a Python dialer detects the mismatch on the open socket and raises `CodecMismatch`,
+while a browser or Node dialer is rejected by its own WebSocket client before muxws runs, with a
+message such as `Server sent no subprotocol` that names neither codec. If a cross-language dial fails
+this way, check this hook first.
 
 **Use `accept()` to get the peer.** `serve` is `accept` plus a handler plus the read loop;
 `accept(socket, options)` returns the `Peer` for tagging and registration.

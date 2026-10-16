@@ -722,9 +722,8 @@ Checks the subprotocol on an already-open socket. Used only for a transport that
 selection hook nor a way to deny the upgrade; an acceptor that can answer 400 uses
 [`select_subprotocol`](./accept.md#select-subprotocol-python) instead.
 
-It does not close the socket. The callers handle the raise differently: `connect()` closes the socket
-with `POLICY_VIOLATION` and re-raises, `accept()` propagates the `CodecMismatch` and leaves the socket
-open, and `serve()` catches it and returns, also leaving the socket open.
+It does not close the socket. `connect()` and `accept()` close it with `POLICY_VIOLATION` and
+re-raise; `serve()` catches the `CodecMismatch` from `accept()` and returns.
 
 ### Signature
 
@@ -745,7 +744,9 @@ def verify_negotiated(negotiated: str | None, configured: str) -> None: ...
 
 ### Raises
 
-- `CodecMismatch` — they do not match. Both names are logged under the `muxws.codec` logger before the raise.
+- `CodecMismatch` — they do not match. One error line naming both subprotocols and the `MUXWS_CODEC`
+  and `VITE_MUXWS_CODEC` environment variables is logged under the `muxws.codec` logger before the
+  raise.
 
 ### Example
 
@@ -1021,8 +1022,9 @@ promise that resolves once the socket is closed. `receive()` returns the next me
 - `CodecMismatch` from `connect()` when the socket closes before opening. A browser receives a
   refused upgrade and an unreachable server as the same generic error with no status, so the message
   is composed from the offered codec name and names both causes. Also from `connect()` when the
-  handshake completed with a different subprotocol or none; in that case the socket is first closed
-  with `1008`.
+  handshake completed with a different subprotocol or none; in that case one error line naming both
+  subprotocols and both environment variables is logged through `logger`, and the socket is closed
+  with `1008` before the rejection.
 - `ConnectionClosed` from `sendText` / `sendBytes` when the socket is not open, and from a pending
   `receive()` when it closes.
 - `ProtocolError` from `receive()` when the socket delivers a message that is neither a string nor

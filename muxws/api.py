@@ -14,6 +14,7 @@ from muxws.conf import settings
 from muxws.errors import CodecMismatch, ConnectionClosed, ProtocolError
 from muxws.fragment import MAX_FRAME_BYTES
 from muxws.peer import (
+    _checked_frame_cap,
     ErrorSerializer,
     IncomingHeadersInterceptor,
     OpenInterceptor,
@@ -70,7 +71,8 @@ async def connect(
     If the first attempt fails, the underlying error is raised regardless of `reconnect`
     (WSM-RCN-006). Reconnection applies only to connections that were established and then lost.
     No option changes this (WSM-INV-018); a caller that wants the first dial retried writes its own
-    loop.
+    loop. An unusable `max_frame_bytes` and an uncopyable hello raise before the dial; any other
+    exception raised after the dial closes the dialled socket before it propagates.
 
     After the first connection, the reconnect helper handles the backoff schedule, the heartbeat, and
     the hello, which is replayed unchanged on every connection.
@@ -86,33 +88,42 @@ async def connect(
     """
     resolved = resolve_codec(codec)
     dial = _websocket_dialer(url, resolved, headers=headers, subprotocols=subprotocols)
+    # Both raise before any socket is opened: the frame cap with `ProtocolError` (WSM-FRG-034), an
+    # uncopyable hello with the `deepcopy` error.
+    _checked_frame_cap(max_frame_bytes, resolved)
+    # Captured once, by value, and replayed unchanged on every later connection (WSM-RCN-020).
+    captured_hello = Hello(payload=hello, headers=hello_headers, timeout=hello_timeout)
 
     socket = await dial()
-    peer = Peer(
-        socket,
-        codec=resolved,
-        is_dialer=True,
-        error_serializer=error_serializer,
-        max_frame_bytes=max_frame_bytes,
-        max_payload_bytes=max_payload_bytes,
-        max_concurrent_streams=max_concurrent_streams,
-    )
-    if on_stream is not None:
-        peer.on_stream(on_stream)
-    if on_close is not None:
-        peer.on_close(on_close)
-    if on_reconnect is not None:
-        peer.on_reconnect(on_reconnect)
-    _register_interceptors(peer, open_interceptors, reply_headers_interceptors, incoming_headers_interceptors)
-    loop = ConnectionLoop(
-        peer,
-        dial,
-        options=reconnect or Reconnect(),
-        # Captured once, by value, and replayed unchanged on every later connection (WSM-RCN-020).
-        hello=Hello(payload=hello, headers=hello_headers, timeout=hello_timeout),
-        ping_interval=ping_interval,
-        ping_timeout=ping_timeout,
-    )
+    try:
+        peer = Peer(
+            socket,
+            codec=resolved,
+            is_dialer=True,
+            error_serializer=error_serializer,
+            max_frame_bytes=max_frame_bytes,
+            max_payload_bytes=max_payload_bytes,
+            max_concurrent_streams=max_concurrent_streams,
+        )
+        if on_stream is not None:
+            peer.on_stream(on_stream)
+        if on_close is not None:
+            peer.on_close(on_close)
+        if on_reconnect is not None:
+            peer.on_reconnect(on_reconnect)
+        _register_interceptors(peer, open_interceptors, reply_headers_interceptors, incoming_headers_interceptors)
+        loop = ConnectionLoop(
+            peer,
+            dial,
+            options=reconnect or Reconnect(),
+            hello=captured_hello,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+        )
+    except BaseException:
+        # No peer owns the socket yet; `establish()` closes it on its own failures.
+        await socket.close()
+        raise
     await loop.establish()
     loop.start()
     # Lets `close()` stop the helper, and keeps the supervisor task referenced.
@@ -282,7 +293,13 @@ async def _adapt(socket: Any, codec_name: str) -> SocketAdapter:
     if _is_websockets_connection(socket):
         from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
 
-        verify_negotiated(getattr(socket, "subprotocol", None), codec_name)
+        try:
+            verify_negotiated(getattr(socket, "subprotocol", None), codec_name)
+        except CodecMismatch:
+            from muxws.transports.websockets_ import POLICY_VIOLATION
+
+            await socket.close(code=POLICY_VIOLATION, reason="codec mismatch")
+            raise
         return WebsocketsSocket(socket)
 
     if isinstance(socket, SocketAdapter):
@@ -311,8 +328,10 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
     try:
         peer = await accept(socket, **peer_options)
     except CodecMismatch:
-        # The upgrade was refused and the 400 has already been sent (WSM-CDC-022). There is no peer;
-        # the function returns without raising, and the refusal was logged by `select`.
+        # There is no peer, and the function returns without raising. For a Starlette socket the 400
+        # has been sent and `select` logged the refusal (WSM-CDC-022/029); for a `websockets`
+        # connection `verify_negotiated` logged the mismatch and the socket is closed with 1008
+        # (WSM-CDC-028).
         return
     peer.on_stream(handler)
     try:

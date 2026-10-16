@@ -262,6 +262,92 @@ async def test_a_101_that_negotiated_something_else_is_caught_on_the_open_socket
             await muxws.connect(url, subprotocols=["bearer.abc123"])
 
 
+async def test_accepting_a_websockets_connection_with_another_subprotocol_closes_it_with_1008(
+    caplog: pytest.LogCaptureFixture,
+):
+    """WSM-CDC-028/029: `accept()` of an open `websockets` connection whose negotiated subprotocol is
+    not `muxws.v1.<codec>` logs one `muxws.codec` ERROR naming the negotiated and the expected
+    subprotocol and both environment variables, closes the socket with 1008 and raises `CodecMismatch`."""
+    raised: list[BaseException] = []
+
+    async def handle(connection: Any) -> None:
+        try:
+            await muxws.accept(connection, codec=muxws.get_codec("json"))
+        except CodecMismatch as exc:
+            raised.append(exc)
+        await connection.wait_closed()
+
+    # No `select_subprotocol` hook: the handshake completes with no subprotocol selected.
+    async with websockets.serve(handle, "127.0.0.1", 0) as service:
+        url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        with caplog.at_level(logging.ERROR, logger="muxws.codec"):
+            async with websockets.connect(url, subprotocols=["muxws.v1.json"]) as connection:  # type: ignore[list-item]
+                await asyncio.wait_for(connection.wait_closed(), timeout=5)
+
+    assert connection.close_code == 1008
+    assert len(raised) == 1
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert [record.name for record in errors] == ["muxws.codec"]
+    message = errors[0].getMessage()
+    assert "None" in message
+    assert "'muxws.v1.json'" in message
+    assert "VITE_MUXWS_CODEC" in message
+    assert "MUXWS_CODEC on the server" in message
+
+
+class _HandshakeCounter:
+    """A `websockets` acceptor that counts completed handshakes; `closed` is set when a connection closes."""
+
+    def __init__(self) -> None:
+        self.url = ""
+        self.handshakes = 0
+        self.closed = asyncio.Event()
+
+
+@pytest.fixture
+async def counter() -> AsyncIterator[_HandshakeCounter]:
+    running = _HandshakeCounter()
+
+    async def handle(connection: Any) -> None:
+        running.handshakes += 1
+        await connection.wait_closed()
+        running.closed.set()
+
+    async with websockets.serve(handle, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol) as service:
+        running.url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        yield running
+
+
+async def test_connect_rejects_a_frame_cap_that_cannot_hold_a_frame_before_dialing(counter: _HandshakeCounter):
+    """WSM-FRG-034: `connect()` raises `ProtocolError` for an unusable `max_frame_bytes` without dialing."""
+    with pytest.raises(muxws.ProtocolError, match="WSM-FRG-034"):
+        await muxws.connect(counter.url, max_frame_bytes=8)
+    assert counter.handshakes == 0
+
+
+async def test_connect_rejects_a_hello_that_cannot_be_copied_before_dialing(counter: _HandshakeCounter):
+    """WSM-RCN-027: `connect()` raises the `deepcopy` error for an uncopyable hello without dialing."""
+    with pytest.raises(TypeError):
+        await muxws.connect(counter.url, hello={"pending": (value for value in ())})
+    assert counter.handshakes == 0
+
+
+async def test_connect_closes_the_dialled_socket_when_building_the_peer_fails(
+    counter: _HandshakeCounter, monkeypatch: pytest.MonkeyPatch
+):
+    """WSM-RCN-006: an error raised after the dial and before the hello reaches the caller, and the
+    dialled socket is closed."""
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("peer construction failed")
+
+    monkeypatch.setattr(muxws.api, "Peer", refuse)
+    with pytest.raises(RuntimeError, match="peer construction failed"):
+        await muxws.connect(counter.url)
+    assert counter.handshakes == 1
+    await asyncio.wait_for(counter.closed.wait(), timeout=5)
+
+
 def _a_closed_port_whose_number_contains_400() -> int:
     """A port nothing is listening on, chosen so the connection error names "400" in its text."""
     for candidate in (14000, 24000, 34000, 44000):

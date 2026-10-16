@@ -27,7 +27,7 @@ import {
   type StreamHandler,
 } from './peer';
 import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
-import { mismatchError, offer, PREFIX, select } from './subprotocol';
+import { logNegotiatedMismatch, mismatchError, offer, PREFIX, select } from './subprotocol';
 import { WsSocket } from './transports/ws-socket';
 
 /**
@@ -35,6 +35,9 @@ import { WsSocket } from './transports/ws-socket';
  * this module treats as a refused muxws handshake on the dialer side.
  */
 const REFUSED = 400;
+
+/** The WebSocket policy-violation close code, sent for a codec mismatch on an open socket (WSM-CDC-028). */
+const POLICY_VIOLATION = 1008;
 
 /** The scheme `unixTarget` parses, as `new URL()` normalises it: lowercase, colon included. */
 const UNIX_SCHEME = 'ws+unix:';
@@ -294,7 +297,7 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
   // Resolved before any socket is opened (WSM-CDC-016), as in the browser entry point.
   const codec: Codec = options.codec ?? getCodec(settings.codec);
   const dial: Dial = async () => dialWs(url, codec.name, options);
-  return dialAndEstablish(await dial(), dial, options, codec);
+  return dialAndEstablish(dial, options, codec);
 }
 
 /**
@@ -417,7 +420,8 @@ async function dialWs(url: string, codecName: string, options: NodeConnectOption
   if (socket.protocol !== wanted) {
     // The handshake completed with a different subprotocol or none: close with the
     // policy-violation code and throw `CodecMismatch` (WSM-CDC-028).
-    adapter.close(1008, 'muxws subprotocol mismatch');
+    logNegotiatedMismatch(socket.protocol, wanted, POLICY_VIOLATION);
+    adapter.close(POLICY_VIOLATION, 'muxws subprotocol mismatch');
     throw mismatchError(codecName);
   }
   return adapter;
@@ -483,15 +487,18 @@ export function refuseMismatchedUpgrade(server: WebSocketServer): WebSocketServe
  * Wrap an accepted `ws` connection in a peer.
  *
  * `ws` passes the connection after the handshake, so the subprotocol is verified on the open socket;
- * on a mismatch the socket is closed with the policy-violation code and `CodecMismatch` is thrown
+ * on a mismatch one error line naming the negotiated and the expected subprotocol is logged
+ * (WSM-CDC-029), the socket is closed with the policy-violation code and `CodecMismatch` is thrown
  * (WSM-CDC-028).
  */
 export async function accept(socket: NodeWebSocket, options: AcceptOptions = {}): Promise<Peer> {
   const codec = options.codec ?? getCodec(settings.codec);
   const negotiated = socket.protocol;
+  const wanted = `${PREFIX}${codec.name}`;
 
-  if (negotiated !== `${PREFIX}${codec.name}`) {
-    socket.close(1008, 'codec mismatch');
+  if (negotiated !== wanted) {
+    logNegotiatedMismatch(negotiated, wanted, POLICY_VIOLATION);
+    socket.close(POLICY_VIOLATION, 'codec mismatch');
     throw mismatchError(codec.name);
   }
 
@@ -513,7 +520,8 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
  *
  * On `CodecMismatch` it resolves instead of rejecting, as `muxws.serve()` does in Python. A server
  * with `refuseMismatchedUpgrade` has already answered such an upgrade with HTTP 400 (WSM-CDC-022), and
- * `handleProtocols` has logged both codec names (WSM-CDC-029). A rejection from a `ws` connection
+ * `handleProtocols` has logged both codec names (WSM-CDC-029); on a server with neither hook,
+ * `accept()` has logged the negotiated and the expected subprotocol. A rejection from a `ws` connection
  * handler would be an unhandled rejection, which terminates a Node process by default.
  */
 export async function serve(socket: NodeWebSocket, options: AcceptOptions & { handler: StreamHandler }): Promise<void> {
