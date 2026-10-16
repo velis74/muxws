@@ -514,6 +514,16 @@ class Peer:
             return False
 
         stream = self._streams.get(frame.stream)
+        continues_open = stream is not None and stream._opening and frame.fragment is not None
+        if frame.type == "open" and not continues_open:
+            # The id of an over-cap `open` is validated and counts toward the high-water mark, so a later
+            # `data` or `reset` on it is ignored (WSM-STM-002) and is not above the mark (WSM-STM-003).
+            if not await self._admit_remote_open(frame.stream):
+                return False
+        elif stream is None and frame.type in ("data", "reset"):
+            # No live stream to reset: the id is classified by the high-water mark (WSM-STM-002/003).
+            await self._on_stream_frame(frame)
+            return False
         if stream is not None:
             await self._reset_stream(
                 stream,
@@ -683,18 +693,8 @@ class Peer:
         if existing is not None and existing._opening and frame.fragment is not None:
             return await self._continue_open(existing, frame)
 
-        remote_parity = 0 if self._is_dialer else 1
-        if stream_id % 2 != remote_parity:
-            await self._fail_connection(f"open on stream {stream_id}: wrong parity for the remote (WSM-SID-005)")
+        if not await self._admit_remote_open(stream_id):
             return False
-        if stream_id <= self._highest_remote_open:
-            await self._fail_connection(
-                f"open on stream {stream_id} is not greater than the remote's highest previous open "
-                f"{self._highest_remote_open} (WSM-SID-005)"
-            )
-            return False
-
-        self._highest_remote_open = stream_id
 
         if self._remote_stream_count() >= self._max_concurrent_streams:
             # Refused without invoking the handler, so the opener may retry it elsewhere
@@ -742,6 +742,24 @@ class Peer:
         if frame.end:
             stream.state = StreamState.HALF_CLOSED_REMOTE
         self._start_handler(stream)
+        return True
+
+    async def _admit_remote_open(self, stream_id: int) -> bool:
+        """Validate the id of an `open` that does not continue a live opening (WSM-SID-005).
+
+        Records the id as the remote's highest open. Returns False after failing the connection.
+        """
+        remote_parity = 0 if self._is_dialer else 1
+        if stream_id % 2 != remote_parity:
+            await self._fail_connection(f"open on stream {stream_id}: wrong parity for the remote (WSM-SID-005)")
+            return False
+        if stream_id <= self._highest_remote_open:
+            await self._fail_connection(
+                f"open on stream {stream_id} is not greater than the remote's highest previous open "
+                f"{self._highest_remote_open} (WSM-SID-005)"
+            )
+            return False
+        self._highest_remote_open = stream_id
         return True
 
     def _start_handler(self, stream: Stream) -> None:

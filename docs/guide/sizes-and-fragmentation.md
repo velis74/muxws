@@ -118,8 +118,12 @@ Reset code `7`. Two checks produce it:
 **A single encoded message over the frame limit.** The receiver measures the *whole encoded message*
 read from the socket, not the `fragment` field inside it. If a stream frame exceeds the limit, that
 stream is reset with `PAYLOAD_TOO_LARGE`; if a connection-level frame exceeds it, the connection fails,
-because there is no stream to reset. A conforming muxws sender fragments at the same constant and does
-not trigger this check.
+because there is no stream to reset. An over-size `open` for a new id has its id checked like any
+other `open` (WSM-SID-005) and counts as the remote's highest open before the reset goes out, so a
+later `data` or `reset` on that id is ignored. An over-size `data` or `reset` for an id that is not
+live is not reset: at or below the high-water mark it is ignored (WSM-STM-002), above it the
+connection fails (WSM-STM-003). A conforming muxws sender fragments at the same constant and does not
+trigger this check.
 
 **A reassembled payload over `max_payload_bytes`.** This is the receiver's memory limit, and it is
 checked **as fragments arrive**: for each fragment, the accumulated byte count plus the incoming

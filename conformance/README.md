@@ -456,7 +456,7 @@ the suite.
 | `open-wrong-parity.json` | the dialer opens an even id | connection (WSM-SID-005) | no |
 | `open-id-not-monotonic.json` | an `open` id not greater than that peer's highest previous open | connection (WSM-SID-005) | no |
 | `data-after-end.json` | `data` on a stream that peer already ended | stream (WSM-STM-020/021) | yes |
-| `frame-over-max-frame-bytes.json` | an encoded message beyond the receiver's cap | stream (WSM-FRG-031) | yes |
+| `frame-over-max-frame-bytes.json` | an encoded message beyond the receiver's cap, then `data` on its id | stream (WSM-FRG-031); the `data` is ignored (WSM-STM-002) | yes |
 | `undecodable-message.json` | a message the configured codec refuses to decode | connection (WSM-FRM-005) | no |
 | `fragment-interrupted-by-non-fragment.json` | a non-fragment frame lands mid-reassembly | stream (WSM-FRG-033) | yes |
 | `data-above-high-water-mark.json` | a stream-level frame for an id never opened | connection (WSM-STM-003) | no |

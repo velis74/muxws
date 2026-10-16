@@ -518,3 +518,90 @@ describe('observability', () => {
     });
   });
 });
+
+// --------------------------------------------------------------------------- the id of an over-cap open
+
+describe('the id of an over-cap open', () => {
+  /** `[stream, code]` of every reset the peer sent. */
+  function resets(lone: Lone): unknown[][] {
+    return lone.framesOfType('reset').map((frame) => [frame.stream, frame.code]);
+  }
+
+  /** The payloads of the `data` frames the peer sent on `streamId`. */
+  function dataOn(lone: Lone, streamId: number): unknown[] {
+    return lone
+      .framesOfType('data')
+      .filter((frame) => frame.stream === streamId)
+      .map((frame) => frame.payload);
+  }
+
+  // The Python name is `test_an_over_cap_open_counts_toward_the_high_water_mark`.
+  it('counts an over-cap open toward the high-water mark - WSM-FRG-031/WSM-STM-002', async () => {
+    // A later frame on the id of an over-cap `open` is ignored, not a WSM-STM-003 error.
+    const lone = makeLone({ maxFrameBytes: 512 });
+    lone.peer.onStream(replyNow);
+    lone.start();
+
+    lone.inject({ type: 'open', stream: 1, payload: { body: 'x'.repeat(4000) } });
+    await lone.settle();
+    lone.inject({ type: 'data', stream: 1, payload: { chunk: 1 }, end: true });
+    await lone.settle();
+
+    expect(resets(lone)).toEqual([[1, ResetCode.PAYLOAD_TOO_LARGE]]);
+    expect(lone.framesOfType('goaway')).toHaveLength(0);
+    expect(lone.peer.isOpen).toBe(true);
+
+    lone.inject({ type: 'open', stream: 3, payload: { q: 1 }, end: true });
+    await lone.settle();
+    expect(dataOn(lone, 3)).toEqual([{ ok: true }]);
+  });
+
+  // The Python name is `test_an_over_cap_frame_on_a_closed_id_is_ignored`.
+  it('ignores an over-cap data on the id of a rejected open - WSM-STM-002', async () => {
+    const lone = makeLone({ maxFrameBytes: 512 });
+    lone.peer.onStream(replyNow);
+    lone.start();
+
+    lone.inject({ type: 'open', stream: 1, payload: { body: 'x'.repeat(4000) } });
+    await lone.settle();
+    lone.inject({ type: 'data', stream: 1, payload: { body: 'x'.repeat(4000) }, end: true });
+    await lone.settle();
+
+    expect(resets(lone)).toEqual([[1, ResetCode.PAYLOAD_TOO_LARGE]]);
+    expect(lone.framesOfType('goaway')).toHaveLength(0);
+    expect(lone.peer.isOpen).toBe(true);
+  });
+
+  // The Python name is `test_an_over_cap_frame_above_the_high_water_mark_is_a_connection_error`.
+  it('ends the connection for an over-cap data on an id never opened - WSM-STM-003', async () => {
+    const lone = makeLone({ maxFrameBytes: 512 });
+    lone.peer.onStream(replyNow);
+    lone.start();
+
+    lone.inject({ type: 'data', stream: 5, payload: { body: 'x'.repeat(4000) } });
+    await lone.settle();
+
+    expect(resets(lone)).toEqual([]);
+    expect(lone.framesOfType('goaway').map((frame) => frame.code)).toEqual([ResetCode.PROTOCOL_ERROR]);
+    expect(lone.peer.isOpen).toBe(false);
+  });
+
+  // The Python name is `test_an_over_cap_open_with_an_invalid_id_is_a_connection_error`.
+  it.each([
+    ['wrong-parity', 2],
+    ['not-above-the-previous-open', 1],
+  ])('ends the connection for an over-cap open with an invalid id (%s) - WSM-SID-005', async (_, streamId) => {
+    const lone = makeLone({ maxFrameBytes: 512 });
+    lone.peer.onStream(replyNow);
+    lone.start();
+
+    lone.inject({ type: 'open', stream: 1, payload: { q: 1 }, end: true });
+    await lone.settle();
+    expect(lone.peer.streams.size).toBe(0);
+    lone.inject({ type: 'open', stream: streamId, payload: { body: 'x'.repeat(4000) } });
+    await lone.settle();
+
+    expect(lone.framesOfType('goaway').map((frame) => frame.code)).toEqual([ResetCode.PROTOCOL_ERROR]);
+    expect(lone.peer.isOpen).toBe(false);
+  });
+});

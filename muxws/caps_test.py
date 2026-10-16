@@ -308,6 +308,84 @@ async def test_window_update_is_never_sent(make_pair):
         await pair.stop()
 
 
+# --------------------------------------------------------------------------- the id of an over-cap open
+
+
+async def test_an_over_cap_open_counts_toward_the_high_water_mark(make_lone):
+    """WSM-FRG-031/WSM-STM-002: a later frame on the id of an over-cap `open` is ignored, not a WSM-STM-003 error."""
+    lone = make_lone(max_frame_bytes=512)
+    lone.peer.on_stream(_reply_now)
+    lone.start()
+    try:
+        lone.inject(Frame("open", stream=1, payload={"body": "x" * 4000}))
+        await lone.settle()
+        lone.inject(Frame("data", stream=1, payload={"chunk": 1}, end=True))
+        await lone.settle()
+
+        assert [(f.stream, f.code) for f in lone.frames_of_type("reset")] == [(1, int(ResetCode.PAYLOAD_TOO_LARGE))]
+        assert not lone.frames_of_type("goaway")
+        assert lone.peer.is_open
+
+        lone.inject(Frame("open", stream=3, payload={"q": 1}, end=True))
+        await lone.settle()
+        assert [f.payload for f in lone.frames_of_type("data") if f.stream == 3] == [{"ok": True}]
+    finally:
+        await lone.stop()
+
+
+@pytest.mark.parametrize("stream_id", [2, 1], ids=["wrong-parity", "not-above-the-previous-open"])
+async def test_an_over_cap_open_with_an_invalid_id_is_a_connection_error(make_lone, stream_id):
+    """WSM-SID-005: the id of an over-cap `open` is validated, and an invalid one ends the connection."""
+    lone = make_lone(max_frame_bytes=512)
+    lone.peer.on_stream(_reply_now)
+    lone.start()
+    try:
+        lone.inject(Frame("open", stream=1, payload={"q": 1}, end=True))
+        await lone.settle()
+        assert lone.peer.streams == {}
+        lone.inject(Frame("open", stream=stream_id, payload={"body": "x" * 4000}))
+        await lone.settle()
+
+        assert [f.code for f in lone.frames_of_type("goaway")] == [int(ResetCode.PROTOCOL_ERROR)]
+        assert not lone.peer.is_open
+    finally:
+        await lone.stop()
+
+
+async def test_an_over_cap_frame_on_a_closed_id_is_ignored(make_lone):
+    """WSM-STM-002: an over-cap `data` on the id of a rejected `open` is ignored, with no second reset."""
+    lone = make_lone(max_frame_bytes=512)
+    lone.peer.on_stream(_reply_now)
+    lone.start()
+    try:
+        lone.inject(Frame("open", stream=1, payload={"body": "x" * 4000}))
+        await lone.settle()
+        lone.inject(Frame("data", stream=1, payload={"body": "x" * 4000}, end=True))
+        await lone.settle()
+
+        assert [(f.stream, f.code) for f in lone.frames_of_type("reset")] == [(1, int(ResetCode.PAYLOAD_TOO_LARGE))]
+        assert not lone.frames_of_type("goaway")
+        assert lone.peer.is_open
+    finally:
+        await lone.stop()
+
+
+async def test_an_over_cap_frame_above_the_high_water_mark_is_a_connection_error(make_lone):
+    """WSM-STM-003: an over-cap `data` on an id the remote never opened ends the connection."""
+    lone = make_lone(max_frame_bytes=512)
+    lone.peer.on_stream(_reply_now)
+    lone.start()
+    try:
+        lone.inject(Frame("data", stream=5, payload={"body": "x" * 4000}))
+        await lone.settle()
+
+        assert not lone.frames_of_type("reset")
+        assert [f.code for f in lone.frames_of_type("goaway")] == [int(ResetCode.PROTOCOL_ERROR)]
+        assert not lone.peer.is_open
+    finally:
+        await lone.stop()
+
+
 async def _hold(payload: Any, stream: Stream) -> None:
     _ = payload
     await stream.closed.wait()

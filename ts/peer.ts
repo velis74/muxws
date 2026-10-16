@@ -982,6 +982,16 @@ export class Peer {
     }
 
     const stream = this.liveStreams.get(frame.stream);
+    const continuesOpen = stream !== undefined && stream.opening && hasFragment(frame);
+    if (frame.type === 'open' && !continuesOpen) {
+      // The id of an over-cap `open` is validated and counts toward the high-water mark, so a later
+      // `data` or `reset` on it is ignored (WSM-STM-002) and is not above the mark (WSM-STM-003).
+      if (!(await this.admitRemoteOpen(frame.stream))) return false;
+    } else if (stream === undefined && (frame.type === 'data' || frame.type === 'reset')) {
+      // No live stream to reset: the id is classified by the high-water mark (WSM-STM-002/003).
+      await this.onStreamFrame(frame);
+      return false;
+    }
     if (stream !== undefined) {
       this.resetStream(
         stream,
@@ -1183,20 +1193,7 @@ export class Peer {
       return this.continueOpen(existing, frame);
     }
 
-    const remoteParity = this.dialer ? 0 : 1;
-    if (streamId % 2 !== remoteParity) {
-      await this.failConnection(`open on stream ${streamId}: wrong parity for the remote (WSM-SID-005)`);
-      return false;
-    }
-    if (streamId <= this.highestRemoteOpen) {
-      await this.failConnection(
-        `open on stream ${streamId} is not greater than the remote's highest previous open ` +
-          `${this.highestRemoteOpen} (WSM-SID-005)`,
-      );
-      return false;
-    }
-
-    this.highestRemoteOpen = streamId;
+    if (!(await this.admitRemoteOpen(streamId))) return false;
 
     if (this.remoteStreamCount() >= this.maxConcurrentStreams) {
       // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). There
@@ -1230,6 +1227,27 @@ export class Peer {
     }
 
     this.startHandler(stream);
+    return true;
+  }
+
+  /**
+   * Validate the id of an `open` that does not continue a live opening (WSM-SID-005), and record it as
+   * the remote's highest open. Returns false after failing the connection.
+   */
+  private async admitRemoteOpen(streamId: number): Promise<boolean> {
+    const remoteParity = this.dialer ? 0 : 1;
+    if (streamId % 2 !== remoteParity) {
+      await this.failConnection(`open on stream ${streamId}: wrong parity for the remote (WSM-SID-005)`);
+      return false;
+    }
+    if (streamId <= this.highestRemoteOpen) {
+      await this.failConnection(
+        `open on stream ${streamId} is not greater than the remote's highest previous open ` +
+          `${this.highestRemoteOpen} (WSM-SID-005)`,
+      );
+      return false;
+    }
+    this.highestRemoteOpen = streamId;
     return true;
   }
 
