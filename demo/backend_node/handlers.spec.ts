@@ -21,10 +21,12 @@ import {
   Peer,
   PeerRegistry,
   RemoteError,
+  type SocketAdapter,
   type Stream,
   StreamReset,
   StreamState,
 } from '../../ts/index';
+import type { Writer } from '../../ts/writer';
 
 import { type Counters, MarketService, type MarketServiceOptions } from './handlers';
 import {
@@ -86,13 +88,61 @@ function pause(ms: number): Promise<void> {
   });
 }
 
+/** Frames each tick stream has queued when the export's sends are released, more than the export has fragments. */
+const BACKLOG = 32;
+
+/**
+ * A `MemorySocket` whose sends wait while it is held.
+ *
+ * Not held, a send is the wrapped socket's synchronous send and adds no suspension. Held, the write
+ * loop waits at its next send and every frame enqueued meanwhile stays in the writer, so a test can
+ * fix what the rotation has to choose from before it chooses.
+ */
+class GatedSocket implements SocketAdapter {
+  private held: Promise<void> | null = null;
+
+  private release: (() => void) | null = null;
+
+  constructor(private readonly socket: MemorySocket) {}
+
+  hold(): void {
+    this.held = new Promise<void>((resolve) => {
+      this.release = resolve;
+    });
+  }
+
+  open(): void {
+    this.release?.();
+    this.held = null;
+    this.release = null;
+  }
+
+  sendText(text: string): Promise<void> | void {
+    if (this.held === null) return this.socket.sendText(text);
+    return this.held.then(() => this.socket.sendText(text));
+  }
+
+  sendBytes(bytes: ArrayBuffer): Promise<void> | void {
+    if (this.held === null) return this.socket.sendBytes(bytes);
+    return this.held.then(() => this.socket.sendBytes(bytes));
+  }
+
+  receive(): Promise<string | ArrayBuffer> {
+    return this.socket.receive();
+  }
+
+  close(code?: number, reason?: string): void {
+    this.socket.close(code, reason);
+  }
+}
+
 /**
  * A browser and a backend, wired to each other, with the demo's real handler on the acceptor.
  *
  * Over a plain `MemorySocket` - the same transport every other test in this repository uses, and that
  * is what makes WSM-INV-004 observable here: the write loop takes one event-loop turn per frame, so
  * the rotation has something to rotate over without a paced socket double supplying a yield the
- * transport does not.
+ * transport does not. The backend's sends pass a `GatedSocket`, which is open unless a test holds it.
  */
 class Wire {
   readonly dialer: Peer;
@@ -126,6 +176,8 @@ class Wire {
    */
   readonly closes: CloseReason[] = [];
 
+  readonly backend: GatedSocket;
+
   private readonly sockets: MemorySocket[];
 
   private tasks: Promise<void>[] = [];
@@ -134,7 +186,8 @@ class Wire {
     const codec = new JsonCodec();
     const [browserSide, backendSide] = memoryPair();
     this.dialer = new Peer(browserSide, { codec, isDialer: true });
-    this.acceptor = new Peer(backendSide, { codec, isDialer: false });
+    this.backend = new GatedSocket(backendSide);
+    this.acceptor = new Peer(this.backend, { codec, isDialer: false });
     this.service = new MarketService(new Market(), new PeerRegistry(), options);
     this.acceptor.onStream(this.service.handlerFor(this.acceptor));
     this.sockets = [browserSide, backendSide];
@@ -189,7 +242,30 @@ class Wire {
     }
   }
 
+  /** The ids of the streams the backend pushed, one per symbol. */
+  tickStreams(): number[] {
+    return [...this.acceptor.streams.values()].filter((stream) => stream.local).map((stream) => stream.id);
+  }
+
+  /**
+   * Wait until `streamId` has a frame queued and every tick stream has `depth` frames queued.
+   *
+   * Meaningful only while `backend` is held: the writer then holds every frame enqueued.
+   */
+  async untilBacklogged(streamId: number, depth: number, timeoutMs = 5_000): Promise<void> {
+    const { writer } = this.acceptor as unknown as { writer: Writer };
+    const deadline = Date.now() + timeoutMs;
+    while (
+      writer.depthOf(streamId) === 0 ||
+      Math.min(...this.tickStreams().map((lane) => writer.depthOf(lane))) < depth
+    ) {
+      if (Date.now() > deadline) throw new Error(`the tick streams did not queue ${depth} frames each`);
+      await pause(5);
+    }
+  }
+
   async stop(): Promise<void> {
+    this.backend.open();
     this.service.forget(this.acceptor);
     this.sockets.forEach((socket) => {
       socket.drop();
@@ -212,24 +288,8 @@ async function marketWire(options: MarketServiceOptions, body: (wire: Wire) => P
   }
 }
 
-/** The longest run of consecutive `true` values. */
-function runsOf(flags: boolean[]): number {
-  let longest = 0;
-  let run = 0;
-  flags.forEach((flag) => {
-    run = flag ? run + 1 : 0;
-    longest = Math.max(longest, run);
-  });
-  return longest;
-}
-
 function isFragment(frame: Frame): boolean {
   return frame.fragment !== null && frame.fragment !== undefined;
-}
-
-/** A tick stream is one the **acceptor** opened, and the acceptor's ids are the even ones. */
-function isTickFrame(frame: Frame): boolean {
-  return frame.type === 'data' && frame.stream !== null && frame.stream !== undefined && frame.stream % 2 === 0;
 }
 
 // --------------------------------------------------------------------------- the headline
@@ -238,23 +298,22 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
   // WSM-INV-004, as a test: a megabyte on one stream does not stall the twenty others.
   //
   // Asserted from what the *browser's* `onFrame` recorded, not from anything visual and not from the
-  // handler's own bookkeeping. A FIFO anywhere on the send path decides the order at enqueue time, so
-  // every one of the export's sixteen fragments would go out back to back and the ticks produced
-  // while they did would arrive afterwards in a heap. Under the round-robin writer the export gets
-  // one fragment per turn and every tick stream gets its own turn in between (WSM-FRG-017/018/019).
-  //
-  // One millisecond per symbol rather than the Python twin's five, and the reason is the *producers*
-  // rather than the writer. A tick lane can only take its turn if it has something in it, and a lane
-  // fed by a `setTimeout` is empty for as long as the timer runs late - on a loaded machine running
-  // the whole suite in parallel workers, long enough for several export fragments to go out with
-  // nothing between them, which reads as a FIFO writer when it is a starved producer. At one
-  // millisecond every lane always has a frame waiting, so what the assertion below measures is the
-  // rotation and only the rotation.
+  // handler's own bookkeeping. The backend's sends are held while the export is enqueued, until every
+  // tick stream has more frames queued than the export has fragments; then they are released. What
+  // the writer sends from that state does not depend on scheduling. A FIFO decides the order at
+  // enqueue time, so the ticks queued before the export would go out first and every fragment of the
+  // export after them, back to back. The round-robin writer gives the export one fragment per turn
+  // and every tick stream one frame in between (WSM-FRG-017/018/019).
   await marketWire({ tickIntervalMs: 1 }, async (wire) => {
     await wire.hello();
     await wire.untilTheBoardIsLive();
+    const ticks = wire.tickStreams().sort((a, b) => a - b);
+    expect(ticks).toHaveLength(SYMBOLS.length);
 
+    wire.backend.hold();
     const exported = wire.dialer.open<ExportPayload>({ action: 'export', symbol: 'ACME' }, { end: true });
+    await wire.untilBacklogged(exported.id, BACKLOG);
+    wire.backend.open();
     const payload = await exported;
 
     const received = wire.received();
@@ -262,12 +321,6 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
       .map((frame, index) => ({ frame, index }))
       .filter(({ frame }) => frame.stream === exported.id && frame.type === 'data' && isFragment(frame))
       .map(({ index }) => index);
-    const ticks = new Set(
-      received
-        .map((frame, index) => ({ frame, index }))
-        .filter(({ frame }) => isTickFrame(frame))
-        .map(({ index }) => index),
-    );
 
     note(
       `export fragments=${fragments.length} span=${fragments[0]}..${fragments[fragments.length - 1]} ` +
@@ -275,27 +328,19 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
     );
     // A megabyte really did have to be fragmented; otherwise there was nothing to stall behind.
     expect(fragments.length).toBeGreaterThanOrEqual(8);
+    expect(fragments.length, 'the tick streams ran dry before the export finished').toBeLessThan(BACKLOG);
     expect(payload.count).toBe(EXPORT_ROWS);
 
-    const firstFragment = fragments[0];
-    const lastFragment = fragments[fragments.length - 1];
-    const interleaved = [...ticks].filter((index) => index > firstFragment && index < lastFragment).length;
-    note(`tick frames between the first and last export fragment: ${interleaved}`);
-    expect(interleaved).toBeGreaterThanOrEqual(40);
-
-    // The sharper form of the same claim, and the one a FIFO cannot survive: no tick ever waits on
-    // more than a fragment or two of the export.
-    const window = received.slice(firstFragment, lastFragment + 1);
-    const inWindow = new Set(fragments);
-    const backToBack = runsOf(window.map((_frame, index) => inWindow.has(index + firstFragment)));
-    note(`longest run of consecutive export fragments: ${backToBack}`);
-    expect(backToBack).toBeLessThanOrEqual(2);
-
-    // And it was the whole board that kept moving, not one lucky stream: the rotation asks every lane
-    // once before it asks any lane twice.
-    const streams = new Set(window.filter((frame) => isTickFrame(frame)).map((frame) => frame.stream));
-    note(`distinct tick streams delivering during the export: ${streams.size} of ${SYMBOLS.length}`);
-    expect(streams.size).toBe(SYMBOLS.length);
+    // Between any two fragments of the export, every tick stream delivered exactly one frame and
+    // nothing else went out: the rotation asks every lane once before it asks any lane twice.
+    fragments.slice(1).forEach((after, position) => {
+      const before = fragments[position];
+      const between = received
+        .slice(before + 1, after)
+        .map((frame) => frame.stream as number)
+        .sort((a, b) => a - b);
+      expect(between, `frames ${before}..${after}`).toEqual(ticks);
+    });
   });
 }, 30_000);
 

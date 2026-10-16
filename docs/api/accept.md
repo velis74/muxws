@@ -45,6 +45,9 @@ async def accept(
     error_serializer: ErrorSerializer | None = None,
     codec: Codec | None = None,
     max_frame_bytes: int = MAX_FRAME_BYTES,
+    open_interceptors: Sequence[OpenInterceptor] = (),
+    reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
+    incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
 ) -> Peer:
 ```
 
@@ -58,6 +61,9 @@ async def accept(
 | `error_serializer` | `ErrorSerializer \| None` | `None` | Turns a handler's exception into the payload of the `reset(APPLICATION_ERROR)` frame. `None` means `default_error_serializer`, which puts the class name and `str(exc)` **on the wire**; a public-facing acceptor should replace it with a redacting one. |
 | `codec` | `Codec \| None` | `None` | An explicit codec, which wins over `settings.codec`. `None` looks the configured name up in the registry and never falls back to JSON. |
 | `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | Test-only. The frame cap is a protocol constant; the conformance runner lowers it to exercise fragmentation without megabyte fixtures. A value too small to hold an envelope plus one indivisible unit is rejected here. |
+| `open_interceptors` | `Sequence[OpenInterceptor]` | `()` | Registered in order with [`peer.intercept_open()`](./peer.md#peer-intercept-open-python) on the peer this returns. |
+| `reply_headers_interceptors` | `Sequence[ReplyHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python). |
+| `incoming_headers_interceptors` | `Sequence[IncomingHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_incoming_headers()`](./peer.md#peer-intercept-incoming-headers-python). |
 
 ### Return
 
@@ -127,7 +133,7 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 |---|---|---|---|
 | `socket` | `SocketAdapter \| Any` | required | The same three kinds `accept()` takes. |
 | `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async, called once per incoming stream. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`. |
-| `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`. An unknown name raises `TypeError` from `accept()`. |
+| `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`, `open_interceptors`, `reply_headers_interceptors`, `incoming_headers_interceptors`. The interceptors are the only way to register any on the peer `serve()` builds. An unknown name raises `TypeError` from `accept()`. |
 
 ### Return
 
@@ -405,6 +411,12 @@ export interface AcceptOptions {
   errorSerializer?: ErrorSerializer;
   codec?: Codec;
   maxFrameBytes?: number;
+  /** Registered on the peer, in order, as `peer.interceptOpen()` would (WSM-API-026). */
+  openInterceptors?: readonly OpenInterceptor[];
+  /** Registered on the peer, in order, as `peer.interceptReplyHeaders()` would (WSM-API-026). */
+  replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
+  /** Registered on the peer, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
+  incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
 }
 ```
 
@@ -417,6 +429,9 @@ export interface AcceptOptions {
 | `errorSerializer` | `ErrorSerializer` | `defaultErrorSerializer` | Turns a handler's failure into the `reset(APPLICATION_ERROR)` payload. The default puts the error's `name` and `message` **on the wire**; replace it with a redacting one on a public-facing acceptor. |
 | `codec` | `Codec` | `getCodec(settings.codec)` | An explicit codec, which wins over the configured name. |
 | `maxFrameBytes` | `number` | `MAX_FRAME_BYTES` (65536) | Test-only lowering of the protocol frame cap. |
+| `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) on the peer `accept()` returns or `serve()` builds. |
+| `replyHeadersInterceptors` | `readonly ReplyHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript). |
+| `incomingHeadersInterceptors` | `readonly IncomingHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptIncomingHeaders()`](./peer.md#peer-interceptincomingheaders-typescript). |
 
 ### Return
 

@@ -2113,3 +2113,252 @@ describe('WSM-RCN-044 is per connection, not per Peer object', () => {
     ).toEqual([false, false]);
   });
 });
+
+describe('header interceptors', () => {
+  it('shapes the headers of every open in registration order, on a copy - WSM-API-026/027', async () => {
+    const pair = makePair();
+    const received: Record<string, unknown>[] = [];
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      received.push({ ...stream.headers });
+      await stream.reply({ ok: true });
+    });
+    const calls: [string, unknown][] = [];
+    const kept: Record<string, unknown>[] = [];
+    const unregisterFirst = pair.dialer.interceptOpen((headers, payload) => {
+      calls.push(['first', payload]);
+      headers.trace = 't-1';
+      headers.attempt = 2;
+      kept.push(headers);
+    });
+    const unregisterSecond = pair.dialer.interceptOpen((headers) => {
+      calls.push(['second', { ...headers }]);
+      delete headers['drop-me'];
+    });
+    pair.start();
+
+    const callers = { attempt: 1, 'drop-me': true, own: 'x' };
+    const stream = pair.dialer.open({ n: 1 }, { headers: callers, end: true });
+    kept[0].late = 'after return';
+    await stream;
+
+    expect(callers, "the caller's object is untouched").toEqual({ attempt: 1, 'drop-me': true, own: 'x' });
+    expect(calls).toEqual([
+      ['first', { n: 1 }],
+      ['second', { attempt: 2, 'drop-me': true, own: 'x', trace: 't-1' }],
+    ]);
+    expect(stream.headers).toEqual({ attempt: 2, own: 'x', trace: 't-1' });
+    expect(received, 'a change after return never reaches the frame').toEqual([{ attempt: 2, own: 'x', trace: 't-1' }]);
+
+    await pair.dialer.request('r');
+    await pair.dialer.notify('n');
+    await pair.settle();
+    expect(
+      received.map((headers) => headers.trace),
+      'request() and notify() too',
+    ).toEqual(['t-1', 't-1', 't-1']);
+
+    unregisterFirst();
+    unregisterFirst();
+    unregisterSecond();
+    let before = pair.dialerSocket.sent.length;
+    await pair.dialer.request('bare');
+    expect(String(pair.dialerSocket.sent[before]), 'no interceptor left, no headers field').not.toContain('"headers"');
+
+    pair.dialer.interceptOpen(() => undefined);
+    before = pair.dialerSocket.sent.length;
+    await pair.dialer.request('bare');
+    expect(String(pair.dialerSocket.sent[before]), 'an interceptor that adds nothing changes no byte').not.toContain(
+      '"headers"',
+    );
+  });
+
+  it('fails the open with the interceptor error and spends nothing - WSM-API-027', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(replyNow);
+    const later: string[] = [];
+    let unregister = pair.dialer.interceptOpen(() => {
+      throw new RangeError('no ambient token');
+    });
+    pair.dialer.interceptOpen(() => {
+      later.push('ran');
+    });
+    pair.start();
+
+    expect(() => pair.dialer.open('x')).toThrow(RangeError);
+    await expect(pair.dialer.request('x')).rejects.toThrow('no ambient token');
+    expect(later, 'the interceptors after the one that threw do not run').toEqual([]);
+    await pair.settle();
+    expect(pair.dialerSocket.sent, 'nothing reached the wire').toEqual([]);
+    unregister();
+
+    unregister = pair.dialer.interceptOpen(async (headers) => {
+      headers.late = true;
+    });
+    expect(() => pair.dialer.open('x')).toThrow(/thenable/);
+    unregister();
+
+    unregister = pair.dialer.interceptOpen((headers) => {
+      (headers as Record<string | symbol, unknown>)[Symbol('key')] = 'symbol';
+    });
+    expect(() => pair.dialer.open('x')).toThrow(TypeError);
+    unregister();
+
+    expect(pair.dialer.open('x').id, 'no failed open spent an id').toBe(1);
+    expect(pair.dialer.isOpen).toBe(true);
+  });
+
+  it('shapes the first frame of every answer, on a copy, whichever call sends it - WSM-API-028', async () => {
+    const pair = makePair();
+    const seen: [Record<string, unknown>, unknown][] = [];
+    const kept: Record<string, unknown>[] = [];
+    const announced = { 'content-type': 'text/csv' };
+    const onOwnStreams: number[] = [];
+    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+      if (payload === 'announce') {
+        await stream.sendHeaders(announced);
+        kept[kept.length - 1].late = 'after return';
+        await stream.send('row');
+        await stream.end({ payload: 'last' });
+      } else if (payload === 'reply') {
+        await stream.reply('done', { headers: { 'drop-me': 1 } });
+      }
+    });
+    const unregister = pair.acceptor.interceptReplyHeaders((headers, stream) => {
+      seen.push([{ ...headers }, stream.payload]);
+      headers['served-by'] = 'acceptor';
+      delete headers['drop-me'];
+      kept.push(headers);
+    });
+    pair.dialer.interceptReplyHeaders((_headers, stream) => {
+      onOwnStreams.push(stream.id);
+    });
+    pair.start();
+
+    let stream = pair.dialer.open('announce');
+    await stream.end();
+    await stream.closed;
+    expect(stream.replyHeaders).toEqual({ 'content-type': 'text/csv', 'served-by': 'acceptor' });
+    expect(announced, "the caller's object is untouched").toEqual({ 'content-type': 'text/csv' });
+
+    stream = pair.dialer.open('reply', { end: true });
+    expect(await stream).toBe('done');
+    expect(stream.replyHeaders).toEqual({ 'served-by': 'acceptor' });
+
+    stream = pair.dialer.open('implicit', { end: true });
+    await stream.closed;
+    expect(stream.replyHeaders, 'the implicit end of a returning handler too').toEqual({ 'served-by': 'acceptor' });
+
+    expect(seen).toEqual([
+      [{ 'content-type': 'text/csv' }, 'announce'],
+      [{ 'drop-me': 1 }, 'reply'],
+      [{}, 'implicit'],
+    ]);
+    expect(onOwnStreams, 'never on a stream this peer opened').toEqual([]);
+
+    unregister();
+    const before = pair.acceptorSocket.sent.length;
+    stream = pair.dialer.open('implicit', { end: true });
+    await stream.closed;
+    expect(String(pair.acceptorSocket.sent[before]), 'no interceptor left, no headers field').not.toContain(
+      '"headers"',
+    );
+  });
+
+  it('fails the call that sends the answer and leaves its first frame unspent - WSM-API-028', async () => {
+    const pair = makePair();
+    const sentBeforeAnswer: number[] = [];
+    const refuse = (): void => {
+      throw new RangeError('no tenant');
+    };
+    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+      if (payload === 'implicit') return;
+      let unregister = pair.acceptor.interceptReplyHeaders(refuse);
+      await expect(stream.sendHeaders({ a: 1 })).rejects.toThrow('no tenant');
+      unregister();
+      unregister = pair.acceptor.interceptReplyHeaders(async (headers) => {
+        headers.late = true;
+      });
+      await expect(stream.send('x')).rejects.toThrow(/thenable/);
+      unregister();
+      sentBeforeAnswer.push(pair.acceptorSocket.sent.length);
+      await stream.reply('ok', { headers: { a: 1 } });
+    });
+    pair.start();
+
+    const stream = pair.dialer.open('explicit', { end: true });
+    expect(await stream).toBe('ok');
+    expect(sentBeforeAnswer, 'a failed call put nothing on the wire').toEqual([0]);
+    expect(stream.replyHeaders, 'and left the first frame for the next call').toEqual({ a: 1 });
+
+    pair.acceptor.interceptReplyHeaders(refuse);
+    await expect(pair.dialer.request('implicit', { timeoutMs: 5000 })).rejects.toBeInstanceOf(RemoteError);
+    expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
+  });
+
+  it("hands each stream's leading headers to incoming interceptors once, frozen - WSM-API-029", async () => {
+    const pair = makePair();
+    const order: string[] = [];
+    const seenByAcceptor: [Record<string, unknown>, boolean][] = [];
+    const seenByDialer: [Record<string, unknown>, number, boolean][] = [];
+    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+      order.push('handler');
+      if (payload === 'reset') {
+        await stream.reset(ResetCode.APPLICATION_ERROR, 'no answer');
+        return;
+      }
+      await stream.sendHeaders({ 'content-type': 'text/csv' });
+      await stream.send('row');
+      await stream.end({ payload: 'last' });
+    });
+    pair.acceptor.interceptIncomingHeaders((headers, stream) => {
+      order.push('interceptor');
+      seenByAcceptor.push([{ ...headers }, stream.local]);
+      expect(() => {
+        (headers as Record<string, unknown>).x = 1;
+      }).toThrow(TypeError);
+    });
+    pair.dialer.interceptIncomingHeaders((headers, stream) => {
+      seenByDialer.push([{ ...headers }, stream.id, stream.local]);
+    });
+    pair.start();
+
+    const stream = pair.dialer.open('go', { headers: { trace: 'abc' } });
+    const items: unknown[] = [];
+    for await (const item of stream) items.push(item);
+    expect(items).toEqual(['row', 'last']);
+    expect(order, 'before the handler runs').toEqual(['interceptor', 'handler']);
+    expect(seenByAcceptor).toEqual([[{ trace: 'abc' }, false]]);
+    expect(seenByDialer, 'once, on the answer').toEqual([[{ 'content-type': 'text/csv' }, stream.id, true]]);
+
+    await expect(pair.dialer.request('reset')).rejects.toBeInstanceOf(StreamReset);
+    await pair.settle();
+    expect(seenByDialer, 'a reset is not an answer').toHaveLength(1);
+    expect(seenByAcceptor.at(-1), 'an open without headers is seen with an empty object').toEqual([{}, false]);
+  });
+
+  it('logs an incoming interceptor that throws and changes nothing else - WSM-API-029', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(replyNow);
+    const after: unknown[] = [];
+    const broken = (): void => {
+      throw new Error('interceptor bug');
+    };
+    pair.acceptor.interceptIncomingHeaders(broken);
+    pair.acceptor.interceptIncomingHeaders(async () => {
+      after.push('never awaited');
+      throw new Error('rejected');
+    });
+    pair.acceptor.interceptIncomingHeaders((headers) => {
+      after.push({ ...headers });
+    });
+    pair.dialer.interceptIncomingHeaders(broken);
+    pair.start();
+
+    expect(await pair.dialer.request('q', { headers: { k: 'v' } })).toEqual({ ok: true });
+    await pair.settle();
+    expect(after).toEqual(['never awaited', { k: 'v' }]);
+    expect(logged.error.filter((line) => line.includes('incoming headers interceptor threw'))).toHaveLength(2);
+    expect(logged.error.filter((line) => line.includes('returned a thenable'))).toHaveLength(1);
+    expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
+  });
+});

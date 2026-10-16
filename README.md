@@ -32,6 +32,7 @@ npm install muxws                       # optional peers: ws, @msgpack/msgpack
 | A browser, a socket file, and what the envelope costs | [Demos](https://docs.velis.si/muxws/guide/demos) |
 | Every public symbol, both languages | [API reference](https://docs.velis.si/muxws/api/) |
 | The normative rules, and the fixtures a third port is written from | [`SPEC.md`](https://github.com/velis74/muxws/blob/main/SPEC.md), [`conformance/`](https://github.com/velis74/muxws/blob/main/conformance/README.md) |
+| What changed in each release, and what to change when upgrading | [Changelog](https://docs.velis.si/muxws/guide/changelog), [Migration guide](https://docs.velis.si/muxws/guide/migration) |
 
 ## Status
 

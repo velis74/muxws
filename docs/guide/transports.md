@@ -127,6 +127,7 @@ def select(connection, subprotocols):  # fragment
     # your own checks first — then delegate, and let it raise
     return select_subprotocol(connection, subprotocols)
 ```
+
 :::
 
 `accept()` takes the `websockets` connection directly: it recognises one, checks that the negotiated

@@ -211,7 +211,8 @@ The **answering** side's leading headers: the other half of `headers`, and what 
 open the stream announces before or with its first frame (WSM-FRM-016).
 
 Read the same way from either end. The peer that opened the stream sees what the answer announced;
-the peer answering sees what it announced itself. `{}` until there are any - use
+the peer answering sees what it announced itself, as its reply headers interceptors left it
+([`intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python)). `{}` until there are any - use
 [`stream.reply_headers_arrived`](#stream-reply-headers-arrived-python) to know that the value you are
 reading is the final one.
 
@@ -1128,6 +1129,10 @@ Three different outcomes with three different classes, which is the point:
 - `ConnectionLost` — the socket died. It is itself a `StreamReset`, because the stream really did end
   early; `ConnectionClosed` is not, because it describes the connection rather than a stream.
 - `ProtocolError` — `headers` was passed on a frame that is not this side's first on the stream.
+- whatever a reply headers interceptor raises, and `TypeError` for an awaitable it returned or a
+  non-`str` key it left, when this is this side's first frame on a stream the remote opened (see
+  [`intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python)). Nothing is sent, and
+  the next call may still carry headers.
 
 ### Example
 
@@ -1193,7 +1198,10 @@ async send(payload: unknown, options: SendOptions = {}): Promise<void>;
 
 Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`, exactly as Python does and
 for the same three reasons — plus `ProtocolError` when `headers` rides a frame that is not this side's
-first on the stream.
+first on the stream, and whatever a reply headers interceptor throws (or `TypeError` for a thenable it
+returned or a symbol key it left) when this is this side's first frame on a stream the remote opened
+(see [`interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript)). Nothing is sent,
+and the next call may still carry headers.
 
 ### Example
 
@@ -1262,6 +1270,10 @@ async def send_headers(self, headers: dict[str, Any]) -> None:
 - `StreamClosed` — the stream closed normally, or this side already sent `end`.
 - `StreamReset` (or a subclass) — the stream was reset.
 - `ConnectionLost` — the socket died.
+- whatever a reply headers interceptor raises, and `TypeError` for an awaitable it returned or a
+  non-`str` key it left, when this is this side's first frame on a stream the remote opened (see
+  [`intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python)). Nothing is sent, and
+  the next call may still carry headers.
 
 ### Example
 
@@ -1321,7 +1333,8 @@ async sendHeaders(headers: Record<string, unknown>): Promise<void>;
 ### Raises
 
 Rejects with `ProtocolError` when this side has already sent a frame on the stream, and otherwise
-with the same three as `send()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`.
+with the same three as `send()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, plus a
+reply headers interceptor's failure as described there.
 
 ### Example
 
@@ -1433,6 +1446,12 @@ half-closed-local and the remote may still send.
 - `StreamReset` (or a subclass) — the stream was reset.
 - `ConnectionLost` — the socket died.
 - `ProtocolError` — `headers` was passed on a frame that is not this side's first on the stream.
+- whatever a reply headers interceptor raises, and `TypeError` for an awaitable it returned or a
+  non-`str` key it left, when this is this side's first frame on a stream the remote opened (see
+  [`intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python)). Nothing is sent, and
+  the next call may still carry headers.
+  In the implicit end of a handler that returns without ending, the failure is the handler's: the
+  stream is reset with `APPLICATION_ERROR`.
 
 ### Example
 
@@ -1498,7 +1517,9 @@ async end(options: EndOptions = {}): Promise<void>;
 
 Rejects with `StreamClosed` (closed normally, or `end` already sent), a `StreamReset` subclass, or
 `ConnectionLost` — plus `ProtocolError` when `headers` rides a frame that is not this side's first on
-the stream.
+the stream, and a reply headers interceptor's failure as described under `send()`. In the implicit
+end of a handler that returns without ending, that failure is the handler's: the stream is reset with
+`APPLICATION_ERROR`.
 
 ### Example
 
@@ -1616,7 +1637,8 @@ async def reply(
 
 ### Raises
 
-The same four as `end()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, `ProtocolError`.
+The same as `end()`: `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, `ProtocolError`, and
+a reply headers interceptor's failure.
 
 ### Example
 
@@ -1673,8 +1695,9 @@ async reply(payload: unknown, options: ReplyOptions = {}): Promise<void>;
 
 ### Raises
 
-Rejects with `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, or `ProtocolError` when
-`headers` rides a frame that is not this side's first on the stream.
+Rejects with `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, `ProtocolError` when
+`headers` rides a frame that is not this side's first on the stream, or a reply headers interceptor's
+failure as described under `send()`.
 
 ### Example
 

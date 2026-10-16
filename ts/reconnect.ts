@@ -17,7 +17,15 @@ import type { Codec } from './codec';
 import { ConnectionClosed, StreamTimeout } from './errors';
 import type { CloseReason } from './observability';
 import { logger } from './observability';
-import { type ErrorSerializer, Peer, type StreamHandler } from './peer';
+import {
+  type ErrorSerializer,
+  type IncomingHeadersInterceptor,
+  type OpenInterceptor,
+  Peer,
+  registerInterceptors,
+  type ReplyHeadersInterceptor,
+  type StreamHandler,
+} from './peer';
 import type { Stream } from './stream';
 import type { SocketAdapter } from './transports';
 
@@ -817,6 +825,12 @@ export interface ConnectOptions {
   onStream?: StreamHandler;
   onClose?: (reason: CloseReason) => void;
   onReconnect?: (attempt: number, peer: Peer) => void;
+  /** Registered before the hello, in order, as `peer.interceptOpen()` would (WSM-API-026). */
+  openInterceptors?: readonly OpenInterceptor[];
+  /** Registered before the hello, in order, as `peer.interceptReplyHeaders()` would (WSM-API-026). */
+  replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
+  /** Registered before the hello, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
+  incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
   /** Appended **after** the muxws entry in the subprotocol offer (WSM-CDC-020/021). */
   subprotocols?: readonly string[];
   errorSerializer?: ErrorSerializer;
@@ -854,6 +868,7 @@ export async function dialAndEstablish(
   // Registered **before** the loop runs, so the acceptor cannot push a stream at the first hello and
   // find nobody listening. `onClose` and `onReconnect` go on further down, once the connection stands.
   if (options.onStream !== undefined) peer.onStream(options.onStream);
+  registerInterceptors(peer, options);
 
   const loop = new ConnectionLoop(peer, dial, {
     options: options.reconnect ?? new Reconnect(),

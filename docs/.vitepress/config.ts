@@ -51,6 +51,13 @@ export default defineConfig({
             { text: 'Interop', link: '/guide/interop' },
           ],
         },
+        {
+          text: 'Upgrading',
+          items: [
+            { text: 'Changelog', link: '/guide/changelog' },
+            { text: 'Migration guide', link: '/guide/migration' },
+          ],
+        },
       ],
       // The API pages in reading order: the two ways a connection starts, then the two objects an
       // application holds, then everything a connection is configured with.

@@ -13,7 +13,7 @@ from the package root in both languages. The classes indented under those bases 
 errors**: each one belongs to a single transport, is imported from that transport's own module, and
 is never re-exported from the root. The right-hand column says where each of those comes from.
 
-```
+```text
 MuxwsError                          from muxws / 'muxws' — the whole tree is catchable as this
 ├── ProtocolError
 ├── ConnectionClosed

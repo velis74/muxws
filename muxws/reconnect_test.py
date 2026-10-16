@@ -1162,6 +1162,55 @@ async def test_connect_registers_its_handlers_before_the_hello_goes_out():
             await peer.close()
 
 
+async def test_connect_and_accept_register_their_interceptors_before_any_frame():
+    """WSM-API-026: the interceptor arguments are registered before the hello and before `serve()`.
+
+    The acceptor pushes a stream the instant it sees the hello, so the dialer's incoming interceptor
+    sees that push only if `connect()` registered it before `establish()` ran.
+    """
+    pushed: list[dict[str, Any]] = []
+    answered: list[dict[str, Any]] = []
+    acceptor_saw: list[dict[str, Any]] = []
+
+    async def handle(connection: Any) -> None:
+        acceptor = await muxws.accept(
+            WebsocketsSocket(connection),
+            open_interceptors=[lambda headers, _payload: headers.update(pushed_by="acceptor")],
+            reply_headers_interceptors=[lambda headers, _stream: headers.update(served_by="acceptor")],
+            incoming_headers_interceptors=[lambda headers, _stream: acceptor_saw.append(dict(headers))],
+        )
+
+        async def handler(payload: Any, stream: Stream) -> None:
+            if isinstance(payload, dict) and "tab" in payload:
+                await acceptor.notify({"backlog": payload["tab"]})
+            await stream.reply("ok")
+
+        acceptor.on_stream(handler)
+        await acceptor.serve()
+
+    def record(headers: Any, stream: Stream) -> None:
+        (answered if stream.local else pushed).append(dict(headers))
+
+    async with websockets.serve(handle, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol) as service:
+        url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        peer = await muxws.connect(
+            url,
+            hello={"tab": "abc"},
+            ping_interval=0.0,
+            on_stream=lambda _payload, _stream: None,
+            open_interceptors=[lambda headers, _payload: headers.update(conn="tab-abc")],
+            incoming_headers_interceptors=[record],
+        )
+        try:
+            await asyncio.wait_for(_until(lambda: pushed == [{"pushed_by": "acceptor"}]), 5.0)
+            assert await asyncio.wait_for(peer.request("q"), 5.0) == "ok"
+            assert acceptor_saw[0] == {}, "the hello passes no open interceptor"
+            assert acceptor_saw[-1] == {"conn": "tab-abc"}
+            assert answered[-1] == {"served_by": "acceptor"}
+        finally:
+            await peer.close()
+
+
 async def test_a_swallowed_pong_on_a_real_socket_re_dials():
     """WSM-RCN-011: the heartbeat's local close must be a code a peer is allowed to send.
 
@@ -1378,3 +1427,37 @@ async def test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade()
         f"a reconnect presented a different credential, or none: {seen}. The dial closure is the only "
         f"place a credential enters, and every attempt must go through it (WSM-AUT-003)"
     )
+
+
+async def test_header_interceptors_survive_a_reconnect_and_leave_the_hello_alone(dialable_server: DialableServer):
+    """WSM-API-026/027: registrations belong to the `Peer`, and the hello is not an `open()` call.
+
+    The hello comparison is on the raw messages, as in WSM-RCN-027's own test: an interceptor that
+    reached the hello would make the replay differ from the first one.
+    """
+    answered: list[dict[str, Any]] = []
+
+    async def answer(_payload: Any, stream: Stream) -> None:
+        await stream.send_headers({"served-by": len(dialable_server.acceptors)})
+
+    dialable_server.handler = answer
+    again = asyncio.Event()
+    peer, loop = await dialable_server.driver(hello=Hello(payload={"tab": "abc"}))
+    peer.on_reconnect(lambda _attempt, _peer: again.set())
+    await loop.establish()
+    peer.intercept_open(lambda headers, _payload: headers.update(conn="tab-abc"))
+    peer.intercept_incoming_headers(lambda headers, _stream: answered.append(dict(headers)))
+    loop.start()
+    try:
+        await dialable_server.drop()
+        await asyncio.wait_for(again.wait(), 5.0)
+        stream = peer.open({"after": "reconnect"}, end=True)
+        await stream.closed.wait()
+
+        assert stream.headers == {"conn": "tab-abc"}
+        assert dialable_server.frames(1)[1].headers == {"conn": "tab-abc"}
+        assert dialable_server.raw(1)[0] == dialable_server.raw(0)[0], "the hello replays byte for byte"
+        assert dialable_server.frames(1)[0].headers is None
+        assert answered[-1] == {"served-by": 2}
+    finally:
+        await loop.stop()

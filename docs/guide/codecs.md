@@ -73,7 +73,7 @@ Refusing at the handshake, rather than completing it and closing afterwards, is 
 readable: a dialer gets `CodecMismatch` naming both environment variables, because it does not yet
 know which end is wrong.
 
-```
+```text
 CodecMismatch: the acceptor refused the muxws handshake for codec 'msgpack'. Both ends must be
 configured for the same codec: VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on the server. muxws
 asserts the codec at the handshake and never falls back. …
@@ -88,7 +88,7 @@ different generation is refused here in the same way, and for the same reason. S
 
 ## An unregistered name fails loudly, and never falls back
 
-```
+```text
 # fragment - a Python session transcript
 >>> settings.codec = "msgpakc"
 >>> await connect(url)
@@ -173,7 +173,7 @@ rest of this section is for when that is not available to you.
 
 The JSON codec raises `TypeError` rather than encoding for you:
 
-```
+```text
 TypeError: the json codec cannot carry bytes: bytes are a payload type only under a binary codec,
 and muxws does not base64-encode them for you … Either encode them in the application or configure
 the msgpack codec.

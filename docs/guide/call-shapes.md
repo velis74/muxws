@@ -145,11 +145,12 @@ a non-monotonic id sequence on the wire - which the remote is entitled to treat 
 
 Two consequences:
 
-- **`open()` never queues.** It raises synchronously at the call site in exactly two cases:
-  `ConnectionGoingAway` when the remote has sent `goaway` (or this peer has), and `ConnectionLost`
-  while the peer is between sockets with nothing buffered for the next one. It does *not* raise for
-  concurrency: the receiver's stream limit is the receiver's, and it surfaces asynchronously as
-  `StreamRefused` on the pending await. See [Connection lifecycle](/guide/connection-lifecycle).
+- **`open()` never queues.** It raises synchronously at the call site in exactly two
+  connection-state cases: `ConnectionGoingAway` when the remote has sent `goaway` (or this peer has),
+  and `ConnectionLost` while the peer is between sockets with nothing buffered for the next one. An
+  [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the same way.
+  It does *not* raise for concurrency: the receiver's stream limit is the receiver's, and it surfaces
+  asynchronously as `StreamRefused` on the pending await. See [Connection lifecycle](/guide/connection-lifecycle).
 - **`open()` takes no deadline, in either language.** There is no `timeout=` in seconds on the
   Python call and no `timeoutMs` in milliseconds in `OpenOptions`. `open()` returns immediately, so
   there is nothing for a deadline on it to bound. Deadlines live on the calls that actually wait:

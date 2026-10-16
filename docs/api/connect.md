@@ -59,6 +59,9 @@ async def connect(
     on_stream: StreamHandler | None = None,
     on_close: Callable[[Any], None] | None = None,
     on_reconnect: Callable[[int, Any], None] | None = None,
+    open_interceptors: Sequence[OpenInterceptor] = (),
+    reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
+    incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
 ) -> Peer:
 ```
 
@@ -83,6 +86,9 @@ async def connect(
 | `on_stream` | `StreamHandler \| None` | `None` | The incoming-stream handler, registered **before** the hello goes out. Passing it here rather than calling `peer.on_stream(...)` afterwards is what stops an acceptor's immediate push from being answered `reset(REFUSED, "no on_stream handler")`. |
 | `on_close` | `Callable[[Any], None] \| None` | `None` | Called with a `CloseReason` on every socket loss after this one. A first connection that never establishes reports itself by raising, not through this handler. |
 | `on_reconnect` | `Callable[[int, Any], None] \| None` | `None` | Called `(attempt, peer)` once per **re**-established connection, after the hello is acknowledged. The first connection does not fire it. |
+| `open_interceptors` | `Sequence[OpenInterceptor]` | `()` | Registered in order with [`peer.intercept_open()`](./peer.md#peer-intercept-open-python) before the hello goes out. The hello itself does not pass through them. |
+| `reply_headers_interceptors` | `Sequence[ReplyHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python) before the hello goes out. |
+| `incoming_headers_interceptors` | `Sequence[IncomingHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_incoming_headers()`](./peer.md#peer-intercept-incoming-headers-python) before the hello goes out, so a stream the acceptor pushes in answer to the hello passes them. |
 
 ### Return
 
@@ -368,6 +374,12 @@ export interface ConnectOptions {
   onStream?: StreamHandler;
   onClose?: (reason: CloseReason) => void;
   onReconnect?: (attempt: number, peer: Peer) => void;
+  /** Registered before the hello, in order, as `peer.interceptOpen()` would (WSM-API-026). */
+  openInterceptors?: readonly OpenInterceptor[];
+  /** Registered before the hello, in order, as `peer.interceptReplyHeaders()` would (WSM-API-026). */
+  replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
+  /** Registered before the hello, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
+  incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
   /** Appended **after** the muxws entry in the subprotocol offer (WSM-CDC-020/021). */
   subprotocols?: readonly string[];
   errorSerializer?: ErrorSerializer;
@@ -391,6 +403,9 @@ export interface ConnectOptions {
 | `onStream` | `StreamHandler` | none | Registered **before** the hello goes out, so an acceptor pushing a stream at the hello is not answered `reset(REFUSED)`. |
 | `onClose` | `(reason: CloseReason) => void` | none | Registered **after** the first connection stands, which is what makes a failed `connect()` report itself exactly once, through the rejection. |
 | `onReconnect` | `(attempt: number, peer: Peer) => void` | none | Fires once per re-established connection, after the hello acknowledgement. |
+| `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) before the hello goes out. The hello itself does not pass through them. |
+| `replyHeadersInterceptors` | `readonly ReplyHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript) before the hello goes out. |
+| `incomingHeadersInterceptors` | `readonly IncomingHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptIncomingHeaders()`](./peer.md#peer-interceptincomingheaders-typescript) before the hello goes out, so a stream the acceptor pushes in answer to the hello passes them. |
 | `subprotocols` | `readonly string[]` | `[]` | Extra entries appended after the muxws entry in the offer. |
 | `errorSerializer` | `ErrorSerializer` | `defaultErrorSerializer` | Turns a handler's failure into the `reset(APPLICATION_ERROR)` payload. The default puts the error's `name` and `message` **on the wire**; replace it with a redacting one on a public-facing connection. |
 | `maxPayloadBytes` | `number` | `67_108_864` | This peer's own reassembly limit in bytes. Never announced. |

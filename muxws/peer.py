@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import logging
 import random
 
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
 
 from muxws.codecs import Codec
@@ -44,6 +46,12 @@ _CONNECTION_COUNTER = itertools.count()
 
 StreamHandler = Callable[[Any, Stream], Any]
 ErrorSerializer = Callable[[BaseException], Any]
+#: `(headers, payload)`. Mutates `headers` in place; the return value is ignored (WSM-API-027).
+OpenInterceptor = Callable[[dict[str, Any], Any], None]
+#: `(headers, stream)`. Mutates `headers` in place; the return value is ignored (WSM-API-028).
+ReplyHeadersInterceptor = Callable[[dict[str, Any], Stream], None]
+#: `(headers, stream)`, with `headers` read-only. The return value is ignored (WSM-API-029).
+IncomingHeadersInterceptor = Callable[[Mapping[str, Any], Stream], None]
 
 
 def _loop_time() -> float:
@@ -104,6 +112,12 @@ class Peer:
         #: Latched by the first `will_retry=False` close, so there is never a second (WSM-RCN-044).
         self._final_close_reported = False
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
+        #: Keyed by one token per registration, so one function registered twice is two registrations
+        #: and each unregister function removes only its own. `_adopt_socket` leaves all three alone:
+        #: they belong to the `Peer`, not to its connection (WSM-API-026).
+        self._open_interceptors: dict[object, OpenInterceptor] = {}
+        self._reply_interceptors: dict[object, ReplyHeadersInterceptor] = {}
+        self._incoming_interceptors: dict[object, IncomingHeadersInterceptor] = {}
 
         self._writer = Writer(codec, max_frame_bytes=self._max_frame_bytes)
         self._pings = PingRegistry()
@@ -221,6 +235,34 @@ class Peer:
         self._frame_handlers.append(handler)
         return handler
 
+    def intercept_open(self, interceptor: OpenInterceptor) -> Callable[[], None]:
+        """Register an interceptor for the headers of every stream this peer opens (WSM-API-026/027).
+
+        `open()`, `notify()` and `request()` call it synchronously as `(headers, payload)` before an id
+        is allocated; it adds, replaces or deletes keys by mutating `headers`. One that raises fails
+        the open with that exception. Returns a function that removes this registration.
+        """
+        return _register(self._open_interceptors, interceptor)
+
+    def intercept_reply_headers(self, interceptor: ReplyHeadersInterceptor) -> Callable[[], None]:
+        """Register an interceptor for the leading headers this peer answers with (WSM-API-026/028).
+
+        Called once per stream the remote opened, as `(headers, stream)`, by the call that sends this
+        peer's first frame on it: `send_headers()`, `send()`, `end()`, `reply()`, or the implicit end
+        of a handler that returns. It adds, replaces or deletes keys by mutating `headers`. One that
+        raises fails that call with that exception. Returns a function that removes this registration.
+        """
+        return _register(self._reply_interceptors, interceptor)
+
+    def intercept_incoming_headers(self, interceptor: IncomingHeadersInterceptor) -> Callable[[], None]:
+        """Register an interceptor for the leading headers the remote sends (WSM-API-026/029).
+
+        Called once per stream as `(headers, stream)` when the remote's first frame on it arrives: the
+        `open` of a stream the remote opened, the first `data` of a stream this peer opened. One that
+        raises is logged and changes nothing. Returns a function that removes this registration.
+        """
+        return _register(self._incoming_interceptors, interceptor)
+
     # ------------------------------------------------------------------ opening
 
     def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, end: bool = False) -> Stream:
@@ -233,7 +275,19 @@ class Peer:
         (WSM-RCN-023).
         """
         self._raise_if_unopenable()
+        if self._open_interceptors:
+            headers = _intercepted_headers(self._open_interceptors, headers, payload, "open")
         return self._allocate_and_enqueue(payload, headers=headers, end=end)
+
+    def _intercepted_reply_headers(self, headers: dict[str, Any] | None, stream: Stream) -> dict[str, Any] | None:
+        """The leading headers of this peer's answer on `stream`, as the reply interceptors leave them.
+
+        Called by the stream before it spends its first frame, so an interceptor that raises leaves the
+        stream able to send that frame again (WSM-API-028).
+        """
+        if not self._reply_interceptors:
+            return headers
+        return _intercepted_headers(self._reply_interceptors, headers, stream, "reply headers")
 
     def _allocate_and_enqueue(self, payload: Any, *, headers: dict[str, Any] | None, end: bool) -> Stream:
         """Allocate an id and enqueue the `open` - one indivisible step (WSM-SID-006).
@@ -667,6 +721,7 @@ class Peer:
         stream = Stream(self, stream_id, headers=frame.headers, local=False)
         stream.state = StreamState.HALF_CLOSED_REMOTE if frame.end else StreamState.OPEN
         self._streams[stream_id] = stream
+        self._intercept_incoming(stream, stream.headers)
 
         if frame.fragment is not None:
             stream._opening = True
@@ -736,6 +791,8 @@ class Peer:
                 await stream.end()
             except (StreamReset, ConnectionLost):
                 pass
+            except Exception as exc:  # noqa: BLE001 - a reply interceptor's failure is the handler's (WSM-API-028)
+                await self._reset_for_handler_error(stream, exc)
 
     async def _reset_for_handler_error(self, stream: Stream, exc: BaseException) -> None:
         """WSM-STM-034/WSM-INV-008: **always** APPLICATION_ERROR, never REFUSED.
@@ -816,9 +873,12 @@ class Peer:
         # WSM-FRM-016, before anything is delivered: headers ride the remote's first frame on the
         # stream or no frame at all. Stream-level, so a peer that gets this wrong loses its stream
         # and not the connection - the same weight as `data after end` above, and for the same reason.
+        answer = stream.local and not stream._received_a_frame
         if not stream._note_remote_frame(frame.headers):
             await self._reset_stream(stream, ResetCode.PROTOCOL_ERROR, "headers after the first frame (WSM-FRM-016)")
             return True
+        if answer:
+            self._intercept_incoming(stream, stream.reply_headers)
 
         if stream._assembler.in_progress and frame.fragment is None:
             await self._reset_stream(
@@ -839,6 +899,35 @@ class Peer:
         if frame.end:
             stream._remote_end(frame.trailers)
         return True
+
+    def _intercept_incoming(self, stream: Stream, headers: Mapping[str, Any]) -> None:
+        """Hand the remote's leading headers to every incoming interceptor (WSM-API-029).
+
+        Runs inside the read loop, so each interceptor is isolated: one that raises is logged, and the
+        frame, the stream and the connection carry on as if it had not been registered.
+        """
+        if not self._incoming_interceptors:
+            return
+        view = MappingProxyType(headers)
+        for interceptor in list(self._incoming_interceptors.values()):
+            try:
+                result = interceptor(view, stream)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:  # noqa: BLE001 - an interceptor is not allowed to break the read loop
+                # A CancelledError raised by a synchronous call belongs to the interceptor, not to this
+                # task: cancellation of the read loop is delivered at an await, never inside this call.
+                logger.exception("muxws conn=%s stream=%s an incoming headers interceptor raised", self.id, stream.id)
+                continue
+            if inspect.isawaitable(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                logger.error(
+                    "muxws conn=%s stream=%s an incoming headers interceptor returned an awaitable; it is not "
+                    "awaited (WSM-API-029)",
+                    self.id,
+                    stream.id,
+                )
 
     async def _within_payload_cap(self, stream: Stream, frame: Frame) -> bool:
         """WSM-FRG-032/WSM-INV-017: reject **on the crossing fragment**, not after reassembly.
@@ -1017,6 +1106,45 @@ class Peer:
     def __repr__(self) -> str:
         role = "dialer" if self._is_dialer else "acceptor"
         return f"<Peer {self.id} {role} streams={len(self._streams)}>"
+
+
+def _intercepted_headers(
+    interceptors: dict[object, Any], headers: dict[str, Any] | None, argument: Any, kind: str
+) -> dict[str, Any] | None:
+    """Run outgoing interceptors over a copy of the caller's headers (WSM-API-027/028).
+
+    Runs before anything is enqueued, so an interceptor that raises leaves nothing on the wire. The
+    result is copied again, so a mapping an interceptor kept a reference to cannot change the frame
+    after it returned. `None` when the caller passed no headers and the interceptors added none, so
+    the frame carries no `headers` field.
+    """
+    working: dict[str, Any] = dict(headers) if headers is not None else {}
+    for interceptor in list(interceptors.values()):
+        result = interceptor(working, argument)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError(
+                f"{kind} interceptor {interceptor!r} returned an awaitable; interceptors are synchronous "
+                f"and nothing awaits them (WSM-API-027)"
+            )
+    foreign = [key for key in working if not isinstance(key, str)]
+    if foreign:
+        raise TypeError(f"{kind} interceptors left non-string header keys {foreign!r} (WSM-API-027)")
+    if not working and headers is None:
+        return None
+    return dict(working)
+
+
+def _register(registry: dict[object, Any], entry: Any) -> Callable[[], None]:
+    """Add `entry` under a fresh token and return the function that removes exactly that entry."""
+    token = object()
+    registry[token] = entry
+
+    def unregister() -> None:
+        registry.pop(token, None)
+
+    return unregister
 
 
 def _checked_frame_cap(cap: int, codec: Codec) -> int:

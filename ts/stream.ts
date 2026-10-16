@@ -92,6 +92,12 @@ export interface StreamPeer {
    * be missing.
    */
   reportStreamError?(error: unknown, stream: Stream<any> | null): void;
+  /**
+   * @internal WSM-API-028: the leading headers of this peer's answer, as its reply interceptors leave
+   * them. Optional so a peer without interceptors still type-checks; absent, the headers go out as
+   * given.
+   */
+  replyHeadersFor?(headers: Record<string, unknown> | null, stream: Stream<any>): Record<string, unknown> | null;
 }
 
 /** Sentinel pushed into the iteration queue to end a `for await` cleanly. */
@@ -265,6 +271,12 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /** @internal Which shape claimed the stream; the peer sets `'notify'` directly. */
   claim: StreamClaim | null = null;
 
+  /**
+   * @internal True once the remote has sent a frame on this stream - the other half of WSM-FRM-016's
+   * one chance. The peer reads it to recognise the answer to a stream it opened (WSM-API-029).
+   */
+  receivedAFrame = false;
+
   private readonly peer: StreamPeer;
   private readonly queue = new PayloadQueue();
   private readonly answer = deferred<T>();
@@ -274,9 +286,6 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
 
   /** @internal True once this side has put any frame on this stream - the one chance of WSM-FRM-016. */
   private sentAFrame = false;
-
-  /** True once the remote has sent one - the other half of the same rule. */
-  private receivedAFrame = false;
 
   /** True once `replyHeadersArrived` has been resolved; it resolves exactly once, from three places. */
   private headersSettled = false;
@@ -397,11 +406,16 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
           : `stream ${this.id} has already sent its first frame; headers ride that one or none (WSM-FRM-016)`,
       );
     }
+    let leading = headers ?? null;
+    if (!this.sentAFrame && !this.local && this.peer.replyHeadersFor !== undefined) {
+      // Before the first frame is spent: an interceptor that throws leaves it unspent (WSM-API-028).
+      leading = this.peer.replyHeadersFor(leading, this);
+    }
     this.sentAFrame = true;
     // This peer is the one answering, so what it announces is what `replyHeaders` means on both
     // ends: a handler reads back what it sent, exactly as the opener reads back what it received.
-    if (!this.local) this.acceptReplyHeaders(headers);
-    return headers ?? null;
+    if (!this.local) this.acceptReplyHeaders(leading);
+    return leading;
   }
 
   /** WSM-ERR-009: three different outcomes, three different classes. */

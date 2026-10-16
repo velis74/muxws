@@ -178,6 +178,9 @@ class Stream:
                 if self.local
                 else f"stream {self.id} has already sent its first frame; headers ride that one or none (WSM-FRM-016)"
             )
+        if not self._sent_a_frame and not self.local:
+            # Before the first frame is spent: an interceptor that raises leaves it unspent (WSM-API-028).
+            headers = self._peer._intercepted_reply_headers(headers, self)
         self._sent_a_frame = True
         # This peer is the one answering, so what it announces is what `reply_headers` means on both
         # ends: a handler reads back what it sent, exactly as the opener reads back what it received.
