@@ -1893,7 +1893,9 @@ code 1011, closes the socket with 1011, and `serve()` returns. From the moment `
 
 - `asyncio.CancelledError` — the task running it was cancelled. Cancelling that task is how the read
   loop of a directly constructed peer is stopped.
-- Whatever the socket adapter's `close()` raises while failing the connection on a protocol error.
+
+An exception from the socket adapter's `close()` while failing the connection is logged as a warning
+and does not propagate.
 
 ### Example
 
@@ -1949,11 +1951,15 @@ None — it takes no arguments.
 
 ### Raises
 
-Rejects with the error that ended the read loop, after sending `goaway(INTERNAL_ERROR)` and the frames
-already queued (for at most 10 seconds), marking the peer closed (code 1011) and closing the socket
-with 1011, so `isOpen` is already false when the promise rejects. From the moment `goaway` is queued,
-`open()` throws `ConnectionGoingAway`. The Python `serve()` returns in the same situation. A socket closure resolves the
-promise and does not reject it.
+On an error raised in the read loop, the peer sends `goaway(INTERNAL_ERROR)` and the
+frames already queued (for at most 10 seconds), is marked closed (code 1011) and closes the socket with
+1011. From the moment `goaway` is queued, `open()` throws `ConnectionGoingAway`.
+
+When the error comes from frame dispatch (an interceptor, for example), the promise then resolves. When
+it comes from outside dispatch (a socket adapter's `receive()` throwing something other than
+`ConnectionClosed`, or a codec's `decode()` throwing something other than `ProtocolError`), the promise
+rejects with that error, and `isOpen` is already false. The Python `serve()` returns in both cases. A
+socket closure resolves the promise and does not reject it.
 
 ### Example
 
