@@ -213,6 +213,13 @@ function hasFragment(frame: Frame): boolean {
   return frame.fragment !== null && frame.fragment !== undefined;
 }
 
+/**
+ * How many distinct unknown frame types a peer logs (WSM-FRM-002). Each is logged once; the bound
+ * keeps a remote that sends a new type in every frame from growing the set of logged types without
+ * limit.
+ */
+const MAX_LOGGED_UNKNOWN_TYPES = 32;
+
 const OPEN_OPTION_KEYS: ReadonlySet<string> = new Set(['payload', 'headers', 'end']);
 const REQUEST_OPTION_KEYS: ReadonlySet<string> = new Set(['payload', 'headers', 'end', 'timeoutMs']);
 
@@ -411,6 +418,9 @@ export class Peer {
   private highestRemoteOpen = 0;
 
   private ignoredLateFrames = 0;
+
+  /** The rendered unknown frame types already logged (WSM-FRM-002). */
+  private readonly loggedUnknownTypes = new Set<string>();
 
   private handler: StreamHandler | null = null;
 
@@ -681,9 +691,7 @@ export class Peer {
       );
       return;
     }
-    this.errorHandlers.forEach((handler) => {
-      handler(error, stream);
-    });
+    this.fanOut('onError', this.errorHandlers, error, stream);
   }
 
   // ------------------------------------------------------------------ opening
@@ -884,6 +892,11 @@ export class Peer {
       } catch (error) {
         // The socket is closed; the read loop in `serve()` marks the peer as dead.
         if (error instanceof ConnectionClosed) return;
+        if (error instanceof LaneEncodingError) {
+          // `advance` could not encode the lane's next frame; `frame` itself was sent.
+          await this.failLane(error);
+          continue;
+        }
         logger.error(`muxws conn=${this.id} could not send a ${frame.type} frame`, error);
         await this.failUnsendable(frame, error);
       }
@@ -1064,8 +1077,12 @@ export class Peer {
       return true;
     }
     if (frame.type === 'goaway') return this.onGoaway(frame);
-    // WSM-FRM-002: an unknown type is ignored and logged at info level; it is not an error.
-    logger.info(`muxws conn=${this.id} ignoring unknown frame type '${frame.type}' (WSM-FRM-002)`);
+    // WSM-FRM-002: an unknown type is ignored and logged once, at info level; it is not an error.
+    const shown = `'${frame.type}'`;
+    if (!this.loggedUnknownTypes.has(shown) && this.loggedUnknownTypes.size < MAX_LOGGED_UNKNOWN_TYPES) {
+      this.loggedUnknownTypes.add(shown);
+      logger.info(`muxws conn=${this.id} ignoring unknown frame type ${shown} (WSM-FRM-002)`);
+    }
     return true;
   }
 

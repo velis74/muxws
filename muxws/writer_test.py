@@ -11,7 +11,7 @@ import pytest
 from muxws.codecs.json_ import JsonCodec
 from muxws.fragment import encoded_length, split_frame
 from muxws.frames import Frame
-from muxws.writer import CONNECTION_LANE, StreamQueue, Writer
+from muxws.writer import CONNECTION_LANE, LaneEncodingError, StreamQueue, Writer
 
 
 @pytest.fixture
@@ -181,6 +181,26 @@ async def test_a_spent_lane_is_retired(writer: Writer):
     await _drain(writer)
     assert writer.depth_of(1) == 0
     assert 1 not in writer._queues
+
+
+async def test_advance_discards_a_lane_whose_next_frame_fails_to_encode(writer: Writer):
+    """`advance` raises `LaneEncodingError` for that lane, drops its queued frames and retires it."""
+    writer.enqueue(Frame("data", stream=1, payload={"n": 1}))
+    # Bytes are not a payload type under JSON; the codec refuses them.
+    writer.enqueue(Frame("data", stream=1, payload={"blob": b"\x00\xff"}))
+    writer.enqueue(Frame("data", stream=1, payload={"n": 3}))
+    writer.enqueue(Frame("data", stream=5, payload={"n": 5}))
+
+    first = writer._rotate()
+    assert first is not None
+    assert first.stream == 1
+    with pytest.raises(LaneEncodingError) as info:
+        writer.advance(1)
+
+    assert info.value.lane == 1
+    assert writer.depth_of(1) == 0
+    assert 1 not in writer._queues
+    assert [frame.stream for frame in await _drain(writer)] == [5]
 
 
 async def test_next_frame_waits_and_wakes(writer: Writer):

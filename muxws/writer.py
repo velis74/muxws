@@ -190,14 +190,7 @@ class Writer:
             if queue is None:
                 continue
 
-            try:
-                queue.prepare(self._cap, self._codec)
-            except LaneEncodingError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                queue.discard()
-                self._retire(lane)
-                raise LaneEncodingError(lane, exc) from exc
+            self._prepare(lane, queue)
             frame = queue.take()
             if frame is not None:
                 return frame
@@ -205,6 +198,17 @@ class Writer:
             if not queue.has_work:
                 self._retire(lane)
         return None
+
+    def _prepare(self, lane: int, queue: StreamQueue) -> None:
+        """Slice the lane's next fragment; a codec error discards the lane and raises `LaneEncodingError`."""
+        try:
+            queue.prepare(self._cap, self._codec)
+        except LaneEncodingError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            queue.discard()
+            self._retire(lane)
+            raise LaneEncodingError(lane, exc) from exc
 
     def _retire(self, lane: int) -> None:
         """Remove a lane with no work left. No state is kept per closed stream (WSM-STM-001)."""
@@ -224,10 +228,14 @@ class Writer:
         await self._idle.wait()
 
     def advance(self, stream_id: int) -> None:
-        """Slice that stream's next fragment, now that its previous one has reached the socket."""
-        queue = self._queues.get(stream_id if stream_id else CONNECTION_LANE)
+        """Slice that stream's next fragment, now that its previous one has reached the socket.
+
+        A codec error discards the lane and raises `LaneEncodingError`, as in the rotation.
+        """
+        lane = stream_id if stream_id else CONNECTION_LANE
+        queue = self._queues.get(lane)
         if queue is not None:
-            queue.prepare(self._cap, self._codec)
+            self._prepare(lane, queue)
             if queue.has_work:
                 self._wake.set()
 

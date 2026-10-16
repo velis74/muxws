@@ -1882,6 +1882,38 @@ describe('hostile frames and failing hooks', () => {
     expect(await pair.dialer.request({ q: 2 })).toEqual({ ok: true });
   });
 
+  it('sends nothing more on a stream after a later queued frame fails to encode', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+    const level = logger.level;
+    logger.level = 'silent';
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      // Queued behind the `open`, so the writer slices it when it advances after sending the `open`.
+      void stream.send({ blob: new Uint8Array([0, 255]).buffer });
+      void stream.send({ n: 3 });
+      await pair.settle();
+
+      const sent = pair.sentBy('dialer').filter((frame) => frame.stream === stream.id);
+      expect(sent.map((frame) => frame.type)).toEqual(['open', 'reset']);
+      // The reset carries the codec's own error, as when the rotation fails to encode a frame.
+      let refused: unknown = null;
+      try {
+        new JsonCodec().encode({ type: 'data', stream: stream.id, payload: { blob: new Uint8Array([0, 255]).buffer } });
+      } catch (error) {
+        refused = error;
+      }
+      expect(sent[1]?.reason).toBe((refused as Error).message);
+      const error = await rejection(stream);
+      expect((error as StreamReset).code).toBe(ResetCode.INTERNAL_ERROR);
+      expect(pair.dialer.isOpen).toBe(true);
+    } finally {
+      logger.level = level;
+      await pair.stop();
+    }
+  });
+
   it('still produces the reset when the errorSerializer itself throws - WSM-STM-034', async () => {
     const pair = makePair({
       errorSerializer: () => {
@@ -2382,6 +2414,62 @@ describe('the frame logger', () => {
       await pair.stop();
     }
   });
+
+  it('logs each unknown frame type once per peer, however often it arrives - WSM-FRM-002', async () => {
+    const original = logger.level;
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'info').mockImplementation((message: unknown) => {
+      lines.push(String(message));
+    });
+    logger.level = 'info';
+
+    const pair = makePair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+    try {
+      for (const type of ['widget', 'widget', 'gadget', 'widget', 'gadget']) {
+        pair.acceptorSocket.inject(JSON.stringify({ type, stream: 1 }));
+      }
+      await pair.settle();
+
+      expect(lines.filter((line) => line.includes("'widget'"))).toHaveLength(1);
+      expect(lines.filter((line) => line.includes("'gadget'"))).toHaveLength(1);
+      expect(pair.acceptor.isOpen).toBe(true);
+    } finally {
+      logger.level = original;
+      spy.mockRestore();
+      await pair.stop();
+    }
+  });
+
+  it.each(['5', '[1]', '{"a":1}', '{"toString":1}', 'null'])(
+    'fails the connection on the non-string frame type %s with frame logging on - WSM-FRM-005',
+    async (frameType) => {
+      const original = logger.level;
+      const spy = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      logger.level = 'debug';
+
+      const pair = makePair();
+      pair.acceptor.onStream(hold);
+      pair.start();
+      try {
+        pair.injectRaw('acceptor', `{"type":${frameType},"stream":1}`);
+        await pair.settle();
+
+        expect(pair.framesOfType('acceptor', 'goaway').map((frame) => frame.code)).toEqual([ResetCode.PROTOCOL_ERROR]);
+        expect(pair.acceptor.isOpen).toBe(false);
+        expect(pair.acceptorSocket.isClosed).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+        logger.level = original;
+        spy.mockRestore();
+        infoSpy.mockRestore();
+        await pair.stop();
+      }
+    },
+  );
 
   it('never puts payload contents in a log line, at any level - WSM-OBS-002', async () => {
     const original = logger.level;

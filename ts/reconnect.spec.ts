@@ -398,6 +398,10 @@ describe('the backoff schedule', () => {
     expect(() => new Reconnect({ jitter: 1.5 })).toThrow(/jitter/);
   });
 
+  it.each(['initialDelayMs', 'factor', 'maxDelayMs'])('rejects a NaN %s at construction', (option) => {
+    expect(() => new Reconnect({ [option]: Number.NaN })).toThrow(new RegExp(option));
+  });
+
   it('uses Math.random and never a cryptographic source - WSM-RCN-005', () => {
     // Reconnect jitter disperses simultaneous reconnects; it does not need to resist an adversary. The ping nonce
     // needs that and does use a cryptographic source; this test checks that the jitter does not.

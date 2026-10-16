@@ -66,11 +66,12 @@ construct a new instance instead.
 
 ### Raises
 
-- `ValueError` — `initial_delay` is not greater than zero, `factor` is below 1, or `jitter` is
-  outside the range 0 to 1. Validated at construction.
+- `ValueError` — `initial_delay` is not greater than zero, `factor` is not at least 1, `max_delay` is
+  NaN, or `jitter` is outside the range 0 to 1. A NaN `initial_delay`, `factor` or `jitter` raises.
+  Validated at construction.
 
-`max_delay` and `max_attempts` are **not** validated: a `max_delay` below `initial_delay` caps every
-delay at `max_delay`, and a negative `max_attempts` behaves as 0.
+`max_delay` is not otherwise validated, and `max_attempts` is not validated: a `max_delay` below
+`initial_delay` caps every delay at `max_delay`, and a negative `max_attempts` behaves as 0.
 
 ### Example
 
@@ -132,9 +133,13 @@ A `Reconnect` instance whose five fields are `readonly`.
 
 ### Raises
 
-- `Error` — `initialDelayMs` is not greater than zero, `factor` is below 1, or `jitter` is outside 0
-  to 1. A plain `Error`, not a muxws error class, because it is a configuration error, not a protocol
-  or connection failure.
+- `Error` — `initialDelayMs` is not greater than zero, `factor` is not at least 1, `maxDelayMs` is
+  `NaN`, or `jitter` is outside 0 to 1. A `NaN` `initialDelayMs`, `factor` or `jitter` throws. A plain
+  `Error`, not a muxws error class, because it is a configuration error, not a protocol or connection
+  failure.
+
+`maxDelayMs` is not otherwise validated, and `maxAttempts` is not validated: a `maxDelayMs` below
+`initialDelayMs` caps every delay at `maxDelayMs`, and a negative or `NaN` `maxAttempts` behaves as 0.
 
 ### Example
 

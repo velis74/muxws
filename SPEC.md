@@ -863,7 +863,8 @@ not part of this tree.
 
 - **WSM-FRM-001** A receiver MUST ignore unknown envelope fields.
 - **WSM-FRM-002** A receiver MUST ignore unknown *frame types*, logging once, and MUST NOT treat them
-  as any kind of error. Test: `peer_test.py::test_unknown_frame_type_is_ignored`.
+  as any kind of error. Tests: `peer_test.py::test_unknown_frame_type_is_ignored`,
+  `::test_each_unknown_frame_type_is_logged_once`.
 - **WSM-FRM-003** *Retired.* It required a peer not to send an extension frame type unless the remote
   had advertised that extension in `settings.extensions`. There is no `settings` frame and no
   extension advertisement (WSM-CON-031); a v1 peer sends only the six frame types of §2.3, and a frame

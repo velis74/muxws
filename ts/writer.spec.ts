@@ -12,7 +12,7 @@ import { encodedLength, splitFrame } from './fragment';
 import type { Frame } from './frames';
 import { Peer } from './peer';
 import { memoryPair } from './transports/memory';
-import { CONNECTION_LANE, StreamQueue, Writer } from './writer';
+import { CONNECTION_LANE, LaneEncodingError, StreamQueue, Writer } from './writer';
 
 const codec = new JsonCodec();
 
@@ -209,6 +209,30 @@ describe('the writer', () => {
 
     expect(writer.depthOf(1)).toBe(0);
     expect(internals(writer).queues.has(1)).toBe(false);
+  });
+
+  it('discards a lane whose next frame fails to encode when advancing, and throws LaneEncodingError', () => {
+    const writer = makeWriter();
+    writer.enqueue({ type: 'data', stream: 1, payload: { n: 1 } });
+    // Bytes are not a payload type under JSON; the codec refuses them.
+    writer.enqueue({ type: 'data', stream: 1, payload: { blob: new Uint8Array([0, 255]).buffer } });
+    writer.enqueue({ type: 'data', stream: 1, payload: { n: 3 } });
+    writer.enqueue({ type: 'data', stream: 5, payload: { n: 5 } });
+
+    const first = internals(writer).rotate();
+    expect(first?.stream).toBe(1);
+    let thrown: unknown = null;
+    try {
+      writer.advance(1);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LaneEncodingError);
+    expect((thrown as LaneEncodingError).lane).toBe(1);
+    expect(writer.depthOf(1)).toBe(0);
+    expect(internals(writer).queues.has(1)).toBe(false);
+    expect(drain(writer).map((frame) => frame.stream)).toEqual([5]);
   });
 
   it('waits when there is nothing to send, and wakes on the next enqueue', async () => {

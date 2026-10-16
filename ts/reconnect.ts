@@ -45,8 +45,8 @@ export interface ReconnectOptions {
  * Backoff options. Durations are milliseconds (§9.3).
  *
  * A class, not an interface, so the defaults are defined in one place and invalid values are rejected
- * in the constructor: `initialDelayMs` not greater than 0, `factor` below 1 (a shrinking schedule),
- * and `jitter` outside [0, 1].
+ * in the constructor: `initialDelayMs` not greater than 0, `factor` not at least 1 (a shrinking
+ * schedule), `jitter` outside [0, 1], and a NaN `maxDelayMs`. NaN fails each of these checks.
  */
 export class Reconnect {
   readonly initialDelayMs: number;
@@ -72,8 +72,9 @@ export class Reconnect {
 
     // Python raises `ValueError`; here a plain `Error`, because this is an argument error, not a
     // protocol or connection failure that a muxws error class would indicate.
-    if (this.initialDelayMs <= 0) throw new Error('initialDelayMs must be greater than zero');
-    if (this.factor < 1) throw new Error('factor must be at least 1');
+    if (!(this.initialDelayMs > 0)) throw new Error('initialDelayMs must be greater than zero');
+    if (!(this.factor >= 1)) throw new Error('factor must be at least 1');
+    if (Number.isNaN(this.maxDelayMs)) throw new Error('maxDelayMs must be a number, not NaN');
     if (!(this.jitter >= 0 && this.jitter <= 1)) throw new Error('jitter is a fraction between 0 and 1');
   }
 }

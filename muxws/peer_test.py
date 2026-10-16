@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 import logging
 import re
 import warnings
@@ -354,6 +355,46 @@ async def test_unknown_frame_type_is_ignored(make_pair, caplog):
         # WSM-OBS-001 requires every frame log line to use the one named logger.
         assert lines[0].name == "muxws.frames"
         assert lines[0].levelno == logging.INFO
+    finally:
+        await pair.stop()
+
+
+async def test_each_unknown_frame_type_is_logged_once(make_pair, caplog):
+    """WSM-FRM-002: an unknown frame type that arrives repeatedly produces one log line per type."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        with caplog.at_level(logging.INFO, logger="muxws.frames"):
+            for frame_type in ("widget", "widget", "gadget", "widget", "gadget"):
+                pair.acceptor_socket.inject(json.dumps({"type": frame_type, "stream": 1}))
+            await pair.settle()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert len([message for message in messages if "'widget'" in message]) == 1, messages
+        assert len([message for message in messages if "'gadget'" in message]) == 1, messages
+        assert pair.acceptor.is_open
+    finally:
+        await pair.stop()
+
+
+@pytest.mark.parametrize("frame_type", ["5", "[1]", '{"a":1}', '{"toString":1}', "null"])
+async def test_a_non_string_frame_type_fails_the_connection_with_frame_logging_on(make_pair, caplog, frame_type):
+    """WSM-FRM-005: a `type` that is not a string is a malformed envelope, not an unknown frame type.
+
+    With frame logging at DEBUG level the read loop sends goaway(PROTOCOL_ERROR) and closes the socket.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        with caplog.at_level(logging.DEBUG, logger="muxws.frames"):
+            pair.acceptor_socket.inject(f'{{"type":{frame_type},"stream":1}}')
+            await pair.settle()
+        goaways = pair.frames_of_type("acceptor", "goaway")
+        assert [frame.code for frame in goaways] == [int(ResetCode.PROTOCOL_ERROR)]
+        assert pair.acceptor.is_open is False
+        assert pair.acceptor_socket.is_closed
     finally:
         await pair.stop()
 
@@ -1681,6 +1722,33 @@ async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connect
 
         # The writer is still alive: a later request still completes.
         assert await pair.dialer.request({"q": 2}) == {"ok": True}
+    finally:
+        await pair.stop()
+
+
+async def test_nothing_more_is_sent_on_a_stream_after_a_later_queued_frame_fails_to_encode(make_pair):
+    """A frame that fails to encode when the writer advances past the previous frame on its lane
+    resets the stream, and the frames queued behind it on that lane are not sent."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        # Queued behind the `open`, so the writer slices it when it advances after sending the `open`.
+        await stream.send({"blob": b"\x00\xff"})
+        await stream.send({"n": 3})
+        await pair.settle()
+
+        sent = [frame for frame in pair.sent_by("dialer") if frame.stream == stream.id]
+        assert [frame.type for frame in sent] == ["open", "reset"]
+        # The reset carries the codec's own error, as when the rotation fails to encode a frame.
+        with pytest.raises(Exception) as refused:  # noqa: PT011 - the codec's error type is not part of the contract
+            JsonCodec().encode(Frame("data", stream=stream.id, payload={"blob": b"\x00\xff"}))
+        assert sent[1].reason == str(refused.value)
+        with pytest.raises(StreamReset) as info:
+            await stream
+        assert info.value.code is ResetCode.INTERNAL_ERROR
+        assert pair.dialer.is_open
     finally:
         await pair.stop()
 

@@ -71,8 +71,10 @@ sockets closed at the same time retry at the same time, and a restarting server 
 reconnections at once. If jitter were applied only below the cap, retries during a long outage, which
 run at the cap, would stay synchronised.
 
-The constructor raises `ValueError` (Python) or `Error` (TypeScript) for three configurations:
-`initial_delay` at or below zero, `factor` below 1 (a decreasing schedule), and `jitter` outside 0..1.
+The constructor raises `ValueError` (Python) or `Error` (TypeScript) for four configurations:
+`initial_delay` not greater than zero, `factor` not at least 1 (a decreasing schedule), a NaN
+`max_delay`, and `jitter` outside 0..1. A NaN `initial_delay`, `factor` or `jitter` is refused by
+the same checks.
 
 The schedule is a pure function of the attempt count, so it can be computed without waiting:
 

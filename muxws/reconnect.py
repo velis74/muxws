@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 
 from collections import deque
@@ -46,10 +47,12 @@ class Reconnect:
     max_attempts: int | None = None
 
     def __post_init__(self) -> None:
-        if self.initial_delay <= 0:
+        if not self.initial_delay > 0:
             raise ValueError("initial_delay must be greater than zero")
-        if self.factor < 1:
+        if not self.factor >= 1:
             raise ValueError("factor must be at least 1")
+        if math.isnan(self.max_delay):
+            raise ValueError("max_delay must be a number, not NaN")
         if not 0 <= self.jitter <= 1:
             raise ValueError("jitter is a fraction between 0 and 1")
 

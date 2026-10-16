@@ -129,6 +129,13 @@ def test_nonsense_options_are_refused_at_construction():
         backoff_delay(-1, Reconnect())
 
 
+@pytest.mark.parametrize("option", ["initial_delay", "factor", "max_delay"])
+def test_a_nan_option_is_refused_at_construction(option: str):
+    """A NaN `initial_delay`, `factor` or `max_delay` raises `ValueError` naming the option."""
+    with pytest.raises(ValueError, match=option):
+        Reconnect(**{option: float("nan")})
+
+
 # --------------------------------------------------------------------------- the attempt counter
 
 

@@ -1142,7 +1142,7 @@ onError(handler: (error: unknown, stream: Stream | null) => void): void;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `(error: unknown, stream: Stream \| null) => void` | required | Called with the failure and the stream it belongs to. Handlers run in registration order with **no per-handler isolation**, unlike `onClose`, `onReconnect` and `onFrame`: an exception from one stops the rest. The stream close path that reported the failure catches that exception, so the connection stays open; the remaining handlers are not called. |
+| `handler` | `(error: unknown, stream: Stream \| null) => void` | required | Called with the failure and the stream it belongs to. Handlers run in registration order and are isolated, as for `onClose`, `onReconnect` and `onFrame`: one that throws is logged and the rest still run. |
 
 ### Return
 

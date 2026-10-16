@@ -49,6 +49,11 @@ _FAILURE_DRAIN = 10.0
 #: The longest close reason a WebSocket close frame carries (RFC 6455 5.5: 125 bytes less the code).
 _MAX_CLOSE_REASON_BYTES = 123
 
+#: How many distinct unknown frame types a peer logs (WSM-FRM-002). Each is logged once; the bound
+#: keeps a remote that sends a new type in every frame from growing the set of logged types without
+#: limit.
+MAX_LOGGED_UNKNOWN_TYPES = 32
+
 StreamHandler = Callable[[Any, Stream], Any]
 ErrorSerializer = Callable[[BaseException], Any]
 #: `(headers, payload)`. Mutates `headers` in place; the return value is ignored (WSM-API-027).
@@ -106,6 +111,8 @@ class Peer:
         self._highest_local_open = 0
         self._highest_remote_open = 0
         self._ignored_late_frames = 0
+        #: The `repr` of each unknown frame type already logged (WSM-FRM-002).
+        self._logged_unknown_types: set[str] = set()
 
         self._handler: StreamHandler | None = None
         self._close_handlers: list[Callable[[Any], None]] = []
@@ -423,6 +430,9 @@ class Peer:
                 return
             except asyncio.CancelledError:
                 raise
+            except LaneEncodingError as failure:
+                # `advance` could not encode the lane's next frame; `frame` itself was sent.
+                await self._fail_lane(failure)
             except Exception as exc:  # noqa: BLE001
                 # A frame the codec cannot encode (for example a bytes payload under JSON) fails its
                 # stream only. If the exception ended this task, nothing would drain the queue while
@@ -578,7 +588,10 @@ class Peer:
         if frame.type == "goaway":
             return await self._on_goaway(frame)
         # WSM-FRM-002: unknown types are ignored, logged once, and are never an error.
-        logger.info("muxws conn=%s ignoring unknown frame type %r (WSM-FRM-002)", self.id, frame.type)
+        shown = repr(frame.type)
+        if shown not in self._logged_unknown_types and len(self._logged_unknown_types) < MAX_LOGGED_UNKNOWN_TYPES:
+            self._logged_unknown_types.add(shown)
+            logger.info("muxws conn=%s ignoring unknown frame type %s (WSM-FRM-002)", self.id, shown)
         return True
 
     # ------------------------------------------------------------------ liveness

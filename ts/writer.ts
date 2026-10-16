@@ -280,6 +280,15 @@ export class Writer {
 
   /** Ask one lane for its next frame; a codec error discards the lane and throws `LaneEncodingError`. */
   private turnOne(lane: number, queue: StreamQueue): Frame | null {
+    this.prepareLane(lane, queue);
+    const frame = queue.take();
+    if (frame !== null) return frame;
+    if (!queue.hasWork) this.retire(lane);
+    return null;
+  }
+
+  /** Slice the lane's next fragment; a codec error discards the lane and throws `LaneEncodingError`. */
+  private prepareLane(lane: number, queue: StreamQueue): void {
     try {
       queue.prepare(this.cap, this.codec);
     } catch (failure) {
@@ -288,11 +297,6 @@ export class Writer {
       this.retire(lane);
       throw new LaneEncodingError(lane, failure);
     }
-
-    const frame = queue.take();
-    if (frame !== null) return frame;
-    if (!queue.hasWork) this.retire(lane);
-    return null;
   }
 
   /** Remove an empty stream lane. No state is retained per closed stream (WSM-STM-001). */
@@ -303,11 +307,16 @@ export class Writer {
     if (at >= 0) this.order.splice(at, 1);
   }
 
-  /** Slice the stream's next fragment after its previous one has been passed to the socket. */
+  /**
+   * Slice the stream's next fragment after its previous one has been passed to the socket.
+   *
+   * A codec error discards the lane and throws `LaneEncodingError`, as in the rotation.
+   */
   advance(streamId: number | null | undefined): void {
-    const queue = this.queues.get(streamId ?? CONNECTION_LANE);
+    const lane = streamId ?? CONNECTION_LANE;
+    const queue = this.queues.get(lane);
     if (queue === undefined) return;
-    queue.prepare(this.cap, this.codec);
+    this.prepareLane(lane, queue);
     if (queue.hasWork) this.wake.set();
   }
 

@@ -81,7 +81,8 @@ handshake with HTTP 400, before a socket exists. Peers of different generations 
 
 **Additive revisions need no announcement.** A receiver must ignore what it does not recognise:
 
-- **Unknown frame types** are ignored and logged, and are never an error. The connection continues.
+- **Unknown frame types** are ignored and are never an error. The connection continues. Each type is
+  logged once per peer, at info level, for at most 32 distinct types.
 - **Unknown envelope fields** are ignored. A decoder must *drop* them rather than preserve them; if it
   preserved them, `decode(encode(frame)) == frame` would also pass for frames carrying unknown fields.
 

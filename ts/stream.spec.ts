@@ -450,6 +450,32 @@ describe('reset stream nobody consumed', () => {
       await pair.stop();
     }
   });
+
+  it('calls every error handler when one throws - WSM-API-016', async () => {
+    const pair = new Pair();
+    const reported: unknown[] = [];
+    pair.dialer.onError(() => {
+      throw new Error('a broken error handler');
+    });
+    pair.dialer.onError((error) => reported.push(error));
+    pair.acceptor.onStream(hold);
+    pair.start();
+    const level = logger.level;
+    logger.level = 'silent';
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      await pair.settle();
+      pair.inject('dialer', { type: 'reset', stream: stream.id, code: ResetCode.APPLICATION_ERROR, reason: 'no' });
+      await pair.settle();
+
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toBeInstanceOf(RemoteError);
+      expect(pair.dialer.isOpen).toBe(true);
+    } finally {
+      logger.level = level;
+      await pair.stop();
+    }
+  });
 });
 
 describe('closed and signal', () => {
