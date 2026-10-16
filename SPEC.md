@@ -1402,14 +1402,14 @@ much as the mutation that kills the witness, and the mutation is given with it.
 Of the **222** individually numbered rules in §5, **19** have no citing test.
 
 Of those 19: **fourteen** are exercised by a test that simply does not name them; **one**
-(`WSM-PKG-004`) is enforced by the linters; **two** (`WSM-TST-004`, `WSM-TST-005`) by a CI job; and
+(`WSM-PKG-004`) is enforced by the linters; **two** (`WSM-TST-004`, `WSM-TST-005`) by CI steps; and
 **two** (`WSM-RCN-025`, `WSM-RCN-028`) are rules whose library half is held by a differently-named
 test and whose other half binds the deploying application rather than muxws.
 
 **Every rule in this document has a witness of some kind**, and the kind is named for each. That is a
 weaker claim than "everything is tested" and it is the one worth making: fourteen of the nineteen
-would survive a rename of the test that holds them without anyone noticing, and the two CI jobs are
-falsifiable only for the codecs their matrix enumerates.
+would survive a rename of the test that holds them without anyone noticing, and the two CI witnesses
+are falsifiable only for the codecs their steps enumerate.
 
 ### Retired — no test is owed
 
@@ -1465,8 +1465,8 @@ is a promise.
 |---|---|---|
 | `WSM-PKG-004` | `eslint` and `ruff`, via `npm run lint:ci` and `ruff check .` | In a scratch tree using this repository's own `eslint.config.js` and `pyproject.toml`: `ts/streamState.ts` → `Filename is not in kebab case. Rename it to 'stream-state.ts'` (`unicorn/filename-case`); a double-quoted TypeScript string → `prettier/prettier`; a 153-column line → `vue/max-len`. On the Python side a single-quoted string → `Q000` and a 136-column line → `E501`. Renaming the file to `stream-state.ts` passes. **All three clauses of the rule are enforced** — it is a witness, but a lint job rather than a test, and a lint job does not run in `pytest`. |
 | `WSM-API-003` (the "zero mandatory arguments" half) | `tsc --noEmit`, via `npm run lint:ci` | `?` is erased at runtime and `Function.length` is 2 either way, so vitest cannot see this half in TypeScript. Changing the overload to `open<T>(payload: unknown, …)` produces `ts/peer.spec.ts(1668,32): error TS2554: Expected 1-2 arguments, but got 0` — the type-checker fails at the test's own bare `pair.dialer.open()`. The witness is the call site; the checker is the thing that reads it. |
-| `WSM-TST-004` | the `cross-language` workflow's `scenario` jobs (`interop/drive.sh <acceptor> <dialer>`, both role assignments × both codecs) | a job, not a test |
-| `WSM-TST-005` | the `cross-language` workflow's `reconnect` job (`interop/drive.sh <acceptor> <dialer> reconnect`, both role assignments) | a job, not a test |
+| `WSM-TST-004` | the `cross-language` workflow's four leg steps (`interop/drive.sh <acceptor> <dialer>`, both role assignments × both codecs) | a CI step, not a test |
+| `WSM-TST-005` | the `cross-language` workflow's two reconnect steps (`interop/drive.sh <acceptor> <dialer> reconnect`, both role assignments) | a CI step, not a test |
 | `WSM-CDC-007` (for the codecs it names) | the same workflow, plus `conformance_test.py::test_sequence_corpus_replays_under_msgpack` and `::test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere` | `interop/drive.sh python ts corpus json 12` passes locally and fails on each of three deliberate breaks: `PREFIX = "muxws.v9."` in `subprotocol.py` (`Unexpected server response: 400` — the pair genuinely cannot form and the job says so), a wrong pinned fixture count, and a codec pinned to `msgpack` for a JSON-configured run. **But see the gap below: this witnesses two codecs, not the rule's quantifier.** |
 
 ### Genuinely unwitnessable, and what would change that
@@ -1504,13 +1504,13 @@ have to appear in the hello, and byte identity across three drops says none did.
 
 **`WSM-CDC-007`'s quantifier is unwitnessed, and the missing witness is one assertion.** The rule is
 "***Every*** codec that ships MUST have a live cross-language pair… A codec without that pair MUST NOT
-ship." The workflow's matrix is a literal `include:` list of four legs naming `json` and `msgpack`,
+ship." The workflow lists four leg steps naming `json` and `msgpack`,
 and `conformance_test.py` pins the configured set as the literal `{JsonCodec.name,
 MsgpackCodec.name}`. Register a third codec in both ports tomorrow and everything stays green: no
-matrix leg exists for it, and nothing in either suite asserts the *set* of shipped codecs —
+leg exists for it, and nothing in either suite asserts the *set* of shipped codecs —
 `registered_codecs()` is only ever asked `in` / `not in` (`codecs/registry_test.py:34`,
 `codecs/msgpack__test.py:240,250`, `ts/codec.spec.ts`). The missing witness is a test asserting
-`registered_codecs()` equals the set the CI matrix covers. It is writable in either language and it
+`registered_codecs()` equals the set the CI legs cover. It is writable in either language and it
 must agree with a YAML file under `.github/`, which is why it is recorded here rather than guessed
 at.
 

@@ -1,7 +1,11 @@
 name: CI
 
+# A pull request runs every job once; a push runs them only on main, where the merge result is
+# checked again. A push to a branch with an open pull request would otherwise run each job twice on
+# the same commit.
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
@@ -50,6 +54,12 @@ jobs:
       - run: npm run lint:ci
       - run: npm test
       - run: npm run build
+      # The documentation site: every exported symbol has an entry with all five sections, no
+      # duration without a unit, no dead link or anchor, SPEC.md linked from one page. Then the build,
+      # which fails on a dead internal link. The examples on the API pages run in `cross-language.yml`
+      # (TypeScript, against the Python acceptor) and in the python job above (`docs/examples` is in
+      # `testpaths`).
+      - run: npm run docs:check
       - run: npm run docs:build
       - uses: actions/upload-artifact@v4
         with:
@@ -95,5 +105,5 @@ jobs:
           pr-number: ${{ github.event.pull_request.number }}
 
   # Interop belongs in `cross-language.yml`, which runs both role assignments over both codecs on
-  # the same triggers. A second copy here would be a strict subset of that matrix: two jobs to keep
-  # in step, and the one that ships fewer codecs is the one that rots.
+  # the same triggers. A second copy here would be a strict subset of it: two places to keep in step,
+  # and the one that ships fewer codecs is the one that rots.
