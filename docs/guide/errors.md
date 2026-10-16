@@ -9,7 +9,7 @@ Every error muxws raises descends from one root, so `except MuxwsError` / `catch
 if (e instanceof MuxwsError) ... }` is a complete net. The names are identical in both languages;
 Python's inherit from `Exception`, TypeScript's from `Error`.
 
-```
+```text
 MuxwsError                     everything below is one of these
 ├── ProtocolError              this peer or the remote violated the protocol
 ├── ConnectionClosed           the socket died — connection-level, never per-stream

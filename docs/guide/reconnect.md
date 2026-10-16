@@ -48,7 +48,7 @@ for anything else.
 
 ## The backoff schedule
 
-```
+```text
 delay = min(initial_delay * factor ** attempts, max_delay)
 delay = delay * (1 + uniform(-jitter, +jitter))
 ```

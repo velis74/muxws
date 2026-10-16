@@ -34,7 +34,7 @@ logger.level = 'debug'; // 'debug' | 'info' | 'warn' | 'error' | 'silent'
 
 ### The format
 
-```
+```text
 muxws conn=b19-0 dir=tx type=open   stream=1 end=1 bytes=88 headers=1
 muxws conn=b19-1 dir=rx type=open   stream=1 end=1 bytes=88 headers=1
 muxws conn=b19-1 dir=tx type=data   stream=1 end=0 bytes=44

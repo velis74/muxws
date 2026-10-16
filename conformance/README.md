@@ -274,8 +274,9 @@ step is a fixture that passes by testing nothing.
 | `expect_closed` | — | `{"peer", "socket"?}`: that peer is no longer open. |
 
 `peer` is `"dialer"` or `"acceptor"` and is **required** on `call`, `inject`, `expect_frame`,
-`expect_no_frame` and (inside its own object) `expect_headers` - an `expect_frame` without it cannot say whose wire to search, and a runner that
-guessed would be asserting something different in each language.
+`expect_no_frame` and (inside its own object) `expect_headers` - an `expect_frame` without it cannot
+say whose wire to search, and a runner that guessed would be asserting something different in each
+language.
 
 #### `inject`
 

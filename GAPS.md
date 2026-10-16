@@ -19,7 +19,7 @@ variables `MUXWS_CODEC` / `VITE_MUXWS_CODEC`, loggers `muxws.frames` / `muxws.co
 mechanically to match; the `WSM-*` rule ids were deliberately left untouched, because the briefs make
 them the stable contract between milestones.
 
-## muxws-m0-scaffolding.md — no rule id
+## muxws-m0-scaffolding.md — no rule id, `docs/design/` and the site
 
 **What I needed:** to know whether `docs/design/` is part of the published documentation site.
 
@@ -33,7 +33,7 @@ This also disposes of a problem M7 would otherwise have hit: `docs/design/README
 links to backchannel briefs that do not exist in this repository, and M7 requires the VitePress build
 to treat dead links as fatal.
 
-## muxws-m0-scaffolding.md — no rule id
+## muxws-m0-scaffolding.md — no rule id, CI without a lockfile
 
 **What I needed:** a CI job for the Node side that survives a fresh checkout.
 
@@ -65,6 +65,7 @@ reassembled buffer to.
 may expose only those, so this extends the port rather than contradicting it. Both are documented on
 the protocol in both languages. If the intent was that fragmentation should slice the encoded
 *frame* instead, that is a different protocol - the `fragment` field would then carry envelope bytes
+
 - and WSM-FRG-011 says otherwise.
 
 ## muxws-m1-frames-and-codec.md — WSM-CDC-014, test 8
@@ -234,6 +235,7 @@ Python's terms, where `CancelledError` is delivered *into* the awaiting frame.
 
 **What I assumed:** that it carries across only where JavaScript can observe the walking away, and
 that saying so is better than pretending. Three cases:
+
 - **`for await` that breaks, returns or throws** - carries across. The async generator is finalised
   and its `finally` sends the reset. This is the case the rule names explicitly.
 - **`result({ signal })`** - carries across, via an `AbortSignal` the caller supplies. Aborting
@@ -313,7 +315,6 @@ synchronously and the stream just allocated gets its drain window like any other
 implement it, and the test in each fails when the trigger is removed. Nothing is deferred here any
 more; this entry is kept because the shape of the mistake - satisfying one clause of a four-clause
 MUST and writing a test that agrees with you - is worth remembering.
-
 
 ## muxws-m4-connection-lifecycle.md — WSM-CON-012
 
@@ -1048,7 +1049,7 @@ a runner that agreed to the convention; a payload is read by an application that
 **What the reader found that nobody had:** `datetime` fails on **both** shipped codecs, and it was
 documented nowhere.
 
-```
+```text
 json    datetime -> TypeError: the json codec cannot encode datetime
 msgpack datetime -> TypeError: can not serialize 'datetime.datetime' object
 ```
@@ -1397,7 +1398,7 @@ each is now pinned by a witness that fails when the fix is reverted.
   which is "requirement already satisfied". Measured with a shadowing `websockets/__init__.py` whose
   body was `import definitely_missing_pkg_xyz`:
 
-  ```
+  ```text
   WebsocketsNotInstalledError: muxws needs the `websockets` package to dial a ws:, wss: or ws+unix:
   URL, and importing it failed (No module named 'definitely_missing_pkg_xyz'); install it with
   `pip install muxws[websockets]`

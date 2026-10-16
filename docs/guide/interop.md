@@ -62,7 +62,7 @@ There are two things that are conspicuously *not* on the wire, and their absence
 
 ## The subprotocol prefix is the only version
 
-```
+```text
 muxws.v1.json
 muxws.v1.msgpack
 ```

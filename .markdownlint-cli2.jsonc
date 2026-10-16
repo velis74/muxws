@@ -1,0 +1,13 @@
+{
+  "config": {
+    "MD013": { "line_length": 120, "tables": false, "code_blocks": false },
+    // Keep a Changelog repeats Added / Changed / Fixed under every version
+    "MD024": { "siblings_only": true },
+    // the docs embed HTML: the README's icon, VitePress containers
+    "MD033": false,
+    // VitePress builds heading anchors differently from markdownlint's GitHub slugs (`0.4.0` -> `0-4-0`)
+    "MD051": false
+  },
+  // docs/design/ holds the design briefs as they were handed over; they are not published
+  "ignores": ["**/node_modules/**", "**/dist/**", "coverage/**", "docs/.vitepress/cache/**", "docs/design/**"]
+}
