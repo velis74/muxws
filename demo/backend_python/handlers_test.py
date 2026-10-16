@@ -9,6 +9,7 @@ the round-robin writer is ever replaced by a FIFO.
 from __future__ import annotations
 
 import asyncio
+import itertools
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,6 +23,39 @@ from muxws import Frame, MAX_FRAME_BYTES, Peer, PeerRegistry, RemoteError, Strea
 from muxws.codecs.json_ import JsonCodec
 from muxws.transports.memory import memory_pair, MemorySocket
 
+#: Frames each tick stream has queued when the export's sends are released: more than the export
+#: has fragments, so no tick stream runs dry while the export is still on the wire.
+BACKLOG = 32
+
+
+class GatedSocket:
+    """A `MemorySocket` whose sends wait while `gate` is clear. Implements `SocketAdapter`.
+
+    With the gate set, a send is the wrapped socket's send and adds no suspension: `Event.wait()` on a
+    set event returns without yielding. With it clear, the write loop holds at its next send and every
+    frame enqueued meanwhile stays in the writer, so a test can fix what the rotation has to choose
+    from before it chooses.
+    """
+
+    def __init__(self, socket: MemorySocket) -> None:
+        self._socket = socket
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def send_text(self, text: str) -> None:
+        await self.gate.wait()
+        await self._socket.send_text(text)
+
+    async def send_bytes(self, data: bytes) -> None:
+        await self.gate.wait()
+        await self._socket.send_bytes(data)
+
+    async def receive(self) -> str | bytes:
+        return await self._socket.receive()
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._socket.close(code, reason)
+
 
 class Wire:
     """A browser and a backend, wired to each other, with the demo's real handler on the acceptor.
@@ -30,14 +64,23 @@ class Wire:
     takes one event-loop turn per frame, so the rotation has lanes to rotate over without the
     transport supplying any suspension of its own. A socket double that slept in proportion to frame
     size would supply that yield instead, and the interleaving asserted below would then be the
-    double's rather than the writer's.
+    double's rather than the writer's. The backend's sends pass a `GatedSocket`, which is open unless
+    a test closes it.
     """
 
-    def __init__(self, dialer: Peer, acceptor: Peer, service: MarketService, sockets: list[MemorySocket]) -> None:
+    def __init__(
+        self,
+        dialer: Peer,
+        acceptor: Peer,
+        service: MarketService,
+        sockets: list[MemorySocket],
+        backend: GatedSocket,
+    ) -> None:
         self.dialer = dialer
         self.acceptor = acceptor
         self.service = service
         self.sockets = sockets
+        self.backend = backend
         #: Every frame the *browser* saw, in arrival order. WSM-OBS-003's hook is the only witness
         #: the headline test below uses.
         self.seen: list[tuple[str, Frame, int]] = []
@@ -85,7 +128,24 @@ class Wire:
                 raise AssertionError(f"only {len(self.board)} of {len(SYMBOLS)} tick streams started")
             await asyncio.sleep(0.005)
 
+    def tick_streams(self) -> set[int]:
+        """The ids of the streams the backend pushed, one per symbol."""
+        return {stream.id for stream in self.acceptor._streams.values() if stream.local}
+
+    async def until_backlogged(self, stream_id: int, depth: int, timeout: float = 5.0) -> None:
+        """Wait until `stream_id` has a frame queued and every tick stream has `depth` frames queued.
+
+        Meaningful only while `backend.gate` is clear: the writer then holds every frame enqueued.
+        """
+        writer = self.acceptor._writer
+        deadline = asyncio.get_running_loop().time() + timeout
+        while writer.depth_of(stream_id) == 0 or min(writer.depth_of(lane) for lane in self.tick_streams()) < depth:
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError(f"the tick streams did not queue {depth} frames each")
+            await asyncio.sleep(0.005)
+
     async def stop(self) -> None:
+        self.backend.gate.set()
         self.service.forget(self.acceptor)
         for socket in self.sockets:
             await socket.drop()
@@ -106,24 +166,16 @@ async def market_wire(**service_options: Any) -> AsyncIterator[Wire]:
     browser_side, backend_side = left, right
     codec = JsonCodec()
     dialer = Peer(browser_side, codec=codec, is_dialer=True)
-    acceptor = Peer(backend_side, codec=codec, is_dialer=False)
+    backend = GatedSocket(backend_side)
+    acceptor = Peer(backend, codec=codec, is_dialer=False)
     service = MarketService(Market(), PeerRegistry(), **service_options)
     acceptor.on_stream(service.handler_for(acceptor))
-    wire = Wire(dialer, acceptor, service, [browser_side, backend_side])
+    wire = Wire(dialer, acceptor, service, [browser_side, backend_side], backend)
     wire.start()
     try:
         yield wire
     finally:
         await wire.stop()
-
-
-def _runs_of(flags: list[bool]) -> int:
-    """The longest run of consecutive True values."""
-    longest = run = 0
-    for flag in flags:
-        run = run + 1 if flag else 0
-        longest = max(longest, run)
-    return longest
 
 
 # ---------------------------------------------------------------------------- the headline
@@ -133,17 +185,24 @@ async def test_ticks_keep_flowing_during_an_export() -> None:
     """WSM-INV-004, as a test: a megabyte on one stream does not stall the twenty others.
 
     Asserted from what the *browser's* `on_frame` recorded, not from anything visual and not from the
-    handler's own bookkeeping. A FIFO anywhere on the send path decides the order at enqueue time, so
-    every one of the export's sixteen fragments would go out back to back and the ticks produced
-    while they did would arrive afterwards in a heap. Under the round-robin writer the export gets
-    one fragment per turn and every tick stream gets its own turn in between (WSM-FRG-017/018/019).
+    handler's own bookkeeping. The backend's sends are held while the export is enqueued, until every
+    tick stream has more frames queued than the export has fragments; then they are released. What
+    the writer sends from that state does not depend on scheduling. A FIFO decides the order at
+    enqueue time, so the ticks queued before the export would go out first and every fragment of the
+    export after them, back to back. The round-robin writer gives the export one fragment per turn and
+    every tick stream one frame in between (WSM-FRG-017/018/019).
     """
     async with market_wire(tick_interval=0.005) as wire:
         await wire.hello()
         await wire.until_the_board_is_live()
+        ticks = wire.tick_streams()
+        assert len(ticks) == len(SYMBOLS)
 
+        wire.backend.gate.clear()
         export = wire.dialer.open({"action": "export", "symbol": "ACME"}, end=True)
-        payload = await export
+        await wire.until_backlogged(export.id, depth=BACKLOG)
+        wire.backend.gate.set()
+        payload = await asyncio.wait_for(export, 10.0)
 
         received = wire.received()
         fragments = [
@@ -151,37 +210,17 @@ async def test_ticks_keep_flowing_during_an_export() -> None:
             for index, frame in enumerate(received)
             if frame.stream == export.id and frame.type == "data" and frame.fragment is not None
         ]
-        ticks = {
-            index
-            for index, frame in enumerate(received)
-            if frame.type == "data" and frame.stream is not None and frame.stream % 2 == 0
-        }
-
         print(f"export fragments={len(fragments)} span={fragments[0]}..{fragments[-1]} of {len(received)} frames")
         # A megabyte really did have to be fragmented; otherwise there was nothing to stall behind.
         assert len(fragments) >= 8, f"the export arrived in {len(fragments)} fragments; it cannot stall anything"
+        assert len(fragments) < BACKLOG, "the tick streams ran dry before the export finished"
         assert payload["count"] == EXPORT_ROWS
 
-        interleaved = sum(1 for index in ticks if fragments[0] < index < fragments[-1])
-        print(f"tick frames between the first and last export fragment: {interleaved}")
-        assert interleaved >= 40, f"only {interleaved} ticks arrived while a megabyte was on the wire"
-
-        # The sharper form of the same claim, and the one a FIFO cannot survive: no tick ever waits
-        # on more than a fragment or two of the export.
-        window = received[fragments[0] : fragments[-1] + 1]
-        back_to_back = _runs_of([index + fragments[0] in set(fragments) for index in range(len(window))])
-        print(f"longest run of consecutive export fragments: {back_to_back}")
-        assert back_to_back <= 2, f"{back_to_back} export fragments went out back to back; the writer is a FIFO"
-
-        # And it was the whole board that kept moving, not one lucky stream: the rotation asks every
-        # lane once before it asks any lane twice.
-        streams = {
-            frame.stream
-            for frame in window
-            if frame.type == "data" and frame.stream is not None and frame.stream % 2 == 0
-        }
-        print(f"distinct tick streams delivering during the export: {len(streams)} of {len(SYMBOLS)}")
-        assert len(streams) == len(SYMBOLS), f"only {len(streams)} of {len(SYMBOLS)} symbols kept ticking"
+        # Between any two fragments of the export, every tick stream delivered exactly one frame and
+        # nothing else went out: the rotation asks every lane once before it asks any lane twice.
+        for before, after in itertools.pairwise(fragments):
+            between = sorted(frame.stream for frame in received[before + 1 : after])
+            assert between == sorted(ticks), f"frames {before}..{after} carried streams {between}"
 
 
 # ---------------------------------------------------------------------------- section 6's rest
