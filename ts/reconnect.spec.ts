@@ -347,6 +347,14 @@ describe('the backoff schedule', () => {
     expect(schedule).toEqual([250, 500, 1000, 2000, 4000, 8000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
   });
 
+  it('stays at the cap however many attempts failed - WSM-RCN-003', () => {
+    const options = new Reconnect();
+    [1023, 1024, 10_000].forEach((attempt) => {
+      expect(unjitteredDelay(attempt, options)).toBe(30_000);
+      expect(backoffDelay(attempt, options, () => 1)).toBeCloseTo(30_000 * 1.3);
+    });
+  });
+
   it('applies jitter to every delay, including the capped ones - WSM-RCN-002', () => {
     const options = new Reconnect();
     [0, 3, 9].forEach((attempt) => {
@@ -1364,6 +1372,80 @@ describe('the reconnect driver', () => {
     expect(errors.mock.calls.length, 'each failure is logged where an operator can see it').toBe(4);
     await loop.stop();
     errors.mockRestore();
+  });
+
+  it('closes the socket a dial returns after close(), and never reconnects - WSM-RCN-040', async () => {
+    const server = new FakeServer();
+    const peer = dialerOver(await server.dial());
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let dialling = false;
+    const slowDial = async (): Promise<MemorySocket> => {
+      dialling = true;
+      await held;
+      return server.dial();
+    };
+    const loop = new ConnectionLoop(peer, slowDial, {
+      options: new Reconnect({ initialDelayMs: 1, jitter: 0 }),
+      hello: new Hello(),
+      draw: () => 0,
+      pingIntervalMs: 0,
+    });
+    cleanups.push(() => void loop.stop());
+    peer.connectionLoop = loop;
+    const reconnects: number[] = [];
+    peer.onReconnect((attempt) => reconnects.push(attempt));
+    await loop.establish();
+    loop.start();
+
+    server.drop();
+    await until(() => dialling, 3000, 'the redial to start');
+    await peer.close();
+    release();
+    await until(() => server.dialerSockets.length === 2, 3000, 'the held dial to return');
+    await settle();
+
+    expect(peer.isOpen).toBe(false);
+    expect(reconnects, 'a connection closed by the application is not re-established').toEqual([]);
+    expect(server.dialerSockets[1].isClosed, 'the late socket is closed, not left open').toBe(true);
+  });
+
+  it('does not establish a hello that completes after stop() - WSM-RCN-040', async () => {
+    const server = new FakeServer();
+    const peer = dialerOver(await server.dial());
+    let answerHello: () => void = () => undefined;
+    const helloHeld = new Promise<void>((resolve) => {
+      answerHello = resolve;
+    });
+    let hellos = 0;
+    server.handler = async (_payload, stream) => {
+      hellos += 1;
+      if (hellos > 1) await helloHeld;
+      await stream.reply('ack');
+    };
+    const loop = new ConnectionLoop(peer, server.dial, {
+      options: new Reconnect({ initialDelayMs: 1, jitter: 0 }),
+      hello: new Hello({ payload: { session: 'abc' } }),
+      draw: () => 0,
+      pingIntervalMs: 0,
+    });
+    cleanups.push(() => void loop.stop());
+    const reconnects: number[] = [];
+    peer.onReconnect((attempt) => reconnects.push(attempt));
+    await loop.establish();
+    loop.start();
+
+    server.drop();
+    await until(() => hellos === 2, 3000, 'the second hello to arrive');
+    await loop.stop();
+    answerHello();
+    await settle(50);
+
+    expect(peer.isOpen).toBe(false);
+    expect(reconnects, 'a stopped helper does not report a reconnection').toEqual([]);
+    expect(server.dialerSockets[1].isClosed, 'the half-established socket is closed').toBe(true);
   });
 
   it('stops dialling on a deliberate close in the gap between sockets - WSM-RCN-040/044', async () => {

@@ -377,6 +377,13 @@ class Peer:
             collector.cancel()
             await asyncio.gather(collector, return_exceptions=True)
             raise StreamTimeout(f"stream {stream.id} did not answer within {timeout}s", stream_id=stream.id) from None
+        except asyncio.CancelledError:
+            # The caller was cancelled, not the deadline: the shield keeps the collector alive, so it
+            # is cancelled here, and its own cancellation sends reset(CANCELLED) as it does without a
+            # timeout (WSM-ERR-011).
+            collector.cancel()
+            await asyncio.gather(collector, return_exceptions=True)
+            raise
 
     # ------------------------------------------------------------------ the writer
 

@@ -62,6 +62,18 @@ def test_schedule_before_jitter_and_cap():
     assert schedule == [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0, 30.0, 30.0]
 
 
+def test_the_schedule_stays_at_the_cap_however_many_attempts_failed():
+    """WSM-RCN-003: past the float range of `factor ** attempts` the delay is still the cap.
+
+    At the default factor that is attempt 1024, about eight and a half hours of failed dials.
+    """
+    options = Reconnect()
+    for attempts in (1023, 1024, 10_000):
+        assert unjittered_delay(attempts, options) == 30.0
+        assert backoff_delay(attempts, options, lambda: 1.0) == pytest.approx(30.0 * 1.3)
+    assert unjittered_delay(10_000, Reconnect(factor=1.5, max_delay=60.0)) == 60.0
+
+
 def test_jitter_is_applied_to_every_delay_including_the_capped_ones():
     """WSM-RCN-002: including the capped ones - which is where a herd would otherwise re-form."""
     options = Reconnect()
@@ -1459,5 +1471,67 @@ async def test_header_interceptors_survive_a_reconnect_and_leave_the_hello_alone
         assert dialable_server.raw(1)[0] == dialable_server.raw(0)[0], "the hello replays byte for byte"
         assert dialable_server.frames(1)[0].headers is None
         assert answered[-1] == {"served-by": 2}
+    finally:
+        await loop.stop()
+
+
+async def test_close_during_a_dial_never_reconnects(dialable_server: DialableServer):
+    """WSM-RCN-040: a dial still in flight when `close()` runs does not bring the connection back."""
+    held = asyncio.Event()
+    dialling = asyncio.Event()
+
+    async def slow_dial() -> Any:
+        dialling.set()
+        await held.wait()
+        return await dialable_server.dial()
+
+    peer, loop = await dialable_server.driver()
+    loop._dial = slow_dial
+    peer._connection_loop = loop
+    reconnects: list[int] = []
+    peer.on_reconnect(lambda attempt, _peer: reconnects.append(attempt))
+    await loop.establish()
+    loop.start()
+    try:
+        await dialable_server.drop()
+        await asyncio.wait_for(dialling.wait(), 5.0)
+        await peer.close(drain=0.1)
+        held.set()
+        await asyncio.sleep(0.05)
+
+        assert not peer.is_open
+        assert reconnects == [], "a connection closed by the application is not re-established"
+        assert len(dialable_server.sockets) == 1, "the dial was cancelled before it produced a socket"
+    finally:
+        await loop.stop()
+
+
+async def test_stop_during_the_hello_establishes_nothing(dialable_server: DialableServer):
+    """WSM-RCN-040: a hello still outstanding when `stop()` runs leaves no connection behind."""
+    answer = asyncio.Event()
+    hellos: list[Any] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        hellos.append(payload)
+        if len(hellos) > 1:
+            await answer.wait()
+        await stream.reply("ack")
+
+    dialable_server.handler = handler
+    peer, loop = await dialable_server.driver(hello=Hello(payload={"session": "abc"}))
+    reconnects: list[int] = []
+    peer.on_reconnect(lambda attempt, _peer: reconnects.append(attempt))
+    await loop.establish()
+    loop.start()
+    try:
+        await dialable_server.drop()
+        await asyncio.wait_for(_until(lambda: len(hellos) == 2), 5.0)
+        await loop.stop()
+        answer.set()
+        await asyncio.sleep(0.05)
+
+        assert not peer.is_open
+        assert reconnects == [], "a stopped helper does not report a reconnection"
+        assert dialable_server.sockets[1].is_closed, "the half-established socket is closed"
     finally:
         await loop.stop()

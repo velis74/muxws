@@ -82,13 +82,22 @@ def backoff_delay(attempts: int, options: Reconnect, draw: RandomDraw = _uniform
     """
     if attempts < 0:
         raise ValueError("attempts cannot be negative")
-    base = min(options.initial_delay * options.factor**attempts, options.max_delay)
+    base = unjittered_delay(attempts, options)
     return max(0.0, base * (1.0 + options.jitter * draw()))
 
 
 def unjittered_delay(attempts: int, options: Reconnect) -> float:
-    """The schedule before jitter and after the cap - the half that is exactly predictable."""
-    return min(options.initial_delay * options.factor**attempts, options.max_delay)
+    """The schedule before jitter and after the cap - the half that is exactly predictable.
+
+    `factor ** attempts` exceeds the float range after about a thousand attempts at the default
+    factor. `initial_delay > 0` and `factor >= 1`, so a growth that overflows is past any cap, and
+    the result is `max_delay`.
+    """
+    try:
+        grown = options.initial_delay * options.factor**attempts
+    except OverflowError:
+        return options.max_delay
+    return min(grown, options.max_delay)
 
 
 def should_retry(attempts: int, options: Reconnect) -> bool:
@@ -447,6 +456,12 @@ class ConnectionLoop:
         self._serving = asyncio.create_task(peer.serve())
         try:
             await self._perform_hello()
+        except asyncio.CancelledError:
+            # `stop()` cancelled the attempt mid-hello. The socket is not a connection and nothing
+            # will serve it again, so it is closed rather than left open behind the helper
+            # (WSM-RCN-040).
+            await self._abandon_socket()
+            raise
         except Exception as exc:  # noqa: BLE001 - a reset hello and a timed-out one fail alike
             await self._fail_attempt(exc)
             return False

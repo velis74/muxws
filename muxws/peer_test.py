@@ -996,6 +996,28 @@ async def test_request_timeout_resets_and_raises(make_pair):
         await pair.stop()
 
 
+@pytest.mark.parametrize("timeout", [None, 5.0])
+async def test_cancelling_a_request_resets_its_stream_with_or_without_a_timeout(make_pair, timeout):
+    """WSM-ERR-011: a cancelled caller sends reset(CANCELLED) and leaves no stream and no task behind."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        caller = asyncio.create_task(pair.dialer.request({"q": 1}, timeout=timeout))
+        await pair.settle()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        await pair.settle()
+
+        resets = [f.code for f in pair.sent_by("dialer") if f.type == "reset"]
+        assert resets == [int(ResetCode.CANCELLED)]
+        assert pair.dialer._streams == {}, "the stream is gone"
+        assert pair.acceptor._streams == {}, "and the remote stopped working on it"
+    finally:
+        await pair.stop()
+
+
 async def test_request_with_a_timeout_that_does_not_expire(make_pair):
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)

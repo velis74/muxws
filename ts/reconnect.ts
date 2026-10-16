@@ -629,6 +629,12 @@ export class ConnectionLoop {
         this.counter.failed();
         continue;
       }
+      // `stop()` - and through it `peer.close()` - cannot cancel a dial already in flight, so a socket
+      // it returns afterwards is closed here instead of adopted (WSM-RCN-040).
+      if (this.stopped) {
+        await socket.close(1000, 'the connection was closed while dialling');
+        return false;
+      }
 
       // Before the socket, because this socket may die during the hello and `die()` reads it: what
       // `CloseReason.willRetry` has to say is whether the helper intends to dial *again*, which for
@@ -661,6 +667,12 @@ export class ConnectionLoop {
         await this.abandonSocket();
         this.counter.failed();
         continue;
+      }
+      // A hello acknowledged after `stop()` establishes nothing: the attempt is abandoned like a
+      // failed one, so `isOpen` stays false and `onReconnect` does not fire (WSM-RCN-040).
+      if (this.stopped) {
+        await this.abandonSocket();
+        return false;
       }
 
       // Only now. This is the single point where the counter resets (WSM-RCN-004/WSM-INV-012):

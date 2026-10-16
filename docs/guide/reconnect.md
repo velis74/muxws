@@ -290,7 +290,10 @@ At most one `will_retry=False` close ever reaches an application for one peer. A
 ran twice is what saying it twice would cost.
 
 `peer.close()` is the other way the helper stops: it sets the intent before anything else, so a close
-called while the helper is asleep in its backoff stops the next dial rather than racing it.
+called while the helper is asleep in its backoff stops the next dial rather than racing it. A close
+called while a dial or a hello is in progress ends that attempt: a socket the dial returns afterwards
+is closed without being adopted, a hello acknowledged afterwards establishes nothing, `is_open` /
+`isOpen` stays false and `on_reconnect` / `onReconnect` does not fire.
 
 ## See also
 
