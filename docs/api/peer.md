@@ -508,6 +508,8 @@ async def request(
 - `StreamRefused` — the remote refused the stream without running anything: no handler, going away,
   or its concurrency limit reached. Safe to retry elsewhere.
 - `StreamReset` — any other reset code, including one this generation does not define.
+- `asyncio.CancelledError` — the calling task was cancelled. The remote has already been sent
+  `reset(CANCELLED)` and the stream is closed, with or without a `timeout`.
 
 ### Example
 

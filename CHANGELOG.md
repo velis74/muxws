@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fragmentation slices the UTF-8 encoding of a payload on byte offsets. Fragment boundaries are unchanged; splitting
   a large payload is an order of magnitude faster in both ports.
 
+### Fixed
+
+- TypeScript: `peer.close()` or `stop()` while the reconnect helper was dialling or waiting for the hello no longer
+  lets that attempt establish. A socket the dial returns afterwards is closed, `isOpen` stays false and
+  `onReconnect` does not fire. Python: a `stop()` during the hello closes the socket of that attempt.
+- Python: cancelling the task awaiting `peer.request(..., timeout=...)` sends `reset(CANCELLED)` and closes the
+  stream, as it does without a timeout.
+- Python: `backoff_delay()` and `unjittered_delay()` return the cap after about 1024 failed attempts instead of
+  raising `OverflowError`, which stopped the reconnect helper.
+
 ## [0.3.1] - 2026-08-13
 
 ### Changed
