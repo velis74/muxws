@@ -34,6 +34,8 @@ class PeerRegistry:
         self._entries: dict[Peer, set[tuple[str, Hashable]]] = {}
         #: Peers whose close hook is installed. A consumer may call `register(peer)` after every tag
         #: write (WSM-REG-017); the hook is installed once per peer, not once per call (WSM-REG-001).
+        #: `Peer` calls its close handlers on every connection loss and keeps them across a reconnect
+        #: (WSM-RCN-032, WSM-RCN-040), so the hook stays installed and deregisters the peer on each loss.
         #: A weak set, so the registry does not keep a peer alive.
         self._hooked: weakref.WeakSet[Peer] = weakref.WeakSet()
 
@@ -70,16 +72,7 @@ class PeerRegistry:
         self._entries[peer] = entries
         if peer not in self._hooked:
             self._hooked.add(peer)
-            peer.on_close(lambda _reason, target=peer: self._forget_closed(target))
-
-    def _forget_closed(self, peer: Peer) -> None:
-        """The close hook: deregister `peer` and mark its hook as no longer installed.
-
-        A `Peer` that survives a reconnect (WSM-RCN-032) and is registered again on its next
-        connection gets its hook installed again.
-        """
-        self._hooked.discard(peer)
-        self.deregister(peer)
+            peer.on_close(lambda _reason, target=peer: self.deregister(target))
 
     def deregister(self, peer: Peer) -> None:
         """Forget `peer` entirely. Idempotent."""

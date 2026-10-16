@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from muxws.conftest import DialableServer
+from muxws.observability import CloseReason
 from muxws.reconnect import Hello
 from muxws.registry import PeerRegistry
 from muxws.stream import Stream
@@ -203,6 +204,22 @@ async def test_reregistering_installs_one_close_hook_per_peer(registry: PeerRegi
     assert len(peer._close_handlers) == 1, "one hook per peer, however often it is re-registered"
     assert registry.peers_for(session="s49") == [peer]
     assert registry.peers_for(session="s0") == []
+
+
+async def test_reregistering_after_each_reconnect_installs_one_close_hook(registry: PeerRegistry, make_pair):
+    """WSM-REG-001/016/RCN-032: a peer registered again after each of 20 socket losses holds one close hook.
+
+    Each loss deregisters the peer, and the hook stays installed for the next loss.
+    """
+    peer = make_pair().dialer
+    for generation in range(20):
+        peer.tags["session"] = f"s{generation}"
+        registry.register(peer)
+        assert registry.peers_for(session=f"s{generation}") == [peer]
+        peer._notify_close(CloseReason(code=1006, reason="", was_clean=False, will_retry=True))
+        assert registry.peers_for(session=f"s{generation}") == [], "every socket loss deregisters the peer"
+
+    assert len(peer._close_handlers) == 1, "one hook per peer, however often it reconnects and is re-registered"
 
 
 async def test_registered_is_a_scope(registry: PeerRegistry, make_pair):

@@ -602,9 +602,12 @@ class Peer:
         try:
             return await asyncio.wait_for(waiting, timeout)
         except asyncio.TimeoutError:
+            raise ConnectionClosed(f"no pong within {timeout}s", code=1006) from None
+        finally:
+            # Every exit removes the nonce: a pong, the deadline, cancellation of the caller, or
+            # socket death.
             self._pings.give_up(nonce)
             self._ping_started.pop(nonce, None)
-            raise ConnectionClosed(f"no pong within {timeout}s", code=1006) from None
 
     def _on_pong(self, frame: Frame) -> None:
         """Settle the ping this nonce belongs to; a nonce nobody is waiting for is dropped."""
