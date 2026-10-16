@@ -1,4 +1,4 @@
-"""The codec seam: the port, and the explicit registry behind it (§2.1, WSM-CDC-001..016)."""
+"""The `Codec` protocol and the codec registry (§2.1, WSM-CDC-001..016)."""
 
 from __future__ import annotations
 
@@ -12,15 +12,12 @@ from muxws.frames import Frame
 class Codec(Protocol):
     """Turns a logical frame into a WebSocket message and back.
 
-    `binary` is **declared, not inferred** (WSM-CDC-002): the peer reads it to choose the socket's
-    text or binary send method and the inbound message type it expects. A peer never sniffs a message
-    to decide which branch to take.
+    `binary` is declared, not inferred (WSM-CDC-002): the peer reads it to choose the socket's text
+    or binary send method. The peer does not inspect a message to choose.
 
-    `encode_payload` / `decode_payload` are the payload-level half of the port. WSM-CDC-001 names
-    only the frame-level pair, but fragmentation is defined in terms of the encoded form of a
-    *logical payload* (WSM-FRG-011) which the receiver hands back to the codec once reassembled
-    (WSM-FRG-030), and neither operation can be expressed through `encode`/`decode` alone.
-    See GAPS.md.
+    `encode_payload` / `decode_payload` encode and decode a payload without an envelope.
+    Fragmentation slices the encoded form of a logical payload (WSM-FRG-011), and the receiver
+    decodes the reassembled bytes (WSM-FRG-030); neither can be expressed through `encode`/`decode`.
     """
 
     name: str
@@ -30,33 +27,31 @@ class Codec(Protocol):
         """One whole frame - envelope and payload - as it goes on the wire.
 
         `str` under a text codec, `bytes` under a binary one; the peer picks the socket method from
-        `binary` and never from this return type. An absent field MUST NOT be emitted at all: an
-        omitted `payload` key and `"payload": null` are different frames.
+        `binary`, not from this return type. An absent field MUST NOT be emitted: an omitted
+        `payload` key and `"payload": null` are different frames.
         """
         ...
 
     def decode(self, message: str | bytes) -> Frame:
         """The inverse. Unknown envelope fields MUST be dropped rather than rejected (WSM-FRM-001).
 
-        Raises `ProtocolError` when the message is not something this codec can read - that is a
-        connection-level failure, and the peer answers it with `goaway`.
+        Raises `ProtocolError` when this codec cannot decode the message. The peer treats that as a
+        connection-level error and answers it with `goaway`.
         """
         ...
 
     def encode_payload(self, payload: Any) -> str | bytes:
         """A payload on its own, with no envelope around it.
 
-        This is what fragmentation slices (WSM-FRG-011), so its output has to be exactly the bytes
-        that would appear inside a frame's payload position - a codec whose two encoders disagree
-        cuts fragments at boundaries the receiver cannot rejoin.
+        Fragmentation slices this output (WSM-FRG-011), so it must equal the bytes that appear in a
+        frame's payload position; otherwise the receiver cannot decode the reassembled fragments.
         """
         ...
 
     def decode_payload(self, data: str | bytes) -> Any:
-        """What the receiver hands back once the fragments are concatenated (WSM-FRG-030).
+        """Decode concatenated fragments into a payload (WSM-FRG-030). The inverse of `encode_payload`.
 
-        The inverse of `encode_payload`, and the reason the port carries four members rather than
-        the two WSM-CDC-001 names.
+        Raises `ProtocolError` when the data cannot be decoded.
         """
         ...
 
@@ -67,9 +62,9 @@ _REGISTRY: dict[str, Codec] = {}
 def register_codec(name: str, codec: Codec) -> None:
     """Register `codec` under `name`.
 
-    Registration is explicit and eager (WSM-CDC-013): there is no dynamic import, no lazy
-    auto-registration, no entry-point scan, and no probing of whether a module happens to be
-    installed. A codec module never registers itself at import time (WSM-CDC-014).
+    Registration is explicit (WSM-CDC-013): muxws does not import codec modules dynamically, scan
+    entry points, or check which modules are installed. A codec module does not register itself at
+    import time (WSM-CDC-014). Registering a name again replaces the previous codec.
     """
     _REGISTRY[name] = codec
 
@@ -78,8 +73,8 @@ def get_codec(name: str) -> Codec:
     """Return the codec registered under `name`.
 
     Raises `CodecNotRegistered` naming the environment variable, the value found and the registered
-    set (WSM-CDC-016). There is no fallback to JSON, ever - a deployment that believes it is running
-    msgpack and silently is not may never find out (WSM-INV-015).
+    names (WSM-CDC-016). There is no fallback to JSON (WSM-INV-015).
+
     """
     try:
         return _REGISTRY[name]

@@ -1,7 +1,8 @@
 """muxws - multiplexed, cancellable, bidirectional streams over one WebSocket.
 
-`backoff_delay`, `unjittered_delay` and `should_retry` are one schedule seen from three sides and are
-exported together: an operator computing "when will it try again" needs all three.
+`backoff_delay`, `unjittered_delay` and `should_retry` are exported together; they compute the
+reconnect schedule.
+
 """
 
 from muxws.api import accept, connect, resolve_codec, select_subprotocol, serve

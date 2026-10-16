@@ -1,12 +1,11 @@
 /**
  * `ts/node.ts`'s handshake: which HTTP status the acceptor answers, and what the dialer makes of it.
  *
- * A mirror of the handshake block in `muxws/transports/websockets_test.py`, and every witness in it
- * is an **HTTP request**. That is not ceremony: a status code is the whole of what WSM-CDC-022 asks
- * for, and no dial in this language can see one - `connect()` recovers through the WSM-CDC-028 check
- * on the already-open socket and reports `CodecMismatch` whether the acceptor answered 400 or
- * 101-with-no-subprotocol. An acceptor that completes the handshake it should have refused is
- * therefore invisible to every test that does not read the status off the wire itself.
+ * Mirrors the handshake block in `muxws/transports/websockets_test.py`; every test sends a raw
+ * **HTTP request**. WSM-CDC-022 specifies a status code, and no dial in this language exposes one:
+ * `connect()` falls back to the WSM-CDC-028 check on the open socket and reports `CodecMismatch`
+ * whether the acceptor answered 400 or 101 without a subprotocol. Only a test that reads the status
+ * line detects an acceptor that completes a handshake it should refuse.
  *
  * The rest of `ts/node.ts` is exercised through `ts/reconnect.spec.ts`, which dials it for real.
  */
@@ -19,7 +18,7 @@ import { WebSocketServer } from 'ws';
 
 import { type Codec, JsonCodec } from './codec';
 import { CodecMismatch, MuxwsError, TransportUrlError } from './errors';
-// The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` deliberately does not.
+// The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` does not.
 import './index';
 import { WsUrlError, accept, connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
 import { logger } from './observability';
@@ -30,9 +29,8 @@ import type { Peer } from './peer';
 interface Acceptor {
   url: string;
   /**
-   * How many times `ws` reached its `connection` event. A refusal must leave this at zero: an
-   * acceptor that got as far as its connection handler has already completed the handshake, which
-   * is what WSM-CDC-022 forbids whatever it does next.
+   * How many times `ws` emitted its `connection` event. A refusal must leave this at zero: when the
+   * connection handler runs, the handshake is already complete, which WSM-CDC-022 forbids.
    */
   handshakes: () => number;
   close: () => Promise<void>;
@@ -45,9 +43,9 @@ async function startAcceptor(refuse = true): Promise<Acceptor> {
   const server = refuse ? refuseMismatchedUpgrade(built) : built;
   server.on('connection', (socket) => {
     handshakes += 1;
-    // `.catch` is a belt on top of braces: `serve()` swallows a `CodecMismatch` and returns, the way
-    // `muxws.serve()` does in Python, precisely so an unrefused mismatch cannot surface here as an
-    // unhandled rejection out of a `ws` connection handler and take the process with it.
+    // `.catch` is redundant with `serve()`, which catches a `CodecMismatch` and returns, as
+    // `muxws.serve()` does in Python, so a mismatch cannot become an unhandled rejection in a `ws`
+    // connection handler and terminate the process.
     void serve(socket, { handler: (payload, stream) => stream.reply({ echo: payload }) }).catch(() => undefined);
   });
   await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -63,14 +61,14 @@ interface Answer {
   protocol: string | undefined;
 }
 
-/** Speak the upgrade by hand and read the HTTP status line back. */
+/** Send the upgrade request directly and return the HTTP status line. */
 function upgrade(url: string, offered: string): Promise<Answer> {
   const { hostname, port, pathname } = new URL(url);
   return new Promise<Answer>((resolve, reject) => {
     const request = http.request({
       host: hostname,
       port,
-      // From the URL, so a test can address a server that was scoped to one path.
+      // Taken from the URL, so a test can address a server restricted to one path.
       path: pathname,
       headers: {
         Connection: 'Upgrade',
@@ -85,8 +83,8 @@ function upgrade(url: string, offered: string): Promise<Answer> {
     const answer = (status: number | undefined, protocol: string | string[] | undefined): void => {
       resolve({ status: status ?? 0, protocol: Array.isArray(protocol) ? protocol.join(',') : protocol });
     };
-    // A refusal arrives as an ordinary response; an acceptance arrives as `upgrade`. Both are
-    // answers to the same request, and which one comes back is the assertion.
+    // A refusal arrives as an ordinary response; an acceptance arrives as `upgrade`. The tests assert
+    // which of the two is received.
     request.on('response', (response) => {
       response.resume();
       answer(response.statusCode, response.headers['sec-websocket-protocol']);
@@ -100,7 +98,7 @@ function upgrade(url: string, offered: string): Promise<Answer> {
   });
 }
 
-/** A codec whose only interesting property is its **name**, so the dialer offers `muxws.v1.msgpack`. */
+/** A codec used only for its **name**, so the dialer offers `muxws.v1.msgpack`. */
 function msgpackish(): Codec {
   const json = new JsonCodec();
   return {
@@ -122,7 +120,7 @@ describe('the acceptor refuses a codec it does not speak - WSM-CDC-022', () => {
   beforeEach(async () => {
     acceptor = await startAcceptor();
     refusals = [];
-    // The acceptor's own half of the diagnostic (WSM-CDC-029), captured rather than printed.
+    // The acceptor's log line (WSM-CDC-029), captured and not printed.
     vi.spyOn(console, 'error').mockImplementation((line: unknown) => {
       refusals.push(String(line));
     });
@@ -143,7 +141,7 @@ describe('the acceptor refuses a codec it does not speak - WSM-CDC-022', () => {
   });
 
   it('answers a matching offer with HTTP 101 and echoes the subprotocol', async () => {
-    // Without this the 400 above is also what an acceptor that refuses everybody answers.
+    // Control: an acceptor that refuses every offer would also pass the 400 test above.
     const { status, protocol } = await upgrade(acceptor.url, 'muxws.v1.json');
 
     expect(status).toBe(101);
@@ -154,8 +152,8 @@ describe('the acceptor refuses a codec it does not speak - WSM-CDC-022', () => {
     ['a later generation', 'muxws.v2.json'],
     ['no muxws entry at all', 'bearer.abc123'],
   ])('answers %s with HTTP 400', async (_name, offered) => {
-    // A generation this acceptor cannot speak is rejected *here*, which is what makes the version
-    // component of the subprotocol name a gate rather than a label (WSM-CDC-025, WSM-CON-009).
+    // A generation this acceptor does not support is rejected at the handshake, so the version
+    // component of the subprotocol name is enforced (WSM-CDC-025, WSM-CON-009).
     const { status } = await upgrade(acceptor.url, offered);
 
     expect(status).toBe(400);
@@ -170,10 +168,9 @@ describe('the acceptor refuses a codec it does not speak - WSM-CDC-022', () => {
   });
 
   it("keeps the server's own shouldHandle, so a `path` option still applies", async () => {
-    // `refuseMismatchedUpgrade` replaces a method the server may already have been given a meaning
-    // for: `new WebSocketServer({ path })` is implemented as `shouldHandle`, and an installer that
-    // simply assigned over it would answer 101 on every path of an application that had scoped its
-    // acceptor to one - a routing change made by a codec check, which nobody would look for here.
+    // `refuseMismatchedUpgrade` wraps `shouldHandle`, which the server may already define:
+    // `new WebSocketServer({ path })` is implemented as `shouldHandle`. Replacing it would make an
+    // acceptor restricted to one path answer 101 on every path.
     const scoped = refuseMismatchedUpgrade(new WebSocketServer({ port: 0, path: '/muxws', handleProtocols }));
     await new Promise<void>((resolve) => scoped.once('listening', resolve));
     const url = `ws://127.0.0.1:${(scoped.address() as AddressInfo).port}`;
@@ -188,12 +185,11 @@ describe('the acceptor refuses a codec it does not speak - WSM-CDC-022', () => {
   });
 });
 
-describe('handleProtocols alone cannot refuse, which is why the second hook exists', () => {
+describe('handleProtocols alone cannot refuse, so a second hook is installed', () => {
   it('completes the handshake with 101 and no subprotocol when only handleProtocols is installed', async () => {
-    // Not an endorsement: this is the violation, pinned. `handleProtocols` returning `false` selects
-    // nothing and `ws` answers 101 anyway, so an acceptor built with that hook alone breaks
-    // WSM-CDC-022 while looking configured. If a later `ws` ever makes the hook refuse, this test
-    // fails and `refuseMismatchedUpgrade` can go.
+    // Pins the `ws` behaviour that violates WSM-CDC-022: when `handleProtocols` returns `false`, no
+    // subprotocol is selected and `ws` still answers 101. If a `ws` release makes the hook refuse,
+    // this test fails and `refuseMismatchedUpgrade` is no longer needed.
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const acceptor = await startAcceptor(false);
     try {
@@ -202,9 +198,9 @@ describe('handleProtocols alone cannot refuse, which is why the second hook exis
       expect(status).toBe(101);
       expect(protocol).toBeUndefined();
 
-      // And the last resort underneath it: the dialer finds the mismatch on the already-open socket
-      // and closes it with the policy-violation code (WSM-CDC-028). That is why an in-language dial
-      // cannot tell this 101 from a correct 400, and it is not a substitute for the 400.
+      // The dialer detects the mismatch on the open socket and closes it with the policy-violation
+      // code (WSM-CDC-028). For this reason a dial cannot distinguish this 101 from a correct 400;
+      // the check does not replace the 400.
       const caught = await connect(acceptor.url, { codec: msgpackish() }).then(
         () => null,
         (error: unknown) => error,
@@ -233,10 +229,10 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
   });
 
   it('raises CodecMismatch rather than a bare connection failure, and exchanges no frame', async () => {
-    // The frame count is the negative witness the rule names: a refused handshake exchanges nothing.
-    // Both peers would live in this process, so the `muxws.frames` logger sees every frame either of
-    // them sends or receives, and `hello` guarantees there would be one to see: a dialer that got a
-    // socket puts its hello on the wire immediately (WSM-RCN-021).
+    // A refused handshake exchanges no frame, as the rule requires. Both peers would run in this
+    // process, so the `muxws.frames` logger sees every frame either sends or receives, and a dialer
+    // that obtains a socket sends `hello` immediately (WSM-RCN-021), so at least one frame would be
+    // logged.
     const frames: string[] = [];
     vi.spyOn(console, 'debug').mockImplementation((line: unknown) => {
       frames.push(String(line));
@@ -264,10 +260,9 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
   });
 
   it('falls back to the check on the open socket when a 101 negotiated something else - WSM-CDC-028', async () => {
-    // This acceptor selects the application's own entry instead of the muxws one. `ws` opens the
-    // socket, because that value *was* offered, so nothing about the handshake looks wrong from the
-    // client's side: the check on the already-open socket is the last resort, and it is the only
-    // route a browser ever has.
+    // This acceptor selects the application's entry instead of the muxws one. `ws` opens the socket
+    // because that value was offered, so the handshake succeeds from the client's side. The check on
+    // the open socket detects the mismatch; it is the only check available in a browser.
     const rogue = new WebSocketServer({ port: 0, handleProtocols: () => 'bearer.abc123' });
     await new Promise<void>((resolve) => rogue.once('listening', resolve));
     const url = `ws://127.0.0.1:${(rogue.address() as AddressInfo).port}`;
@@ -285,9 +280,8 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
   });
 
   it('leaves any status other than 400 as its own error', async () => {
-    // The structured path must stay a *400* check, not "the handshake did not complete". A proxy
-    // answering 503 in front of a healthy acceptor is not a codec mismatch, and telling the reader
-    // to go and set MUXWS_CODEC would be worse than saying nothing.
+    // The structured path checks for status 400, not for any incomplete handshake. A proxy answering
+    // 503 in front of a working acceptor is not a codec mismatch and must not be reported as one.
     const gateway = http.createServer((_request, response) => {
       response.writeHead(503).end();
     });
@@ -309,13 +303,12 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
   });
 
   it.each([
-    // Two ports, because two different wrong ways of reading a status out of prose reach them.
-    // `/400/` anywhere in the message matches this one...
+    // Two ports, each matched by a different incorrect way of parsing a status from the message.
+    // `/400/` anywhere in the message matches this one.
     ['a port whose number contains 400', 14_000],
-    // ...and `/\b400\b/`, which looks careful, matches this one: `connect ECONNREFUSED
-    // 127.0.0.1:400`. Both send the reader off to check MUXWS_CODEC on both ends of a connection
-    // where nothing is listening at all, which is not what WSM-CDC-024 is about. The second port is
-    // the sharper of the two, and the one to keep if a machine somewhere ever answers on 400.
+    // `/\b400\b/` matches this one: `connect ECONNREFUSED 127.0.0.1:400`. Both would report a codec
+    // mismatch for a connection where nothing is listening, which is outside WSM-CDC-024. The second
+    // port is the stricter case and the one to keep if port 400 is in use on the test machine.
     ['a port whose number is 400', 400],
   ])('leaves an acceptor that is simply not running as its own error - %s', async (_name, port) => {
     const caught = await connect(`ws://127.0.0.1:${port}`).then(
@@ -330,10 +323,10 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
 });
 
 describe('a url this transport cannot open - WSM-ERR-016', () => {
-  it("arrives as a WsUrlError framing the wording `ws` used, not as ws's own SyntaxError", async () => {
-    // Untranslated, `ws`'s constructor throws a bare `SyntaxError: Invalid URL: nonsense`, which an
-    // application wrapping its dials in one `instanceof MuxwsError` handler never sees. The sentence
-    // stays `ws`'s: it names the offending text, and this frame only says who was asked to dial it.
+  it("arrives as a WsUrlError wrapping the message of `ws`, not as ws's own SyntaxError", async () => {
+    // Without translation, `ws`'s constructor throws a bare `SyntaxError: Invalid URL: nonsense`, which
+    // an `instanceof MuxwsError` handler around a dial does not catch. The message of `ws` is kept,
+    // because it names the invalid text; the wrapper adds which transport was asked to dial it.
     const caught = await connect('nonsense').then(
       () => null,
       (error: unknown) => error,
@@ -347,17 +340,15 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
     expect((caught as Error).cause).toBeInstanceOf(SyntaxError);
   });
 
-  it('leaves a dial that failed for any other reason exactly as it was - the control', async () => {
-    // A host that does not resolve is not an address this transport cannot *open*; it is one nothing
-    // answers at. The remedy is somewhere other than the address bar, and reporting it as a url error
-    // would send the reader to re-read a string that is spelled correctly. This is the same shape as
-    // the ECONNREFUSED controls above, one class over.
+  it('passes through unchanged a dial that failed for any other reason (control)', async () => {
+    // A host that does not resolve is a valid url that nothing answers at, not a url this transport
+    // cannot open, so it must not be reported as a url error. This is the same kind of control as
+    // the ECONNREFUSED tests above, for the url error class.
     //
-    // `.invalid` rather than a bare label: RFC 6761 reserves it never to resolve, while `bad` on a
-    // network with a search domain is a name a resolver may go looking for. The assertion is on
-    // `getaddrinfo` plus a *family* of codes rather than on `ENOTFOUND`, because which one comes back
-    // is the resolver's answer and not this library's. The claim is that name resolution failed and
-    // the failure reached the caller untranslated.
+    // `.invalid` and not a bare label: RFC 6761 reserves it to never resolve, while `bad` on a
+    // network with a search domain may be resolved. The assertion is on `getaddrinfo` plus a set of
+    // codes and not on `ENOTFOUND`, because the code depends on the resolver. The test asserts that
+    // name resolution failed and the error reached the caller untranslated.
     const caught = await connect('ws://no-such-host.invalid').then(
       () => null,
       (error: unknown) => error,
@@ -369,12 +360,12 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
     expect((caught as Error).message).toMatch(/getaddrinfo (ENOTFOUND|EAI_AGAIN|EAI_NODATA|ESERVFAIL)\b/);
   });
 
-  it('leaves a bad subprotocol as a bad subprotocol, which is why the guard is not a blanket catch', async () => {
-    // `ws` throws a `SyntaxError` for `An invalid or duplicated subprotocol was specified` as well as
-    // for `Invalid URL`, and nothing on either object tells them apart, so a `catch` around the
-    // constructor that translated everything would report a space in a subprotocol token as a
-    // malformed address. The address is re-read instead - `new URL()` parses `ws://127.0.0.1:1/x` to
-    // a scheme `ws` takes - and this throw is passed through untouched.
+  it('passes a bad subprotocol error through untranslated; the url guard is not a blanket catch', async () => {
+    // `ws` throws a `SyntaxError` both for `An invalid or duplicated subprotocol was specified` and
+    // for `Invalid URL`, and the two objects are otherwise identical, so a `catch` that translated
+    // every error from the constructor would report a space in a subprotocol token as a malformed
+    // address. The guard parses the address instead (`new URL()` parses `ws://127.0.0.1:1/x` to a
+    // scheme `ws` accepts) and passes this error through unchanged.
     const caught = await connect('ws://127.0.0.1:1/x', { subprotocols: ['bad protocol'] }).then(
       () => null,
       (error: unknown) => error,
@@ -387,15 +378,15 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
 });
 
 describe('serve() reports a refused handshake by returning, not by rejecting', () => {
-  it('matches Python, whose serve() swallows CodecMismatch for the same reason', async () => {
-    // By the time `CodecMismatch` is raised the refusal has already gone out as HTTP 400
-    // (WSM-CDC-022) and already been logged with both codec names (WSM-CDC-029). Rejecting again
-    // adds no diagnostic - and in Node it adds an unhandled rejection inside a `ws` connection
-    // handler, which takes the acceptor's whole process down.
+  it('matches Python, whose serve() also catches CodecMismatch', async () => {
+    // When `CodecMismatch` is raised, the refusal has already been sent as HTTP 400 (WSM-CDC-022)
+    // and logged with both codec names (WSM-CDC-029). Rejecting adds no diagnostic, and in Node it
+    // causes an unhandled rejection inside a `ws` connection handler, which terminates the
+    // acceptor's process.
     //
-    // A stand-in rather than a live server: `accept()` reads exactly two things off the socket on
-    // this path, and standing up a `ws` server that negotiates the wrong subprotocol on purpose
-    // would test the double more than the branch.
+    // A stub socket instead of a live server: `accept()` reads two properties of the socket on this
+    // path, and a `ws` server configured to negotiate the wrong subprotocol would mostly test that
+    // configuration.
     let closedWith: [number, string] | null = null;
     const negotiatedSomethingElse = {
       protocol: 'muxws.v1.msgpack',

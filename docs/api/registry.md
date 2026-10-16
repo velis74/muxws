@@ -4,30 +4,26 @@ outline: deep
 
 # Registry
 
-`PeerRegistry` answers one question: *which connected peers carry these tags?* It is how a server
-finds the sockets to push to — every peer for user 42, every peer subscribed to document 7 — without
-keeping its own bookkeeping.
+`PeerRegistry` returns the connected peers whose tags match given values. A server uses it to find
+the peers to push to, for example every peer for user 42 or every peer subscribed to document 7.
 
-Two facts shape everything below.
+**`peer.tags` is an ordinary dict / plain object.** muxws does not read, validate or observe it, and
+writing a tag updates no index. On the acceptor, a reconnect produces a new `Peer` whose `tags` are
+empty. A dialer's `Peer` survives a reconnect and keeps its `tags`.
 
-**`peer.tags` is an ordinary dict / plain object.** muxws never reads it, never validates it and
-never watches it. Writing a tag is free and costs no bookkeeping at all. It also dies with the
-socket: a reconnected peer starts with `tags` empty.
-
-**The registry indexes; it does not watch.** The index only moves when someone says so, which gives
-the usage rule:
+**The registry is updated only by `register` and `deregister`.** A tag write after `register` is not
+reflected in the index until the next `register(peer)`. Usage rule:
 
 > **Look up on keys you do not mutate, and mutate keys you do not look up.** If you need both on one
 > key, call `register(peer)` after each write.
 
-A peer is removed from the index automatically when its connection closes, so nothing has to prune
-it. The hook is installed once per peer no matter how many times you re-register.
+A peer is removed from the index automatically when its connection closes. The close hook is
+installed once per peer, however many times the peer is re-registered.
 
 The registry is **per-process**. muxws ships no cross-process backplane. A multi-process deployment
-that needs "every peer for user 42 across the fleet" has to build that itself — the usual shape is a
-pub/sub channel each process subscribes to, where each process consults its own `PeerRegistry` and
-pushes to the sockets it happens to hold. Nothing in muxws does that for you, and nothing in muxws
-assumes you have not.
+that needs "every peer for user 42 across all processes" implements it in the application, typically
+as a pub/sub channel that every process subscribes to; each process looks up its own `PeerRegistry`
+and pushes to the sockets it holds.
 
 ## `PeerRegistry`
 
@@ -90,21 +86,18 @@ console.log(registry.size, registry.indexSize, registry.peersFor({ user: 42 }).m
 
 ## `PeerRegistry.register`
 
-Indexes a peer under **every key its `tags` holds at this moment**. The registry has no notion of
-which keys matter, so it takes all of them.
+Indexes a peer under **every key its `tags` holds at the time of the call**.
 
-Re-registering **replaces** the peer's previous entries rather than adding to them: after the call
-the peer is found under its new values and no longer under the old ones. That is what makes
-`register(peer)` after each write the correct fix for a key you both mutate and look up.
+Re-registering **replaces** the peer's previous entries: after the call the peer is found under its
+new values and no longer under the old ones. For a key that is both mutated and looked up, call
+`register(peer)` after each write.
 
-A tag value that cannot serve as a lookup key is passed over rather than rejected — a dict or a list
-in Python (unhashable), an object or an array in TypeScript (keyed by identity, so only a caller
-already holding the same reference could ever match). The peer is simply not findable by that key.
-Raising instead would turn an ordinary tag write into an error.
+A tag value that cannot serve as a lookup key is skipped without an error: a dict or a list in
+Python (unhashable), an object, an array, `null` or `undefined` in TypeScript (objects and arrays
+would be keyed by identity). The peer is not findable by that key.
 
 Removal on close is automatic. The close hook is installed the first time a peer is registered and
-not again on later calls, so a long-lived peer that is re-registered on every write does not
-accumulate one handler per write.
+not on later calls, so re-registering a peer on every write adds no further close handlers.
 
 ### Signature
 
@@ -146,7 +139,7 @@ registry.register(peer)
 print("lobby:", len(registry.peers_for(room="lobby")), "| roles indexed:", registry.index_size)
 
 peer.tags["room"] = "kitchen"
-registry.register(peer)  # the fix for a key you both mutate and look up
+registry.register(peer)  # re-index after writing a looked-up key
 print("lobby:", len(registry.peers_for(room="lobby")), "kitchen:", len(registry.peers_for(room="kitchen")))
 ```
 
@@ -163,7 +156,7 @@ registry.register(peer);
 console.log('lobby:', registry.peersFor({ room: 'lobby' }).length, '| indexed keys:', registry.indexSize);
 
 peer.tags.room = 'kitchen';
-registry.register(peer); // the fix for a key you both mutate and look up
+registry.register(peer); // re-index after writing a looked-up key
 console.log('lobby:', registry.peersFor({ room: 'lobby' }).length);
 console.log('kitchen:', registry.peersFor({ room: 'kitchen' }).length);
 ```
@@ -173,7 +166,7 @@ console.log('kitchen:', registry.peersFor({ room: 'kitchen' }).length);
 Forgets a peer entirely. Idempotent: deregistering a peer that was never registered, or one that was
 already removed when its connection closed, does nothing.
 
-You rarely need to call this. A peer is deregistered automatically when its connection closes.
+A peer is also deregistered automatically when its connection closes.
 
 ### Signature
 
@@ -234,12 +227,11 @@ console.log('still empty:', registry.size);
 
 ## `PeerRegistry.registered`
 
-`register` plus an explicit deregister, for a consumer that wants the scope visible in the code
-rather than implied by the connection's lifetime. The deregister runs even when the body raises.
+`register` on entry and `deregister` on exit of an explicit scope, independent of the connection's
+lifetime. The deregister runs even when the body raises.
 
-The two languages spell the scope differently. Python is a context manager, used with `with`.
-TypeScript takes the body as a callback and is `async`, because the `using` declaration would need a
-`Symbol.dispose` that this package's ES2020 target does not carry.
+In Python it is a context manager, used with `with`. In TypeScript it takes the body as a callback
+and is `async`; the package targets ES2020, which has no `Symbol.dispose` for a `using` declaration.
 
 ### Signature
 
@@ -321,12 +313,11 @@ void main();
 Every live peer whose `tags` match **all** the given keys. With no keys at all it returns every
 registered peer.
 
-The result is a **list / array in a stable order**, never a set: callers iterate it, and a set's
-order would vary between runs for no reason anyone could see. The order is by `peer.id`.
+The result is a **list / array sorted by `peer.id`**, not a set, so iteration order is the same
+on every run.
 
-Treat it as a snapshot. A peer in it may already be closing by the time you send to it — which is not
-a bug to defend against so much as a race to expect: send, and handle `ConnectionLost` where you
-would have handled it anyway.
+The result is a snapshot. A peer in it may already be closing when the application sends to it; a
+send to such a peer raises `ConnectionLost`.
 
 ### Signature
 
@@ -352,7 +343,7 @@ peersFor(tags: Record<string, unknown> = {}): Peer[];
 ### Raises
 
 Raises: nothing. An unhashable Python value or a non-primitive TypeScript value yields an empty
-result rather than an error — the same answer the write side gives by passing such a value over.
+result, matching `register`, which skips such values.
 
 ### Example
 
@@ -461,10 +452,10 @@ console.log('re-registering does not double it:', registry.size);
 
 ## `PeerRegistry.index_size` / `indexSize`
 
-How many `(key, value)` buckets the index holds. It is a diagnostic: a registry whose `index_size`
-grows without bound while `len(registry)` stays flat means peers are being re-registered under
-ever-changing values and the old buckets are not being reclaimed — which, if you ever see it, is a
-bug in muxws and not in your code, because `register` replaces a peer's entries wholesale.
+How many `(key, value)` buckets the index holds. It is a diagnostic. `register` replaces a peer's
+entries and drops buckets that become empty, so `index_size` equals the number of distinct
+`(key, value)` pairs held by registered peers and does not grow when a peer is re-registered under
+new values.
 
 ### Signature
 
@@ -535,8 +526,7 @@ TypeScript only. What may serve as a lookup value: the five primitive `typeof` r
 — an object, an array, `null`, `undefined` — is passed over by `register` and matches nothing in
 `peersFor`.
 
-Python asks `hash()` and catches `TypeError` instead, so it has no such type to export: any hashable
-value is indexable there, including a tuple.
+Python has no equivalent type: any value that `hash()` accepts is indexable, including a tuple.
 
 ### Signature
 
@@ -568,7 +558,7 @@ const registry = new PeerRegistry();
 const [, socket] = memoryPair();
 const peer = new Peer(socket, { codec: new JsonCodec(), isDialer: false });
 
-/** Only values the registry can actually index get past the compiler. */
+/** Accepts only values the registry indexes. */
 function tag(target: Peer, key: string, value: TagValue): void {
   target.tags[key] = value;
   registry.register(target);
@@ -583,4 +573,4 @@ console.log(registry.indexSize, registry.peersFor({ user: 42, beta: true }).leng
 
 - [Peer](./peer.md) — `peer.tags` and `peer.id`, the two things the registry reads.
 - [Errors](./errors.md) — `ConnectionLost`, what a send to a peer from a stale snapshot raises.
-- [Guide: registry](../guide/registry.md) — the usage rule with the reasoning behind it.
+- [Guide: registry](../guide/registry.md) — the usage rule and its rationale.

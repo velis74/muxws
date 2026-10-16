@@ -19,8 +19,8 @@ import { PREFIX, findOffer, generationOf, mismatchError, offer, select } from '.
 /**
  * `select` with the acceptor's own half of the diagnostic captured (WSM-CDC-029).
  *
- * `caplog` in Python; the ERROR line goes to the console here, and a test that let it through
- * would print refusals over a passing run.
+ * Python uses `caplog`. Here the ERROR line goes to the console, so it is captured to keep refusals
+ * out of the test output.
  */
 function selectAndCapture(offered: readonly string[], configured: string): { selected: string | null; logged: string } {
   const lines: string[] = [];
@@ -71,7 +71,7 @@ describe('the acceptor', () => {
 
   it('refuses a different generation - WSM-CDC-025', () => {
     expect(selectAndCapture(['muxws.v2.json'], 'json').selected).toBeNull();
-    // Twice, because a refusal that only happens the first time is a refusal that leaks state.
+    // Called twice, so a refusal that depends on state left by the first call fails the test.
     expect(selectAndCapture(['muxws.v2.json'], 'json').selected).toBeNull();
   });
 
@@ -104,7 +104,7 @@ describe('the generation prefix', () => {
 });
 
 describe('the peer', () => {
-  it('has no codec branch to take, because this is an assertion - WSM-CDC-023', () => {
+  it('contains no codec branch; the subprotocol is an assertion - WSM-CDC-023', () => {
     // The Python twin reads its own source with `inspect.getsource`; the TypeScript sources are on
     // disk beside this file, and `process.cwd()` is the vitest root.
     ['peer.ts', 'stream.ts'].forEach((name) => {

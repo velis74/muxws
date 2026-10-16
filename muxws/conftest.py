@@ -50,8 +50,8 @@ class Pair:
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
-            # A cancelled serve() is the expected end of a test; anything it raises on the way out
-            # is teardown noise, not a result.
+            # serve() is cancelled at the end of a test; exceptions it raises while cancelled are
+            # ignored.
             await asyncio.gather(task, return_exceptions=True)
 
 
@@ -81,10 +81,9 @@ async def pair(make_pair: Callable[..., Pair]) -> AsyncIterator[Pair]:
 class Lone:
     """One peer, fed frames from the wire by hand.
 
-    A live pair cannot test a receiver's reaction to a frame no correct sender would produce: the
-    counterpart peer sees the answer, cannot account for it, and kills the connection - correctly,
-    and entirely beside the point. Injecting into a peer with no counterpart is how the conformance
-    runner does it.
+    Tests a receiver's reaction to a frame no correct sender produces. In a live pair the counterpart
+    peer receives the response to such a frame, treats it as a protocol error and closes the
+    connection. The conformance runner injects frames into a peer with no counterpart in the same way.
     """
 
     def __init__(self, peer: Peer, socket: MemorySocket, codec: JsonCodec) -> None:
@@ -132,17 +131,17 @@ class DialableServer:
     """A fake server the reconnect driver can actually dial (§7).
 
     Every `dial()` builds a fresh `memory_pair()`, stands an acceptor `Peer` up over one end, starts
-    its `serve()` task and returns the other end - so `server.dial` is a `Dial` callable a
-    `ConnectionLoop` can be constructed with directly. Each connection is a *new* acceptor peer,
-    which is the acceptor-side truth of a reconnect (WSM-RCN-033): nothing carries forward.
+    its `serve()` task and returns the other end, so `server.dial` is a `Dial` callable a
+    `ConnectionLoop` can be constructed with directly. Each connection is a new acceptor peer, as on
+    the acceptor side of a reconnect (WSM-RCN-033): no state carries over from the previous connection.
 
-    It can be told to refuse the next dial, and to answer the hello in each of the four ways the
-    driver has to survive - acknowledge it, reset it, never answer it, or drop the socket while it is
-    outstanding - because those are the branches of WSM-RCN-026 and of WSM-RCN-004's named test.
+    It can refuse the next dial, and it answers the hello in one of four ways: acknowledge it, reset
+    it, never answer it, or drop the socket while it is outstanding. These are the branches of
+    WSM-RCN-026 and of the named test of WSM-RCN-004.
 
     Everything the dialer put on the wire is kept per connection, so "three drops replay
-    byte-identical hellos" (WSM-RCN-027) can be asserted on the raw messages rather than on decoded
-    objects that would compare equal after a mutation the encoder happened to smooth over.
+    byte-identical hellos" (WSM-RCN-027) is asserted on the raw messages. Decoded objects can compare
+    equal when the encoded messages differ.
     """
 
     def __init__(self) -> None:
@@ -193,13 +192,12 @@ class DialableServer:
     ) -> tuple[Peer, ConnectionLoop]:
         """The first connection and its driver, unestablished: `connect()`'s first three steps.
 
-        `establish()` is deliberately left to the caller. It is the step that raises (WSM-RCN-006),
-        and a fixture that called it would hide the one thing several of these tests are about.
+        The caller calls `establish()`. It is the step that raises (WSM-RCN-006), and several tests
+        assert on that.
 
-        The defaults are what a driver test wants: a hundredth of a second of backoff with no jitter,
-        so waiting three attempts out costs milliseconds rather than seconds, and no heartbeat unless
-        the test asks for one - a heartbeat nobody asked for would put `ping` frames on a wire other
-        tests read.
+        Defaults: 0.01 s initial backoff without jitter, so three attempts take milliseconds, and no
+        heartbeat (`ping_interval=0.0`) unless the test passes one, so no `ping` frames appear in the
+        wire the tests read.
         """
         socket = await self.dial()
         peer = Peer(socket, codec=self.codec, is_dialer=True)
@@ -221,8 +219,8 @@ class DialableServer:
                 await result
             return
         if self.on_hello == "ack":
-            # Returning is the acknowledgement: WSM-STM-035 ends the stream implicitly, and
-            # WSM-RCN-022 says that is all an acceptor has to do.
+            # Returning acknowledges the hello: WSM-STM-035 ends the stream implicitly, which is
+            # what WSM-RCN-022 requires of an acceptor.
             return
         if self.on_hello == "reset":
             await stream.reset(ResetCode.REFUSED, "the hello was refused")
@@ -235,15 +233,15 @@ class DialableServer:
     # ------------------------------------------------------------------ reading the wire
 
     async def drop(self) -> None:
-        """Kill the current socket the way a server going down kills one: no close frame."""
+        """Drop the current socket without a close frame, as when a server goes down."""
         await self.sockets[-1].drop()
 
     async def go_silent(self) -> None:
         """Stop reading on the current connection without closing it.
 
-        The socket stays up and every frame the dialer sends is swallowed, `ping` included - which is
-        the only thing a heartbeat can be tested against (WSM-RCN-011). A closed socket would be
-        detected by the read loop instead, and would prove nothing about the heartbeat.
+        The socket stays open and every frame the dialer sends, `ping` included, is discarded. A
+        heartbeat (WSM-RCN-011) is tested against this state; a closed socket is detected by the read
+        loop and does not exercise the heartbeat.
         """
         task = self._tasks[-1]
         task.cancel()
@@ -262,8 +260,8 @@ class DialableServer:
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
-            # A cancelled serve() is the expected end of a test; anything it raises on the way out is
-            # teardown noise, not a result.
+            # serve() is cancelled at the end of a test; exceptions it raises while cancelled are
+            # ignored.
             await asyncio.gather(task, return_exceptions=True)
 
 

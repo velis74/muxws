@@ -28,15 +28,14 @@ export default defineConfig({
     },
     rollupOptions: {
       // `ws` and `@msgpack/msgpack` are optional peer dependencies the consumer installs; bundling
-      // either would duplicate it and break `instanceof` across the seam.
+      // either would duplicate the package and break `instanceof` checks between the bundled copy and
+      // the consumer's copy.
       //
-      // `/^node:/` because a Vite library build resolves with browser conditions: a `node:` builtin
-      // that is not externalised is rewritten to `__vite-browser-external`, a module whose body is
-      // `module.exports = {}`. In the shipped artifact `await import('node:net')` would then yield an
-      // object with no `connect`, and every `ws+unix:` dial would die as `TypeError: n is not a
-      // function` - naming neither the url nor the transport, and not a `MuxwsError`, which
-      // WSM-ERR-016 forbids. A predicate rather than the one specifier, so the next builtin imported
-      // is covered too.
+      // `/^node:/`: a Vite library build resolves with browser conditions, and a `node:` builtin that
+      // is not external is rewritten to `__vite-browser-external`, whose body is
+      // `module.exports = {}`. `await import('node:net')` would then return an object without
+      // `connect`, and every `ws+unix:` dial would throw `TypeError` instead of a `MuxwsError`
+      // (WSM-ERR-016). The regular expression covers every `node:` builtin.
       external: [/^node:/, 'ws', '@msgpack/msgpack'],
     },
   },

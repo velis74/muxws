@@ -1,16 +1,14 @@
 """The send path: per-stream queues and a round-robin writer (§4.2).
 
-This module is the whole of WSM-FRG-017, WSM-FRG-018 and WSM-FRG-019, and it is one object on
-purpose. The three rules are really one requirement seen from three sides:
+This module implements WSM-FRG-017, WSM-FRG-018 and WSM-FRG-019:
 
   a stream holds at most **one** unsent fragment (WSM-FRG-018),
   fragments of one payload stay contiguous **on their own stream** (WSM-FRG-017),
   and the next frame to go out is chosen by **round-robin across streams** (WSM-FRG-019).
 
-Together they are what stops a 1 MB export adding a full second of latency to a 200-byte progress
-update on another stream (WSM-INV-004). A single FIFO of frames anywhere in this path breaks all
-three at once: the ordering decision is then made at enqueue time, and interleaving stops being
-possible no matter what the loop does afterwards.
+Together they keep a large payload on one stream from delaying a small frame on another stream by
+more than one fragment (WSM-INV-004). A single FIFO of frames would fix the order at enqueue time,
+and frames of different streams could not interleave.
 """
 
 from __future__ import annotations
@@ -24,18 +22,17 @@ from muxws.codecs import Codec
 from muxws.fragment import iter_fragments, MAX_FRAME_BYTES
 from muxws.frames import Frame
 
-#: Connection-level frames - `ping`, `pong`, `goaway` - have no stream of their own. They get one
-#: lane keyed here, so they take their turn in the rotation rather than jumping it or waiting on it.
+#: The lane for connection-level frames (`ping`, `pong`, `goaway`), which have no stream. It takes
+#: its turn in the rotation like a stream lane.
 CONNECTION_LANE = 0
 
 
 class LaneEncodingError(Exception):
     """A frame on one lane could not be encoded.
 
-    Named rather than allowed to propagate: the encode happens inside the writer, so a codec that
-    refuses a payload - bytes under JSON, say - would otherwise take the write loop down with it, and
-    a peer whose writer is dead while it still reports itself open is the worst possible state. The
-    lane is carried so the caller can fail exactly that stream and leave the connection working.
+    Fragmentation encodes inside the writer, so a codec that refuses a payload (for example bytes
+    under JSON) raises here. The exception carries the lane, so the write loop can fail that stream
+    and keep the connection open instead of ending the write loop.
     """
 
     def __init__(self, lane: int, cause: BaseException) -> None:
@@ -47,8 +44,8 @@ class LaneEncodingError(Exception):
 class StreamQueue:
     """One stream's outbound work: whole frames waiting, and **at most one** prepared fragment.
 
-    The per-stream order is a queue and has to be - fragments of one payload are contiguous on their
-    stream (WSM-FRG-017). What must never be a queue is the choice *between* streams.
+    Within one stream the order is FIFO, so fragments of one payload are contiguous on their stream
+    (WSM-FRG-017). The choice between streams is made by `Writer`'s rotation.
     """
 
     __slots__ = ("stream_id", "_waiting", "_prepared", "_fragments")
@@ -56,7 +53,7 @@ class StreamQueue:
     def __init__(self, stream_id: int) -> None:
         self.stream_id = stream_id
         self._waiting: deque[Frame] = deque()
-        #: The one fragment already sliced and not yet handed to the socket. WSM-FRG-018 in a field.
+        #: The fragment already sliced and not yet handed to the socket; at most one (WSM-FRG-018).
         self._prepared: Frame | None = None
         #: The lazy remainder of the payload in flight, if this stream is mid-fragmentation.
         self._fragments: Iterator[Frame] | None = None
@@ -71,18 +68,17 @@ class StreamQueue:
 
     @property
     def prepared_depth(self) -> int:
-        """Instrumentation for the rule: this must never exceed 1."""
+        """The number of prepared fragments, 0 or 1 (WSM-FRG-018)."""
         return 1 if self._prepared is not None else 0
 
     def put(self, frame: Frame) -> None:
         self._waiting.append(frame)
 
     def prepare(self, cap: int, codec: Codec) -> None:
-        """Slice the next fragment - and only the next one.
+        """Slice the next fragment, and only that one.
 
-        Called *after* the previous fragment has reached the socket, never before. Slicing ahead is
-        the bug WSM-FRG-018 forbids: it is not wrong on the wire, it is wrong in the queue, because
-        it decides an order the writer has not been asked to commit to yet.
+        Called after the previous fragment has reached the socket. Slicing further ahead would fix the
+        order of frames before the writer chooses it (WSM-FRG-018).
         """
         if self._prepared is not None:
             return
@@ -116,8 +112,8 @@ class Writer:
         self._codec = codec
         self._cap = max_frame_bytes
         self._queues: dict[int, StreamQueue] = {}
-        #: Where the rotation resumes. Not an index into a list: streams come and go, and an index
-        #: would silently start favouring whoever happened to land in the vacated slot.
+        #: The rotation order of lanes; the lane at the front is asked next. A deque rather than an
+        #: index into a list, so removing a lane does not shift which lane is asked next.
         self._order: deque[int] = deque()
         self._wake = asyncio.Event()
         self._stopped = False
@@ -151,8 +147,7 @@ class Writer:
     async def next_frame(self) -> Frame | None:
         """The next frame to put on the wire, waiting if there is nothing to send.
 
-        Returns None when `discard_all` emptied the writer while we were waiting - the caller checks
-        for that rather than being handed a frame that no longer means anything.
+        Returns None once `stop()` has been called.
         """
         while True:
             if self._stopped:
@@ -169,8 +164,8 @@ class Writer:
     def _rotate(self) -> Frame | None:
         """One full turn of the rotation, at most.
 
-        Every lane gets asked once before any lane is asked twice. That is the entire mechanism: a
-        stream mid-way through a megabyte holds the wire for exactly one fragment at a time.
+        Every lane is asked once before any lane is asked twice, so a stream sending a large payload
+        holds the wire for one fragment at a time.
         """
         for _ in range(len(self._order)):
             lane = self._order[0]
@@ -196,7 +191,7 @@ class Writer:
         return None
 
     def _retire(self, lane: int) -> None:
-        """Forget a lane with nothing left. Nothing is retained per closed stream (WSM-STM-001)."""
+        """Remove a lane with no work left. No state is kept per closed stream (WSM-STM-001)."""
         if lane == CONNECTION_LANE:
             return
         self._queues.pop(lane, None)
@@ -214,7 +209,7 @@ class Writer:
                 self._wake.set()
 
     def discard(self, stream_id: int) -> None:
-        """Drop one stream's queued work - it was reset, and none of it means anything now."""
+        """Drop one stream's queued frames and its lane."""
         queue = self._queues.pop(stream_id, None)
         if queue is not None:
             queue.discard()
@@ -224,12 +219,13 @@ class Writer:
                 pass
 
     def stop(self) -> None:
-        """Retire the writer. `next_frame` returns None from here on, once and for good."""
+        """Stop the writer. Every later `next_frame` call returns None."""
         self._stopped = True
         self._wake.set()
 
     def discard_all(self) -> None:
-        """Socket death: everything queued is dropped and nothing is held for a next socket (WSM-RCN-042)."""
+        """Socket death: drop every queued frame; nothing is kept for a next socket (WSM-RCN-042)."""
+
         for queue in self._queues.values():
             queue.discard()
         self._queues.clear()

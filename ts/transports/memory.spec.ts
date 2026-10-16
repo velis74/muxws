@@ -1,5 +1,5 @@
 /**
- * The transport itself, so a failure in it is never misread as a peer bug.
+ * Tests of the in-memory transport alone, so a transport failure is not reported as a peer bug.
  *
  * Mirrors `muxws/transports/memory_test.py` test for test.
  */
@@ -13,10 +13,10 @@ import type { SocketAdapter } from './index';
 const BYTES = new Uint8Array([0x00, 0xff]).buffer;
 
 describe('the in-memory pair', () => {
-  it('delivers both ways, and drop kills both directions', async () => {
+  it('delivers both ways, and drop closes both directions', async () => {
     const [left, right] = memoryPair();
-    // The port is structural in TypeScript, so `isinstance(left, SocketAdapter)` becomes a binding
-    // the compiler has to accept plus the four members the peer is allowed to reach for.
+    // `SocketAdapter` is a structural type, so `isinstance(left, SocketAdapter)` becomes a typed
+    // binding plus a check of the four members the peer uses.
     const port: SocketAdapter = left;
     expect(typeof port.sendText).toBe('function');
     expect(typeof port.sendBytes).toBe('function');
@@ -32,7 +32,7 @@ describe('the in-memory pair', () => {
 
     expect(left.sent).toEqual(['hello']);
     expect(right.sent).toHaveLength(1);
-    // Identity, not equality: the pair is a wire, and a wire does not copy what it carries.
+    // Identity, not equality: the pair passes messages by reference without copying.
     expect(right.sent[0]).toBe(BYTES);
 
     left.drop();
@@ -42,7 +42,7 @@ describe('the in-memory pair', () => {
     expect(() => {
       left.sendText('too late');
     }).toThrow(ConnectionClosed);
-    // The other direction is dead too, or "both directions" would be a claim the test never made.
+    // The other direction is closed as well.
     expect(() => {
       right.sendText('too late');
     }).toThrow(ConnectionClosed);
@@ -71,8 +71,8 @@ describe('the in-memory pair', () => {
     const [left, right] = memoryPair();
     right.inject('{"type":"widget"}');
     expect(await right.receive()).toBe('{"type":"widget"}');
-    // How the conformance runner delivers frames no correct implementation would send: the other
-    // end never put this on the wire, which is the whole point of the method.
+    // The conformance runner uses `inject` to deliver frames a correct implementation never sends;
+    // the injected message does not come from the other end.
     expect(left.sent).toEqual([]);
   });
 

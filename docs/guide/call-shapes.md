@@ -1,8 +1,8 @@
 # Call shapes
 
-Four shapes cover everything muxws does. They are not four mechanisms - they are one mechanism,
-`open()`, consumed four ways. Which shape you are in is decided by two things: whether the opener
-sends `end` immediately, and whether the responder sends one payload or several.
+muxws supports four call shapes. All four use the same mechanism, `open()`, and differ in how the
+stream is used. The shape is determined by two things: whether the opener sends `end` with the
+opening payload, and whether the responder sends one payload or several.
 
 ## The four shapes
 
@@ -13,13 +13,13 @@ sends `end` immediately, and whether the responder sends one payload or several.
 | **Bidirectional** | `open` → `data` both ways → `data(end)` both ways | `stream = peer.open(payload)` | `const stream = peer.open(payload)` |
 | **One-shot push** | `open(end)`, nothing back | `await peer.notify(payload)` | `await peer.notify(payload)` |
 
-Every one of them works in both directions. An acceptor calls `peer.request(...)` on a client
-exactly as a client calls it on a server.
+Every shape works in both directions. An acceptor calls `peer.request(...)` on a client in the same
+way a client calls it on a server.
 
 ### Unary
 
 One value out, one value back. The opener sends `end` with the opening payload, so the remote knows
-there is nothing more coming and can answer immediately.
+that no more payloads follow and can answer immediately.
 
 ```python
 # fragment
@@ -35,7 +35,7 @@ const answer = await peer.request({ action: 'list' });
 const answered = await peer.request({ action: 'list' }, { timeoutMs: 5000 }); // 5000 milliseconds
 ```
 
-On the handler side, `reply()` is `send()` plus `end()`, which is what a unary handler wants:
+On the handler side, `reply()` is `send()` followed by `end()`, which is what a unary handler needs:
 
 ```python
 # fragment
@@ -53,8 +53,8 @@ peer.onStream(async (payload, stream) => {
 
 ### Streaming response
 
-One value out, many values back. Same opening frame as unary - the difference is entirely in how the
-handler answers and how the caller consumes.
+One value out, many values back. The opening frame is the same as for unary; only the handler's
+answer and the caller's consumption differ.
 
 ```python
 # fragment
@@ -81,7 +81,7 @@ async def handle(payload, stream):
 ### Bidirectional
 
 Both ends send until both ends have sent `end`. The opener does **not** set `end` on the `open`,
-because it intends to keep sending.
+because it sends more payloads.
 
 ```python
 # fragment
@@ -105,8 +105,8 @@ The stream closes when both directions have ended; until then either end may sti
 
 ### One-shot push
 
-Fire and forget. `notify()` is async, returns nothing, and produces no handle at all - there is no
-`Stream` to await, on purpose, so there is nothing to accidentally leave pending.
+Fire and forget. `notify()` is async, returns `None` (`undefined` in TypeScript), and returns no
+`Stream`, so the caller has no stream that could be left pending.
 
 ```python
 # fragment
@@ -118,15 +118,15 @@ await peer.notify({"event": "cache-invalidated"})
 await peer.notify({ event: 'cache-invalidated' });
 ```
 
-It is `open(payload, end=True)` with the result thrown away. The remote's handler still runs; you
-just do not hear about it. If the remote resets that stream, nothing is raised at the call site,
-because there is no call site left to raise at: the `muxws.frames` log is where it shows up. See
+It is `open(payload, end=True)` with the returned stream discarded. The remote's handler runs, but
+the caller receives no result. If the remote resets the stream, nothing is raised to the caller; the
+incoming `reset` frame appears in the `muxws.frames` log. See
 [Observability](/guide/observability).
 
 ## `open()` is synchronous
 
-`peer.open()` returns a `Stream` immediately, in both languages. It is not a coroutine, it is not a
-promise, and there is nothing to await:
+`peer.open()` returns a `Stream` immediately, in both languages. It is neither a coroutine nor a
+promise, and is not awaited:
 
 ```python
 # fragment
@@ -138,34 +138,34 @@ stream = peer.open({"report": "sales"})   # no await
 const stream = peer.open({ report: 'sales' }); // no await
 ```
 
-The reason is ordering. Allocating the stream id and putting the `open` frame on the writer are one
-indivisible step, with no suspension point between them, so the order ids are allocated in *is* the
-order they reach the wire. If `open()` could suspend, two concurrent calls could interleave and put
-a non-monotonic id sequence on the wire - which the remote is entitled to treat as a protocol error.
+Allocating the stream id and enqueueing the `open` frame on the writer happen in one step with no
+suspension point, so ids reach the wire in the order they are allocated. If `open()` could suspend
+between the two, two concurrent calls could put ids on the wire out of order, which the remote treats
+as a protocol error.
 
-Two consequences:
+This has two consequences:
 
 - **`open()` never queues.** It raises synchronously at the call site in exactly two
   connection-state cases: `ConnectionGoingAway` when the remote has sent `goaway` (or this peer has),
-  and `ConnectionLost` while the peer is between sockets with nothing buffered for the next one. An
-  [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the same way.
-  It does *not* raise for concurrency: the receiver's stream limit is the receiver's, and it surfaces
-  asynchronously as `StreamRefused` on the pending await. See [Connection lifecycle](/guide/connection-lifecycle).
+  and `ConnectionLost` while a reconnecting peer has no socket (nothing is buffered for the next
+  one). An [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the
+  same way. It does *not* raise when the receiver's concurrent-stream limit is reached: that limit is
+  enforced by the receiver, and the rejection arrives asynchronously as `StreamRefused` on the pending
+  await. See [Connection lifecycle](/guide/connection-lifecycle).
 - **`open()` takes no deadline, in either language.** There is no `timeout=` in seconds on the
-  Python call and no `timeoutMs` in milliseconds in `OpenOptions`. `open()` returns immediately, so
-  there is nothing for a deadline on it to bound. Deadlines live on the calls that actually wait:
-  `stream.result(timeout=)` in seconds
-  and `result({ timeoutMs })` in milliseconds, `peer.request(timeout=)` in seconds and
+  Python call and no `timeoutMs` in milliseconds in `OpenOptions`, because `open()` does not wait.
+  Deadlines are parameters of the calls that wait: `stream.result(timeout=)` in seconds and
+  `result({ timeoutMs })` in milliseconds, `peer.request(timeout=)` in seconds and
   `request(..., { timeoutMs })` in milliseconds.
 
-`open()` also takes zero mandatory arguments. With no payload it puts an explicit `"payload": null`
+`open()` has no required arguments. With no payload it puts an explicit `"payload": null`
 on the wire in both languages.
 
 ::: tip TypeScript only
-A `Stream` implements `PromiseLike`, so `await` unwraps it. That means a `Stream` can never be the
-resolution value of a promise: an `async function` that returns a stream silently hands its caller
-the stream's **first payload** instead. Box it - `return { stream }` - if you need to pass one out
-of an async function.
+A `Stream` implements `PromiseLike`, so `await` unwraps it. A `Stream` therefore cannot be the
+resolution value of a promise: an `async function` that returns a stream resolves to the stream's
+**first payload** instead. To return a stream from an async function, wrap it in an object:
+`return { stream }`.
 :::
 
 ## A `Stream` is awaitable *and* async-iterable
@@ -192,10 +192,10 @@ for await (const chunk of peer.open({ report: 'sales' }, { end: true })) {  // e
 }
 ```
 
-**The first use claims the stream, and the other then raises `StreamAlreadyConsumed`.** Awaiting a
-stream you are already iterating, iterating one you already awaited, or iterating the same stream
-twice, all raise it - with an error naming both uses. There is one consumer per stream, because two
-consumers would split the payloads between them and neither would see the whole answer.
+**The first use claims the stream; a use of the other kind then raises `StreamAlreadyConsumed`.**
+Awaiting a stream that is being iterated, iterating a stream that was awaited, and iterating the same
+stream twice all raise it, with a message naming both uses. A stream has one consumer, because two
+consumers would each receive only part of the payloads.
 
 ```python
 # fragment
@@ -205,28 +205,27 @@ async for chunk in stream:   # raises StreamAlreadyConsumed
     print(chunk)
 ```
 
-Awaiting the *same* stream twice is fine and is not a second claim: the value is memoized, so the
-second await returns the first await's value rather than the next payload. `stream.result(...)` is
-that same memoized answer with a deadline wrapped around the wait - never a second source of the
-value.
+Awaiting the *same* stream twice is allowed and is not a second claim: the value is memoized, so the
+second await returns the same value as the first, not the next payload. `stream.result(...)` returns
+the same memoized value, with a deadline on the wait.
 
 ## `request()` polices a second payload; `await stream` does not
 
-This is the one behavioural difference between the two unary-looking calls, and it is deliberate.
+This is the only behavioural difference between the two calls that return one value.
 
 | | Remote sends one payload | Remote sends two |
 |---|---|---|
 | `await peer.request(...)` | returns it | resets the stream with a protocol error and raises `ProtocolError` |
 | `await peer.open(..., end=True)` | returns it | returns the **first**; the second is simply never read |
 
-`request()` is a unary call, and a unary call that quietly discarded extra values would hide a
-handler bug rather than report it. `await stream` makes no such claim - it is documented as "the
-first payload", and a caller who wanted them all would have iterated.
+`request()` is a unary call; discarding extra values silently would hide a handler bug, so it
+reports them. `await stream` is defined as "the first payload"; to receive all payloads, iterate the
+stream.
 
 `request()` also raises `ProtocolError` if the stream ends without producing any payload at all.
 
-Neither call has a default deadline. A stream lives until it ends, is reset, or the connection dies;
-if you want a bound, pass one - `timeout=` in seconds, `timeoutMs` in milliseconds.
+Neither call has a default deadline. A stream stays open until it ends, is reset, or the connection
+closes. To set a deadline, pass `timeout=` in seconds or `timeoutMs` in milliseconds.
 
 ## See also
 

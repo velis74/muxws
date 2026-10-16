@@ -23,6 +23,7 @@ class Settings:
         return f"Settings(codec={self.codec!r})"
 
 
-#: Read at connection time, never at import time - or WSM-CDC-011's "an application may set it
-#: during bootstrap" stops being true for anything that imports muxws early.
+#: `codec` is read when a connection is made, not at import, so an application may set it during
+#: bootstrap after importing muxws (WSM-CDC-011).
+
 settings = Settings()

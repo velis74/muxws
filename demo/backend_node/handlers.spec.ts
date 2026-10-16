@@ -1,14 +1,12 @@
 /**
- * The node backend against the in-memory transport - the twin of `demo/backend_python/handlers_test.py`.
+ * Tests of the Node demo backend over the in-memory transport; the counterpart of
+ * `demo/backend_python/handlers_test.py`.
  *
- * A demo with no tests rots into a screenshot. The headline is
- * `keeps the ticks flowing while a megabyte goes out`: the panel is the demonstration, this is the
- * proof, and it is written against `onFrame`'s record rather than against anything on a screen so
- * that it fails if the round-robin writer is ever replaced by a FIFO.
+ * The test `interleaves tick frames between the fragments of a 1 MB export` asserts on the frames
+ * recorded by `onFrame`, so it fails if the round-robin writer is replaced by a FIFO writer.
  *
- * It is a twin and not a translation. Where the two ports differ - a `break` out of a `for await` that
- * TypeScript *does* observe, `closed` being a promise, a signal standing in for task cancellation -
- * the difference is asserted here rather than glossed over.
+ * Where the two ports differ (TypeScript observes a `break` out of a `for await`, `closed` is a
+ * promise, and an abort signal replaces task cancellation), the tests assert the TypeScript behaviour.
  */
 
 import {
@@ -43,7 +41,7 @@ import {
 
 // --------------------------------------------------------------------------- the harness
 
-/** What `MarketService._stats` answers with - the same fields `Stats` in the frontend destructures. */
+/** The `stats` reply; the same fields as `Stats` in the frontend. */
 interface Stats extends Counters {
   peers: number;
   streams: number;
@@ -70,12 +68,10 @@ interface Seen {
 }
 
 /**
- * A measurement worth reading while you are investigating, and noise while you are not.
+ * Logs a diagnostic line when `MUXWS_VERBOSE` is set; otherwise does nothing.
  *
- * Every call below sits beside an `expect` on the same number, so these lines are evidence for a
- * human and never the test's strength - and a suite whose normal state is silence is one where an
- * unexpected line means something. Set `MUXWS_VERBOSE` to get them back; a failing assertion prints
- * its own actual value either way.
+ * Every call is next to an `expect` on the same value, and a failing assertion prints its actual value
+ * regardless of this setting.
  */
 function note(line: string): void {
   const verbose = process.env.MUXWS_VERBOSE;
@@ -94,9 +90,9 @@ const BACKLOG = 32;
 /**
  * A `MemorySocket` whose sends wait while it is held.
  *
- * Not held, a send is the wrapped socket's synchronous send and adds no suspension. Held, the write
- * loop waits at its next send and every frame enqueued meanwhile stays in the writer, so a test can
- * fix what the rotation has to choose from before it chooses.
+ * When not held, a send is the wrapped socket's synchronous send. When held, the write loop waits at
+ * its next send and every frame enqueued meanwhile stays in the writer, so a test can fix the set of
+ * queued frames before the writer chooses among them.
  */
 class GatedSocket implements SocketAdapter {
   private held: Promise<void> | null = null;
@@ -137,12 +133,12 @@ class GatedSocket implements SocketAdapter {
 }
 
 /**
- * A browser and a backend, wired to each other, with the demo's real handler on the acceptor.
+ * A browser peer and a backend peer connected to each other, with the demo's handler on the acceptor.
  *
- * Over a plain `MemorySocket` - the same transport every other test in this repository uses, and that
- * is what makes WSM-INV-004 observable here: the write loop takes one event-loop turn per frame, so
- * the rotation has something to rotate over without a paced socket double supplying a yield the
- * transport does not. The backend's sends pass a `GatedSocket`, which is open unless a test holds it.
+ * The transport is a `MemorySocket`, as in the other tests in this repository. The write loop takes one
+ * event-loop turn per frame, so several streams have frames queued at each choice and WSM-INV-004 is
+ * observable without a paced socket. The backend's sends pass a `GatedSocket`, which is open unless a
+ * test holds it.
  */
 class Wire {
   readonly dialer: Peer;
@@ -152,27 +148,23 @@ class Wire {
   readonly service: MarketService;
 
   /**
-   * Every frame the *browser* saw, in arrival order. WSM-OBS-003's hook is the only witness the
-   * headline test below uses.
+   * Every frame the browser received, in arrival order, recorded by the WSM-OBS-003 `onFrame` hook.
    */
   readonly seen: Seen[] = [];
 
   /**
-   * What the browser knows about the market, and it knows nothing the socket did not tell it (D1).
-   * Filled by the pushed streams alone.
+   * The latest board row per symbol, filled only from the pushed tick streams.
    */
   readonly board = new Map<string, BoardRow>();
 
   /**
-   * The **first** row each symbol pushed, kept separately because the latest one overwrites it. A board
-   * that could only draw a row once a price had moved would leave the grid empty for a whole tick
-   * interval, which is what the snapshot exists to prevent.
+   * The first row each symbol pushed (the snapshot), kept separately because later rows overwrite
+   * `board`.
    */
   readonly first = new Map<string, BoardRow>();
 
   /**
-   * Every `CloseReason` the browser was handed. The kill-switch panel's claim is that the UI is *told*,
-   * rather than left with a frozen screen.
+   * Every `CloseReason` passed to the browser's close handler.
    */
   readonly closes: CloseReason[] = [];
 
@@ -197,17 +189,17 @@ class Wire {
     this.dialer.onFrame((direction, frame, byteLength) => {
       this.seen.push({ direction, frame, byteLength });
     });
-    // Registered **before** anything goes out, because the backend pushes the board the instant it sees
-    // the hello and a handler registered one await later meets that push with
-    // `reset(REFUSED, "no on_stream handler")` (WSM-STM-033). `connect()` takes `onStream` as an option
-    // for exactly this reason.
+    // Registered before anything is sent: the backend pushes the board as soon as it receives the
+    // hello, and a handler registered one `await` later would see those streams reset with
+    // `REFUSED, "no on_stream handler"` (WSM-STM-033). `connect()` takes `onStream` as an option for
+    // the same reason.
     this.dialer.onStream(this.onPush.bind(this));
     this.dialer.onClose((reason) => {
       this.closes.push(reason);
     });
     this.tasks = [this.dialer.serve(), this.acceptor.serve()];
-    // A socket dropped in teardown ends both read loops; whatever they report on the way out is
-    // teardown noise rather than a result, and an unhandled rejection would fail an unrelated test.
+    // Dropping the socket in teardown ends both read loops. Their errors are ignored, because an
+    // unhandled rejection would fail an unrelated test.
     this.tasks.forEach((task) => {
       void task.catch(() => undefined);
     });
@@ -222,7 +214,7 @@ class Wire {
     }
   }
 
-  /** What `connect({hello})` puts on the wire, sent by hand so the ack can be read (D3). */
+  /** Sends the hello that `connect({hello})` would send, directly, so the reply can be read. */
   async hello(tags?: Record<string, unknown>): Promise<HelloAck> {
     return this.dialer.request<HelloAck>({ action: 'hello', tags: tags ?? { topic: 'board' } });
   }
@@ -231,7 +223,7 @@ class Wire {
     return this.seen.filter((entry) => entry.direction === direction).map((entry) => entry.frame);
   }
 
-  /** Wait until every symbol has pushed at least one price, so the export starts into a live board. */
+  /** Waits until every symbol has a row on the board. */
   async untilTheBoardIsLive(timeoutMs = 5_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (this.board.size < SYMBOLS.length) {
@@ -248,9 +240,9 @@ class Wire {
   }
 
   /**
-   * Wait until `streamId` has a frame queued and every tick stream has `depth` frames queued.
+   * Waits until `streamId` has a frame queued and every tick stream has `depth` frames queued.
    *
-   * Meaningful only while `backend` is held: the writer then holds every frame enqueued.
+   * Used only while `backend` is held, so the writer keeps every enqueued frame.
    */
   async untilBacklogged(streamId: number, depth: number, timeoutMs = 5_000): Promise<void> {
     const { writer } = this.acceptor as unknown as { writer: Writer };
@@ -271,13 +263,13 @@ class Wire {
       socket.drop();
     });
     await Promise.allSettled(this.tasks);
-    // One turn past the drop, so the generators that were sleeping observe their aborted board and
-    // finish before the next test starts counting frames.
+    // Waits one turn after the drop, so sleeping generators observe the aborted board and finish
+    // before the next test starts.
     await pause(5);
   }
 }
 
-/** One browser, one backend, one socket - the demo's own objects and nobody's test doubles. */
+/** Runs `body` with a connected browser peer and backend peer using the demo's `MarketService`. */
 async function marketWire(options: MarketServiceOptions, body: (wire: Wire) => Promise<void>): Promise<void> {
   const wire = new Wire(options);
   wire.start();
@@ -292,18 +284,16 @@ function isFragment(frame: Frame): boolean {
   return frame.fragment !== null && frame.fragment !== undefined;
 }
 
-// --------------------------------------------------------------------------- the headline
+// --------------------------------------------------------------------------- stream interleaving
 
-it('keeps the ticks flowing while a megabyte goes out', async () => {
-  // WSM-INV-004, as a test: a megabyte on one stream does not stall the twenty others.
+it('interleaves tick frames between the fragments of a 1 MB export', async () => {
+  // WSM-INV-004: a 1 MB payload on one stream does not block the twenty tick streams.
   //
-  // Asserted from what the *browser's* `onFrame` recorded, not from anything visual and not from the
-  // handler's own bookkeeping. The backend's sends are held while the export is enqueued, until every
-  // tick stream has more frames queued than the export has fragments; then they are released. What
-  // the writer sends from that state does not depend on scheduling. A FIFO decides the order at
-  // enqueue time, so the ticks queued before the export would go out first and every fragment of the
-  // export after them, back to back. The round-robin writer gives the export one fragment per turn
-  // and every tick stream one frame in between (WSM-FRG-017/018/019).
+  // Asserted on the frames recorded by the browser's `onFrame`. The backend's sends are held while the
+  // export is enqueued, until every tick stream has more frames queued than the export has fragments;
+  // then they are released, so the send order does not depend on scheduling. A FIFO writer would send
+  // the queued ticks first and then every export fragment consecutively. The round-robin writer sends
+  // one export fragment per turn and one frame of every tick stream between them (WSM-FRG-017/018/019).
   await marketWire({ tickIntervalMs: 1 }, async (wire) => {
     await wire.hello();
     await wire.untilTheBoardIsLive();
@@ -326,13 +316,13 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
       `export fragments=${fragments.length} span=${fragments[0]}..${fragments[fragments.length - 1]} ` +
         `of ${received.length} frames`,
     );
-    // A megabyte really did have to be fragmented; otherwise there was nothing to stall behind.
+    // The export was fragmented.
     expect(fragments.length).toBeGreaterThanOrEqual(8);
     expect(fragments.length, 'the tick streams ran dry before the export finished').toBeLessThan(BACKLOG);
     expect(payload.count).toBe(EXPORT_ROWS);
 
-    // Between any two fragments of the export, every tick stream delivered exactly one frame and
-    // nothing else went out: the rotation asks every lane once before it asks any lane twice.
+    // Between any two fragments of the export, every tick stream delivered exactly one frame and no
+    // other frame was sent: the rotation serves every stream once before serving any stream twice.
     fragments.slice(1).forEach((after, position) => {
       const before = fragments[position];
       const between = received
@@ -344,29 +334,27 @@ it('keeps the ticks flowing while a megabyte goes out', async () => {
   });
 }, 30_000);
 
-// --------------------------------------------------------------------------- the rest of section 6
+// --------------------------------------------------------------------------- actions
 
 it('answers every action the frontend can name', async () => {
   await marketWire({ tickIntervalMs: 500, historyDelayMs: 0 }, async (wire) => {
-    // The eight the frontend may send, and the eight `dispatch` will route. An action added to one
-    // backend and not the other is a demo whose two halves are not the same demo.
+    // The eight actions the frontend may send, which `dispatch` routes; the Python backend has the
+    // same eight.
     expect(wire.service.actions).toEqual(['hello', 'quote', 'history', 'depth', 'export', 'stats', 'rate', 'kill']);
 
     const acknowledgement = await wire.hello({ topic: 'board', session: 'demo' });
     expect(acknowledgement.ok).toBe(true);
     expect(acknowledgement.symbols).toBe(SYMBOLS.length);
-    // D3: the peer is findable under the tags the *frontend* named, and under nothing muxws chose.
+    // The peer is registered under the tags the frontend sent, and under no tags added by muxws.
     expect(wire.service.registry.peersFor({ topic: 'board' })).toEqual([wire.acceptor]);
     expect(wire.service.registry.peersFor({ session: 'demo' })).toEqual([wire.acceptor]);
 
-    // Server push, and D1 with it: the browser asked for no symbol list and holds no seed data, and
-    // yet it knows all twenty - because the acceptor opened twenty streams of its own accord and the
-    // browser received them through its own `onStream` handler (WSM-INV-002).
+    // Server push: the browser requested no symbol list and receives all twenty symbols on streams the
+    // acceptor opened, through the browser's own `onStream` handler (WSM-INV-002).
     await wire.untilTheBoardIsLive();
     expect([...wire.board.keys()].sort()).toEqual(SYMBOLS.map(([symbol]) => symbol).sort());
-    // The first frame of every pushed stream is the snapshot, not a tick: the grid is drawable the
-    // moment it is subscribed rather than a tick interval later. A backend that pushed only movements
-    // would fill the board just as surely and leave it blank until it did.
+    // The first frame of every pushed stream is the snapshot, not a tick, so the grid can be drawn
+    // immediately after the hello instead of one tick interval later.
     expect([...wire.first.values()].map((row) => row.ticks)).toEqual(SYMBOLS.map(() => 0));
 
     const quote = await wire.dialer.request<Quote>({ action: 'quote', symbol: 'ACME' });
@@ -379,7 +367,7 @@ it('answers every action the frontend can name', async () => {
     for await (const point of history) points.push(point);
     expect(points).toHaveLength(HISTORY_POINTS);
     expect(points.map((point) => point.t)).toEqual([...Array(HISTORY_POINTS).keys()]);
-    // Trailers ride the `end` frame and are readable only once the iteration is over.
+    // Trailers are carried on the `end` frame and are readable after the iteration completes.
     expect(history.trailers).toEqual({ symbol: 'ACME', points: HISTORY_POINTS });
 
     const before = wire.seen.length;
@@ -387,10 +375,9 @@ it('answers every action the frontend can name', async () => {
     expect(depth.bids).toHaveLength(depth.levels);
     expect(depth.asks).toHaveLength(depth.levels);
     expect(depth.bids[0].px).toBeLessThan(depth.asks[0].px);
-    // WSM-FRG-010, which is the entire claim of the "full depth" panel and is not implied by the three
-    // assertions above: a book of five levels is internally consistent, arrives whole, and witnesses
-    // nothing. The payload has to cross MAX_FRAME_BYTES for there to be a reassembly to watch, and
-    // nothing in the handler or here asked for one.
+    // WSM-FRG-010: the depth payload exceeds MAX_FRAME_BYTES, so it was fragmented and reassembled.
+    // The three assertions above would also pass for a five-level book that fits in one frame. Neither
+    // the handler nor this test requests fragmentation.
     const pieces = wire.seen
       .slice(before)
       .filter((entry) => entry.direction === 'rx' && isFragment(entry.frame))
@@ -409,16 +396,15 @@ it('answers every action the frontend can name', async () => {
     expect(stats.exports).toBe(1);
     expect(stats.peers).toBe(1);
 
-    // An action nobody defined is an application error, never a refusal: REFUSED would promise the
-    // request had not been processed and invite the browser to retry it (WSM-STM-034).
+    // An unknown action is an application error, not a refusal: REFUSED would state that the request
+    // was not processed and may be retried (WSM-STM-034).
     await expect(wire.dialer.request({ action: 'buy', symbol: 'ACME' })).rejects.toBeInstanceOf(RemoteError);
   });
 }, 30_000);
 
-it('changes how often the board pushes when asked', async () => {
-  // The pacing is the demo's and not the library's, and a reader has to be able to prove that. The
-  // interval is a `sleep` in the generator; this asserts the choice is reachable, and that it is
-  // bounded, because zero would turn the generator into a busy loop that starves the loop it sends on.
+it('changes the tick interval on a rate request', async () => {
+  // The tick interval is a `sleep` in the demo's generator, not a library limit. This asserts that
+  // `rate` changes it and rejects values outside 1..5000 ms.
   await marketWire({}, async (wire) => {
     const answer = await wire.dialer.request<RateAck>({ action: 'rate', interval_ms: 10 });
     expect(answer.ok).toBe(true);
@@ -426,9 +412,8 @@ it('changes how often the board pushes when asked', async () => {
     expect(wire.service.tickIntervalMs).toBe(10);
 
     const stats = await wire.dialer.request<Stats>({ action: 'stats' });
-    // Seconds on the wire, milliseconds in this port: the frontend reads `tick_interval` the way the
-    // Python backend spells it, and a second backend that changed the units would be a second backend
-    // the frontend could tell apart.
+    // `tick_interval` is in seconds on the wire, as the Python backend sends it; this port stores
+    // milliseconds.
     expect(stats.tick_interval).toBe(0.01);
 
     for (const refused of [0, -5, 10_000]) {
@@ -439,19 +424,15 @@ it('changes how often the board pushes when asked', async () => {
 });
 
 it('stops the generator when the browser cancels a history', async () => {
-  // WSM-ERR-012/013: `cancel()` stops the *backend*, and a counter it increments says so.
+  // WSM-ERR-012/013: `cancel()` stops the backend generator, which increments `history_cancelled`.
   //
-  // Asserted from that counter and never from the absence of frames. A frontend that stopped reading
-  // would produce exactly the same silence on the wire, and the panel's whole claim is that the backend
-  // stopped generating.
+  // Asserted on that counter, not on the absence of frames: a frontend that stopped reading would also
+  // produce no further frames.
   //
-  // The delay is a quarter of a second and not the Python twin's five milliseconds, and that is the
-  // whole of what makes this test bite *this* port. The signal is the only thing standing in for task
-  // cancellation here, and a handler that never looked at it would still stop - one delay later, when
-  // its next `send` met a stream the browser had already reset. At five milliseconds those two are
-  // indistinguishable and a handler that ignored `stream.signal` outright would pass. Against the
-  // window below - far shorter than the delay - only the handler that watches the signal can answer
-  // in time, which is exactly the claim `history`'s doc comment makes.
+  // The history delay is 250 ms (the Python test uses 5 ms). A handler that ignored `stream.signal`
+  // would still stop one delay later, when its next `send` fails on the reset stream. The test requires
+  // the cancellation to be observed within half the delay, which only a handler that watches the signal
+  // satisfies.
   const historyDelayMs = 250;
   await marketWire({ tickIntervalMs: 500, historyDelayMs }, async (wire) => {
     await wire.hello();
@@ -462,10 +443,9 @@ it('stops the generator when the browser cancels a history', async () => {
       received += 1;
       if (received === 3) break;
     }
-    // The one place the twin tests differ, and it is a difference in the *consumer*: Python cannot
-    // observe a `break` out of an `async for`, so its version cancels the stream by hand. TypeScript
-    // finalises the generator, and `Stream.iterate`'s `finally` sends the same `reset(CANCELLED)`
-    // (WSM-ERR-014). The frame on the wire is identical, and the frame is all the backend reacts to.
+    // Python cannot observe a `break` out of an `async for`, so the Python test cancels the stream
+    // explicitly. TypeScript finalises the iterator, and `Stream.iterate`'s `finally` sends the same
+    // `reset(CANCELLED)` (WSM-ERR-014); the backend receives the same frame.
     const cancelledAt = Date.now();
     const counters = wire.service.counters;
     const window = historyDelayMs / 2;
@@ -473,15 +453,15 @@ it('stops the generator when the browser cancels a history', async () => {
     const noticedMs = Date.now() - cancelledAt;
 
     expect(counters.history_started).toBe(1);
-    // WSM-API-023: the generator was told, rather than finding out on its next write. Inside half a
-    // delay there has been no next write to find out on.
+    // WSM-API-023: the generator is notified through the signal. Within half a delay it has made no
+    // further write that could have failed.
     note(`the generator noticed the cancellation after ${noticedMs}ms of a ${historyDelayMs}ms delay`);
     expect(counters.history_cancelled).toBe(1);
     expect(noticedMs).toBeLessThan(window);
 
     const stoppedAt = counters.history_points_sent;
     expect(stoppedAt).toBeLessThan(HISTORY_POINTS);
-    // Longer than the delay itself, so a generator still looping would have sent at least one more.
+    // Twice the delay, so a generator still looping would have sent at least one more point.
     await pause(historyDelayMs * 2);
     note(
       `points sent before the cancellation: ${stoppedAt}; ` +
@@ -491,8 +471,9 @@ it('stops the generator when the browser cancels a history', async () => {
   });
 });
 
-it('fragments the export payload without anybody asking it to', async () => {
-  // WSM-FRG-010: over MAX_FRAME_BYTES on the wire, whole on arrival, and nothing asked for it.
+it('fragments the export payload without application code', async () => {
+  // WSM-FRG-010: the payload exceeds MAX_FRAME_BYTES, is fragmented on the wire and arrives whole,
+  // without the application requesting fragmentation.
   await marketWire({ tickIntervalMs: 500 }, async (wire) => {
     await wire.hello();
     const exported = wire.dialer.open<ExportPayload>({ action: 'export', symbol: 'ACME' }, { end: true });
@@ -505,18 +486,17 @@ it('fragments the export payload without anybody asking it to', async () => {
     note(`export: ${fragments.length} fragments, ${total} bytes on the wire`);
     expect(fragments.length).toBeGreaterThan(1);
     expect(total).toBeGreaterThan(1_000_000);
-    // A receiver must accept anything up to the cap and a sender must never exceed it. The cap is a
-    // protocol constant, not a setting - nothing in the demo passed `maxFrameBytes` at all.
+    // A receiver accepts frames up to the limit and a sender never exceeds it. The demo passes no
+    // `maxFrameBytes`, so the limit is the protocol default.
     fragments.forEach((entry) => {
       expect(entry.byteLength).toBeLessThanOrEqual(MAX_FRAME_BYTES);
     });
-    // `more: true` on every fragment but the last, which is how the receiver knows it is done.
+    // `more: true` on every fragment except the last, which marks the end of the payload.
     //
-    // `?? false`, and that is not a weakening: a field at its default is omitted from the envelope
-    // (WSM-CDC-005), so the last fragment arrives with no `more` key at all. Python rebuilds a
-    // dataclass whose default is `False` and TypeScript leaves the property `undefined`; `FIELD_DEFAULTS`
-    // in `ts/frames.ts` is the statement that the two are the same frame, and `framesEqual` compares
-    // them through exactly this normalisation.
+    // A field at its default is omitted from the envelope (WSM-CDC-005), so the last fragment has no
+    // `more` key and TypeScript leaves the property `undefined`; `?? false` applies the default.
+    // `FIELD_DEFAULTS` in `ts/frames.ts` defines the defaults, and `framesEqual` compares frames with
+    // the same normalisation.
     expect(fragments.map((entry) => entry.frame.more ?? false)).toEqual([
       ...fragments.slice(0, -1).map(() => true),
       false,
@@ -528,17 +508,12 @@ it('fragments the export payload without anybody asking it to', async () => {
   });
 }, 30_000);
 
-it('draws the same market whatever the reader clicked', () => {
-  // D2, and the half of it that a single seeded generator would not give you.
+it('generates the same market data regardless of request order', () => {
+  // Each (seed, purpose, symbol) has its own generator, so ACME's tenth price does not depend on which
+  // other requests were made first. This test sends different requests to two markets and expects the
+  // same ACME ticks from both.
   //
-  // Seeding one shared stream of randomness makes a run reproducible only if it is *driven*
-  // identically: ACME's tenth price would then depend on whether anybody asked for an export first, and
-  // the screenshot in the documentation would stop being true the moment a reader clicked in a
-  // different order. One generator per (seed, purpose, symbol) is what makes the claim hold, so this
-  // drives two markets differently on purpose and expects the same numbers out of both.
-  //
-  // Within this backend, and only within it: the numbers deliberately differ from the Python one, so
-  // the reproducibility a screenshot needs is reproducibility across runs of *this* process.
+  // The numbers are reproducible across runs of this backend; they differ from the Python backend's.
   const quiet = new Market();
   const busy = new Market();
   const ten = Array.from({ length: 10 }, () => quiet.tick('ACME'));
@@ -549,18 +524,18 @@ it('draws the same market whatever the reader clicked', () => {
   busy.tick('BOLT');
   expect(Array.from({ length: 10 }, () => busy.tick('ACME'))).toEqual(ten);
 
-  // And across processes, which is what a screenshot actually needs: the generator is seeded from the
-  // characters of `<seed>:<purpose>:<symbol>` and owes nothing to insertion order or to a hash seed.
+  // Reproducible across processes: the generator is seeded from the characters of
+  // `<seed>:<purpose>:<symbol>` and does not depend on insertion order or a per-process hash seed.
   expect(new Market().history('ACME')).toEqual(quiet.history('ACME'));
-  // The book's prices hang off the symbol's *current* price, which `busy` has moved on purpose, so what
-  // is compared is the drawn part: the quantities are the same draws in the same order.
+  // The book's prices are offsets from the symbol's current price, which `busy` has changed, so only
+  // the drawn values are compared: quantities and order counts.
   const drawn = (book: DepthBook): [number, number][] =>
     book.bids.slice(0, 5).map((level) => [level.qty, level.orders]);
   expect(drawn(new Market().depth('BOLT'))).toEqual(drawn(busy.depth('BOLT')));
 });
 
-it('closes every peer when the kill switch is thrown', async () => {
-  // The "kill the backend" panel: every live stream fails and the browser is told, not frozen.
+it('closes every peer on a kill request', async () => {
+  // The kill switch: every live stream fails and the browser's close handler receives a reason.
   await marketWire({ tickIntervalMs: 20, killDelayMs: 10 }, async (wire) => {
     await wire.hello();
     await wire.untilTheBoardIsLive();
@@ -571,22 +546,18 @@ it('closes every peer when the kill switch is thrown', async () => {
 
     const deadline = Date.now() + 2_000;
     while (wire.closes.length === 0 && Date.now() < deadline) await pause(5);
-    // The browser is *told*, which is the whole of the panel: a UI that only froze would be
-    // indistinguishable from a slow backend.
+    // The browser receives a `CloseReason`, so the UI can report the closed connection.
     expect(wire.closes.length).toBeGreaterThan(0);
     note(`the browser was told: code=${wire.closes[0].code} clean=${wire.closes[0].wasClean}`);
     expect(wire.dialer.isOpen).toBe(false);
     expect(wire.dialer.streams.size).toBe(0);
-    // WSM-REG-016 end to end, and it is the *library* this witnesses rather than the demo: the registry
-    // hooks `onClose` itself, so this stays empty even if `MarketService.forget` never called
-    // `deregister`. That is worth one line here because the kill switch is the only place in the demo
-    // where a registered peer dies, and a registry that answered with sockets that have been shut since
-    // would make the next `peersFor()` count a fiction.
+    // WSM-REG-016: the registry installs its own `onClose` hook, so it is empty even without
+    // `MarketService.forget` calling `deregister`. The kill switch is the only place in the demo where
+    // a registered peer closes.
     expect(wire.service.registry.peersFor()).toEqual([]);
 
-    // Every open stream is closed rather than left hanging, and a send on one throws (WSM-ERR-002 keeps
-    // socket death out of a stream's own vocabulary and gives it its own). `closed` is a promise here
-    // where Python has an `Event`, so the state is what this asserts on (WSM-API-023).
+    // Every open stream is closed, and a send on one throws `StreamReset` (WSM-ERR-002). `closed` is a
+    // promise in TypeScript, so the test asserts on `state` (WSM-API-023).
     expect(watching.state).toBe(StreamState.CLOSED);
     await expect(watching.send({ anything: true })).rejects.toBeInstanceOf(StreamReset);
   });

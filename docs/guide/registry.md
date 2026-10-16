@@ -1,22 +1,23 @@
 # Tags and the peer registry
 
-Server push needs an answer to one question: *which connections should get this?* muxws answers it
-with two pieces — a bag of application-chosen labels on each peer, and an index over those labels.
+Server push requires selecting the connections that receive a message. muxws provides two parts for
+this: a set of application-defined labels on each peer (`peer.tags`), and an index over those labels
+(`PeerRegistry`).
 
-The design rests on one distinction: **the registry indexes, it does not watch.** Nothing observes
-your tags. Writing one is a plain assignment that costs nothing and triggers nothing, and the index
-moves only when you say so.
+**The registry indexes tags; it does not observe them.** Writing a tag is a plain assignment with no
+side effects, and the index changes only when the application calls `register` or `deregister`, or
+when a registered peer closes.
 
 ## `peer.tags`
 
-An ordinary `dict` in Python, an ordinary object in TypeScript. muxws never reads it, never writes it,
-and defines no key of its own in it.
+A plain `dict` in Python, a plain object in TypeScript. muxws does not read or write it (except that
+`PeerRegistry.register` reads it), and defines no keys in it.
 
 ```python
 # fragment
 peer.tags["user"] = 42
 peer.tags["tenant"] = "acme"
-peer.tags["topics"] = {"orders", "shipments"}   # fine — muxws does not care what you store
+peer.tags["topics"] = {"orders", "shipments"}   # any value type is allowed
 ```
 
 ```ts
@@ -25,21 +26,20 @@ peer.tags.user = 42;
 peer.tags.tenant = 'acme';
 ```
 
-Because it is a plain container, it has plain container semantics: no change notification, no
-validation, no ordering guarantee, no persistence.
+It has the semantics of a plain container: no change notification, no validation, no ordering
+guarantee, no persistence.
 
-**It dies with its connection.** On the acceptor side — which is where tags are almost always used — a
-lost socket is the end of that `Peer` object, and a reconnecting client is a **brand-new `Peer` with
-an empty `tags`**. The acceptor never learns that the socket it just accepted belongs to the client
-that was here a moment ago, so there is nowhere for the old tags to come from. That is not a
-limitation to work around; it is what keeps a tab that muted something and then died from leaving a
-successor muted that never asked to be.
+**Tags end with their connection.** On the acceptor side, where tags are normally used, a lost socket
+ends that `Peer` object, and a reconnecting client is a **new `Peer` with empty `tags`**. The acceptor
+does not know that the new socket belongs to a client it served before, so the old tags are not
+carried over. State set by a previous connection (for example, a muted topic) therefore does not apply
+to the next one.
 
-The consequence for your code: **whatever the acceptor indexes, it must index again on every
-connection.** The hello handler is where that happens — see [Reconnect](/guide/reconnect#the-hello).
+**The acceptor must index each connection again.** Do this in the hello handler; see
+[Reconnect](/guide/reconnect#the-hello).
 
-(A dialer's `Peer` object does survive a reconnect, and the library neither clears nor reads its
-`tags`. A dialer rarely has any.)
+(A dialer's `Peer` object remains across a reconnect, and the library neither clears nor reads its
+`tags`.)
 
 ## `PeerRegistry`
 
@@ -49,12 +49,12 @@ from muxws import PeerRegistry
 registry = PeerRegistry()
 ```
 
-Three members do the work.
+The registry has three main members, plus `deregister`.
 
 ### `register(peer)`
 
-Indexes the peer under **every key its `tags` holds at this moment**. The registry has no notion of
-which keys matter, so it takes all of them.
+Indexes the peer under **every key its `tags` holds at the time of the call**. The registry indexes
+all keys.
 
 ```python
 # fragment
@@ -63,8 +63,8 @@ peer.tags["tenant"] = "acme"
 registry.register(peer)          # findable by user=42 and by tenant="acme"
 ```
 
-Re-registering **replaces** a peer's previous entries wholesale rather than adding to them: after
-`register`, the peer is found under its new values and no longer under its old ones.
+Registering again **replaces** all of the peer's previous entries: after `register`, the peer is
+found under its current values and no longer under its previous ones.
 
 ```python
 # fragment
@@ -72,14 +72,13 @@ peer.tags["tenant"] = "globex"
 registry.register(peer)          # findable by tenant="globex"; no longer by tenant="acme"
 ```
 
-A value that cannot serve as a lookup key is passed over rather than rejected — an unhashable value in
-Python, anything other than a string, number, boolean, bigint or symbol in TypeScript. The peer is
-simply not findable by that key. Raising instead would turn an ordinary tag write into an error, and a
-dict-valued tag would become illegal for no benefit.
+A value that cannot be a lookup key is skipped without an error: an unhashable value in Python, or
+any value other than a string, number, boolean, bigint or symbol in TypeScript. The peer cannot be
+found by that key. A dict-valued tag is therefore allowed; it is not indexed.
 
 **Removal on close is automatic.** `register` installs one close hook per peer, so a socket loss
-prunes the index by itself. You never have to remember to deregister, and the hook is installed once
-however many times you re-register.
+removes the peer from the index without an explicit `deregister`. The hook is installed once, however
+many times the peer is registered.
 
 ### `peers_for(**tags)` / `peersFor(tags)`
 
@@ -98,16 +97,16 @@ for (const peer of registry.peersFor({ tenant: 'acme', role: 'admin' })) {
 }
 ```
 
-It returns a **list in a stable order** (sorted by `peer.id`), never a set: callers iterate it, and an
-order that varied between runs for no visible reason is a debugging cost with no upside. Called with
-no arguments it returns every registered peer.
+It returns a **list in a stable order** (sorted by `peer.id`), not a set, so iteration order is the
+same between runs. Called with no arguments, it returns every registered peer.
 
-Treat the result as a **snapshot**. A peer in it may already be closing by the time you reach it, so a
-send may raise `ConnectionLost`; that is an ordinary race, not a registry bug.
+The result is a **snapshot**. A peer in it may be closing by the time it is used, so a send may raise
+`ConnectionLost`; this is an expected race.
 
 ### `registered(peer)`
 
-`register` plus an explicit deregister, for a consumer that wants the scope visible in the code.
+`register` with a `deregister` at the end of a scope, so the registration scope is explicit in the
+code.
 
 ```python
 # fragment
@@ -118,8 +117,8 @@ async def endpoint(websocket):
         await peer.serve()
 ```
 
-TypeScript has no `with`, and the package's compile target has no `using` either, so the scope is a
-callback. The deregister still runs when the body throws.
+TypeScript has no `with`, and the package's compile target (ES2020) does not support `using`, so the
+scope is a callback. `deregister` runs also when the callback throws.
 
 ```ts
 // fragment
@@ -130,14 +129,13 @@ await registry.registered(peer, async () => {
 });
 ```
 
-`deregister(peer)` is public and idempotent if you want the two halves separately.
+`deregister(peer)` is public and idempotent, for use without `registered`.
 
 ## Reaching the peer from a handler
 
-`on_stream` is handed `(payload, stream)` and there is no public route from a `Stream` back to its
-`Peer` in either language. That is deliberate — a handler's business is its stream — but tagging,
-registering and pushing all need the peer, so the pattern is to **bind the handler to the peer when
-you accept the connection**:
+`on_stream` receives `(payload, stream)`, and neither language has a public reference from a `Stream`
+to its `Peer`. Tagging, registering and pushing need the peer, so **define the handler as a closure
+over the peer when the connection is accepted**:
 
 ```python
 # fragment
@@ -145,8 +143,8 @@ async def endpoint(websocket):
     peer = await muxws.accept(websocket)
 
     async def handle(payload, stream):
-        # `peer` is in scope because this closure was built for this connection, and it is the only
-        # way the handler can reach it.
+        # `peer` is in scope because this closure is defined per connection; a handler has no other
+        # reference to its peer.
         if payload.get("action") == "subscribe":
             peer.tags.update(payload["tags"])
             registry.register(peer)
@@ -155,17 +153,15 @@ async def endpoint(websocket):
     await peer.serve()
 ```
 
-One handler per connection rather than one per process, which is what makes `peer.tags` usable at all.
-If you find yourself wanting a module-level handler, you will find yourself wanting a way back to the
-peer, and there is not one.
+Define one handler per connection, not one per process. A module-level handler has no access to the
+peer and therefore to `peer.tags`.
 
 ## The usage rule
 
 **Look up on keys you do not mutate, and mutate keys you do not look up.**
 
-That is the whole contract, and it falls straight out of "the registry indexes, it does not watch". A
-write to `peer.tags` does not move the index. So a key you *look up on* must be settled before you
-call `register` and left alone afterwards, and a key you *mutate freely* is one nobody searches by.
+A write to `peer.tags` does not update the index. A key used for lookup must therefore be set before
+`register` and not changed afterwards, and a key that changes must not be used for lookup.
 
 ```python
 # fragment
@@ -190,30 +186,25 @@ peer.tags["room"] = "game-7"
 registry.register(peer)      # required, or peers_for(room="game-7") misses this peer
 ```
 
-This costs one pass over the peer's tags and is safe to call as often as you like — the close hook is
-not duplicated, and the old entries are replaced rather than accumulated.
+Each call iterates over the peer's tags once. It can be called any number of times: the close hook is
+not duplicated, and the old entries are replaced.
 
-The failure mode of forgetting is quiet, which is why the rule is stated as a rule: nothing raises,
-nothing logs, and the peer is simply absent from a broadcast it should have received. The index still
-holds the value it was told about, which is now a value nobody has.
+If `register` is not called after such a write, no error is raised and nothing is logged: the index
+keeps the previous value, and the peer is missing from lookups by the new value.
 
 ## One process
 
-`PeerRegistry` is **per process**. It is an in-memory index over the peers this process is holding
-sockets for, and muxws ships no cross-process backplane — no Redis adapter, no pub/sub bridge, no
-sticky-routing helper.
+`PeerRegistry` is **per process**. It is an in-memory index over the peers whose sockets this process
+holds. muxws ships no cross-process backplane: no Redis adapter, no pub/sub bridge, no sticky-routing
+helper.
 
-That is a deliberate boundary rather than an omission. A multi-process deployment already has to
-decide where its fan-out lives, and that decision belongs to the deployment: which broker, what
-delivery guarantee, what happens to a message published while a client is between reconnections, and
-whether a client's connection is pinned to one process at all. Any answer muxws picked would be wrong
-for most deployments and impossible to remove from a frozen surface.
+Cross-process fan-out depends on deployment choices: the broker, the delivery guarantee, the handling
+of a message published while a client is reconnecting, and whether a client is pinned to one process.
+muxws does not make these choices.
 
-What such a deployment does itself: publish the event on whatever bus it already runs, have every
-process subscribe, and in each subscriber use its **local** `PeerRegistry` to find the peers *it*
-holds and push to those. Each process fans out to its own sockets and to nobody else's; the bus
-handles the crossing. The registry's job stops at the process boundary, and its answer to
-`peers_for(...)` is always "the matching peers connected *here*".
+A multi-process deployment publishes the event on its message bus, has every process subscribe, and in
+each subscriber uses the **local** `PeerRegistry` to find the matching peers that process holds and
+push to them. `peers_for(...)` returns only the matching peers connected to the current process.
 
 ## See also
 

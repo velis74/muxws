@@ -55,7 +55,7 @@ def test_undecodable_reassembled_payload_is_a_protocol_error(codec: JsonCodec):
 
 
 def test_nan_and_infinity_are_refused(codec: JsonCodec):
-    """Neither has a JSON representation; emitting the JavaScript-only spelling would not round-trip."""
+    """Neither has a JSON representation; the JavaScript-only spelling does not round-trip."""
     with pytest.raises(ValueError, match="(?i)nan|infinit|not.*compliant"):
         codec.encode_payload(float("nan"))
     with pytest.raises(ValueError, match="(?i)inf|not.*compliant"):
@@ -63,7 +63,7 @@ def test_nan_and_infinity_are_refused(codec: JsonCodec):
 
 
 def test_decode_accepts_bytes_as_well_as_str(codec: JsonCodec):
-    """A text codec may still be handed bytes by a transport; decoding must not care."""
+    """A transport may pass bytes to a text codec; decode accepts both."""
     assert codec.decode(b'{"type":"ping","nonce":"a"}') == Frame("ping", nonce="a")
 
 
@@ -99,12 +99,12 @@ def test_unencodable_non_bytes_value_is_refused_too(codec: JsonCodec):
 def test_number_forms_that_the_two_ports_spell_differently(
     value: float | int, python_form: str, javascript_form: str, codec: JsonCodec
 ):
-    """Pins the known WSM-FRG-016 divergence so it cannot silently widen.
+    """Pins the known WSM-FRG-016 divergence, so any further divergence fails.
 
     Fragment boundaries are cut over the encoded payload, so any value the two ports spell
     differently is cut differently by them. That is invisible on the wire - the sender chooses the
-    cuts and the receiver only concatenates - but it bounds what the shared boundary corpus may
-    contain. See GAPS.md.
+    cuts and the receiver only concatenates - but such values cannot appear in the shared boundary
+    corpus.
     """
     assert codec.encode_payload(value) == python_form
     assert python_form != javascript_form

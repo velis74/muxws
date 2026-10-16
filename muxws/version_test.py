@@ -19,10 +19,11 @@ def test_package_has_no_required_runtime_dependencies():
 
 
 def test_every_name_in_all_is_actually_importable():
-    """`__all__` is a promise: a name listed but never imported is an `AttributeError` waiting.
+    """Every name in `__all__` resolves on the package root.
 
-    Nothing else reaches for these names through the package root, so a missing import is invisible
-    until an application writes `from muxws import Peer`.
+    A name listed but not imported raises `AttributeError` on access. No other test imports these
+    names from the package root, so a missing import would otherwise surface only in an application
+    writing `from muxws import Peer`.
     """
     missing = [name for name in muxws.__all__ if not hasattr(muxws, name)]
     assert missing == [], f"listed in __all__ but not importable: {missing}"
@@ -34,7 +35,7 @@ def test_all_is_sorted_and_free_of_duplicates():
 
 
 def test_star_import_works():
-    """The cheapest end-to-end check that the package root is coherent."""
+    """`from muxws import *` succeeds."""
     namespace: dict[str, object] = {}
     exec("from muxws import *", namespace)  # noqa: S102
     assert "Peer" in namespace

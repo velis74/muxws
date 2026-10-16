@@ -1,9 +1,8 @@
 """Runs the shipped Python examples and checks them against the output the guide prints.
 
-The guide's expected-output blocks are not prose here: they are the fixture. `documented_output`
-reads them out of the page it is given - `docs/guide/getting-started.md` for the quick start,
-`docs/guide/transports.md` for the Unix-socket pair - so an example whose behaviour drifts from the
-page fails in CI rather than in a reader's terminal.
+The guide's expected-output blocks are the expected values. `documented_output` reads them from the
+given page (`docs/guide/getting-started.md` for the quick start, `docs/guide/transports.md` for the
+Unix-socket pair), so an example whose output differs from the page fails the test.
 """
 
 import importlib.util
@@ -48,12 +47,11 @@ API_EXAMPLE = re.compile(
     r"^#{3,}\s+Example\b[^\n]*\n(?:(?!^#{1,6}\s).)*?^```python\n(?P<code>.*?)^```", re.DOTALL | re.MULTILINE
 )
 
-#: The environment every example subprocess gets, with **this checkout** ahead of anything installed.
+#: The environment of every example subprocess, with this checkout first on `PYTHONPATH`.
 #:
-#: Python puts the *script's* directory on `sys.path`, never the working directory, and
-#: `docs/examples/` holds no package - so without this an example can only import `muxws` when the
-#: interpreter happens to have a copy installed, and what it imports then is that copy rather than
-#: the tree under test. `cwd=REPOSITORY` does not help: it is not on `sys.path` for a script.
+#: Python puts the script's directory on `sys.path`, not the working directory, and `docs/examples/`
+#: contains no package. Without this an example imports an installed `muxws`, if any, instead of the
+#: checkout under test. `cwd=REPOSITORY` does not add the repository to `sys.path` for a script.
 EXAMPLE_ENV = {
     **os.environ,
     "PYTHONPATH": os.pathsep.join([str(REPOSITORY), *filter(None, [os.environ.get("PYTHONPATH")])]),
@@ -65,9 +63,8 @@ needs_acceptor = pytest.mark.skipif(
     reason="the quick-start acceptor is a FastAPI app under uvicorn; install fastapi and uvicorn to run it",
 )
 
-#: The Unix-socket pair needs neither fastapi nor uvicorn - its acceptor is `websockets.unix_serve` -
-#: but it does need a kernel with `AF_UNIX`, which Windows has not got. Reusing `needs_acceptor` here
-#: would skip the pair on every checkout without fastapi and say nothing about why.
+#: The Unix-socket pair needs neither fastapi nor uvicorn (its acceptor is `websockets.unix_serve`),
+#: but it needs `websockets` and `AF_UNIX`, which Windows does not have.
 MISSING_WEBSOCKETS = importlib.util.find_spec("websockets") is None
 needs_unix_sockets = pytest.mark.skipif(
     MISSING_WEBSOCKETS or not hasattr(socket, "AF_UNIX"),
@@ -85,19 +82,19 @@ def documented_output(name: str, page: Path = GETTING_STARTED) -> str:
 
 
 def free_port() -> int:
-    """A port the operating system is not using, released again before the server takes it."""
+    """A port that is free at the time of the call; it is released before the server binds it."""
     with closing(socket.socket()) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
 
 
 def wait_until_listening(family: int, address: Any, process: subprocess.Popen[str], what: str) -> None:
-    """Poll `address` until the server accepts a connection there, or say why it never did.
+    """Poll `address` until the server accepts a connection, or fail with the reason.
 
-    Connecting is the readiness test rather than looking at the address, because for a socket **file**
-    the file exists from `bind()` and only starts accepting at `listen()` - a probe that stopped at
-    `os.path.exists` would hand the client a socket that answers `ECONNREFUSED`. `connect_ex` reports
-    both of those states as a non-zero errno, so one loop covers the port case and the file case.
+    Readiness is tested by connecting: a socket file exists from `bind()` but accepts connections only
+    after `listen()`, so checking `os.path.exists` could let the client connect too early and get
+    `ECONNREFUSED`. `connect_ex` returns a non-zero errno in both not-ready states, so one loop
+    handles both TCP ports and socket files.
     """
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -139,14 +136,13 @@ def example_server(script: str) -> Iterator[str]:
 def example_server_on_a_socket_file(script: str) -> Iterator[str]:
     """Start one of the example servers on a socket **file** and yield the `ws+unix://` URL to dial.
 
-    A sibling of `example_server` rather than a flag on it: the two differ in the variable they set,
+    A separate function from `example_server`: the two differ in the environment variable they set,
     the address they probe and the URL they build.
 
-    The directory is short on purpose. A Unix socket path goes into `sockaddr_un.sun_path`, which is
-    about 108 bytes on Linux and less elsewhere, and pytest's own `tmp_path` is long enough to cross
-    that on a normal machine. The length is measured here so that a checkout with a long `TMPDIR`
-    skips with the number in the message, rather than dying inside a subprocess' `bind()` with an
-    `OSError: AF_UNIX path too long` that names no length and no component.
+    The directory is short. A Unix socket path goes into `sockaddr_un.sun_path`, which is about 108
+    bytes on Linux and less elsewhere, and pytest's `tmp_path` can exceed that. The length is checked
+    here, so a long `TMPDIR` skips the test with the length in the message instead of failing in the
+    subprocess's `bind()` with `OSError: AF_UNIX path too long`.
     """
     with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
         path = Path(directory) / "s.sock"
@@ -190,14 +186,14 @@ def run_client(script: str, url: str) -> str:
 
 @needs_acceptor
 def test_quickstart_runs_end_to_end() -> None:
-    """The whole of the quick start: the documented output is the assertion, not a hope."""
+    """The quick-start server and client print exactly the documented output."""
     with example_server("quickstart_server.py") as url:
         assert run_client("quickstart_client.py", url) == documented_output("quickstart")
 
 
 @needs_acceptor
 def test_server_push_runs_end_to_end() -> None:
-    """The symmetry claim, executed: the acceptor opens a stream and the dialer's handler gets it."""
+    """The acceptor opens a stream and the dialer's handler receives it."""
     with example_server("push_server.py") as url:
         assert run_client("push_client.py", url) == documented_output("push")
 
@@ -211,12 +207,11 @@ def test_reconnecting_client_runs_end_to_end() -> None:
 
 @needs_unix_sockets
 def test_the_unix_socket_pair_runs_end_to_end() -> None:
-    """`connect()` over `ws+unix://` reaches a `unix_serve` acceptor, with no muxws code in between.
+    """`connect()` with a `ws+unix://` URL reaches a `unix_serve` acceptor.
 
-    The assertion is the whole feature: the client is the public `connect()` and nothing else, the URL
-    is the only thing that changed, and what comes out is the quick start's own output over a socket
-    file. A dial that silently fell back to TCP, or a URL parse that split the path on the wrong colon,
-    cannot produce these lines.
+    The client uses only the public `connect()`; only the URL differs from the TCP quick start, and
+    the output matches the documented output. A dial that fell back to TCP, or a URL split at the
+    wrong colon, does not produce these lines.
     """
     with example_server_on_a_socket_file("uds_server.py") as url:
         assert run_client("uds_client.py", url) == documented_output("unix-socket", TRANSPORTS)
@@ -235,7 +230,7 @@ def api_examples() -> list[tuple[str, str]]:
 
 
 def test_every_api_example_executes(tmp_path: Path) -> None:
-    """Every API-reference example runs as written. A fragment that cannot run is not an example."""
+    """Every API-reference example runs as written."""
     examples = api_examples()
     if not examples:
         pytest.skip("docs/api/ has no `### Example` python blocks yet")

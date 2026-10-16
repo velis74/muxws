@@ -1,26 +1,27 @@
 # API Reference
 
-Every public symbol in both languages, each with its signature exactly as the source declares it,
-every parameter, the return value, the exceptions it raises, and one example that runs. The examples
-are executed by the test suite, so a block that stops working stops the build.
+This reference documents every public symbol in both languages: the signature as the source declares
+it, every parameter, the return value, the exceptions raised, and one runnable example. The test suite
+executes the examples; an example that fails fails the build.
 
-Two conventions worth knowing before you read a page:
+Conventions used on every page:
 
 - **Durations state their unit.** Python takes **seconds as floats** (`timeout=5.0`); TypeScript
   takes **milliseconds as integers** (`{ timeoutMs: 5000 }`). The two ports use the same names
   otherwise, in each language's casing: `on_stream` / `onStream`, `is_open` / `isOpen`.
-- **Limits belong to the peer that sets them.** `max_payload_bytes`, `max_concurrent_streams` and
-  `error_serializer` are configured per connection, are never announced and are never negotiated.
-  The other end finds out about one only from the reset it provokes.
-- **`muxws/node` re-exports the portable half of `muxws`.** `Reconnect`, `ReconnectOptions`, `Hello`,
+- **Limits are local to the peer that sets them.** `max_payload_bytes`, `max_concurrent_streams` and
+  `error_serializer` are configured per connection and are never sent to or negotiated with the
+  remote. The remote observes a limit only as the reset it receives when it exceeds the limit.
+- **`muxws/node` re-exports part of `muxws`.** `Reconnect`, `ReconnectOptions`, `Hello`,
   `HelloOptions`, `ConnectOptions`, `backoffDelay`, `shouldRetry`, `unjitteredDelay`, `PeerRegistry`,
-  `TagValue` and `VERSION` come out of both entry points, so a Node-only consumer needs one import
-  path. `WsSocket` comes from `muxws/node` alone — nothing reachable from `muxws` may import it
-  (WSM-API-022). Everything else — the codecs, the errors, `Peer`, the frame helpers — is `muxws`
-  only, and importing `muxws` is also what registers the JSON codec.
+  `TagValue` and `VERSION` are exported from both entry points. `WsSocket` is exported from
+  `muxws/node` only; no module reachable from `muxws` may import it (WSM-API-022). The codecs, the
+  errors, `Peer` and the frame helpers are exported from `muxws` only, and importing `muxws` registers
+  the JSON codec.
 
-The Python package needs Python 3.10 or newer, and the `websockets` extra needs `websockets` 14 or
-newer: the `ws+unix:` dial is `websockets.asyncio.client.unix_connect`.
+The Python package requires Python 3.10 or newer. The `websockets` extra requires `websockets` 14 or
+newer, the first release whose top-level `connect` is `websockets.asyncio.client.connect`, which takes
+`additional_headers`.
 
 ## The pages
 
@@ -30,12 +31,12 @@ newer: the `ws+unix:` dial is `websockets.asyncio.client.unix_connect`.
 | [accept](/api/accept) | The acceptor side: `accept`, `serve`, and the subprotocol hooks that refuse a codec you do not speak. |
 | [Peer](/api/peer) | The object both ends hold: opening streams, the handler and lifecycle callbacks, header interceptors, `ping`, `close`, `serve`. |
 | [Stream](/api/stream) | One call: sending, ending, replying, awaiting, iterating, cancelling and resetting. |
-| [Reconnect](/api/reconnect) | The dialer-only helper - backoff, the hello, and the three functions that describe its schedule. |
+| [Reconnect](/api/reconnect) | The dialer-only helper: backoff, the hello, and the three functions that compute its schedule. |
 | [Errors](/api/errors) | The exception tree, the nine reset codes, and how a reset becomes an exception. |
 | [Codec](/api/codec) | The codec protocol, the two codecs that ship, the registry, and the settings that select one. |
 | [Registry](/api/registry) | `PeerRegistry`: tagging live peers and looking them up again. |
 | [Transports](/api/transports) | `SocketAdapter` and every adapter that implements it, in both languages, plus the `ws+unix:` URL grammar and the `websockets` dial gates. |
 | [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, the two callback aliases and the three interceptor aliases. |
 
-New to muxws? Start with the [rationale](/guide/rationale) and the
-[quick start](/guide/getting-started); this reference assumes you have a connection open.
+For an introduction, see the [rationale](/guide/rationale) and the
+[quick start](/guide/getting-started). This reference assumes an open connection.

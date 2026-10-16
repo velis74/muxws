@@ -9,9 +9,8 @@ import { ABSENT, type Frame, fromMapping, toMapping } from './frames';
 const codec = new JsonCodec();
 
 /**
- * The same payloads the Python suite sweeps, spelled identically, so that a boundary disagreement
- * between the ports shows up as a failing test here rather than as corruption on a cross-language
- * connection.
+ * The same payloads the Python suite tests, written identically, so a boundary disagreement between
+ * the ports fails a test here instead of corrupting payloads on a cross-language connection.
  */
 const PAYLOADS: Record<string, unknown> = {
   ascii: { body: 'abcdefghij'.repeat(400) },
@@ -50,7 +49,7 @@ describe('encodedLength', () => {
     expect(encodedLength('abc')).toBe(3);
     expect(encodedLength('č')).toBe(2);
     expect(encodedLength('𝕄')).toBe(4);
-    // The failure this rule exists to prevent: a non-BMP character is 2 in `.length` and 4 on the wire.
+    // A non-BMP character has `.length` 2 and is 4 bytes on the wire.
     expect('𝕄'.length).toBe(2);
     expect(encodedLength('𝕄')).not.toBe('𝕄'.length);
     expect(encodedLength(new Uint8Array([0, 255]).buffer)).toBe(2);
@@ -58,7 +57,7 @@ describe('encodedLength', () => {
 });
 
 /**
- * The take invariant, asserted as itself rather than against the implementation.
+ * The take invariant, asserted directly and not by comparison with the implementation.
  *
  * For a string S, a byte offset i on a codepoint boundary and a budget b, the take T satisfies:
  *   1. T is a prefix of S from i onwards
@@ -66,23 +65,22 @@ describe('encodedLength', () => {
  *   3. maximality: either i + the length of T is the end of S, or the next codepoint would exceed b
  *   4. T is empty exactly when the codepoint at i does not fit in b
  *
- * Both ports compute this; neither has to compute it the same way, and it is what makes them cut at
- * the same boundaries by construction (WSM-FRG-012/016). Pinning the current arithmetic instead
- * would pin its mistakes with it, so the expectations below re-derive every quantity - codepoint
- * widths come from the lead byte, not from the walk the implementation does.
+ * Both ports compute this take, each in its own way, and it makes them cut at the same boundaries
+ * (WSM-FRG-012/016). The expectations below derive every quantity independently of the
+ * implementation: codepoint widths come from the lead byte, not from the implementation's walk.
  */
 describe('takeWithinBudget', () => {
   const encoder = new TextEncoder();
-  // The splitter's own decoder options: a slice is a piece of a payload and not a document, so a
-  // leading U+FEFF is payload, and a cut inside a sequence must throw rather than yield U+FFFD.
+  // The splitter's decoder options: a slice is part of a payload, not a document, so a leading U+FEFF
+  // is payload, and a cut inside a sequence throws instead of yielding U+FFFD.
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
   /**
    * The splitter's reservation cut, over a plain string: the longest prefix of the UTF-8 from byte
    * `start` that fits `budget` bytes and ends on a codepoint boundary.
    *
-   * Built on the library's own `boundaryWithin`, so the invariant below is asserted on the rule the
-   * splitter cuts by rather than on a second implementation of it.
+   * Uses the library's `boundaryWithin`, so the invariant below is asserted on the function the
+   * splitter uses and not on a second implementation of it.
    */
   function takeWithinBudget(text: string, start: number, budget: number): string {
     const units = { bytes: encoder.encode(text), text: true };
@@ -184,14 +182,14 @@ describe('takeWithinBudget', () => {
   });
 
   it('takes the whole run when the budget lands exactly on a boundary', () => {
-    // 'čš' is four bytes and '𝕄' is four more, so 4 and 8 are the two exact landings.
+    // 'čš' is four bytes and '𝕄' is four more, so 4 and 8 are the two exact boundaries.
     expect(takeWithinBudget('čš𝕄', 0, 4)).toBe('čš');
     expect(takeWithinBudget('čš𝕄', 0, 8)).toBe('čš𝕄');
-    // One byte short of the landing takes one codepoint less, never a partial one.
+    // A budget one byte below a boundary takes one codepoint less, never a partial one.
     expect(takeWithinBudget('čš𝕄', 0, 7)).toBe('čš');
   });
 
-  it('never cuts a four-byte codepoint, whichever of its bytes the budget lands on', () => {
+  it('never cuts a four-byte codepoint, at any budget ending inside it', () => {
     const text = '🛰𝕄𝕦🌍';
     [4, 5, 6, 7].forEach((budget) => expect(takeWithinBudget(text, 0, budget)).toBe('🛰'));
     // A surrogate pair is one codepoint and two UTF-16 units; the take must carry both or neither.
@@ -202,14 +200,14 @@ describe('takeWithinBudget', () => {
   });
 
   it('leaves the caller to report a cap that cannot hold one codepoint - WSM-FRG-034', () => {
-    // The empty take at the top of a fragment is not a stall: the splitter raises instead of looping.
+    // An empty take at the start of a fragment makes the splitter raise; it does not loop.
     const payload = { body: '𝕄'.repeat(200) };
     expect(() => splitFrame({ type: 'data', stream: 1, payload }, 5, codec)).toThrow(/indivisible unit/);
   });
 
-  it('carries a leading U+FEFF, which a decoder reading a document would swallow', () => {
-    // The slice is a piece of a payload, not a file: a byte-order mark inside it is payload too, and
-    // a fragment that starts on one must arrive with it (WSM-FRG-016).
+  it('keeps a leading U+FEFF, which a document decoder would strip', () => {
+    // The slice is part of a payload, not a file: a byte-order mark in it is payload, and a fragment
+    // that starts with one must keep it (WSM-FRG-016).
     expect(takeWithinBudget('﻿abc', 0, 6)).toBe('﻿abc');
     expect(takeWithinBudget('﻿﻿', 0, 3)).toBe('﻿');
     assertInvariant('﻿a﻿', 0, 4, 'leading byte-order mark');
@@ -217,9 +215,9 @@ describe('takeWithinBudget', () => {
 });
 
 describe('a payload of byte-order marks', () => {
-  it('survives the split and the reassembly whole', () => {
-    // Every fragment after the first begins on a U+FEFF, so a decoder that strips one loses a
-    // character per fragment - silently, and only on this port.
+  it('is unchanged after splitting and reassembly', () => {
+    // Every fragment after the first begins with U+FEFF, so a decoder that strips it loses one
+    // character per fragment without an error.
     const payload = '﻿'.repeat(100);
     [64, 96, 128, 256].forEach((cap) => {
       const parts = splitFrame({ type: 'data', stream: 1, payload, end: true }, cap, codec);
@@ -253,7 +251,7 @@ describe('splitFrame', () => {
         // Re-encoding and decoding in isolation only round-trips if the slice holds whole codepoints.
         expect(new TextDecoder().decode(new TextEncoder().encode(fragment))).toBe(fragment);
         // `[...fragment]` iterates codepoints, so an astral character arrives as a two-unit string.
-        // A *lone* surrogate is the one-unit case, and that is what must never appear.
+        // A lone surrogate is a one-unit string and must not appear.
         expect(
           [...fragment].every(
             (char) => char.length === 2 || !(char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff),
@@ -392,9 +390,8 @@ describe('Assembler', () => {
 
 describe('the binary path', () => {
   /**
-   * A toy binary codec, so the byte-boundary half of the splitter has something to exercise without
-   * pulling msgpack in. `latin-1` round-trips any byte sequence one-to-one, which is all the envelope
-   * needs.
+   * A minimal binary codec that exercises the byte-boundary path of the splitter without msgpack.
+   * `latin-1` maps any byte sequence one-to-one, which is sufficient for the envelope.
    */
   class BinaryJsonCodec implements Codec {
     readonly name = 'binary-json';
@@ -442,8 +439,8 @@ describe('the binary path', () => {
   });
 
   it('may be cut at every byte - WSM-FRG-003', () => {
-    // Under a binary codec the unit is the byte, and 0x80..0xBF are ordinary payload rather than
-    // continuation bytes: no cut walks backwards, and one byte is a whole unit.
+    // Under a binary codec the unit is the byte, and 0x80..0xBF are ordinary payload, not continuation
+    // bytes: no cut moves backwards, and one byte is a whole unit.
     const units = { bytes: Uint8Array.from({ length: 256 }, (_, index) => index), text: false };
     for (let limit = 0; limit <= units.bytes.length; limit += 1) {
       expect(boundaryWithin(units, 0, limit), `limit ${limit}`).toBe(limit);
@@ -454,10 +451,10 @@ describe('the binary path', () => {
 
 describe('the one-unit floor', () => {
   /**
-   * A codec whose fragment frames are the fragment and nothing else, so that the reservation can be
-   * narrower than one codepoint while a fragment carrying that codepoint still fits under the cap.
-   * Under any real envelope the cap would have to be smaller than the envelope for that to happen,
-   * and the splitter would raise instead (WSM-FRG-034), leaving the floor unobservable.
+   * A codec that encodes a fragment frame as the fragment alone, so the reservation can be narrower
+   * than one codepoint while a fragment carrying that codepoint still fits under the cap. With a real
+   * envelope this requires a cap smaller than the envelope, and the splitter then raises
+   * (WSM-FRG-034), so the floor cannot be tested.
    */
   class BareCodec implements Codec {
     readonly name = 'bare';
@@ -495,7 +492,7 @@ describe('the corpus', () => {
     const testCase = entry as { name: string; frame: Record<string, unknown> };
     if (!('payload' in testCase.frame)) return;
 
-    it(`fragments and reassembles at a hostile cap - ${testCase.name}`, () => {
+    it(`fragments and reassembles at a small cap - ${testCase.name}`, () => {
       const parts = splitFrame({ type: 'data', stream: 1, payload: testCase.frame.payload }, 96, codec);
       parts.forEach((part) => expect(encodedLength(codec.encode(part))).toBeLessThanOrEqual(96));
       expect(reassemble(parts, codec)).toEqual(testCase.frame.payload);
@@ -505,12 +502,11 @@ describe('the corpus', () => {
 
 describe('cross-language boundaries', () => {
   /**
-   * WSM-FRG-016: the pinned fragments are the contract both ports are held to.
+   * WSM-FRG-016: both ports must produce the pinned fragments.
    *
-   * A boundary disagreement between TypeScript and Python is invisible until two peers of different
-   * languages try to reassemble each other's payloads, at which point it looks like corruption.
-   * This fixture - generated once, read by both suites - turns it into a failing unit test in
-   * whichever port drifted.
+   * A boundary disagreement between TypeScript and Python appears only when peers of different
+   * languages reassemble each other's payloads, as corrupted data. This fixture is read by both
+   * suites, so a disagreement fails a unit test in the port that differs.
    */
   boundaries.forEach((entry) => {
     const testCase = entry as { name: string; cap: number; payload: unknown; fragments: string[] };
@@ -523,7 +519,7 @@ describe('cross-language boundaries', () => {
   });
 
   it('encodes payloads to the same bytes Python does', () => {
-    // The boundaries can only agree if the encoded form does, so this is the assumption underneath.
+    // The boundaries agree only if the encoded forms agree; this test checks that precondition.
     boundaries.forEach((entry) => {
       const testCase = entry as { payload: unknown; fragments: string[] };
       expect(codec.encodePayload(testCase.payload)).toBe(testCase.fragments.join(''));
@@ -534,9 +530,9 @@ describe('cross-language boundaries', () => {
 describe('sequence termination', () => {
   /**
    * A splitter that sizes its slices against the middle envelope alone cannot terminate a sequence
-   * whose trailers are larger than that: the closing frame is over cap at every slice point, so the
-   * loop emits middle fragments until the payload runs out and then stops. The receiver's assembler
-   * never fires, the payload never reaches the application, and nothing anywhere reports an error.
+   * whose trailers are larger than that envelope: the closing frame is over cap at every slice point,
+   * so the loop emits middle fragments until the payload is exhausted and then stops. The receiver's
+   * assembler never completes, the payload is not delivered, and no error is reported.
    */
   it('always ends with a fragment carrying more:false - WSM-FRG-020/030', () => {
     const trailers = { checksum: 'd'.repeat(130) };

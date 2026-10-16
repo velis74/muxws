@@ -1,4 +1,4 @@
-"""The Python half of the live cross-language interop matrix.
+"""Python runner for the live cross-language interop matrix.
 
 Run as an acceptor:          python interop/runner.py accept <port>
 Accept on a socket file:     python interop/runner.py accept-unix <path>
@@ -8,17 +8,17 @@ Run the WSM-TST-005 script:  python interop/runner.py reconnect-dial ws://127.0.
 Serve the corpus:            python interop/runner.py corpus-accept <control-port>
 Conduct the corpus:          python interop/runner.py corpus-dial 127.0.0.1:<control-port>
 
-The same entry points exist in `interop/runner.ts`, and `interop/drive.sh` pairs them in both
-role assignments, so a rule one port implements differently from the other shows up as a named
-failure rather than as a hang.
+`interop/runner.ts` has the same entry points, and `interop/drive.sh` pairs them in both role
+assignments. A rule the two implementations handle differently fails with a named check instead of a
+hang.
 
-`dial` takes a URL and nothing else, so the Unix pairing needs no dialling mode of its own: the same
-script runs over a socket file with `ws+unix:///path/to.sock:/route` in place of the TCP URL. What
-the pairing is here to witness is that the two ports split that URL identically - pathname and
-search up to the **first** colon is the filesystem path, the rest is the HTTP request target.
+`dial` takes only a URL, so the Unix pairing uses the same mode with `ws+unix:///path/to.sock:/route`
+in place of the TCP URL. The pairing checks that both implementations split that URL the same way:
+pathname and search up to the first colon are the filesystem path, the rest is the HTTP request
+target.
 
-`assert` is deliberately absent: this file is not a `*_test.py`, so ruff's S101 applies and, more to
-the point, a driver that vanished under `python -O` would be worse than no driver.
+Checks use `check()` instead of `assert`: this file is not a `*_test.py`, so ruff's S101 applies, and
+`assert` statements are removed under `python -O`.
 """
 
 from __future__ import annotations
@@ -46,26 +46,23 @@ from muxws.transports.websockets_ import verify_negotiated, WebsocketsSocket
 PUSH_COUNT = 3
 #: Rows an `export` produces, the last one carrying `end` and trailers.
 EXPORT_ROWS = 5
-#: A pause between export rows. Deliberate, not incidental: the interleaving assertion below has to
-#: be a fact about the protocol rather than about how fast one handler happened to run. Without it an
-#: acceptor could enqueue all five rows before any other handler was scheduled, and the assertion
-#: would pass or fail on scheduling luck.
+#: Pause between export rows. Without it the acceptor can enqueue all five rows before any other
+#: handler is scheduled, and the interleaving assertion in `run_tst_004` depends on scheduling.
 EXPORT_GAP = 0.01
-#: The cancelled-mid-flight producer's cadence.
+#: Interval between rows of the producer that is cancelled mid-flight.
 DRIP_GAP = 0.02
 #: Rows the `slow` stream produces; it is the stream that must survive the goaway drain.
 SLOW_ROWS = 3
 SLOW_GAP = 0.05
 
 #: The hello replayed on every connection the reconnect scenario's dialer makes (WSM-RCN-020/027).
-#: Nested, so a replay that rebuilt the payload rather than replaying the captured bytes has
-#: somewhere to differ.
+#: Nested, so a replay that rebuilds the payload instead of replaying the captured bytes can produce
+#: different bytes.
 HELLO_PAYLOAD: Any = {"who": "interop", "caps": ["a", "b"], "nested": {"n": 1}}
 HELLO_HEADERS: dict[str, Any] = {"session": "interop-session"}
 
-#: WSM-TST-005 bounds the reconnect job's wall clock: a jittered retry has to be observable inside a
-#: CI job without a 30 s wait. The jitter fraction is left at its default, because the point of the
-#: scenario is that the delay is *dispersed* - pinning it would be pinning the thing under test.
+#: Short delays so that WSM-TST-005's jittered retries complete within a CI job without a 30 s wait.
+#: The jitter fraction keeps its default: the scenario asserts that the delays are dispersed.
 RECONNECT = muxws.Reconnect(initial_delay=0.05, max_delay=0.5)
 
 
@@ -75,11 +72,11 @@ def check(condition: bool, what: str) -> None:
 
 
 def register_configured_codec() -> None:
-    """Register whatever `MUXWS_CODEC` selected. The **application's** job, never the library's.
+    """Register the codec `MUXWS_CODEC` selects. This is done by the application, not the library.
 
-    WSM-CDC-013 forbids the library dynamic-importing or probing for a codec; it says nothing about
-    an application choosing which codec module to import, which is exactly what a deployment does.
-    An unknown name is a loud startup failure and never a silent JSON fallback (WSM-INV-015).
+    WSM-CDC-013 forbids the library from dynamically importing or probing for a codec; an application
+    may choose which codec module to import. An unknown name exits at startup and does not fall back
+    to JSON (WSM-INV-015).
     """
     name = muxws.settings.codec
     if name == "json":
@@ -94,17 +91,17 @@ def register_configured_codec() -> None:
 
 
 def encoding_of(frame: Frame) -> str:
-    """The bytes this frame goes out as, as hex.
+    """The encoded frame as a hex string.
 
-    Hex rather than the value itself because a binary codec produces bytes and JSON produces text,
-    and the byte-identity WSM-RCN-027 asks about is a question about neither one's spelling.
+    A binary codec produces bytes and JSON produces text; hex gives one comparable form for the
+    byte-identity check of WSM-RCN-027.
     """
     encoded = muxws.resolve_codec().encode(frame)
     return (encoded if isinstance(encoded, bytes) else encoded.encode("utf-8")).hex()
 
 
 def emit(**fields: Any) -> None:
-    """One JSON object per line on stdout - what `interop/drive.sh` greps."""
+    """Print one JSON object per line on stdout; `interop/drive.sh` reads these lines."""
     print(json.dumps(fields), flush=True)
 
 
@@ -112,21 +109,21 @@ def emit(**fields: Any) -> None:
 
 
 def make_handler(peer: muxws.Peer, state: dict[str, Any]) -> Any:
-    """Every shape the two scenarios exercise, chosen by the opening payload.
+    """Build the per-connection handler; the opening payload's `action` selects the behaviour.
 
-    The handler is built per connection so that it can reach `peer` - a server push is an ordinary
-    `open()` from the acceptor - and so that `state` cannot leak from one connection to the next,
-    which matters once the reconnect scenario gives this process two of them.
+    The handler is built per connection so that it can use `peer` (a server push is an ordinary
+    `open()` from the acceptor) and so that `state` is not shared between connections; the reconnect
+    scenario gives this process two connections.
     """
 
     async def handler(payload: Any, stream: Stream) -> None:
         action = (payload or {}).get("action")
 
         if action is None:
-            # The hello. Nothing marks it on the wire (WSM-RCN-021) and its acknowledgement is this
-            # handler returning, which ends the stream implicitly (WSM-RCN-022/WSM-STM-035). An
-            # acceptor that insisted on an `action` would reset the one stream the reconnect helper
-            # needs accepted, and the reconnect scenario would never get past its first connection.
+            # The hello. It carries no marker on the wire (WSM-RCN-021); it is acknowledged by this
+            # handler returning, which ends the stream implicitly (WSM-RCN-022/WSM-STM-035). Rejecting
+            # a payload without `action` would reset the hello and the reconnect scenario would fail
+            # on its first connection.
             if payload != HELLO_PAYLOAD:
                 raise ValueError(f"opened with neither an action nor the hello: {payload!r}")
 
@@ -164,33 +161,30 @@ def make_handler(peer: muxws.Peer, state: dict[str, Any]) -> Any:
             await stream.closed.wait()
 
         elif action == "big":
-            # Comfortably over MAX_FRAME_BYTES once encoded, so fragmentation is exercised end to end
-            # while other streams are in flight - which is WSM-FRG-019's round robin.
+            # Larger than MAX_FRAME_BYTES once encoded, so the reply is fragmented while other streams
+            # are in flight (WSM-FRG-019 round robin).
             await stream.reply({"blob": "š" * 40_000})
 
         elif action == "goaway":
-            # Scheduled, never awaited here: `peer.close()` drains the streams still in flight and
-            # this handler's own stream is one of them, so awaiting it would be the connection
-            # waiting for itself. The task is parked in `state` because a bare `create_task` result
-            # nobody holds may be collected mid-drain.
+            # Scheduled, not awaited: `peer.close()` drains the streams in flight, including this
+            # handler's stream, so awaiting it here would deadlock. The task is stored in `state`
+            # because an unreferenced `create_task` result can be garbage-collected during the drain.
             state["shutdown"] = asyncio.create_task(peer.close(reason="interop goaway"))
 
         else:
-            # Raised, not exited: an unknown action is one stream's problem, and killing the acceptor
-            # process here would report it to the dialer as a socket death rather than as the
-            # mismatch it is (WSM-ERR-006).
+            # Raised, not exited: the error resets one stream (WSM-ERR-006). Exiting the process would
+            # appear to the dialer as a lost socket.
             raise ValueError(f"unknown action {action!r}")
 
     return handler
 
 
 async def drip(stream: Stream, state: dict[str, Any]) -> None:
-    """Produce until the consumer stops us - the remote half of the cancel-mid-flight assertion.
+    """Send rows until the consumer cancels the stream; the remote side of the cancel-mid-flight check.
 
-    Both exits are recorded, because WSM-ERR-013 makes an inbound `reset(CANCELLED)` cancel the
-    handler task, while a reset that lands between two sends surfaces as `StreamClosed` from the
-    send itself. A scenario asserting only one of them would pass or fail on which microsecond the
-    reset arrived in.
+    Both exits set `drip_stopped`: under WSM-ERR-013 an inbound `reset(CANCELLED)` cancels the handler
+    task, and a reset that arrives between two sends raises `StreamClosed` from the send. Which one
+    occurs depends on timing.
     """
     try:
         while True:
@@ -199,24 +193,21 @@ async def drip(stream: Stream, state: dict[str, Any]) -> None:
             await asyncio.sleep(DRIP_GAP)
     except asyncio.CancelledError:
         state["drip_stopped"] = True
-        # Re-raised: swallowing a cancellation leaves a task the event loop believes it cancelled.
+        # Re-raised so that the task completes as cancelled.
         raise
     except (muxws.StreamClosed, muxws.StreamReset):
         state["drip_stopped"] = True
 
 
 async def serve_one_connection(connection: Any) -> None:
-    """One accepted connection, whatever carried it - a TCP socket or a socket file.
+    """Serve one accepted connection, over TCP or a Unix socket file.
 
-    Module level rather than nested inside `accept_forever`: `accept_unix_forever` below hands the
-    same coroutine to `unix_serve`, so the two acceptors differ in the line that binds and in nothing
-    else. A UDS acceptor with its own copy of this handler could pass while the transport-agnostic
-    path was broken (WSM-API-021).
+    `accept_forever` and `accept_unix_forever` both pass this coroutine to their server, so the two
+    acceptors differ only in how they bind (WSM-API-021).
     """
-    # The HTTP request target this connection arrived on: the half of the `ws+unix://<path>:/route`
-    # grammar that reaching the socket does not prove. Neither acceptor routes on the target, so a
-    # dialer that sent `/` instead, or that dropped the query string, would connect and pass every
-    # assertion in the script. The driver compares this line against the route it put in the URL.
+    # Report the HTTP request target. Neither acceptor routes on it, so a dialer that sends `/` or
+    # drops the query string still passes every assertion in the script; the driver compares this
+    # value with the route in the `ws+unix://<path>:/route` URL.
     request = connection.request
     emit(event="accepted", target=None if request is None else request.path)
     peer = await muxws.accept(WebsocketsSocket(connection))
@@ -226,10 +217,9 @@ async def serve_one_connection(connection: Any) -> None:
     def journal(direction: str, frame: Frame, _length: int) -> None:
         """Report the first inbound `open` of this connection, re-encoded.
 
-        This is where WSM-TST-005's "byte-identical hello" is checked from the *other* language:
-        the driver compares this line across the two acceptor processes, so the comparison is
-        made by the port that had to accept the replay rather than by the one that sent it.
-        Being the *first* open is itself WSM-RCN-023 - nothing may precede the hello.
+        The driver compares this line across the two acceptor processes to check WSM-TST-005's
+        byte-identical hello on the receiving side. The first open of a connection is the hello
+        (WSM-RCN-023).
         """
         nonlocal seen_open
         if direction == "rx" and frame.type == "open" and not seen_open:
@@ -238,14 +228,13 @@ async def serve_one_connection(connection: Any) -> None:
 
     peer.on_frame(journal)
     peer.on_stream(make_handler(peer, state))
-    # A dialer that walks away leaves the read loop reporting the close; that is this
-    # connection ending, not this process failing.
+    # A dialer disconnecting ends this connection; the read loop's `ConnectionClosed` is not an error.
     with contextlib.suppress(muxws.ConnectionClosed):
         await peer.serve()
 
 
 async def accept_forever(port: int) -> None:
-    """Serve until the driver kills us. It does, and in the reconnect scenario it means it."""
+    """Serve until the driver kills the process (SIGKILL in the reconnect scenario)."""
     async with websockets.serve(
         serve_one_connection, "127.0.0.1", port, select_subprotocol=muxws.select_subprotocol
     ) as service:
@@ -254,22 +243,20 @@ async def accept_forever(port: int) -> None:
 
 
 async def accept_unix_forever(path: str) -> None:
-    """The same acceptor on a socket **file**, for the Unix half of WSM-TST-004.
+    """The acceptor bound to a Unix socket file, for the Unix variant of WSM-TST-004.
 
-    `select_subprotocol` is the same hook the TCP acceptor passes, so a dialer offering a codec this
-    process does not speak still meets HTTP 400 here and still has to turn it into `CodecMismatch`
-    (WSM-CDC-022/024): the only thing that changed is which kernel object the handshake travelled
-    over, and the driver proves it by running the unmodified WSM-TST-004 script across it.
+    It passes the same `select_subprotocol` hook as the TCP acceptor, so a dialer offering an
+    unsupported codec gets HTTP 400 and must raise `CodecMismatch` (WSM-CDC-022/024). The driver runs
+    the unmodified WSM-TST-004 script against it.
 
-    The driver's readiness signal is the `path=` line below rather than a `port=` one - a socket file
-    exists between `bind` and `listen`, so a driver that waited for the file would race the listen.
+    The driver's readiness signal is the `path` line printed after `listen`; the socket file already
+    exists after `bind`, so waiting for the file can connect before `listen`.
     """
-    # Checked here rather than left to the bind: on Windows the bind failure is an event loop
-    # reporting that it has no `create_unix_server`, which reads as a defect in this file.
+    # Without AF_UNIX (Windows) the bind fails with an event-loop error about a missing
+    # `create_unix_server`; this check exits with a clear message first.
     if not hasattr(socket, "AF_UNIX"):
         raise SystemExit("this platform has no AF_UNIX, so the unix scenario cannot run here")
-    # Imported inside the guard for the same reason: on a platform this cannot run on, nothing about
-    # the module should be touched before the line that explains why.
+    # Imported after the check so that an unsupported platform reaches the message above first.
     from websockets.asyncio.server import unix_serve
 
     async with unix_serve(serve_one_connection, path, select_subprotocol=muxws.select_subprotocol):
@@ -283,8 +270,8 @@ async def accept_unix_forever(path: str) -> None:
 class Journal:
     """Every frame the peer saw, in order, as `(direction, type, stream)`.
 
-    The wire order is the only place "interleaved" is a fact rather than a hope: two calls that
-    overlapped in Python could still have been serialised on the socket.
+    Interleaving is checked on wire order: two calls that overlap in Python can still be serialised
+    on the socket.
     """
 
     def __init__(self) -> None:
@@ -312,8 +299,8 @@ async def run_tst_004(peer: muxws.Peer, journal: Journal, pushes: list[Any], *, 
         async for row in stream:
             export_rows.append(row)
 
-    # Six streams open at once. `gather` is what makes them concurrent rather than sequential, and
-    # the export and the fragmented `big` reply are what make the concurrency visible on the wire.
+    # Six concurrent streams. The export and the fragmented `big` reply produce multiple frames each,
+    # so concurrency shows up in the wire order.
     echoed_1, echoed_2, echoed_3, big, _, pushed = await asyncio.gather(
         peer.request({"action": "echo", "value": 1}),
         peer.request({"action": "echo", "value": 2}),
@@ -328,30 +315,24 @@ async def run_tst_004(peer: muxws.Peer, journal: Journal, pushes: list[Any], *, 
     check(big["blob"][0] == "š", f"{label}: fragmented payload lost its non-ASCII content")
     check(export_rows == [{"row": index} for index in range(EXPORT_ROWS)], f"{label}: export gave {export_rows!r}")
     check(pushed == {"pushed": PUSH_COUNT}, f"{label}: the push request answered {pushed!r}")
-    # Compared as a set: three pushed streams are three streams, and nothing in v1 orders the
-    # delivery of one stream against another (WSM-STM-001). Asserting the arrival order would be
-    # asserting an implementation detail of whichever port happened to be the acceptor.
+    # Compared without order: v1 does not order delivery across streams (WSM-STM-001).
     check(
         sorted(push["index"] for push in pushes) == list(range(PUSH_COUNT))
         and {push["event"] for push in pushes} == {"tick"},
         f"{label}: the server pushed {pushes!r}",
     )
 
-    # Interleaving on the wire, and what that is worth: between the export's first and last
-    # **inbound** frame there must be an inbound frame belonging to some other stream. Only inbound
-    # frames count - the six opens leave together whatever the acceptor does with them, so counting
-    # those would pass against a port that answered each stream to completion before starting the
-    # next.
+    # Between the export's first and last inbound frame there must be an inbound frame of another
+    # stream. Only inbound frames are counted: the six outbound opens are sent together regardless of
+    # how the acceptor answers.
     #
-    # What this does NOT catch, said plainly: removing the round-robin writer entirely leaves this
-    # assertion passing. It is satisfied by the export handler's own pauses, not by the writer's
-    # rotation. WSM-FRG-019's real witnesses are
+    # This assertion does not test the round-robin writer; the export handler's pauses satisfy it
+    # without one. WSM-FRG-019 is tested by
     # `writer_test.py::test_round_robin_selects_across_streams_not_fifo` and the
-    # `small-frame-overtakes-a-fragmented-payload` fixture, both of which do fail; this one proves
-    # the weaker and still-useful thing that the two ports do not serialise streams end to end. The
-    # sharp version - asserting the fragmented reply's own fragments are non-contiguous inbound -
-    # depends on another lane having work at that instant, and a flaky cross-language assertion
-    # would be worse than an honest weak one.
+    # `small-frame-overtakes-a-fragmented-payload` fixture. This check asserts that neither
+    # implementation answers streams one at a time. Asserting that the `big` reply's fragments are
+    # non-contiguous would depend on another stream having data queued at that moment, and would be
+    # timing-dependent.
     inbound = [entry for entry in journal.entries if entry[0] == "rx"]
     export_positions = [index for index, entry in enumerate(inbound) if entry[2] == export_id]
     check(bool(export_positions), f"{label}: no inbound frame for the export stream {export_id}")
@@ -377,9 +358,8 @@ async def run_application_error(peer: muxws.Peer, *, label: str) -> None:
     check(raised is not None, f"{label}: a raising handler did not produce RemoteError")
 
     payload = raised.payload or {}
-    # `message` is portable; `type` is NOT. WSM-ERR-006's default serializer reports the remote's own
-    # exception class name, so a TypeScript acceptor says "Error" where a Python one says
-    # "ValueError". Asserting equality on it would be asserting which language answered.
+    # `message` is the same in both languages; `type` is not. WSM-ERR-006's default serializer
+    # reports the remote's exception class name: "Error" from TypeScript, "ValueError" from Python.
     check(payload.get("message") == "interop handler said no", f"{label}: application error was {payload!r}")
     check(
         isinstance(payload.get("type"), str) and bool(payload["type"]),
@@ -400,9 +380,8 @@ async def run_cancel_mid_flight(peer: muxws.Peer, *, label: str) -> None:
     await drip_stream.cancel("interop cancel mid-flight")
     check(drip_stream.closed.is_set(), f"{label}: cancel did not close the stream locally")
 
-    # Polled rather than slept-then-asked once: the deadline is what gives the assertion its teeth,
-    # and a fixed sleep is either a flake or a tax. A producer that never saw the reset never reports
-    # `stopped` and this fails at the deadline.
+    # Polled until a deadline instead of a single fixed sleep. A producer that did not receive the
+    # reset never reports `stopped`, and the check fails at the deadline.
     deadline = asyncio.get_running_loop().time() + 5.0
     report: dict[str, Any] = {}
     while asyncio.get_running_loop().time() < deadline:
@@ -421,8 +400,7 @@ async def run_goaway_shutdown(peer: muxws.Peer, journal: Journal, *, label: str)
     draining = asyncio.create_task(collect(slow, rows))
 
     await peer.notify({"action": "goaway"})
-    # The frame, not a sleep: everything below is a statement about what happens *after* the goaway
-    # arrived, and timing it by sleeping would make the whole phase a race.
+    # Waits for the goaway frame itself; the checks below apply after it has arrived.
     await asyncio.wait_for(journal.goaway.wait(), 5.0)
     frame = journal.goaway_frame
     check(frame is not None, f"{label}: no goaway arrived")
@@ -460,9 +438,8 @@ async def run_tst_005(url: str, *, label: str) -> None:
     closes: list[Any] = []
 
     def on_reconnect(attempt: int, _peer: muxws.Peer) -> None:
-        # The second number is the ordering assertion: at the instant `on_reconnect` fires the
-        # replayed hello must already have gone out and been acknowledged (WSM-RCN-023/030). A peer
-        # that announced the identity first would record a zero here.
+        # The second number checks ordering: when `on_reconnect` fires, the replayed hello has been
+        # sent and acknowledged (WSM-RCN-023/030), so `hellos` is non-empty.
         reconnects.append((attempt, len(hellos)))
 
     peer = await muxws.connect(
@@ -477,11 +454,10 @@ async def run_tst_005(url: str, *, label: str) -> None:
     def journal(direction: str, frame: Frame, _length: int) -> None:
         """Capture the encoding of every hello this peer sends after the first connection.
 
-        Stream 1 is the hello and only the hello: the id space restarts at 1 on every socket, and
-        WSM-RCN-023 forbids anything preceding it. The first connection's hello went out inside
-        `connect()`, before any application code could register a handler - which is why the
-        first-connection half of the byte comparison is made by the acceptor instead (see
-        `accept_forever`). See GAPS.md.
+        Stream 1 is the hello: stream ids restart at 1 on every socket, and WSM-RCN-023 forbids any
+        frame before it. The first connection's hello is sent inside `connect()`, before a handler
+        can be registered, so the acceptor reports the first-connection encoding (see
+        `serve_one_connection`).
         """
         if direction == "tx" and frame.type == "open" and frame.stream == 1:
             hellos.append(encoding_of(frame))
@@ -492,9 +468,8 @@ async def run_tst_005(url: str, *, label: str) -> None:
     # The driver kills the acceptor when it reads this, so the streams above must already exist.
     emit(role=label, event="streams-open", streams=[stream.id for stream in held])
 
-    # Deadlined, not simply awaited. A peer that lost its socket and left these streams pending -
-    # neither failed nor answered - is a defect WSM-RCN-041 exists to prevent, and without the
-    # deadline it would surface as a job that hung rather than as a driver that said so.
+    # Awaited with a deadline. Streams left pending after the socket is lost violate WSM-RCN-041;
+    # the deadline turns that into a reported failure instead of a hung job.
     try:
         outcomes = await asyncio.wait_for(asyncio.gather(*held, return_exceptions=True), 60.0)
     except asyncio.TimeoutError:
@@ -510,9 +485,8 @@ async def run_tst_005(url: str, *, label: str) -> None:
     deadline = asyncio.get_running_loop().time() + 60.0
     while not reconnects and asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(0.05)
-    # `delays`, not `attempts`: the attempt counter resets the moment a connection is established
-    # (WSM-RCN-004), so a peer that reconnected but never announced it would report zero here and
-    # read as a peer that never tried.
+    # Reports `delays`, not `attempts`: the attempt counter resets when a connection is established
+    # (WSM-RCN-004), so it is zero for a peer that reconnected without calling `on_reconnect`.
     check(bool(reconnects), f"{label}: the dialer never announced a reconnect; it waited {loop.delays!r}")
 
     check(
@@ -526,16 +500,14 @@ async def run_tst_005(url: str, *, label: str) -> None:
     )
     check_jitter_dispersed(loop.delays, label=label)
 
-    # The connection is usable again, which is the only proof that the acceptor accepted the replay
-    # for more than the length of the handshake.
+    # A request on the reconnected peer checks that the acceptor accepted the replayed hello.
     echoed = await peer.request({"action": "echo", "value": 7})
     check(echoed == {"echo": 7}, f"{label}: the reconnected peer answered {echoed!r}")
     check(len(closes) >= 1, f"{label}: losing the socket fired no on_close")
 
     attempts = len(loop.delays)
-    # Closed, not abandoned. A peer under test holds a heartbeat task and a supervisor task, and
-    # `close()` is the only thing that stops the reconnect helper (WSM-RCN-040) - this peer is
-    # configured to retry forever, so without it the process would go on dialing after the scenario.
+    # The peer has a heartbeat task and a supervisor task, and only `close()` stops the reconnect
+    # helper (WSM-RCN-040). This peer retries indefinitely, so without `close()` it keeps dialing.
     await peer.close(reason="interop reconnect scenario complete")
     emit(role=label, ok=True, attempts=attempts, reconnections=loop.reconnections)
 
@@ -543,10 +515,8 @@ async def run_tst_005(url: str, *, label: str) -> None:
 def check_jitter_dispersed(delays: list[float], *, label: str) -> None:
     """WSM-RCN-002: jitter is applied to every delay, including the capped ones.
 
-    Asserted as dispersion and never as a value. Pinning a jittered delay to a constant is an
-    assertion that flakes by construction, so this looks at the delays whose *unjittered* schedule
-    has already reached `max_delay`: those would all be exactly `max_delay` if jitter were missing,
-    and that is the failure this catches.
+    Asserted as dispersion, not as values. The check uses the delays whose unjittered value equals
+    `max_delay`; without jitter they would all be exactly `max_delay`.
     """
     capped = [
         delay
@@ -570,43 +540,35 @@ def check_jitter_dispersed(delays: list[float], *, label: str) -> None:
 
 # --------------------------------------------------------------------------- WSM-CDC-007: the corpus
 #
-# The cross-language half of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
+# The cross-language part of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
 # that codec, running the sequence corpus". `muxws/conformance_test.py` and `ts/conformance.spec.ts`
-# already replay `conformance/sequences/` with a real peer at each end - but both peers are in one
-# process, so what they prove is that each port agrees with *itself*. This is the other half.
+# replay `conformance/sequences/` with both peers in one process; this runs the corpus with one peer
+# in each language.
 #
-# The obstacle is that a sequence fixture scripts **both** peers, and here the two peers are two
-# processes in two languages. The fixture's steps are one ordered script, so the two halves cannot
-# simply be run side by side and hoped to line up. So one process conducts: the dialer reads the
-# script, executes the steps whose `peer` is its own role, and ships every other step over a control
-# channel to the acceptor process, which executes it through the same `Side` class and answers. The
-# script therefore stays one totally ordered sequence, exactly as in the in-process runners, and the
-# whole corpus runs rather than the subset one side happens to be able to drive alone.
+# A sequence fixture scripts both peers as one ordered list of steps. The dialer process conducts: it
+# reads the script, executes the steps whose `peer` is its own role, and sends every other step over
+# a control channel to the acceptor process, which executes it through the same `Side` class and
+# replies. The steps run in fixture order, as in the in-process runners, and every fixture can run.
 #
-# Two things move over the control channel and nothing else: a step **index**, and the ordinal ->
-# stream id table. The fixture itself is loaded from disk by both processes, so a `$bytes`
-# placeholder (`conformance/README.md`) is resolved twice from one file rather than being shipped as
-# JSON - which would need a second spelling for bytes, and a second spelling is the divergence the
-# corpus exists to prevent.
+# The control channel carries only a step index and the ordinal -> stream id table. Both processes
+# load the fixture from disk, so each resolves `$bytes` placeholders (`conformance/README.md`) from
+# the same file and no JSON encoding of bytes is needed.
 
-#: Read from disk by both processes. Not sent over the control channel; see above.
+#: Read from disk by both processes; not sent over the control channel.
 CONFORMANCE = Path(__file__).resolve().parent.parent / "conformance"
 SEQUENCES_DIR = CONFORMANCE / "sequences"
 
-#: The expected fixture count is **not** declared here. `muxws/conformance_test.py` pins it and
-#: `ts/conformance.spec.ts` is pinned against that file, so this driver reads the literal rather than
-#: adding a third number that could drift on its own and make a shrinking corpus look intentional.
+#: The file that declares the expected fixture count. `muxws/conformance_test.py` defines it and
+#: `ts/conformance.spec.ts` checks against that file; this driver reads the same literal.
 FIXTURE_COUNT_SOURCE = Path(__file__).resolve().parent.parent / "muxws" / "conformance_test.py"
 
-#: Mirrors `test_the_only_fixture_the_json_pass_skips_is_the_binary_codec_one`. Pinned rather than
-#: derived from the corpus: "skip whatever declares a codec I am not configured with" is a rule that
-#: empties itself as fixtures acquire declarations, and a corpus run that skipped everything would
-#: report the same green line as one that ran everything.
+#: Mirrors `test_the_only_fixture_the_json_pass_skips_is_the_binary_codec_one`. Listed explicitly
+#: and compared with the corpus's `requires_codec` declarations, so a fixture that gains a
+#: declaration fails the run instead of being skipped.
 CODEC_SPECIFIC_FIXTURES = {"bytes-payload-under-binary-codec": "msgpack"}
 
-#: Every step kind and every `call` of `conformance/README.md`. A fixture reaching for something
-#: outside these is reported as **unsupported by name** and fails the run, because the alternative -
-#: skipping it - is the hollow coverage this whole exercise exists to prevent.
+#: Every step kind and every `call` of `conformance/README.md`. A fixture that uses anything else is
+#: reported as unsupported by name and fails the run.
 STEP_KINDS = (
     "settle",
     "call",
@@ -644,9 +606,8 @@ ERROR_CLASSES: dict[str, type[BaseException]] = {
     "StreamTimeout": muxws.StreamTimeout,
 }
 
-#: Wall-clock ceiling on one waiting step. Larger than the in-process runners' 2 s because every step
-#: here crosses a socket and a process boundary; still a ceiling, so a stalled fixture fails by name
-#: rather than hanging the job until its timeout.
+#: Timeout for one waiting step, in seconds. Larger than the in-process runners' 2 s because every
+#: step crosses a socket and a process boundary. A stalled fixture fails by name.
 CORPUS_STEP_TIMEOUT = 5.0
 
 #: One quiescence window, and how many of them a `settle` may take before it gives up. See
@@ -654,14 +615,12 @@ CORPUS_STEP_TIMEOUT = 5.0
 QUIET = 0.03
 QUIET_ROUNDS = 60
 
-#: Ceiling on one control-channel round trip. A step the other process is stuck inside must surface
-#: as this driver saying so, not as two processes waiting for each other.
+#: Timeout for one control-channel round trip, in seconds. A step that blocks in the other process
+#: fails with an error instead of a hang.
 CONTROL_TIMEOUT = 60.0
 
-#: How long `stream_for` waits for an *inbound* stream to have been delivered. Zero in the in-process
-#: runners, where a `settle` guarantees delivery; across a real socket the same `settle` guarantees it
-#: too, and this exists only so that a fixture whose author forgot one fails by name after a bounded
-#: wait instead of on a race.
+#: Event-loop turns `stream_for` waits for an inbound stream to be delivered. A preceding `settle`
+#: guarantees delivery; this bound makes a fixture without one fail by name instead of on timing.
 STREAM_ARRIVAL_TURNS = 400
 
 
@@ -672,22 +631,20 @@ class StepError(Exception):
 class Error(Exception):
     """What a fixture's `{"handler": "raise"}` payload makes the receiving handler raise.
 
-    The class name is load-bearing, which is why this is not a `RuntimeError`. WSM-ERR-006's default
-    serializer sends `type(exc).__name__` here and `error.name` in TypeScript, so the
-    `reset(APPLICATION_ERROR)` payload `handler-raises-produces-application-error` pins is one value
-    in both languages only if the class is spelled the same in both. `Error` is the one name that
-    already exists in JavaScript, and `muxws/conformance_test.py` declares its own for the same
-    reason.
+    The class name appears on the wire. WSM-ERR-006's default serializer sends `type(exc).__name__`
+    in Python and `error.name` in TypeScript, so the `reset(APPLICATION_ERROR)` payload that
+    `handler-raises-produces-application-error` expects is the same in both languages only if the
+    class names match. `Error` is the JavaScript built-in name; `muxws/conformance_test.py` declares
+    the same class.
     """
 
 
 def substitute_bytes(value: Any) -> Any:
     """Resolve every `{"$bytes": [...]}` placeholder into the byte string those integers spell.
 
-    The same function as the one in `muxws/conformance_test.py`, and it has to run in **both**
-    processes: JSON has no byte type, so a placeholder that survived loading would be sent as an
-    ordinary map that msgpack carries happily, and `bytes-payload-under-binary-codec` would pass
-    while asserting nothing about bytes (WSM-CDC-008).
+    Same as the function in `muxws/conformance_test.py`, and run in both processes. JSON has no byte
+    type; an unresolved placeholder would be sent as an ordinary map, and
+    `bytes-payload-under-binary-codec` would not test bytes (WSM-CDC-008).
     """
     if isinstance(value, dict):
         if set(value) == {"$bytes"}:
@@ -705,14 +662,13 @@ def load_fixture(name: str) -> dict[str, Any]:
 def peer_options(fixture: dict[str, Any]) -> dict[str, Any]:
     """`max_frame_bytes` / `max_concurrent_streams` are instructions to the runner (WSM-TST-002).
 
-    Both peers are constructed with them and neither may be encoded into any frame (WSM-CON-031),
-    which is why they are read here and never looked at again.
+    Both peers are constructed with them; neither is encoded into any frame (WSM-CON-031).
     """
     return {key: fixture[key] for key in ("max_frame_bytes", "max_concurrent_streams") if key in fixture}
 
 
 def unsupported_reason(fixture: dict[str, Any]) -> str | None:
-    """Why this driver cannot replay the fixture, or None. Declared, never silently skipped."""
+    """The reason this driver cannot replay the fixture, or None."""
     for index, step in enumerate(fixture["steps"]):
         kind = next((key for key in STEP_KINDS if key in step), None)
         if kind is None:
@@ -723,12 +679,11 @@ def unsupported_reason(fixture: dict[str, Any]) -> str | None:
 
 
 class Side:
-    """One process's half of a cross-language replay: one peer, one journal, one role in the script.
+    """One process's part of a cross-language replay: one peer, one journal, one role in the script.
 
-    Both processes run this class, and that is the point: a step means the same thing whichever end
-    of the socket executes it, which is the property `conformance/README.md` exists to protect. The
-    conductor runs the steps whose `peer` is its own role and ships the rest here over the control
-    channel.
+    Both processes use this class, so a step is executed by the same code on either end of the
+    socket. The conductor runs the steps whose `peer` is its own role and sends the rest to the other
+    process over the control channel.
     """
 
     def __init__(self, role: str, peer: muxws.Peer, socket: WebsocketsSocket, codec: Any) -> None:
@@ -736,16 +691,15 @@ class Side:
         self.peer = peer
         self.socket = socket
         self.codec = codec
-        #: Set from the conductor's table on every step; this side never keeps its own count, because
-        #: two independently maintained ordinal lists is precisely the divergence to avoid.
+        #: Replaced with the conductor's table on every step; this side keeps no ordinal list of its own.
         self.ordinals: list[int] = []
         self.by_id: dict[int, Stream] = {}
         self.refs: dict[str, Stream] = {}
         self.tasks: dict[str, asyncio.Task[Any]] = {}
         self.closing: asyncio.Task[None] | None = None
-        #: This peer's own wire, in order. Taken from `on_frame`, which reports **wire** frames on the
-        #: way out - after fragmentation - so `small-frame-overtakes-a-fragmented-payload` can assert
-        #: on individual fragments (WSM-OBS-003, WSM-FRG-019).
+        #: Frames this peer sent, in order. `on_frame` reports outbound wire frames after
+        #: fragmentation, so `small-frame-overtakes-a-fragmented-payload` can assert on individual
+        #: fragments (WSM-OBS-003, WSM-FRG-019).
         self.sent: list[Frame] = []
         #: Every frame in either direction. Only `settle_across` reads it, as a quiescence signal.
         self.frames = 0
@@ -762,8 +716,8 @@ class Side:
     async def _handler(self, payload: Any, stream: Stream) -> None:
         """Record the inbound stream, then hold it open.
 
-        Holding matters: WSM-STM-035 ends a stream the moment its handler returns, so a handler that
-        returned here would close every inbound stream before the script could `reply` on it.
+        WSM-STM-035 ends a stream when its handler returns; returning here would close every inbound
+        stream before the script can `reply` on it.
         """
         self.by_id[stream.id] = stream
         if isinstance(payload, dict) and payload.get("handler") == "raise":
@@ -773,11 +727,10 @@ class Side:
     # ------------------------------------------------------------------ the script
 
     async def execute(self, step: dict[str, Any], ordinals: list[int]) -> int | None:
-        """Run one step **as this side**, and hand back the stream id it allocated, if any.
+        """Run one step as this side, and return the stream id it allocated, if any.
 
-        Routing has already happened by the time a step arrives here, so `step["peer"]` is not read:
-        the conductor decides who runs what, and for `inject` that decision is inverted (see
-        `owner_of`).
+        `step["peer"]` is not read: the conductor routes steps (see `owner_of`, which inverts the
+        owner for `inject`).
         """
         self.ordinals = list(ordinals)
         if "call" in step:
@@ -811,9 +764,9 @@ class Side:
             return await handler(step)
         if expected not in ERROR_CLASSES:
             raise StepError(f"'raises' names an unknown class {expected!r}")
-        # `raises` says the *call itself* fails - a producer whose stream the consumer cancelled, say.
-        # No frame matcher can express that: a peer that reset the stream and went on producing looks
-        # identical on the wire (WSM-ERR-009).
+        # `raises` states that the call itself fails, for example a send on a stream the consumer
+        # cancelled. A frame matcher cannot express this: a peer that reset the stream and kept
+        # producing sends the same frames (WSM-ERR-009).
         try:
             await handler(step)
         except ERROR_CLASSES[expected]:
@@ -827,8 +780,8 @@ class Side:
         return self._adopt(step, stream)
 
     async def corpus_request(self, step: dict[str, Any]) -> int:
-        """`peer.request(...)`, started and not awaited (WSM-API-006) - the steps after it are the
-        assertions about the frames it produced."""
+        """`peer.request(...)`, started and not awaited (WSM-API-006); later steps assert on the frames
+        it produces."""
         timeout = step.get("timeout_ms")
         before = set(self.peer.streams)
         task = asyncio.ensure_future(
@@ -851,7 +804,7 @@ class Side:
         await stream.send(step.get("payload"), end=step.get("end", False), headers=step.get("headers"))
 
     async def corpus_send_headers(self, step: dict[str, Any]) -> None:
-        """The answering side's leading headers, on a frame with no payload at all (WSM-API-024)."""
+        """The answering side's leading headers, on a frame without a payload (WSM-API-024)."""
         await (await self.stream_for(step["stream_ref"])).send_headers(step["headers"])
 
     async def corpus_end(self, step: dict[str, Any]) -> None:
@@ -881,8 +834,8 @@ class Side:
     async def corpus_close(self, step: dict[str, Any]) -> None:
         drain = float(step.get("drain_ms", 10_000)) / 1000
         code = muxws.ResetCode(step.get("code", int(muxws.ResetCode.NO_ERROR)))
-        # Started rather than awaited: `close()` sends `goaway` and *then* drains, and the steps after
-        # this one are what the drain window exists to let happen (WSM-CON-025).
+        # Started, not awaited: `close()` sends `goaway` and then drains, and the following steps run
+        # during the drain window (WSM-CON-025).
         self.closing = asyncio.create_task(self.peer.close(code, step.get("reason"), drain))
 
     async def corpus_await_close(self, _step: dict[str, Any]) -> None:
@@ -900,11 +853,10 @@ class Side:
         return stream.id
 
     async def _discover(self, before: set[int]) -> Stream:
-        """The stream a call opened without handing it back, found through the public map.
+        """Find, through the public stream map, the stream a call opened without returning it.
 
-        A bounded poll and not a single read: `request()` is a coroutine, so the `open()` inside it
-        does not run until the task is first scheduled, while TypeScript reaches it synchronously -
-        exactly the kind of difference a shared corpus must not be able to see.
+        Polled for a bounded number of turns: `request()` is a coroutine, so its `open()` runs only
+        when the task is first scheduled, whereas TypeScript opens the stream synchronously.
         """
         for _ in range(STREAM_ARRIVAL_TURNS):
             fresh = [stream for stream_id, stream in self.peer.streams.items() if stream_id not in before]
@@ -916,16 +868,15 @@ class Side:
     async def write_raw(self, envelope: dict[str, Any]) -> None:
         """Put one hand-written envelope on this side's socket, bypassing the writer.
 
-        This is `inject` seen from the other end. In-process a runner hands the message straight to
-        the receiving peer's socket; across two processes the only thing that can deliver a message
-        *to* a peer is that peer's remote, so the step is executed here, by the other side, as an
-        ordinary send. The envelope deliberately does not pass through `from_mapping`, which drops
-        unknown keys (WSM-FRM-001) - a frame built through it could never carry the unknown field or
-        the unknown type whose toleration is the thing being asserted.
+        Executes `inject` from the sending end. In-process, a runner hands the message to the
+        receiving peer's socket; across two processes only the receiving peer's remote can send it,
+        so the other side executes the step as a send. The envelope does not pass through
+        `from_mapping`, which drops unknown keys (WSM-FRM-001); the fixtures inject unknown fields
+        and unknown frame types.
 
-        The writer is bypassed rather than used because there is no public API for "send exactly
-        these keys", and there should not be. Nothing else is in flight for the two fixtures that
-        need it, and a WebSocket message is atomic, so this cannot interleave with a fragment.
+        The writer is bypassed because no public API sends an envelope with exactly the given keys.
+        Nothing else is in flight in the fixtures that use `inject`, and a WebSocket message is
+        atomic, so this does not interleave with a fragment.
         """
         message = self.codec.encode_payload(self.resolve(envelope))
         if self.codec.binary:
@@ -977,7 +928,7 @@ class Side:
         raise StepError(f"{self.role} sent no frame matching {wanted}; it sent {self.sent[self.cursor :]}")
 
     def expect_no_frame(self, wanted_raw: dict[str, Any]) -> None:
-        """Not "not yet", but "not at all": the whole of this peer's wire is searched."""
+        """Search every frame this peer has sent, not only those after the cursor."""
         wanted = self.resolve(wanted_raw)
         offending = [frame for frame in self.sent if self.matches(frame, wanted)]
         if offending:
@@ -986,8 +937,7 @@ class Side:
     async def _value_of(self, ref: str) -> Any:
         task = self.tasks.get(ref)
         if task is not None:
-            # Shielded: a step that times out must not cancel the call underneath it, or the failure
-            # reported would be a reset this fixture never asked for.
+            # Shielded so that a step timeout does not cancel the underlying call and send a reset.
             return await asyncio.wait_for(asyncio.shield(task), CORPUS_STEP_TIMEOUT)
         stream = self.refs.get(ref)
         if stream is None:
@@ -1003,7 +953,7 @@ class Side:
             raise StepError(f"{spec['ref']} produced {value!r}, expected {spec['value']!r}")
 
     async def expect_headers(self, spec: dict[str, Any]) -> None:
-        """What this peer holds on the attribute `of` names, once it can no longer change (WSM-API-025)."""
+        """Compare the headers held on the attribute `of` names, once final (WSM-API-025)."""
         stream = await self.stream_for(spec["stream_ref"])
         of = spec["of"]
         if of not in ("open", "reply"):
@@ -1036,7 +986,7 @@ class Side:
         raise StepError(f"{spec['ref']} was expected to fail and produced {value!r}")
 
     async def expect_closed(self, spec: dict[str, Any]) -> None:
-        """A bounded poll, not a single read: the other end learns of a close one turn later."""
+        """Polled for a bounded time: the other end observes a close at least one turn later."""
         want_socket = bool(spec.get("socket", False))
         for _ in range(QUIET_ROUNDS):
             if not self.peer.is_open and (not want_socket or self.socket_closed):
@@ -1051,34 +1001,29 @@ class Side:
     async def teardown(self) -> None:
         """Drop the socket and cancel whatever the script left running.
 
-        The socket is dropped rather than closed with a `goaway`: most fixtures deliberately end with
-        streams still open, and a polite close would sit in its drain window for every one of them.
+        The socket is closed without a `goaway`: most fixtures end with streams open, and a graceful
+        close would wait out the drain window for each of them.
         """
         pending = [task for task in (*self.tasks.values(), self.closing) if task is not None]
         for task in pending:
             task.cancel()
         for task in pending:
-            # Whatever a cancelled collector or close() raises on the way out is teardown noise: the
-            # fixture's assertions have already run.
+            # Exceptions from cancelled collectors or close() are ignored; the fixture's assertions
+            # have already run.
             await asyncio.gather(task, return_exceptions=True)
         with contextlib.suppress(Exception):
             await self.socket.close()
 
 
 async def settle_across(side: Side, control: Control) -> None:
-    """`settle: n` means n turns of one event loop; across two processes it means nothing.
+    """Execute `settle` across two processes: wait until neither peer sends or receives a frame.
 
-    The corpus defines `settle` as "a lower bound on progress, never a duration"
-    (`conformance/README.md`), and it is written for a transport where a message is delivered inside
-    the same event loop that sent it. Over a real socket between two processes the count is not a
-    lower bound on anything, so this driver reads a `settle` as what the fixtures actually want it to
-    mean: **let both peers go quiet**. Both sides watch their own frame counter across one window,
-    and the step returns only when neither saw a frame during it.
-
-    That is strictly stronger than the in-process reading and cannot pass earlier than it: a fixture
-    whose next step needs a reset to have arrived - `cancel-mid-stream-stops-the-producer` is the one
-    that does - waits here until it has, instead of failing on a race the number 24 was never a
-    promise about.
+    The corpus defines `settle: n` as n event-loop turns, "a lower bound on progress, never a
+    duration" (`conformance/README.md`), for a transport that delivers within one event loop. Between
+    two processes a turn count bounds nothing, so this driver waits until both peers are quiet: each
+    side checks its frame counter across one `QUIET` window, and the step returns when neither saw a
+    frame. A fixture whose next step needs a reset to have arrived
+    (`cancel-mid-stream-stops-the-producer`) waits here until it has.
     """
     for _ in range(QUIET_ROUNDS):
         before = side.frames
@@ -1095,17 +1040,15 @@ async def settle_across(side: Side, control: Control) -> None:
 class Control:
     """The conductor's end of the line-delimited JSON control channel.
 
-    A plain TCP socket beside the WebSocket under test, and deliberately not the WebSocket itself: a
-    control message carried on the connection being asserted about would appear on the very wire the
-    fixtures read frames off, and every `expect_no_frame` in the corpus would be asserting about this
-    driver's own traffic.
+    A separate TCP socket, not the WebSocket under test: control messages on that connection would
+    appear among the frames the fixtures assert on, including `expect_no_frame`.
     """
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
         self._writer = writer
-        #: A command sent by `dispatch` whose acknowledgement nobody has read yet. Collected before
-        #: the next command, so replies stay paired with the commands that asked for them.
+        #: A command sent by `dispatch` whose acknowledgement has not been read. It is collected before
+        #: the next command, so replies stay paired with their commands.
         self._pending: asyncio.Task[dict[str, Any]] | None = None
 
     async def rpc(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -1116,17 +1059,16 @@ class Control:
     async def dispatch(self, message: dict[str, Any]) -> None:
         """Send a command and go straight on to the next step, collecting the answer later.
 
-        Exactly one step needs this, and the corpus asks for it in so many words: `close` is
-        "**started and not awaited** - `close()` sends `goaway` and *then* drains, and the steps
-        after it are what the drain window exists to let happen" (`conformance/README.md`).
-        `goaway-drains-then-closes` then opens a stream "a moment too late", and the whole fixture
-        turns on that stream leaving **before** its opener has heard the goaway (WSM-CON-021/023).
+        Used only for `close`, which the corpus defines as "started and not awaited - `close()` sends
+        `goaway` and then drains, and the steps after it are what the drain window exists to let
+        happen" (`conformance/README.md`). `goaway-drains-then-closes` then opens a stream that must
+        be sent before its opener receives the goaway (WSM-CON-021/023).
 
-        In one process that is guaranteed by turn ordering. Across two it is a race, and waiting for
-        the acknowledgement is the way to lose it: the goaway is written before the ack, so both are
-        in flight towards the dialer and which arrives first is a coin toss. Sending and moving on
-        gives the local `open()` a head start of a full round trip, and gives the acceptor the control
-        message one event-loop turn before the open it must exclude from `last_stream`.
+        In one process turn ordering guarantees this. Across two processes, the acceptor writes the
+        goaway before the acknowledgement, so waiting for the acknowledgement lets the goaway arrive
+        first. Not waiting lets the local `open()` run a full round trip earlier, and the acceptor
+        receives the control message one event-loop turn before the open it must exclude from
+        `last_stream`.
         """
         await self._collect()
         self._send(message)
@@ -1138,9 +1080,8 @@ class Control:
             await pending
 
     def _send(self, message: dict[str, Any]) -> None:
-        # Written and not drained: these are a few hundred bytes on a loopback socket, and `drain()`
-        # is a suspension point between "the command is out" and "the next step runs" that the one
-        # command using `dispatch` is specifically trying not to have.
+        # Not drained: the messages are a few hundred bytes on a loopback socket, and `drain()` would
+        # add a suspension point between sending a `dispatch` command and running the next step.
         self._writer.write((json.dumps(message) + "\n").encode("utf-8"))
 
     async def _answer(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -1172,8 +1113,8 @@ class CorpusAcceptor:
         self.done = asyncio.Event()
 
     async def handle_connection(self, connection: Any) -> None:
-        # Belt to the handshake hook's braces, and a real cross-language assertion: the dialer must
-        # have offered `muxws.v1.<codec>` first (WSM-CDC-020) and this is the acceptor saying so.
+        # In addition to the handshake hook: checks that the dialer offered `muxws.v1.<codec>` first
+        # (WSM-CDC-020).
         verify_negotiated(getattr(connection, "subprotocol", None), self.codec.name)
         socket = WebsocketsSocket(connection)
         peer = muxws.Peer(socket, codec=self.codec, is_dialer=False, **self.options)
@@ -1193,7 +1134,7 @@ class CorpusAcceptor:
                 break
             try:
                 reply = await self.dispatch(json.loads(line))
-            except Exception as exc:  # the conductor is the only thing that can report a failure
+            except Exception as exc:  # reported to the conductor, which reports failures
                 reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             writer.write((json.dumps(reply) + "\n").encode("utf-8"))
             await writer.drain()
@@ -1238,9 +1179,8 @@ async def corpus_accept(port: int) -> None:
     )
     acceptor.url = f"ws://127.0.0.1:{websocket_server.sockets[0].getsockname()[1]}"
     control = await asyncio.start_server(acceptor.handle_control, "127.0.0.1", port)
-    # The port `interop/drive.sh` greps and hands the conductor is the **control** port: the
-    # WebSocket port is an implementation detail the conductor learns from `begin`, so a fixture that
-    # one day needs a server of its own can have one without a change to the driver.
+    # The reported port is the control port, which `interop/drive.sh` passes to the conductor. The
+    # conductor learns the WebSocket URL from the `begin` reply.
     emit(
         role="python-corpus-acceptor",
         port=control.sockets[0].getsockname()[1],
@@ -1255,11 +1195,7 @@ async def corpus_accept(port: int) -> None:
 
 
 def pinned_fixture_count() -> int:
-    """The count `muxws/conformance_test.py` already pins, read rather than restated.
-
-    A fourth copy of "13" is a fourth thing that can drift, and the failure it would hide is silent:
-    a corpus that stopped being collected reports the same green line as one that was.
-    """
+    """Read `EXPECTED_SEQUENCE_FIXTURES` from `muxws/conformance_test.py`."""
     source = FIXTURE_COUNT_SOURCE.read_text(encoding="utf-8")
     found = re.search(r"^EXPECTED_SEQUENCE_FIXTURES = (\d+)$", source, re.MULTILINE)
     if found is None:
@@ -1270,11 +1206,9 @@ def pinned_fixture_count() -> int:
 def owner_of(step: dict[str, Any], labels: dict[str, str]) -> str:
     """Which side executes this step.
 
-    `inject` is **inverted** and that is the one thing in here worth reading twice: the step says
-    "deliver this message *to* peer X", and in a cross-process run the only thing that can deliver a
-    message to X is X's remote. A driver that read the key as "X runs this" would have each peer send
-    itself the unknown frame, and both extension-point fixtures would pass without a byte crossing
-    the socket.
+    `inject` is inverted: the step means "deliver this message to peer X", and across processes only
+    X's remote can send a message to X. Running it on X would write the frame to X's own outbound
+    socket and the receiving peer would never see it.
     """
     if "inject" in step:
         return "acceptor" if step["peer"] == "dialer" else "dialer"
@@ -1315,10 +1249,9 @@ async def run_fixture(control: Control, name: str, codec: Any) -> None:
             try:
                 await run_step(control, side, step, index, ordinals, labels)
             except Exception as exc:
-                # Every exception and not only `StepError`: a step that failed by raising out of the
-                # library - an iterator that saw a reset, a send onto a dead handle - is a fixture
-                # failure too, and reporting it as a bare traceback loses the one thing a
-                # cross-language failure needs, which is the fixture and step that produced it.
+                # Every exception, not only `StepError`: a library exception (an iterator that saw a
+                # reset, a send on a closed stream) is a fixture failure too, and is reported with
+                # the fixture name and step index.
                 raise SystemExit(f"interop FAILED: {name} step {index}: {type(exc).__name__}: {exc}") from exc
     finally:
         await side.teardown()
@@ -1342,16 +1275,16 @@ async def run_step(
 
     who = owner_of(step, labels)
     if "call" in step and "as" in step:
-        # Which side is holding the awaitable a later `expect_result` will ask for. Labels are
-        # separate from ordinals: an ordinal identifies a stream on the wire, a label identifies a
-        # result the script wants to await, and only the side that started the call has one.
+        # Records which side holds the awaitable a later `expect_result` reads. Labels are separate
+        # from ordinals: an ordinal identifies a stream on the wire, a label identifies a result, and
+        # only the side that started the call holds it.
         labels[step["as"]] = who
 
     command = {"cmd": "step", "index": index, "ordinals": ordinals}
     if who == side.role:
         allocated = await side.execute(step, ordinals)
     elif step.get("call") == "close":
-        # The one call the corpus itself declares started-and-not-awaited; see `Control.dispatch`.
+        # The corpus declares `close` started and not awaited; see `Control.dispatch`.
         await control.dispatch(command)
         allocated = None
     else:
@@ -1360,8 +1293,8 @@ async def run_step(
     if step.get("call") in ALLOCATING_CALLS:
         if allocated is None:
             raise StepError(f"{step['call']} allocated no ordinal")
-        # Appended here and nowhere else, so there is one ordinal table and the other process is
-        # handed a copy of it rather than keeping a second one (WSM-TST-002).
+        # The only place ordinals are appended; the other process receives a copy with each step
+        # (WSM-TST-002).
         ordinals.append(int(allocated))
 
 
@@ -1386,8 +1319,8 @@ async def corpus_dial(endpoint: str, *, label: str) -> None:
     check(
         declared == CODEC_SPECIFIC_FIXTURES,
         f"{label}: the corpus declares {declared!r} codec-specific; this driver's skip list is "
-        f"{CODEC_SPECIFIC_FIXTURES!r} and a fixture that quietly acquired a declaration would shrink "
-        f"every pass that is not configured with it (WSM-CDC-007)",
+        f"{CODEC_SPECIFIC_FIXTURES!r} and a fixture that declares a codec without being listed is skipped "
+        f"by every pass that is not configured with that codec (WSM-CDC-007)",
     )
 
     ran: list[str] = []
@@ -1411,10 +1344,8 @@ async def corpus_dial(endpoint: str, *, label: str) -> None:
 
     await control.close()
 
-    # The three numbers, and every one of them has teeth. `unsupported` is empty on purpose: a
-    # fixture this driver cannot replay across two processes has to be recorded here deliberately,
-    # because the alternative - a driver that quietly runs three fixtures and reports success - is
-    # exactly the hollow coverage WSM-CDC-007 exists to stop.
+    # No fixture may be unsupported, at least one must run, and every fixture on disk must have run
+    # or been skipped for its codec (WSM-CDC-007).
     check(not unsupported, f"{label}: this driver could not replay {unsupported!r}")
     check(bool(ran), f"{label}: the corpus run exercised no fixture at all")
     check(
@@ -1444,8 +1375,8 @@ async def dial(url: str) -> None:
     async def collect_push(payload: Any, _stream: Stream) -> None:
         pushes.append(payload)
 
-    # `max_attempts=0`: this scenario ends by having the *acceptor* go away, and a dialer that
-    # re-dialled afterwards would keep reconnecting to a process the driver has not killed yet.
+    # `max_attempts=0`: the scenario ends with the acceptor's goaway, and the dialer must not reconnect
+    # afterwards to the still-running acceptor.
     peer = await muxws.connect(
         url,
         reconnect=muxws.Reconnect(max_attempts=0),

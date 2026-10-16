@@ -1,4 +1,4 @@
-"""`Peer`: id allocation, retention, dispatch, and what socket death does to every shape."""
+"""`Peer`: id allocation, retention, dispatch, and the outcome of socket death for every stream shape."""
 
 from __future__ import annotations
 
@@ -48,9 +48,8 @@ async def test_parity_and_monotonicity(make_pair):
 async def test_concurrent_opens_produce_increasing_ids_on_the_wire(make_pair):
     """WSM-SID-006/WSM-INV-005: allocation and enqueue are one indivisible step.
 
-    Fifty opens from fifty separate tasks. If anything suspended between taking the id and queueing
-    the frame, the wire would carry a non-monotonic sequence - a protocol error this peer would be
-    committing against itself.
+    Fifty opens from fifty separate tasks. A suspension between taking the id and queueing the frame
+    would put a non-monotonic id sequence on the wire, which is a protocol error by the sending peer.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -73,7 +72,7 @@ async def test_concurrent_opens_produce_increasing_ids_on_the_wire(make_pair):
 
 
 async def test_peer_id_is_prefix_plus_monotonic_counter(make_pair):
-    """WSM-API-009: reuse is the failure being prevented, so nothing recycles a closed peer's id."""
+    """WSM-API-009: a peer id is a prefix plus a counter, and a closed peer's id is not reused."""
     seen: list[str] = []
     for _ in range(100):
         pair = make_pair()
@@ -90,10 +89,10 @@ async def test_peer_id_is_prefix_plus_monotonic_counter(make_pair):
 
 
 async def test_closing_a_peer_does_not_free_its_id(make_pair):
-    """WSM-API-009's fourth clause. Reuse is the failure being prevented, so it needs a closed peer.
+    """WSM-API-009, fourth clause: a peer created after another closed gets a new id.
 
-    Counting distinct ids among peers that were never closed cannot fail against a scheme that
-    recycles the ids of closed connections - which is precisely the scheme the rule forbids.
+    The test closes peers before creating new ones; distinct ids among peers that are all still open
+    do not detect a scheme that reuses the ids of closed connections.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -113,18 +112,16 @@ async def test_closing_a_peer_does_not_free_its_id(make_pair):
 #: Every spelling a caller might reach for if they wanted to name a stream themselves.
 _ID_ARGUMENT_NAMES = frozenset({"id", "sid", "stream", "stream_id", "streamid"})
 
-#: The public callables that take an argument by one of those names, and why each is not the rule's
-#: subject. Held as a set so a **new** one fails here rather than being discovered by a peer that
-#: receives an id its counterpart never allocated.
+#: The public callables that take an argument by one of those names and are exempt from the rule.
+#: Any callable that takes such an argument and is not listed here fails the test.
 #:
-#: - `Frame` is the wire envelope itself, not a way to open a stream. The conformance runner and the
-#:   injection fixtures build frames by hand precisely because that is not the application's API.
-#: - `stream_id` on the `StreamReset` family is an **output**: which stream failed. Nothing is
-#:   allocated by naming it, and an error that could not say would be useless.
-#: - `Stream.__init__` is the library's own constructor, reached only with a `Peer` in hand; every
-#:   caller-facing route to a `Stream` (`open`, `notify`, `request`, and dispatch to `on_stream`)
-#:   allocates the id itself. See the note in SPEC.md's Appendix B: this is the one place the rule's
-#:   absolute wording and the implementation do not quite meet.
+#: - `Frame` is the wire envelope, not a way to open a stream. The conformance runner and the
+#:   injection fixtures build frames directly; frames are not part of the application API.
+#: - `stream_id` on the `StreamReset` family is an output: it names the stream that failed. Naming it
+#:   allocates nothing.
+#: - `Stream.__init__` is the library's own constructor and requires a `Peer`; every caller-facing
+#:   route to a `Stream` (`open`, `notify`, `request`, and dispatch to `on_stream`) allocates the id
+#:   itself. SPEC.md Appendix B notes this exception to the rule's wording.
 _ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION = frozenset(
     {
         ("ConnectionLost.__init__", "stream_id"),
@@ -139,11 +136,10 @@ _ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION = frozenset(
 
 
 def _is_defined_here(cls: type, attr: str) -> bool:
-    """Is `attr` the library's own, rather than inherited from `str`, `int` or `Exception`?
+    """Return whether `attr` is defined by muxws rather than inherited from `str`, `int` or `Exception`.
 
-    Only what muxws writes is this rule's subject, and the inherited half is not even stable to walk:
-    `dir()` of a `str`-mixin enum grew every `str` method in 3.11, so counting it makes the surface a
-    function of the interpreter version.
+    The rule applies only to muxws's own definitions. Inherited members also vary by interpreter
+    version: since Python 3.11, `dir()` of a `str`-mixin enum lists every `str` method.
     """
     for base in cls.__mro__:
         if attr in vars(base):
@@ -176,12 +172,10 @@ def _public_callables() -> list[tuple[str, Any]]:
 def test_no_public_entry_point_lets_a_caller_supply_a_stream_id():
     """WSM-SID-001: the library allocates ids; no API anywhere takes one.
 
-    `test_parity_and_monotonicity` covers the allocator, which is the half that has a value to
-    compare. This is the other half, and it has no value at all - it is an argument that must not
-    exist - so the only way to assert it is over the signatures. A `peer.open(stream_id=...)` added
-    for a test harness would satisfy every behavioural test in this file: the parity of an id the
-    caller chose is the caller's business, and monotonicity would hold for as long as the caller
-    kept counting upwards.
+    `test_parity_and_monotonicity` covers the allocator. This test checks the signatures for an
+    argument that names a stream id. Behavioural tests do not detect such an argument: a
+    `peer.open(stream_id=...)` passes them as long as the caller supplies ids of the right parity in
+    increasing order.
     """
     found = {
         (qualified, parameter)
@@ -308,8 +302,8 @@ async def test_no_bookkeeping_survives_a_closed_stream(make_pair):
         assert pair.acceptor.streams == {}
         assert isinstance(pair.dialer._highest_local_open, int)
         assert isinstance(pair.acceptor._highest_remote_open, int)
-        # Nothing keyed by a closed stream may linger anywhere on the peer, in a container of any
-        # kind. Checking only dicts would pass a `self._seen_ids: set[int]` growing without bound.
+        # No container of any kind on the peer may hold a key of a closed stream. Checking only dicts
+        # would miss an unbounded `self._seen_ids: set[int]`.
         for name, value in vars(pair.dialer).items():
             if name == "tags" or not isinstance(value, (dict, list, set, frozenset, tuple)):
                 continue
@@ -324,15 +318,12 @@ async def test_no_bookkeeping_survives_a_closed_stream(make_pair):
 async def test_unknown_frame_type_is_ignored(make_pair, caplog):
     """WSM-FRM-002: dropped, logged once, connection alive, nothing goes out.
 
-    All three halves in one test, because any one of them alone passes for the wrong reason: a peer
-    that never received the frame is also alive and also quiet, and a peer that answered it with a
-    `reset` also logged something. The arrival witness is what rules the first out - `on_frame` fires
-    after decode and before dispatch (WSM-OBS-003), so it sees exactly the frame dispatch is about to
-    be asked to ignore.
+    The three conditions are asserted together: a peer that never received the frame is also alive
+    and silent, and a peer that answered it with a `reset` also logs. `on_frame` fires after decode
+    and before dispatch (WSM-OBS-003), so it confirms the frame arrived.
 
-    `stream=1` is deliberate. It is above this acceptor's high-water mark, so an implementation that
-    let an unrecognised type fall through to the stream-frame path would kill the connection
-    (WSM-STM-003) rather than fail some subtler assertion.
+    `stream=1` is above this acceptor's high-water mark, so an implementation that passes an
+    unrecognised type to the stream-frame path kills the connection (WSM-STM-003).
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -352,8 +343,7 @@ async def test_unknown_frame_type_is_ignored(make_pair, caplog):
 
         lines = [record for record in caplog.records if "widget" in record.getMessage()]
         assert len(lines) == 1, [record.getMessage() for record in lines]
-        # WSM-OBS-001 puts every frame line under one named logger; a line nobody can filter on is
-        # not the "logging once" the rule asks for.
+        # WSM-OBS-001 requires every frame log line to use the one named logger.
         assert lines[0].name == "muxws.frames"
         assert lines[0].levelno == logging.INFO
     finally:
@@ -361,17 +351,14 @@ async def test_unknown_frame_type_is_ignored(make_pair, caplog):
 
 
 async def test_unknown_envelope_field_is_ignored(make_lone):
-    """WSM-FRM-001: a field this generation has never heard of changes nothing whatever.
+    """WSM-FRM-001: an unknown envelope field changes no behaviour.
 
-    `frames_test.py` proves the decoder drops the key. That is not the rule: a receiver could drop it
-    and still behave differently - refuse the frame, log a warning, take a slower path. So this
-    replays the same exchange twice, once with `"colour": "red"` on the `open` and once without, and
-    compares the two peers' **whole wires**. Equality across the two runs is the only formulation
-    that cannot pass while the extra field is quietly acted on somewhere downstream, and it is what
-    WSM-CON-009 rests on - additive revisions are safe to receive precisely because of this.
+    `frames_test.py` checks that the decoder drops the key. This test checks behaviour: it runs the
+    same exchange twice, once with `"colour": "red"` on the `open` and once without, and compares the
+    two peers' whole wires. WSM-CON-009 (additive revisions are safe to receive) depends on this rule.
 
-    A `Lone` peer rather than a pair: a real counterpart would see the reply to a stream it never
-    opened and kill the connection, correctly and entirely beside the point.
+    The test uses a `Lone` peer: a real counterpart would receive the reply to a stream it never
+    opened and kill the connection.
     """
     with_field = '{"type":"open","stream":1,"payload":{"q":1},"end":true,"colour":"red"}'
     without = '{"type":"open","stream":1,"payload":{"q":1},"end":true}'
@@ -398,16 +385,15 @@ async def test_unknown_envelope_field_is_ignored(make_lone):
     tainted_wire, tainted_rx, tainted_seen, tainted_alive = await replay(with_field)
     clean_wire, clean_rx, clean_seen, clean_alive = await replay(without)
 
-    # Non-vacuity: two silent peers also have equal wires. The handler must have run and answered.
+    # Two silent peers also have equal wires, so the handler must have run and answered.
     assert clean_seen == [{"q": 1}]
     assert clean_wire, "the control exchange produced no frames at all"
     assert tainted_alive is clean_alive is True
     assert tainted_seen == clean_seen, "the payload the handler saw"
     assert tainted_wire == clean_wire, "an unknown envelope field changed what went out"
-    # The wire is the loudest witness but not the finest: a decoder that let the extra key disturb a
-    # *quiet* field - `end`, `more`, `code` - can produce an identical answer to this one exchange and
-    # a different one to the next. `on_frame` fires after decode and before dispatch (WSM-OBS-003),
-    # so this compares the frames the peer actually acted on, field for field.
+    # A decoder that let the extra key change `end`, `more` or `code` can still produce an identical
+    # answer for this exchange. `on_frame` fires after decode and before dispatch (WSM-OBS-003), so
+    # this compares the decoded frames field by field.
     assert tainted_rx == clean_rx, "an unknown envelope field changed the frame the peer dispatched"
 
 
@@ -431,8 +417,8 @@ async def test_no_handler_refuses_with_refused(make_pair):
 async def test_handler_raising_produces_application_error(make_pair):
     """WSM-STM-034/WSM-INV-008: APPLICATION_ERROR **always**, even after the handler already sent.
 
-    REFUSED promises the operation definitively did not happen. A handler that debits an account and
-    then raises would, under REFUSED, be inviting the client to retry the debit.
+    REFUSED means the operation did not happen and may be retried. For a handler that debits an
+    account and then raises, REFUSED would cause the client to retry the debit.
     """
     pair = make_pair()
 
@@ -618,7 +604,7 @@ async def test_notify_returns_none_and_leaves_no_handle(make_pair):
 
 @dataclasses.dataclass
 class _Rig:
-    """What one shape is handed: a peer, a way to say it is armed, and the death it is waiting on."""
+    """The arguments for one shape: a peer, a callback that marks it armed, and the socket-death event."""
 
     name: str
     peer: Peer
@@ -633,7 +619,7 @@ class _Rig:
         return self.stream
 
     def arm(self) -> None:
-        """Say this shape is in position. The socket is not dropped until every shape has said so."""
+        """Mark this shape as armed. The socket is dropped after every shape is armed."""
         self.armed.set()
 
 
@@ -654,7 +640,7 @@ async def _iterate_shape(rig: _Rig) -> None:
     rig.arm()
     async for _item in stream:
         pass
-    # A clean end would read as "the export finished", which is exactly the lie WSM-RCN-041 forbids.
+    # A clean end would report the export as finished; WSM-RCN-041 requires an error.
     raise AssertionError("an async for must raise on socket death, not terminate normally")
 
 
@@ -667,8 +653,8 @@ async def _send_shape(rig: _Rig) -> None:
     stream = rig.open()
     rig.arm()
     while True:
-        # Mid-send when the socket dies, rather than sending once and waiting: a sender that had
-        # already stopped would be testing `send()` on a closed stream, which is a different rule.
+        # The sender keeps sending until the socket dies. A sender that sent once and waited would
+        # test `send()` on a closed stream, which is a different rule.
         await stream.send({"shape": rig.name})
         await asyncio.sleep(0)
 
@@ -681,19 +667,17 @@ async def _cancel_shape(rig: _Rig) -> None:
     await stream.reset(ResetCode.NO_ERROR)
 
 
-#: Every shape WSM-RCN-041 names, with what the socket dying under it must do to that shape. **This
-#: map is the only place they are listed**: the runner below opens one stream per entry, waits for
-#: all of them to be armed, kills the socket once, and checks each outcome against the expectation
-#: recorded here - so adding a seventh shape is one line in one place (§6).
+#: Every shape WSM-RCN-041 names, with the required outcome when the socket dies. The shapes are
+#: listed only here: the runner below opens one stream per entry, waits until all are armed, kills
+#: the socket once, and checks each outcome against this map. Adding a shape is one entry (§6).
 _DEATH_SHAPES: dict[str, tuple[Callable[[_Rig], Awaitable[None]], type[BaseException] | None]] = {
     "await stream": (_await_shape, ConnectionLost),
     "await stream.result()": (_result_shape, ConnectionLost),
     "async for": (_iterate_shape, ConnectionLost),
     "in-flight request()": (_request_shape, ConnectionLost),
     "sender mid-send()": (_send_shape, ConnectionLost),
-    # `cancel()` and `reset()` are the shapes WSM-RCN-041 makes **no-ops** rather than failures, so
-    # `None` is the expectation. They belong here anyway: "does not raise" is worth nothing if it
-    # hangs, and hanging is what this test detects.
+    # WSM-RCN-041 makes `cancel()` and `reset()` no-ops, so the expected outcome is `None`. They are
+    # listed so that the test also detects them hanging.
     "a stream awaiting cancel()": (_cancel_shape, None),
 }
 
@@ -701,24 +685,20 @@ _DEATH_SHAPES: dict[str, tuple[Callable[[_Rig], Awaitable[None]], type[BaseExcep
 async def test_socket_death_fails_every_shape(make_pair):
     """WSM-RCN-041/WSM-STM-014 **(spec)**: every shape ends, none hangs.
 
-    One stream per shape, all of them live at the same instant, and one socket death underneath all
-    of them at once. What each shape must do is read from `_DEATH_SHAPES` rather than written out
-    here, so the list of shapes has exactly one home.
+    One stream per shape, all live at the same time, and one socket death under all of them. The
+    expected outcome of each shape is read from `_DEATH_SHAPES`.
 
-    **This test fails by hang detection.** A shape that never finishes is named in the failure,
-    because the failure WSM-INV-011 describes is not an exception: it is a caller who sees no error,
-    no log and no timeout, just a spinner that never stops. Asserting on an exception nobody raised
-    would report that as a deadline somewhere else entirely, long after the fact, without saying
-    which of the six shapes was the one that never came back.
+    The test fails by hang detection and names each shape that did not finish. The failure WSM-INV-011
+    describes raises no exception: the caller gets no error, no log and no timeout.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
 
     closes: list[Any] = []
-    #: What the world looked like at the instant `on_close` ran. WSM-STM-014 puts the synthesised
-    #: failures *before* it, so a handler that fired first would observe streams still live - and
-    #: counting the calls alone cannot tell the two orderings apart.
+    #: State observed when `on_close` ran. WSM-STM-014 requires the synthesised failures before
+    #: `on_close`; a handler that ran first would observe live streams. Call counts alone do not
+    #: distinguish the two orders.
     world_at_close: list[dict[str, Any]] = []
     watched: list[Stream] = []
     dropped = asyncio.Event()
@@ -746,7 +726,7 @@ async def test_socket_death_fails_every_shape(make_pair):
         await pair.settle()
 
         _, pending = await asyncio.wait(tasks.values(), timeout=5.0)
-        if pending:  # pragma: no cover - the failure this test exists to report
+        if pending:  # pragma: no cover - reached only when the test fails
             hung = sorted(name for name, task in tasks.items() if task in pending)
             for task in pending:
                 task.cancel()
@@ -779,10 +759,9 @@ async def test_socket_death_fails_every_shape(make_pair):
 async def test_nothing_attempted_while_disconnected_appears_on_the_new_socket(make_pair):
     """WSM-RCN-042/WSM-INV-010 **(spec)**: nothing is buffered for a next socket.
 
-    Every call an application can make during the gap raises, and the socket that ends the gap
-    carries none of them. A queue that flushed into a server which has forgotten the sender turns a
-    failure that would have reached a call site into silent misdelivery - which no test on the
-    calling side can detect, because the call site was told nothing.
+    Every call an application makes while disconnected raises, and the next socket carries none of
+    them. A queue flushed into a server that no longer knows the sender delivers frames without any
+    error reaching the call site.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -805,7 +784,7 @@ async def test_nothing_attempted_while_disconnected_appears_on_the_new_socket(ma
         await pair.settle()
         assert fresh.sent == [], "the new socket must carry none of what was attempted in the gap"
 
-        # And the id space starts empty rather than resuming where the gap left off (WSM-RCN-031).
+        # The id space of the new socket starts empty (WSM-RCN-031).
         assert pair.dialer.open({"after": "the gap"}).id == 1
         await pair.settle()
         assert [pair.dialer._codec.decode(message).payload for message in fresh.sent] == [{"after": "the gap"}]
@@ -839,10 +818,8 @@ async def test_open_while_disconnected_raises_connection_lost(make_pair):
 async def test_connection_closed_code_never_appears_on_the_wire(make_pair):
     """Reset code 9 is synthesised locally and MUST NEVER be sent.
 
-    Reading the socket alone cannot prove this, and that is worth saying: the socket the streams died
-    on is dead, so a peer that *did* synthesise a `reset(9)` for each of them would enqueue every one
-    and put none of them on any wire this test can read. The assertion has to be what was **queued**,
-    which is the last point at which the decision is still this peer's own.
+    The socket the streams died on is closed, so a `reset(9)` enqueued for each of them would reach no
+    wire this test can read. The test therefore asserts on the frames that were queued.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -897,12 +874,10 @@ async def test_on_frame_sees_both_directions_with_byte_lengths(make_pair):
 
 
 async def test_a_throwing_on_frame_handler_does_not_break_the_connection(make_pair, caplog):
-    """WSM-OBS-003: an observer must not be able to break what it observes.
+    """WSM-OBS-003: an exception from `on_frame` does not affect the connection.
 
-    `on_frame` is called from inside the read loop and from inside the write loop. A handler that
-    raises - a metrics counter, a debug print with a bad format string - would take the read loop
-    down with it, which the peer then reports as a socket that died: the connection an application
-    is watching is ended by the watching.
+    `on_frame` is called from the read loop and from the write loop. If its exception propagated, it
+    would stop the read loop, and the peer would report the socket as dead.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
@@ -966,7 +941,7 @@ async def test_roles_are_readable(make_pair):
 
 
 async def test_request_that_ends_without_a_payload_raises(make_pair):
-    """A unary call that returned nothing would be indistinguishable from one that returned None."""
+    """A unary call that ends without a payload raises; returning would be indistinguishable from a None payload."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -983,7 +958,7 @@ async def test_request_that_ends_without_a_payload_raises(make_pair):
 
 
 async def test_request_timeout_resets_and_raises(make_pair):
-    """WSM-ERR-011: the remote is told to stop working, and the caller is told why."""
+    """WSM-ERR-011: on timeout the remote receives reset(TIMEOUT) and the caller gets StreamTimeout."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -1092,7 +1067,7 @@ async def test_fragmented_data_reaches_the_consumer_whole(make_pair):
 
 
 async def test_a_fragmented_open_that_ends_on_its_last_fragment(make_pair):
-    """`end` rides the closing fragment, so the stream is half-closed the moment it is dispatched."""
+    """`end` is set on the last fragment, so the stream is half-closed when it is dispatched."""
     pair = make_pair()
     states: list[str] = []
 
@@ -1138,11 +1113,11 @@ async def test_a_handler_whose_stream_died_mid_flight_ends_quietly(make_pair):
 
 
 async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(make_pair):
-    """A peer of another generation - or one still using the retired 5 - must be heard, not crashed on.
+    """A reset code this peer does not know, including the retired 5, resets the stream and keeps the peer open.
 
-    Converting the wire value straight to `ResetCode` raises `ValueError` out of the read loop,
-    which leaves `is_open` true, `on_close` unfired, and every pending await hanging against a queue
-    no writer is draining.
+    Converting the wire value directly to `ResetCode` raises `ValueError` in the read loop, which
+    leaves `is_open` true, `on_close` not called, and every pending await blocked on a queue that no
+    writer drains.
     """
     for wire_code in (5, 42):
         pair = make_pair()
@@ -1166,8 +1141,8 @@ async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(
             await pair.stop()
 
 
-async def test_a_read_loop_failure_closes_the_peer_rather_than_zombifying_it(make_pair):
-    """A peer that reports itself open while its read loop is dead is worse than one that closed."""
+async def test_a_read_loop_failure_closes_the_peer(make_pair):
+    """An exception in the read loop closes the peer; `is_open` does not stay true with a stopped read loop."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -1197,9 +1172,9 @@ async def test_a_read_loop_failure_closes_the_peer_rather_than_zombifying_it(mak
 async def test_a_wrong_parity_open_cannot_pose_as_a_fragment_continuation(make_pair):
     """WSM-SID-005: parity is checked before anything else, whatever reassembly is in flight.
 
-    Inferring "is this a continuation?" from whether *some* assembler is running on that id lets a
-    stream this peer opened, receiving fragmented `data`, accept an `open` carrying our own parity
-    as a continuation - dispatching a handler for a stream we opened, and skipping the
+    If continuation were inferred from an assembler running on that id, a stream this peer opened
+    that is receiving fragmented `data` would accept an `open` with this peer's own parity as a
+    continuation. That dispatches a handler for a locally opened stream and skips the
     connection-level error the rule requires.
     """
     pair = make_pair()
@@ -1230,7 +1205,7 @@ async def test_a_wrong_parity_open_cannot_pose_as_a_fragment_continuation(make_p
 
 
 async def test_a_duplicate_open_is_still_a_connection_error_mid_reassembly(make_pair):
-    """The same rule from the other side: a re-used id must not be laundered by a fragment."""
+    """An `open` that reuses an id is a connection error even while a fragment on that id is being reassembled."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -1250,8 +1225,8 @@ async def test_a_duplicate_open_is_still_a_connection_error_mid_reassembly(make_
 async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connection(make_pair):
     """A frame the codec cannot encode fails its own stream and leaves the writer task running.
 
-    A writer that died on it would leave nothing draining the queue: every later send sits in it
-    forever while the peer goes on reporting itself open - the read-loop zombie from the other end.
+    If the writer task stopped, nothing would drain the queue: every later send would stay queued
+    while the peer reports itself open.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
@@ -1275,7 +1250,7 @@ async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connect
 
 
 async def test_an_error_serializer_that_raises_still_produces_the_reset(make_pair):
-    """WSM-STM-034 is unconditional - a broken hook must not turn a failure into silence."""
+    """WSM-STM-034: the reset is sent even when the error serializer raises."""
 
     def exploding(_exc: BaseException) -> Any:
         raise RuntimeError("the serializer itself is broken")
@@ -1325,20 +1300,17 @@ async def test_repeated_sends_on_a_reset_stream_do_not_grow_one_traceback(make_p
 
 # --------------------------------------------------------------------------- what muxws refuses to interpret
 #
-# Four rules whose whole content is an absence: no argument, no default, no meaning read out of a
-# header or a payload key. None of them can be witnessed by watching a correct exchange succeed,
-# because they are all satisfied by an implementation that does the extra thing and gets away with
-# it. Each test below therefore either reads a signature or compares two runs that must not differ.
+# Four rules that each forbid something: a mandatory argument, a default timeout, and reading a
+# header or a payload key. A successful exchange does not show that the forbidden behaviour is
+# absent, so each test below either inspects a signature or compares two runs that must be equal.
 
 
 async def test_open_takes_zero_mandatory_arguments_and_defaults_payload_to_null(make_pair):
     """WSM-API-003: `peer.open()` on its own is legal, and the payload it sends is an explicit null.
 
-    A promise to every caller, and the reason it needs a witness is that it is the sort of thing a
-    later refactor makes required without noticing - `open(payload)` positional-and-mandatory reads
-    perfectly well in every call site the suite already has, because every one of them passes a
-    payload. The default is also *not* `ABSENT`: WSM-API-003 says `null`, and a receiver that
-    distinguishes "no payload key" from "payload: null" (D1) would see the two as different frames.
+    Other tests always pass a payload, so they do not detect a mandatory `payload` parameter. The
+    default is `null`, not `ABSENT`: a receiver that distinguishes "no payload key" from
+    "payload: null" (D1) treats the two as different frames.
     """
     parameters = inspect.signature(Peer.open).parameters
     mandatory = [
@@ -1366,17 +1338,15 @@ async def test_open_takes_zero_mandatory_arguments_and_defaults_payload_to_null(
 
 
 async def test_request_arms_no_deadline_unless_it_is_given_one(make_pair, monkeypatch):
-    """WSM-ERR-010: `request()` has no default timeout, and nothing quietly supplies one.
+    """WSM-ERR-010: `request()` has no default timeout.
 
-    The behavioural half alone cannot fail: a default of thirty seconds is indistinguishable from no
-    default in any test anybody would be willing to wait for. So this watches the deadline machinery
-    itself. `_collect_unary` reaches `asyncio.wait_for` only on the `timeout is not None` branch, and
-    the spy below records every arming - with the second half of the test as its control, because a
-    spy that never fires is exactly as convincing about a default as no spy at all.
+    A long default timeout is not observable in a test of practical duration, so the test spies on
+    the deadline mechanism. `_collect_unary` calls `asyncio.wait_for` only when `timeout is not None`,
+    and the spy records every call. The second half of the test passes a timeout and checks that the
+    spy records it.
 
-    What a default would cost, and why it is worth a test: a slow handler and a caller who never
-    passed a timeout would get `StreamTimeout` out of a call site that mentions no deadline, and the
-    remote would get `reset(TIMEOUT)` telling it to abandon work nobody cancelled.
+    With a default timeout, a caller that passed no timeout to a slow handler would get
+    `StreamTimeout`, and the remote would receive `reset(TIMEOUT)`.
     """
     timeout_parameter = inspect.signature(Peer.request).parameters["timeout"]
     assert timeout_parameter.default is None
@@ -1402,7 +1372,7 @@ async def test_request_arms_no_deadline_unless_it_is_given_one(make_pair, monkey
         assert not pending.done(), "request() must wait until the stream ends, is reset, or dies"
         assert pair.frames_of_type("dialer", "reset") == [], "nothing timed out, so nothing was reset"
 
-        # The control. Without it every assertion above is also satisfied by a spy wired to nothing.
+        # Control: the spy records a timeout that is passed.
         with pytest.raises(StreamTimeout):
             await pair.dialer.request({"q": 2}, timeout=0.02)
         assert armed == [0.02]
@@ -1414,10 +1384,9 @@ async def test_request_arms_no_deadline_unless_it_is_given_one(make_pair, monkey
         await pair.stop()
 
 
-#: Per-stream headers an implementation might be tempted to act on: two spellings of the same
-#: standard credential header, a cookie, an API key, a structured credential, an expiry that has
-#: already passed, and a scope list. Anything muxws re-authenticated with, or normalised, or
-#: stripped before handing the stream to the application, fails the assertions below.
+#: Per-stream headers with authentication-like content: two spellings of the same standard credential
+#: header, a cookie, an API key, a structured credential, an expiry in the past, and a scope list. The
+#: assertions below fail if muxws authenticates with, normalises or strips any of them.
 _HEADERS_THAT_LOOK_LIKE_AUTHENTICATION: dict[str, Any] = {
     "authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.e30.7T4",
     "Authorization": "a second spelling, because muxws does not fold case either",
@@ -1432,13 +1401,11 @@ _HEADERS_THAT_LOOK_LIKE_AUTHENTICATION: dict[str, Any] = {
 async def test_per_stream_headers_arrive_unchanged_and_change_nothing(make_pair):
     """WSM-AUT-002: headers are the application's, and muxws does not read them.
 
-    Two exchanges, identical but for the headers, and the wire is compared frame for frame with the
-    `headers` field taken off. That comparison is the rule: "muxws MUST NOT interpret them" means
-    the peer that was handed them behaves exactly like the peer that was not. Asserting only that
-    the handler received them back would pass against a peer that also re-authenticated on
-    `authorization`, refused on the expired `expires_at`, or lower-cased every key on the way
-    through - and `expires_at: 0` is there because a library that had opinions about expiry would
-    have them about that value first.
+    Two exchanges that differ only in headers; the wires are compared frame by frame with the
+    `headers` field removed. "muxws MUST NOT interpret them" means the peer that receives headers
+    behaves the same as the peer that does not. Checking only that the handler received the headers
+    would not detect a peer that authenticates on `authorization`, refuses the expired `expires_at`,
+    or lower-cases the keys. `expires_at: 0` is a timestamp in the past.
     """
     seen: list[dict[str, Any]] = []
 
@@ -1461,13 +1428,13 @@ async def test_per_stream_headers_arrive_unchanged_and_change_nothing(make_pair)
     with_headers, dialer_with, acceptor_with = await exchange(_HEADERS_THAT_LOOK_LIKE_AUTHENTICATION)
     without, dialer_without, acceptor_without = await exchange(None)
 
-    # Delivered whole: every key, both spellings, the nested object and the list unflattened.
+    # Every key, both spellings, the nested object and the list are delivered unchanged.
     assert seen[0] == _HEADERS_THAT_LOOK_LIKE_AUTHENTICATION
     assert list(seen[0]) == list(_HEADERS_THAT_LOOK_LIKE_AUTHENTICATION), "no key was reordered away"
     assert seen[1] == {}, "a stream opened without headers gets an empty mapping, not the last one's"
     assert dialer_with[0].headers == _HEADERS_THAT_LOOK_LIKE_AUTHENTICATION, "verbatim on the wire"
 
-    # And they bought nothing and cost nothing: the same result, the same frames, the same order.
+    # The headers change nothing else: same result, same frames, same order.
     assert with_headers == without == {"ok": True}
     stripped = [dataclasses.replace(frame, headers=None) for frame in dialer_with]
     assert stripped == dialer_without, "the headers changed what this peer sent"
@@ -1475,13 +1442,11 @@ async def test_per_stream_headers_arrive_unchanged_and_change_nothing(make_pair)
 
 
 async def test_the_answering_sides_headers_arrive_unchanged_and_change_nothing(make_pair):
-    """WSM-AUT-002, the direction WSM-FRM-016 added: the answer's metadata is the application's too.
+    """WSM-AUT-002 for answer headers (WSM-FRM-016): muxws does not interpret them either.
 
-    The same shape of proof as the opener's half above, pointed the other way: two exchanges
-    identical but for the headers the *acceptor* announces, and the dialer's own frames compared
-    with `headers` taken off. A library that grew opinions about an answer's metadata would grow
-    them here first - a `content-type` it decoded on, a `status` it turned into an exception - and
-    the payload it would have branched on is deliberately spelled to invite exactly that.
+    Two exchanges that differ only in the headers the acceptor sends; the dialer's own frames are
+    compared with `headers` removed. The headers include `content-type`, `status: 500` and
+    `error: True`, so decoding by content type or raising on status would change the result.
     """
     announced = {
         "content-type": "application/octet-stream",
@@ -1517,15 +1482,15 @@ async def test_the_answering_sides_headers_arrive_unchanged_and_change_nothing(m
     with_headers, dialer_with, acceptor_with = await exchange(announced)
     without, dialer_without, acceptor_without = await exchange(None)
 
-    # Delivered whole, on the opener's own handle, and an answer with none leaves an empty mapping
-    # rather than the previous exchange's.
+    # The headers are delivered unchanged on the opener's handle; an answer without headers gives an
+    # empty mapping.
     assert seen[0] == announced
     assert list(seen[0]) == list(announced), "no key was reordered away"
     assert seen[1] == {}
     assert acceptor_with[0].headers == announced, "verbatim on the wire"
 
-    # And they bought nothing and cost nothing. `status: 500` and `error: True` did not become an
-    # exception, and the opener's side of the exchange is frame for frame what it was without them.
+    # `status: 500` and `error: True` raised no exception, and the opener's frames are identical to
+    # the exchange without headers.
     assert with_headers == without == {"ok": True}
     assert dialer_with == dialer_without, "the answer's headers changed what the opener sent"
     stripped = [dataclasses.replace(frame, headers=None) for frame in acceptor_with]
@@ -1535,10 +1500,9 @@ async def test_the_answering_sides_headers_arrive_unchanged_and_change_nothing(m
 class _WatchedPayload(dict):
     """A payload that records every key muxws looks up on it, for WSM-FRM-006.
 
-    A plain equality check cannot see a peer that *read* `payload["type"]` and happened to do
-    nothing with it yet; this can. `json.dumps` walks a dict subclass by iterating its items rather
-    than by subscripting it, so the codec leaves no trace here - which is what makes a trace mean
-    something.
+    An equality check does not detect a peer that reads `payload["type"]` without acting on it; this
+    recorder does. `json.dumps` iterates a dict subclass's items without subscripting it, so encoding
+    records no keys, and every recorded key is a lookup by muxws.
     """
 
     def __init__(self, *args: Any, **options: Any) -> None:
@@ -1554,9 +1518,8 @@ class _WatchedPayload(dict):
         return super().get(key, default)
 
 
-#: A payload made entirely of words the envelope also uses, plus the `kind` field WSM-FRM-006 names
-#: first. Every value here contradicts the envelope it shadows, so anything muxws took from it would
-#: show up as a wrong frame rather than as a coincidence.
+#: A payload whose keys are envelope field names, plus the `kind` field WSM-FRM-006 names. Every value
+#: differs from the actual envelope value, so any value muxws read from it would produce a wrong frame.
 _PAYLOAD_SPELLED_LIKE_AN_ENVELOPE: dict[str, Any] = {
     "type": "reset",
     "stream": 99,
@@ -1577,14 +1540,13 @@ _PAYLOAD_SPELLED_LIKE_AN_ENVELOPE: dict[str, Any] = {
 async def test_a_payload_spelled_like_an_envelope_is_carried_and_never_read(make_pair):
     """WSM-FRM-006 / WSM-INV-016: muxws defines no vocabulary inside `payload`.
 
-    The rule is what makes two independent consumers able to share one socket without nesting their
-    own vocabulary inside an imposed one - so the failure it prevents is not a crash, it is a
-    release of muxws being required every time either consumer changes a message.
+    The rule lets two independent consumers share one socket without nesting their messages inside a
+    muxws-defined vocabulary, and without a muxws release when a message format changes.
 
-    Three things are asserted, and the second is the one no round-trip test would catch. The payload
-    survives both directions unchanged; **every** envelope field that this payload has a lookalike
-    for stays at its own default, so `stream: 99` did not become the frame's stream and `end: true`
-    did not half-close anything; and no key of it was ever subscripted.
+    Three assertions: the payload arrives unchanged in both directions; every envelope field that
+    has a same-named payload key keeps its own value, so `stream: 99` is not the frame's stream and
+    `end: true` half-closes nothing; and no payload key was subscripted. A round-trip test does not
+    check the second.
     """
     pair = make_pair()
     echoed: list[Any] = []
@@ -1597,8 +1559,8 @@ async def test_a_payload_spelled_like_an_envelope_is_carried_and_never_read(make
     pair.start()
     try:
         sent = _WatchedPayload(_PAYLOAD_SPELLED_LIKE_AN_ENVELOPE)
-        # `open`, not `request`: `request` sets `end=True` itself, which would make the frame's
-        # `end` agree with the payload's for the wrong reason.
+        # `open`, not `request`: `request` sets `end=True` itself, so the frame's `end` would equal
+        # the payload's.
         stream = pair.dialer.open(sent)
         assert await stream == _PAYLOAD_SPELLED_LIKE_AN_ENVELOPE
         await pair.settle()
@@ -1613,7 +1575,7 @@ async def test_a_payload_spelled_like_an_envelope_is_carried_and_never_read(make
         assert (opened.nonce, opened.last_stream) == (None, None)
         assert opened.payload == _PAYLOAD_SPELLED_LIKE_AN_ENVELOPE, "nested, not merged"
 
-        # Nothing objected to any of it: no reset, no goaway, both peers still connected.
+        # No reset, no goaway, both peers still connected.
         assert pair.frames_of_type("dialer", "reset") == []
         assert pair.frames_of_type("acceptor", "reset") == []
         assert pair.frames_of_type("acceptor", "goaway") == []
@@ -1624,12 +1586,12 @@ async def test_a_payload_spelled_like_an_envelope_is_carried_and_never_read(make
 
 
 async def test_an_envelope_lookalike_payload_survives_being_fragmented(make_pair):
-    """WSM-FRM-006 again, across the one path that does take the payload apart.
+    """WSM-FRM-006 for a fragmented payload.
 
     The splitter cuts the codec's encoding of the payload into byte ranges (WSM-FRG-011), so a
-    fragment of this payload is a string with `"type":"reset"` visibly inside it. A reassembler that
-    peeked at a fragment's contents, or a receiver that merged a reassembled payload into the
-    envelope, has its one chance here.
+    fragment of this payload is a string containing `"type":"reset"`. The test fails if the
+    reassembler reads a fragment's contents or the receiver merges the reassembled payload into the
+    envelope.
     """
     pair = make_pair(max_frame_bytes=200)
     reassembled: list[Any] = []
@@ -1650,7 +1612,7 @@ async def test_an_envelope_lookalike_payload_survives_being_fragmented(make_pair
         assert len(pieces) > 1, "the payload must actually have been cut for this to prove anything"
         assert all(piece.type == "open" and piece.stream == 1 for piece in pieces)
         assert any('"type":"reset"' in str(piece.fragment) for piece in pieces), "the bait must be on the wire"
-        # The receiver reassembled it whole and read nothing out of it on the way.
+        # The receiver reassembled the whole payload and read no key from it.
         assert reassembled == [big]
         assert pair.frames_of_type("acceptor", "goaway") == []
     finally:
@@ -1660,10 +1622,8 @@ async def test_an_envelope_lookalike_payload_survives_being_fragmented(make_pair
 #: WSM-API-008's partition, spelled out. `connect`, `accept`, `serve`, `notify`, `request`, `ping`,
 #: `close` and every `Stream` send method are async; everything else must not be.
 #:
-#: Two entries the rule's sentence does not name, and why they belong: `Stream.result` and
-#: `Stream.cancel`/`reset` wait or send, which is the property the rule is drawn around, and
-#: `SocketAdapter`'s four members are the transport seam of WSM-API-021 - the thing a socket is,
-#: not a call the application makes.
+#: Entries the rule does not name: `Stream.result` and `Stream.cancel`/`reset` wait or send, so they
+#: are async; `SocketAdapter`'s four members are the transport interface of WSM-API-021 and are async.
 _MUST_BE_ASYNC = frozenset(
     {
         "Peer.close",
@@ -1690,14 +1650,13 @@ _MUST_BE_ASYNC = frozenset(
 
 
 def test_the_public_api_is_async_exactly_where_the_rule_says():
-    """WSM-API-008, in the only place it lives: the signatures.
+    """WSM-API-008: checked on the signatures.
 
-    Compared by equality in both directions, because the rule has two halves and the interesting
-    one is the second. `peer.open()` being **synchronous** is WSM-API-001 and the whole reason a
-    stream can be opened and its id put on the wire in one indivisible step (WSM-INV-005); an
-    `async def open` would still pass every behavioural test in this suite, since `await`ing it
-    reads the same at every call site. So would an `async def on_stream`, and a registration that
-    suspends is a registration an acceptor can race a pushed stream against (WSM-STM-033).
+    The set of async callables is compared for equality, so both an async callable that should be
+    sync and the reverse fail. `peer.open()` is synchronous (WSM-API-001), which lets a stream be
+    opened and its id enqueued in one step (WSM-INV-005); behavioural tests do not detect an
+    `async def open`. An async `on_stream` would let a pushed stream arrive before registration
+    completes (WSM-STM-033).
     """
     import muxws
 
@@ -1706,8 +1665,7 @@ def test_the_public_api_is_async_exactly_where_the_rule_says():
     asynchronous = {name for name, function in surface if inspect.iscoroutinefunction(function)}
     assert asynchronous == _MUST_BE_ASYNC
 
-    # Named individually as well, because a set of nineteen strings is easy to edit and hard to
-    # read: these are the ones §5.1 lists, plus the one it forbids.
+    # The ones §5.1 lists, plus the one it forbids, asserted individually.
     for name in ("connect", "accept", "serve"):
         assert inspect.iscoroutinefunction(getattr(muxws, name)), name
     assert not inspect.iscoroutinefunction(Peer.open)
@@ -1717,15 +1675,11 @@ def test_the_public_api_is_async_exactly_where_the_rule_says():
 async def test_the_opening_payload_is_never_looked_at_for_routing(make_pair):
     """WSM-AUT-004 / WSM-STM-030: one handler, and it gets everything.
 
-    A routing library is what muxws would become by accident, one convenience at a time - a `path`
-    key honoured "just for dispatch", a handler table keyed on it - and the shape of the accident is
-    that every existing test keeps passing, because every existing test sends one payload to one
-    handler. So this sends payloads that *ask* to be routed: two different paths and methods, a bare
-    string with no keys to match on at all, and a null. All four reach the same handler, in the
-    order they were opened, and none of them is refused.
+    The payloads contain routing-like content: two different paths and methods, a string with no
+    keys, and a null. All four reach the same handler in the order they were opened, and none is
+    refused. Other tests send one payload to one handler and do not detect routing on a `path` key.
 
-    `test_second_on_stream_replaces_and_logs` is the companion: there is one handler slot, not a
-    table, so there is nowhere for a route to be registered even if something wanted to match one.
+    `test_second_on_stream_replaces_and_logs` checks that there is one handler slot, not a table.
     """
     assert list(inspect.signature(Peer.on_stream).parameters) == ["self", "handler"]
     for absence in ("route", "add_route", "routes", "handlers", "dispatch", "handler_for"):
@@ -1757,17 +1711,14 @@ async def test_the_opening_payload_is_never_looked_at_for_routing(make_pair):
 
 
 async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_pair):
-    """WSM-ERR-003: errors are raised where they are awaited, and there is nowhere else to put them.
+    """WSM-ERR-003: errors are raised where they are awaited, and no hook receives them instead.
 
-    The rule has two halves. That every shape raises is asserted all over `socket_death_test.py`;
-    this is the other half - that the raise cannot be *diverted*. An `on_error` hook is the single
-    most natural thing to add to a peer that already has four hooks, and what it would cost is the
-    failure this rule prevents: an error handled somewhere other than the call site is an error the
-    caller's `try` never sees, and the await either hangs or returns a value that was never sent.
+    `socket_death_test.py` checks that every shape raises. This test checks that no hook diverts the
+    error: an error handled outside the call site is not seen by the caller's `try`, and the await
+    either hangs or returns a value that was never sent.
 
-    So: the four hooks are named exhaustively, and the exchange below registers every one of them
-    before failing a stream. They all fire, they all see the reset go past, and the exception still
-    comes out of the `await`.
+    The test lists the four hooks exhaustively and registers all of them before failing a stream.
+    All four fire, all see the reset, and the exception is still raised from the `await`.
     """
     assert {name for name in dir(Peer) if name.startswith("on_")} == {
         "on_close",
@@ -1793,8 +1744,8 @@ async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_p
             await pair.dialer.request({"q": 1})
         assert info.value.code is ResetCode.APPLICATION_ERROR
 
-        # The observer saw it and did not consume it - `on_frame` is observability (WSM-OBS-003),
-        # not a handler, and a `reset` reaching it is not a `reset` that was dealt with.
+        # `on_frame` observed the reset without consuming it; it is an observer (WSM-OBS-003), not a
+        # handler.
         assert "rx:reset" in frames_seen
         assert closes_seen == [], "the connection is fine; one stream failed"
     finally:
@@ -1959,8 +1910,8 @@ async def test_reply_headers_interceptors_shape_the_first_frame_of_every_answer(
 
 
 async def test_a_reply_headers_interceptor_that_raises_fails_the_call_and_spends_nothing(make_pair):
-    """WSM-API-028: the call raises and sends nothing, the first frame stays unspent, and at the
-    implicit end of a handler the failure is the handler's."""
+    """WSM-API-028: the call raises and sends nothing, the first frame stays unsent, and at the
+    implicit end of a handler the failure is reported as the handler's."""
     pair = make_pair()
     sent_before_answer: list[int] = []
 

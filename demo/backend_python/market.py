@@ -1,22 +1,20 @@
 """The fake market: deterministic prices, a deep order book, and a megabyte to export.
 
-Nothing here touches a network. Real market data is out of scope for the demo, and a demo that needed
-an upstream feed could not be run by a reader at all.
+Nothing here uses a network; the demo runs without an upstream data feed.
 
-Every number is drawn from a generator seeded from the symbol and the purpose (D2), never from one
-shared stream of randomness. That is the difference between "deterministic" and "deterministic if
-nobody clicks anything": a shared generator would make a symbol's tenth price depend on whether the
-reader happened to ask for an export first, and a screenshot in the documentation would stop being
-reproducible the moment the demo was driven differently.
+Every number is drawn from a generator seeded from the symbol and the purpose (D2), not from one
+shared generator. With a shared generator a symbol's tenth price would depend on which other
+requests (for example an export) ran first; with separate generators the values are the same on
+every run regardless of user actions.
 """
 
 from __future__ import annotations
 
 import random
 
-#: Twenty symbols, because the headline is a 1 MB export fragmenting on one stream while ticks keep
-#: arriving on twenty *others*. With one symbol a round-robin writer and a FIFO produce the same wire
-#: and WSM-INV-004 has nothing to be witnessed against.
+#: Twenty symbols, so that ticks arrive on twenty other streams while a 1 MB export is fragmented on
+#: one. With one symbol a round-robin writer and a FIFO writer produce the same frame order, and
+#: WSM-INV-004 is not observable.
 SYMBOLS: tuple[tuple[str, str, float], ...] = (
     ("ACME", "Acme Industrial", 128.40),
     ("BOLT", "Boltworks", 34.15),
@@ -40,41 +38,39 @@ SYMBOLS: tuple[tuple[str, str, float], ...] = (
     ("TIDE", "Tidewater Marine", 38.75),
 )
 
-#: Fixed rather than drawn from the clock, so the demo starts from the same market every time (D2).
+#: Fixed, not taken from the clock, so the demo starts from the same market every time (D2).
 DEFAULT_SEED = 1_234_567
 
-#: One side of the book. 1500 levels a side puts the depth reply around 190 KB - comfortably over
-#: MAX_FRAME_BYTES (65_536), so it is fragmented on the way out and reassembled on the way in without
-#: the application doing anything at all (WSM-FRG-010).
+#: Levels per side of the book. 1500 levels a side make the depth reply about 190 KB, larger than
+#: MAX_FRAME_BYTES (65_536), so it is fragmented when sent and reassembled when received without
+#: application code (WSM-FRG-010).
 DEPTH_LEVELS = 1_500
 
-#: The stall test's payload: a little over 1 MB, which the 64 KiB frame cap turns into sixteen
-#: fragments. Sixteen chances to starve a 200-byte tick on another stream, and sixteen times it is
-#: not starved (WSM-INV-004).
+#: The stall test's payload: a little over 1 MB, sent as sixteen fragments under the 64 KiB frame
+#: limit. Ticks of about 200 bytes on other streams are sent between the fragments (WSM-INV-004).
 EXPORT_ROWS = 8_000
 
-#: Hex characters of filler per exported row. The filler is drawn rather than repeated so the payload
-#: is a megabyte of genuinely different bytes: a megabyte of "aaaa..." would fragment identically but
-#: would look like a trick to a reader watching the network tab.
+#: Hex characters of filler per exported row. The filler is random, not repeated, so the payload in
+#: the browser's network tab is a megabyte of varied data; repeated filler fragments identically.
 NOTE_WIDTH = 64
 
-#: How many points a history request answers with. Enough that the chart fills in visibly, which is
-#: what makes cancelling it mid-flight something a reader can actually catch.
+#: Number of points a history request returns. The chart fills in gradually, so the stream can be
+#: cancelled while it is in progress.
 HISTORY_POINTS = 120
 
 
 def _generator(seed: int, purpose: str, symbol: str) -> random.Random:
     """One generator per (seed, purpose, symbol).
 
-    `random`, not `secrets`: a fake price is not security-sensitive, and `secrets` cannot be seeded -
-    which is the whole of D2. The string seed is hashed by `random` itself, so it is stable across
-    runs and platforms and owes nothing to `PYTHONHASHSEED`.
+    `random`, not `secrets`: a fake price is not security-sensitive, and `secrets` cannot be seeded
+    (D2). `random` hashes the string seed itself, so it is stable across runs and platforms and
+    independent of `PYTHONHASHSEED`.
     """
     return random.Random(f"{seed}:{purpose}:{symbol}")  # noqa: S311 - a fake price is not a secret
 
 
 class Instrument:
-    """One symbol's price walk. Its own generator, so its Nth tick never depends on the others."""
+    """One symbol's price walk, with its own generator so its Nth tick does not depend on other symbols."""
 
     def __init__(self, symbol: str, name: str, base_price: float, seed: int) -> None:
         self.symbol = symbol
@@ -94,7 +90,7 @@ class Instrument:
         return self.row()
 
     def row(self) -> dict[str, object]:
-        """What a board row needs, and nothing else - this goes out twenty times a tick."""
+        """The fields of one board row; sent twenty times per tick."""
         change = round(self.price - self.open_price, 2)
         return {
             "symbol": self.symbol,
@@ -111,8 +107,8 @@ class Instrument:
 class Market:
     """The demo's only source of truth about symbols (D1).
 
-    The frontend holds no seed data of any kind: every symbol it renders arrived over the socket. A
-    board that could draw itself without a connection would prove nothing about the transport.
+    The frontend holds no seed data: every symbol it renders arrives over the socket, so the board is
+    empty without a connection.
     """
 
     def __init__(self, seed: int = DEFAULT_SEED) -> None:
@@ -124,11 +120,10 @@ class Market:
         return list(self._instruments)
 
     def _instrument(self, symbol: object) -> Instrument:
-        """A symbol nobody trades is an application error, and reaches the caller as one.
+        """Look up a symbol; an unknown symbol raises `ValueError`.
 
-        Raising here is deliberate: the handler lets it out, and WSM-STM-034 turns it into
-        `reset(APPLICATION_ERROR)` - never `REFUSED`, which would promise the request had not been
-        processed and invite a retry.
+        The handler does not catch it, and WSM-STM-034 turns it into `reset(APPLICATION_ERROR)`, not
+        `REFUSED`, which would state that the request was not processed and may be retried.
         """
         instrument = self._instruments.get(symbol) if isinstance(symbol, str) else None
         if instrument is None:
@@ -136,14 +131,14 @@ class Market:
         return instrument
 
     def snapshot(self, symbol: str) -> dict[str, object]:
-        """The row as it stands, without advancing it - the first frame of a pushed tick stream."""
+        """The current row, without advancing; the first frame of a pushed tick stream."""
         return self._instrument(symbol).row()
 
     def tick(self, symbol: str) -> dict[str, object]:
         return self._instrument(symbol).advance()
 
     def quote(self, symbol: str) -> dict[str, object]:
-        """The unary shape's answer: one payload, and the stream ends with it (WSM-API-006)."""
+        """The unary answer: one payload, which also ends the stream (WSM-API-006)."""
         instrument = self._instrument(symbol)
         spread = round(max(0.01, instrument.price * 0.0004), 2)
         return {
@@ -160,9 +155,7 @@ class Market:
     def history(self, symbol: str, points: int = HISTORY_POINTS) -> list[dict[str, object]]:
         """A price series ending at the current price, oldest first.
 
-        Built whole and streamed one point at a time by the handler. The handler, not this: what the
-        streaming shape demonstrates is a response arriving progressively, and a generator that also
-        computed the numbers would leave a reader wondering which of the two the pauses came from.
+        Built in full here; the handler streams it one point at a time with pauses between points.
         """
         instrument = self._instrument(symbol)
         generator = _generator(self.seed, "history", symbol)
@@ -174,7 +167,7 @@ class Market:
         return series
 
     def depth(self, symbol: str, levels: int = DEPTH_LEVELS) -> dict[str, object]:
-        """The full order book: one payload the writer has to fragment (WSM-FRG-010)."""
+        """The full order book: one payload that the writer fragments (WSM-FRG-010)."""
         instrument = self._instrument(symbol)
         generator = _generator(self.seed, "depth", symbol)
         bids: list[dict[str, object]] = []
@@ -202,8 +195,8 @@ class Market:
     def export(self, symbol: str, rows: int = EXPORT_ROWS) -> dict[str, object]:
         """The stall test's payload: one megabyte, as one payload, on one stream.
 
-        The application never calls a splitter. The writer fragments it at MAX_FRAME_BYTES on the way
-        out and the receiver reassembles it, and in between every other stream keeps its turn
+        The application does not split it. The writer fragments it at MAX_FRAME_BYTES, the receiver
+        reassembles it, and other streams' frames are sent between the fragments
         (WSM-FRG-017/018/019, WSM-INV-004).
         """
         instrument = self._instrument(symbol)

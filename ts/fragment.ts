@@ -1,11 +1,11 @@
 /**
  * Fragmentation: the splitter and the assembler, as pure functions (§4).
  *
- * A line-for-line mirror of `muxws/fragment.py`. The two ports must cut at the *same* boundaries
- * (WSM-FRG-016), which is why every decision here - the reservation, the codepoint boundary, the
- * binary search - is made the same way and in the same order as it is there.
+ * Mirrors `muxws/fragment.py` line for line. Both implementations must split at the same boundaries
+ * (WSM-FRG-016), so the reservation, the codepoint boundary and the binary search are computed the
+ * same way and in the same order as in Python.
  *
- * Nothing here touches a socket.
+ * This module performs no I/O.
  */
 
 import type { Codec } from './codec';
@@ -13,29 +13,27 @@ import { ProtocolError } from './errors';
 import { ABSENT, type Frame } from './frames';
 
 /**
- * The largest encoded message a sender may emit. A **protocol constant**, not a setting: it is never
- * negotiated, never announced, and never read from configuration (WSM-FRG-004). A receiver accepts
- * anything up to it and may accept more; a sender always fragments at it regardless of what the
- * remote appears willing to accept.
+ * The largest encoded message a sender may emit, in bytes. A protocol constant: it is not negotiated,
+ * announced or configurable (WSM-FRG-004). A receiver accepts messages up to this size and may accept
+ * larger ones; a sender always fragments at this size.
  */
 export const MAX_FRAME_BYTES = 65_536;
 
 const TEXT_ENCODER = new TextEncoder();
 /**
- * Both options are load-bearing for a decoder that reads a *slice of a payload* rather than a
- * document. `ignoreBOM: true` keeps a leading U+FEFF: the default strips one, so a fragment
- * beginning with that codepoint would arrive one character short and the two ports would carry
- * different payloads (WSM-FRG-016). `fatal: true` makes a cut inside a multi-byte sequence throw
- * instead of yielding U+FFFD, which is what `bytes.decode("utf-8")` does in the Python port.
+ * Decodes slices of an encoded payload. `ignoreBOM: true` keeps a leading U+FEFF; the default strips
+ * it, so a fragment starting with that codepoint would lose a character and the two implementations
+ * would carry different payloads (WSM-FRG-016). `fatal: true` makes a cut inside a multi-byte
+ * sequence throw instead of yielding U+FFFD, as `bytes.decode("utf-8")` does in Python.
  */
 const TEXT_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * Byte length of an encoded message: UTF-8 for text, buffer length for bytes.
  *
- * `String.prototype.length` counts UTF-16 code units and disagrees with Python on every non-BMP
- * character, which is why WSM-FRG-002 names `TextEncoder` explicitly. Using `.length` here would
- * make a 1 MB emoji payload silently over-cap on the wire.
+ * `String.prototype.length` counts UTF-16 code units, which differs from the UTF-8 byte count for
+ * any non-ASCII character; WSM-FRG-002 therefore requires `TextEncoder`. Measuring with `.length`
+ * would let non-ASCII text exceed the cap on the wire.
  */
 export function encodedLength(message: string | ArrayBuffer): number {
   if (typeof message === 'string') return TEXT_ENCODER.encode(message).length;
@@ -48,17 +46,16 @@ function reservation(cap: number): number {
 }
 
 /**
- * The encoded payload as bytes, plus whether cuts into it have to respect codepoint boundaries.
+ * The encoded payload as bytes, plus whether cuts must fall on codepoint boundaries.
  *
- * Both codec families slice the same array; only the indivisible unit differs (WSM-FRG-012). Text is
- * encoded once, here, and every offset from then on is a byte offset into that encoding, which is
- * the index space the two ports agree on (WSM-FRG-016). Indexing a JavaScript string directly would
- * index UTF-16 code units instead, which cuts surrogate pairs in half and matches neither the bytes
- * on the wire nor the other port.
+ * Text and binary codecs both slice a byte array; only the indivisible unit differs (WSM-FRG-012).
+ * Text is UTF-8-encoded once, and every offset is a byte offset into that encoding, the index space
+ * both implementations use (WSM-FRG-016). Indexing a JavaScript string would use UTF-16 code units,
+ * split surrogate pairs, and match neither the wire bytes nor the Python implementation.
  *
- * A text codec's encoded payload has to be well-formed Unicode. `TextEncoder` writes U+FFFD where an
- * unpaired surrogate stands, so the fragments carry the replacement; the Python port cannot encode
- * such a payload at all. `JsonCodec` escapes lone surrogates to ASCII and never reaches this.
+ * A text codec's encoded payload must be well-formed Unicode. `TextEncoder` replaces an unpaired
+ * surrogate with U+FFFD, so the fragments carry the replacement character; Python cannot encode such
+ * a payload. `JsonCodec` escapes lone surrogates as ASCII, so its output is always well-formed.
  */
 export interface Encoded {
   bytes: Uint8Array;
@@ -84,18 +81,17 @@ function isContinuation(byte: number): boolean {
 /**
  * The largest cut at or before `start + limit` bytes that the codec can represent.
  *
- * Under a text codec the slice sits in the envelope as a value of the codec's own type system - a
- * JSON string - and half a codepoint has no representation in one. WebSocket continuation frames
- * would carry a split codepoint, but muxws does not use them: a continuation sequence holds the
- * socket until the message ends, which is the head-of-line blocking the library exists to prevent
- * (WSM-INV-004). So a cut landing inside a multi-byte sequence walks backwards until it does not.
- * UTF-8 is self-synchronising, which bounds that walk at three steps.
+ * Under a text codec the slice is a string value in the envelope (a JSON string), which cannot hold
+ * part of a codepoint. WebSocket continuation frames could carry a split codepoint, but muxws does not
+ * use them: a fragmented WebSocket message occupies the socket until it ends, which causes
+ * head-of-line blocking (WSM-INV-004). A cut inside a multi-byte sequence therefore moves backwards to
+ * the start of that sequence; UTF-8 is self-synchronising, so this takes at most three steps.
  *
- * Returns 0 when nothing fits: `limit` is narrower than the codepoint at `start`, or `start` is
- * already the end of the encoding.
+ * Returns 0 when nothing fits: `limit` is narrower than the codepoint at `start`, or `start` is the
+ * end of the encoding.
  *
- * Exported for the spec, which asserts the boundary rule on the primitive the splitter itself calls;
- * the Python port's tests reach `_floor_boundary` the same way.
+ * Exported for the spec tests, which assert the boundary rule on this function directly, as the
+ * Python tests do with `_floor_boundary`.
  */
 export function boundaryWithin(units: Encoded, start: number, limit: number): number {
   let cut = Math.min(start + limit, units.bytes.length);
@@ -105,7 +101,7 @@ export function boundaryWithin(units: Encoded, start: number, limit: number): nu
   return cut - start;
 }
 
-/** The width in bytes of the one indivisible unit at `start`: a byte, or a whole codepoint. */
+/** The width in bytes of the indivisible unit at `start`: a byte, or a whole codepoint. */
 function firstUnitWidth(units: Encoded, start: number): number {
   let cut = start + 1;
   if (units.text) {
@@ -122,8 +118,8 @@ function unitsWithinBudget(units: Encoded, start: number, budget: number): numbe
 /**
  * Build one fragment frame.
  *
- * `headers` ride only the first fragment and are never split (WSM-FRG-021); `end` and `trailers`
- * ride only the last (WSM-FRG-020); `more` is true on every fragment but the last.
+ * `headers` are carried only on the first fragment and are never split (WSM-FRG-021); `end` and
+ * `trailers` only on the last (WSM-FRG-020); `more` is true on every fragment except the last.
  */
 function fragmentFrame(source: Frame, chunk: string | ArrayBuffer, options: { first: boolean; last: boolean }): Frame {
   return {
@@ -143,11 +139,11 @@ function fragmentFrame(source: Frame, chunk: string | ArrayBuffer, options: { fi
 }
 
 /**
- * The closing fragment does not fit even carrying no payload at all.
+ * The error for a closing fragment that exceeds the cap even with an empty payload slice.
  *
- * `end` and `trailers` ride the final fragment and cannot themselves be fragmented (WSM-FRG-020),
- * exactly as `headers` cannot (WSM-FRG-021). If they do not fit, no valid split exists and saying so
- * is the only honest answer - the alternative is a sequence that never terminates.
+ * `end` and `trailers` are carried on the final fragment and cannot be fragmented (WSM-FRG-020), as
+ * `headers` cannot (WSM-FRG-021). If they do not fit, no valid split exists; without this error the
+ * splitter would not terminate.
  */
 function closingFloorError(cap: number): ProtocolError {
   return new ProtocolError(
@@ -166,15 +162,13 @@ function floorError(cap: number): ProtocolError {
 /**
  * Largest slice at `position` whose non-final fragment frame still fits under `cap`, in bytes.
  *
- * The verify-and-re-split half of WSM-FRG-014, as a **binary search**: it terminates in
- * log2(ceiling) encodes, and - more importantly - it is exactly reproducible, so this port and the
- * Python one cut at the same boundary (WSM-FRG-016). The search bisects byte limits and floors each
- * probe onto a boundary the codec can represent, so what it counts and what it cuts are the same
- * quantity: a wider byte limit never yields a narrower slice, and a slice that does not fit is never
- * a prefix of one that does.
+ * The verify-and-re-split step of WSM-FRG-014, as a binary search. It performs at most
+ * log2(ceiling) encodes and is deterministic, so both implementations cut at the same boundary
+ * (WSM-FRG-016). The search bisects byte limits and floors each probe to a representable boundary,
+ * so the slice width is monotonic in the byte limit.
  *
- * Returns 0 when not even one unit fits - the probes below the first unit's width all floor back to
- * an empty slice, which fits and records nothing.
+ * Returns 0 when not even one unit fits: probes narrower than the first unit floor to an empty slice,
+ * which is not recorded.
  */
 function largestFittingCount(
   source: Frame,
@@ -201,34 +195,29 @@ function largestFittingCount(
 }
 
 /**
- * Every fragment at once. `iterFragments` is the same computation, one slice at a time.
- *
- * Kept because the pure-function tests and the conformance corpus want the whole list, and because a
- * caller with a small payload should not have to think about generators.
+ * All fragments as an array: `iterFragments` collected eagerly. Used by the pure-function tests and
+ * the conformance corpus.
  */
 export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Frame[] {
   return [...iterFragments(frame, cap, codec)];
 }
 
 /**
- * Yield `frame` when it already fits, else the fragment frames that replace it, **lazily**.
+ * Yield `frame` if it fits under `cap`, otherwise the fragment frames that replace it, lazily.
  *
- * The writer consumes this one slice at a time, because WSM-FRG-018 says a stream holds at most one
- * unsent fragment: fragment *n+1* is sliced only once fragment *n* has been handed to the socket.
- * Computing them all up front would commit the wire order in advance, and interleaving - the whole
- * point of WSM-FRG-019 - becomes impossible once the order is already decided.
+ * The writer consumes one fragment at a time, because a stream holds at most one unsent fragment
+ * (WSM-FRG-018): fragment n+1 is sliced only after fragment n has been passed to the socket. Slicing
+ * all fragments up front would fix the wire order and prevent interleaving (WSM-FRG-019).
  *
- * Every boundary decision lives here, so `splitFrame` and the writer cut in exactly the same places
- * by construction rather than by two implementations agreeing.
+ * `splitFrame` and the writer both use this generator, so they split at the same boundaries.
  *
- * A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads nothing else and mutates neither
- * argument. `cap` defaults to the protocol constant; a smaller value comes only from a test or the
- * conformance runner (WSM-FRG-005) and is never a value read off the wire.
+ * A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads no other state and mutates neither
+ * argument. `cap` defaults to the protocol constant; only tests and the conformance runner pass a
+ * smaller value (WSM-FRG-005), and it is never read from the wire.
  *
- * The sender encodes the logical payload with the codec, slices *that* encoded form, and puts each
- * slice into a frame the codec then encodes again (WSM-FRG-011). Slicing budgets for the envelope
- * (WSM-FRG-013) and then **verifies and re-splits** (WSM-FRG-014): the reservation is a per-codec
- * hint, the loop is the guarantee.
+ * The payload is encoded with the codec, the encoded form is sliced, and each slice is placed in a
+ * frame that the codec encodes again (WSM-FRG-011). Each slice is sized with an envelope reservation
+ * (WSM-FRG-013) and then verified and re-split if it exceeds the cap (WSM-FRG-014).
  */
 export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Generator<Frame> {
   if (codec === undefined) {
@@ -258,16 +247,14 @@ export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, code
   let emitted = 0;
 
   for (;;) {
-    // Everything left, as the closing fragment? `end` and `trailers` ride only this one, so it is a
-    // different size from a middle fragment and has to be measured as itself. This is checked first
-    // on every pass, including the one where the payload is already spent: the sequence MUST end
-    // with a fragment carrying `more: false`, even if that fragment carries no bytes.
+    // First, try the whole remainder as the closing fragment. It carries `end` and `trailers`, so it
+    // is measured separately from a middle fragment. This runs on every pass, including when the
+    // payload is fully consumed: the sequence ends with a `more: false` fragment, which may carry no
+    // bytes.
     const first = emitted === 0;
-    // Skipped when the answer is already known: the encoded frame carries the remaining payload plus
-    // an envelope plus whatever the codec's escaping adds, so it is never *shorter* than the
-    // remainder itself. If the remainder alone is over the cap, encoding it only to be told so
-    // renders the whole rest of the payload for nothing - and does it again on every pass, which is
-    // quadratic in payload size.
+    // The encoded closing frame is never shorter than the remainder, so the encode is skipped when
+    // the remainder alone exceeds the cap. Encoding it on every pass would be quadratic in payload
+    // size.
     if (total - position <= cap) {
       const tail = fragmentFrame(frame, sliceUnits(units, position, total - position), { first, last: true });
       if (encodedLength(codec.encode(tail)) <= cap) {
@@ -278,12 +265,11 @@ export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, code
 
     if (position >= total) throw closingFloorError(cap);
 
-    // Otherwise a middle fragment: budget for the envelope first (WSM-FRG-013)...
+    // Otherwise a middle fragment, sized with the envelope reservation (WSM-FRG-013),
     let count = unitsWithinBudget(units, position, budget);
     let candidate = fragmentFrame(frame, sliceUnits(units, position, count), { first, last: false });
 
-    // ...then verify, and re-split if the reservation guessed low (WSM-FRG-014). The reservation is
-    // a per-codec hint; this is the guarantee.
+    // then verified and re-split if the encoded frame exceeds the cap (WSM-FRG-014).
     if (encodedLength(codec.encode(candidate)) > cap) {
       count = largestFittingCount(frame, units, position, count, { first, cap, codec });
       if (count === 0) throw floorError(cap);
@@ -297,7 +283,7 @@ export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, code
 }
 
 /**
- * Receive side: concatenates `fragment` values and decodes once the last one lands.
+ * Receive side: concatenates `fragment` values and decodes the payload after the last one.
  *
  * `feed()` returns `ABSENT` while `more` is true, and the decoded payload on the frame that closes
  * the sequence (WSM-FRG-030).
@@ -306,7 +292,7 @@ export class Assembler {
   private parts: (string | ArrayBuffer)[] = [];
   private bytes = 0;
 
-  /** True between the first fragment and the one that arrives without `more`. */
+  /** True from the first fragment until the fragment without `more`. */
   get inProgress(): boolean {
     return this.parts.length > 0;
   }
@@ -314,21 +300,20 @@ export class Assembler {
   /**
    * Bytes accumulated so far.
    *
-   * `maxPayloadBytes` is enforced against this **as fragments arrive** rather than after
-   * reassembly (WSM-FRG-032): a receiver that assembles a payload in order to measure it has
-   * already spent what the limit was protecting.
+   * `maxPayloadBytes` is enforced against this value as fragments arrive, not after reassembly
+   * (WSM-FRG-032), so an oversized payload is rejected before it is fully buffered.
    */
   get byteLength(): number {
     return this.bytes;
   }
 
-  /** Drop the partial buffer. Called when the stream is reset, releasing the bytes with it. */
+  /** Drop the partial buffer. Called when the stream is reset. */
   reset(): void {
     this.parts = [];
     this.bytes = 0;
   }
 
-  /** Absorb one fragment frame; return `ABSENT` while more are expected, else the payload. */
+  /** Add one fragment frame; return `ABSENT` while more are expected, else the decoded payload. */
   feed(frame: Frame, codec: Codec): unknown {
     const { fragment } = frame;
     if (fragment === null || fragment === undefined) {

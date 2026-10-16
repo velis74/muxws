@@ -1,12 +1,10 @@
 /**
  * The msgpack codec: round-trip only, no pinned bytes, and no registration on import.
  *
- * The mirror of `muxws/codecs/msgpack__test.py`, test for test. Every assertion is
- * `decode(encode(frame))` compared against the frame it started as (WSM-CDC-006); not one of them
- * compares against a byte string, and none may ever, because this library and Python's `msgpack`
- * make different but equally valid choices about integer width and map format. The logical corpus is
- * the same file the JSON tests read - the same frames through a second codec, back as the same
- * frames.
+ * Mirrors `muxws/codecs/msgpack__test.py` test for test. Every assertion compares
+ * `decode(encode(frame))` with the original frame (WSM-CDC-006); none compares against a byte string,
+ * because this library and Python's `msgpack` choose integer widths and map formats differently and
+ * both choices are valid. The logical corpus is the same file the JSON tests read.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -54,11 +52,10 @@ function settle(rounds = 12): Promise<void> {
 }
 
 /**
- * A `SocketAdapter` that records which send method the peer reached for.
+ * A `SocketAdapter` that records which send method the peer calls.
  *
- * It delegates to a real `MemorySocket` rather than swallowing the traffic, so the peer on the other
- * end still answers and the test that watches the send path is the same test that proves the
- * connection works.
+ * It delegates to a real `MemorySocket`, so the peer on the other end still answers and the same
+ * test checks both the send path and a working connection.
  */
 class SpySocket implements SocketAdapter {
   readonly textCalls: unknown[] = [];
@@ -89,9 +86,8 @@ class SpySocket implements SocketAdapter {
 /**
  * Declares `binary = true` and returns a string anyway.
  *
- * Nothing ships like this. It exists because WSM-CDC-002 says the peer MUST NOT sniff the encoded
- * value's type, and the only way to observe the difference between "declared" and "inferred" is a
- * codec where the two disagree.
+ * Test-only. WSM-CDC-002 says the peer MUST NOT infer the encoding from the encoded value's type; a
+ * codec whose declaration and output type differ shows which of the two the peer uses.
  */
 class LyingCodec extends MsgpackCodec {
   encode(frame: Frame): ArrayBuffer {
@@ -114,9 +110,9 @@ describe('MsgpackCodec', () => {
   corpus.forEach((entry) => {
     const testCase = entry as { name: string; frame: Record<string, unknown>; json_wire: string };
 
-    // `json_wire` is deliberately not read. It is the JSON codec's contract; asserting a second
-    // codec against it - or against a msgpack wire of our own - would pin bytes a legal encoder is
-    // entitled to spell differently (WSM-CDC-006).
+    // `json_wire` is not read. It applies to the JSON codec only; asserting msgpack against it, or
+    // against pinned msgpack bytes, would pin bytes a conforming encoder may produce differently
+    // (WSM-CDC-006).
     it(`round-trips - ${testCase.name}`, () => {
       const frame = frameFromFixture(testCase.frame);
       const encoded = codec.encode(frame);
@@ -126,7 +122,8 @@ describe('MsgpackCodec', () => {
   });
 
   it('reads a corpus that covers every v1 frame type', () => {
-    // A corpus that shrank would leave every round-trip above a green tick over nothing.
+    // Without this check, a reduced corpus would let the round-trip tests above pass while covering
+    // fewer frame types.
     expect(corpus.length).toBeGreaterThan(10);
     expect(new Set(corpus.map((entry) => entry.frame.type)).size).toBe(6);
     expect(corpus.every((entry) => Object.keys(entry).length === 3 && 'json_wire' in entry)).toBe(true);
@@ -134,16 +131,16 @@ describe('MsgpackCodec', () => {
 
   it('emits only the frame, not the encoder scratch buffer', () => {
     // `encode()` in @msgpack/msgpack returns `encodeSharedRef()`: a subarray of a 2048-byte internal
-    // buffer that the next call overwrites. Handing `.buffer` to the socket would put the whole
-    // thing on the wire, and the remote would see trailing data after the frame.
+    // buffer that the next call overwrites. Passing `.buffer` to the socket would send the whole
+    // buffer, and the remote would receive trailing data after the frame.
     const encoded = codec.encode({ type: 'ping', nonce: 'a' });
     expect(encoded.byteLength).toBeLessThan(32);
     expect(framesEqual(codec.decode(encoded), { type: 'ping', nonce: 'a' })).toBe(true);
   });
 
   it('decodes strings as text, not as bytes', () => {
-    // `rawStrings: false`, the twin of Python's `raw=False`. Inverted, every envelope key would
-    // arrive as a Uint8Array, no frame would have a `type`, and every message would be an error.
+    // `rawStrings: false`, the counterpart of Python's `raw=False`. With `true`, every envelope key
+    // would decode as a Uint8Array, no frame would have a `type`, and every message would be an error.
     const frame = codec.decode(codec.encode({ type: 'data', stream: 1, payload: { label: 'č' } }));
     expect(frame.type).toBe('data');
     expect(frame.payload).toEqual({ label: 'č' });
@@ -157,7 +154,7 @@ describe('MsgpackCodec', () => {
 // --------------------------------------------------------------------------- bytes are a payload type
 
 describe('bytes under a binary codec', () => {
-  it('survives the round trip - WSM-CDC-008', () => {
+  it('round-trips - WSM-CDC-008', () => {
     const payload = new Uint8Array([0, 255]).buffer;
     const frame: Frame = { type: 'data', stream: 1, payload, end: true };
     const decoded = codec.decode(codec.encode(frame));
@@ -165,10 +162,10 @@ describe('bytes under a binary codec', () => {
     expect(bytesOf(decoded.payload as ArrayBuffer)).toEqual([0, 255]);
   });
 
-  it('survives nested inside a payload, and comes back as an ArrayBuffer', () => {
-    // The port's spelling of "bytes" is `ArrayBuffer` - `Codec.encode` returns one, `Frame.fragment`
-    // is one, `Assembler` concatenates them - so a decoder handing back the library's `Uint8Array`
-    // would leak its own vocabulary and `framesEqual` would call the round trip unequal.
+  it('round-trips nested inside a payload, and decodes as an ArrayBuffer', () => {
+    // This port represents bytes as `ArrayBuffer`: `Codec.encode` returns one, `Frame.fragment` is
+    // one, `Assembler` concatenates them. A decoder returning the library's `Uint8Array` would expose
+    // that type, and `framesEqual` would report the round trip as unequal.
     const nested = { blob: new Uint8Array([1, 2]).buffer, name: 'x', parts: [new Uint8Array([3]).buffer] };
     const decoded = codec.decodePayload(codec.encodePayload(nested)) as typeof nested;
     expect(decoded.blob).toBeInstanceOf(ArrayBuffer);
@@ -179,15 +176,15 @@ describe('bytes under a binary codec', () => {
 
   it('is written as bin and never as an empty map', () => {
     // `Encoder.encodeObject` writes `bin` only for `ArrayBuffer.isView(object)`; a bare ArrayBuffer
-    // falls through to `encodeMap`. Silent data loss of exactly the kind WSM-CDC-008 exists to
-    // prevent, and it would hit every fragment of a bytes payload.
+    // falls through to `encodeMap`, which loses the data without an error (WSM-CDC-008) for every
+    // fragment of a bytes payload.
     const encoded = codec.encodePayload(new Uint8Array([7, 8, 9]).buffer);
     expect([...new Uint8Array(encoded)]).toEqual([0xc4, 3, 7, 8, 9]);
   });
 
   it('is refused by the json codec rather than base64-encoded - WSM-CDC-008', () => {
-    // The other half of the rule. `AP8=` is the base64 of the same bytes; asserting it is absent is
-    // what makes this fail if somebody "helpfully" adds an encoder instead of a refusal.
+    // `AP8=` is the base64 of the same bytes; asserting it is absent makes this test fail if the
+    // codec base64-encodes bytes instead of refusing them.
     const json = new JsonCodec();
     expect(() => json.encode({ type: 'data', stream: 1, payload: new Uint8Array([0, 255]).buffer })).toThrow(
       /WSM-CDC-008/,
@@ -227,9 +224,9 @@ describe('what the msgpack codec refuses', () => {
   });
 
   it('refuses text rather than recoding it - WSM-CDC-002', () => {
-    // `binary` is declared, so text on this wire is the remote's bug. No recoding could recover the
-    // bytes - the transport has already lost them - so inventing one turns a detectable violation
-    // into silent corruption.
+    // `binary` is declared, so text on this wire is an error of the remote. No recoding can recover
+    // the original bytes, which the transport has already lost, so recoding would turn a detectable
+    // violation into undetected corruption.
     expect(() => codec.decode('{"type":"ping"}')).toThrow(/text/);
     expect(() => codec.decodePayload('plain')).toThrow(/text/);
   });
@@ -239,12 +236,11 @@ describe('what the msgpack codec refuses', () => {
 
 describe('the msgpack subpath', () => {
   it('registers nothing at import time - WSM-CDC-013/014', async () => {
-    // `vi.resetModules()` is the whole test. This file imports `./msgpack` statically at the top,
-    // so by the time any assertion runs the module has already been evaluated once and a
-    // module-scope `registerCodec` would have landed in a registry that a later `clearCodecs()`
-    // then wipes - the check would pass over a module that does exactly what the rule forbids.
-    // Resetting re-evaluates both `./codec` and `./msgpack`, so `fresh` is the registry the
-    // re-imported module would have registered into.
+    // `vi.resetModules()` is required. This file imports `./msgpack` statically, so the module is
+    // evaluated before any assertion, and a module-scope `registerCodec` would write into a registry
+    // that a later `clearCodecs()` empties; the check would then pass for a module that violates the
+    // rule. Resetting re-evaluates both `./codec` and `./msgpack`, so `fresh` is the registry the
+    // re-imported module would register into.
     vi.resetModules();
     const fresh = await import('./codec');
     const module = await import('./msgpack');
@@ -255,41 +251,37 @@ describe('the msgpack subpath', () => {
   });
 
   it('contains no registration call at module scope - WSM-CDC-014', async () => {
-    // The structural half, and the one that cannot be fooled by import timing: it reads the file.
-    // The twin of `registry_test.py`'s AST check.
+    // Source check, independent of import timing: it reads the file. Counterpart of
+    // `registry_test.py`'s AST check.
     const source = await readFile(join(SOURCE_DIR, 'msgpack.ts'), 'utf8');
     expect(source).not.toMatch(/^\s*registerCodec\(/m);
-    // Comments stripped first - the module's own doc comment says what the application must call,
-    // and that sentence is the point rather than a violation. `registry_test.py` drops the
-    // docstring for the same reason. What is left is code, and none of it may register anything,
-    // module scope or not: a call inside a function the module invokes on the way up is the same
-    // side effect wearing a hat.
+    // Comments are stripped first, because the module's doc comment names the call the application
+    // must make. `registry_test.py` drops the docstring for the same reason. The remaining code must
+    // not contain a registration call anywhere, including inside a function the module calls during
+    // import, which has the same side effect.
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     expect(code).not.toContain('registerCodec(');
   });
 
   it('reaches @msgpack/msgpack by one static import and no probe - WSM-CDC-013', async () => {
-    // The twin of `msgpack__test.py`'s AST check, and the likelier violation of the two this file
-    // guards: the honest reason to reach for a probe is "let the suite pass without the optional
-    // package installed". A dynamic `import()`, a `require()`, or an import indented under a `try`
-    // all ask "is it there?" instead of failing loudly, which is what turns WSM-INV-015 into a
-    // deployment that believes it is running msgpack and is not. Comments are stripped first, for
-    // the same reason as the check above - the module's doc comment names the package on purpose.
+    // Counterpart of `msgpack__test.py`'s AST check. A dynamic `import()`, a `require()`, or an import
+    // nested under a `try` tests whether the package is installed instead of failing at import, which
+    // violates WSM-INV-015: a deployment could be configured for msgpack without using it. Comments
+    // are stripped first for the same reason as above: the module's doc comment names the package.
     const source = await readFile(join(SOURCE_DIR, 'msgpack.ts'), 'utf8');
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     const referring = code.split('\n').filter((line) => line.includes('@msgpack/msgpack'));
     expect(referring, 'exactly one line may name the package').toHaveLength(1);
-    // Anchored at column zero: an import nested inside a `try` or a function is a probe with the
-    // question asked later.
+    // Anchored at column zero: an import nested inside a `try` or a function is a probe.
     expect(referring[0]).toMatch(/^import\b.*from '@msgpack\/msgpack';$/);
     expect(code).not.toMatch(/\bimport\s*\(/);
     expect(code).not.toMatch(/\brequire\s*\(/);
   });
 
   it('reaches @msgpack/msgpack from nowhere but this subpath - WSM-PKG-003', async () => {
-    // The optional peer dependency must be unreachable from the browser entry point, or "optional"
-    // is a claim the bundler cannot honour. `ts/index.ts` is checked by following its own imports;
-    // this asserts the other end of it - that the only file naming the package is this one.
+    // The optional peer dependency must not be reachable from the browser entry point, or the
+    // bundler requires it. `ts/index.ts` is checked by following its imports; this test asserts that
+    // `ts/msgpack.ts` is the only file that names the package.
     const files = ['index.ts', 'codec.ts', 'peer.ts', 'fragment.ts', 'frames.ts', 'node.ts'];
     const sources = await Promise.all(files.map((name) => readFile(join(SOURCE_DIR, name), 'utf8')));
     expect(sources.filter((source) => source.includes('@msgpack/msgpack'))).toEqual([]);
@@ -300,10 +292,9 @@ describe('the msgpack subpath', () => {
 
 describe('a binary codec through the real Peer', () => {
   it('uses sendBytes and never sendText - WSM-CDC-002', async () => {
-    // The wiring test. It builds the peers the way an application does - `registerCodec`, then
-    // `getCodec`, then `Peer` - and asserts on the SocketAdapter spy, because `MemorySocket`
-    // accepts a string on `sendBytes` without complaining and would hide a peer that took the wrong
-    // branch.
+    // Builds the peers as an application does (`registerCodec`, then `getCodec`, then `Peer`) and
+    // asserts on the SocketAdapter spy, because `MemorySocket` accepts a string on `sendBytes`
+    // without an error and would not detect a peer that calls the wrong method.
     registerCodec('msgpack', new MsgpackCodec());
     const configured = getCodec('msgpack');
     const [left, right] = memoryPair();
@@ -333,7 +324,8 @@ describe('a binary codec through the real Peer', () => {
   });
 
   it('still uses sendBytes when the codec returns text - WSM-CDC-002', async () => {
-    // The declaration decides, not the value. A peer that sniffed would switch to sendText here.
+    // The declaration decides, not the value. A peer that inferred it from the value would call
+    // sendText here.
     const [left, right] = memoryPair();
     const spy = new SpySocket(left);
     const peer = new Peer(spy, { codec: new LyingCodec(), isDialer: true });
@@ -387,11 +379,10 @@ describe('a binary codec through the real Peer', () => {
 
 describe('fragment boundaries under a binary codec', () => {
   it('are byte boundaries measured on the produced buffer - WSM-FRG-003', () => {
-    // `byteLength` on the encoded buffer here rather than `encodedLength`, so the assertion measures
-    // the thing the rule names instead of trusting the helper it is meant to police, and the two
-    // bounds catch the two ways of getting it wrong. Under-counting puts a fragment over the cap;
-    // over-counting keeps every fragment legal but shrinks it, so the constant slice size is what
-    // fails. Neither would be visible from the cap check alone.
+    // Uses `byteLength` on the encoded buffer, not `encodedLength`, so the assertion measures the
+    // quantity the rule names without depending on the helper under test. The two bounds detect the
+    // two errors: under-counting puts a fragment over the cap; over-counting produces smaller legal
+    // fragments, which fails the constant slice size check. The cap check alone detects neither.
     const cap = 512;
     const blob = new Uint8Array(3072).map((_byte, index) => index % 256).buffer;
     const parts = splitFrame({ type: 'data', stream: 1, payload: blob, end: true }, cap, codec);

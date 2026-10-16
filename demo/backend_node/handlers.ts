@@ -1,26 +1,24 @@
 /**
- * The one `onStream` handler, and every action the frontend can ask for.
+ * The `onStream` handler and the actions the frontend can request.
  *
- * A port of `demo/backend_python/handlers.py`. There is one handler per peer and every stream the
- * browser opens arrives at it - the first one and every one after it (WSM-STM-030). What distinguishes
- * the four call shapes is not four APIs but what this code does with the stream it was handed:
+ * A port of `demo/backend_python/handlers.py`. There is one handler per peer, and every stream the
+ * browser opens is delivered to it (WSM-STM-030). The four call shapes use the same API and differ in
+ * how the handler uses the stream:
  *
  *   * `quote`   - `reply()`: one payload, and the stream ends with it (WSM-API-006).
- *   * `history` - `send()` in a loop, then `end()`: a response that arrives progressively, and one that
- *                 stops when the opener cancels it (WSM-ERR-012/013).
- *   * `depth`   - `reply()` with a payload over MAX_FRAME_BYTES: fragmented and reassembled with the
- *                 application doing nothing at all (WSM-FRG-010).
- *   * `export`  - the same, with a megabyte. The headline: while its sixteen fragments are on the wire,
- *                 the twenty pushed tick streams keep their turn (WSM-INV-004).
+ *   * `history` - `send()` in a loop, then `end()`: a progressive response that stops when the opener
+ *                 cancels it (WSM-ERR-012/013).
+ *   * `depth`   - `reply()` with a payload over MAX_FRAME_BYTES; the library fragments and reassembles
+ *                 it without application code (WSM-FRG-010).
+ *   * `export`  - `reply()` with about 1 MB. While its sixteen fragments are sent, the twenty pushed tick
+ *                 streams continue to receive frames (WSM-INV-004).
  *
- * The board itself is not an action. The backend calls `peer.open()` on its own initiative and the
- * browser receives it through *its* `onStream` handler - one `Peer` type, one mechanism, no second
- * correlation story (WSM-INV-002).
+ * The board is not an action. The backend opens the tick streams with `peer.open()` and the browser
+ * receives them through its own `onStream` handler, using the same `Peer` API (WSM-INV-002).
  *
- * The frontend does not know this file exists, and that is the point of the second backend: it asks
- * for the same actions, destructures the same fields and displays the same counters whichever language
- * answered. Where this port differs from the Python one it is because TypeScript forced it, and each
- * such place says so where it happens - `stream.signal` in `history`, and `forget` below.
+ * The frontend receives the same actions, fields and counters from this backend as from the Python
+ * backend. The port differs from the Python one in two places, each commented where it occurs:
+ * `stream.signal` in `history`, and `forget`.
  */
 
 import {
@@ -39,41 +37,36 @@ import {
 import { HISTORY_POINTS, type Market } from './market';
 
 /**
- * How often each symbol's pushed stream carries a new price. Four a second per symbol is fast enough
- * that the board is visibly live and slow enough that a reader can follow one row.
+ * Default interval between price updates on each symbol's pushed stream, in milliseconds (four per
+ * second per symbol).
  *
- * Milliseconds, because every duration in the TypeScript port is milliseconds as an integer where
- * Python's is seconds as a float - the library spells `drainMs` and `timeoutMs` the same way. What
- * goes *on the wire* stays seconds: `tick_interval` is a field the frontend already reads from the
- * Python backend, and the wire is the contract.
+ * Durations in the TypeScript port are integer milliseconds (as in the library's `drainMs` and
+ * `timeoutMs`); the Python port uses float seconds. The `tick_interval` field sent to the frontend is
+ * in seconds, as the Python backend sends it.
  */
 export const TICK_INTERVAL_MS = 250;
 
 /**
- * The pause between two points of a history response. It exists so the response is visibly
- * *progressive*: a chart that filled in one frame would demonstrate nothing that a unary reply does
- * not, and there would be nothing to cancel halfway through.
+ * Delay between two points of a history response, in milliseconds. It makes the response arrive
+ * progressively, so it can be cancelled before it completes.
  */
 export const HISTORY_POINT_DELAY_MS = 20;
 
 /**
- * How long the kill switch waits before closing the sockets. Long enough for its own reply to reach
- * the wire, because a handler whose connection is closed underneath it is a handler whose answer never
- * arrives - and the panel would then look like a bug rather than like a demonstration.
+ * Delay before the kill switch closes the sockets, in milliseconds, so the kill reply is sent before
+ * its connection closes.
  */
 export const KILL_DELAY_MS = 100;
 
 /**
- * What the diagnostics strip reads, and what `handlers.spec.ts` asserts on.
+ * Counters the diagnostics strip displays and `handlers.spec.ts` asserts on.
  *
- * snake_case, and not because this file is a translation: these keys are the wire, `Stats` in
- * `demo/frontend/src/muxws.ts` destructures exactly them, and a backend that camelCased them would be
- * a backend the frontend could tell apart from the Python one - which is the one thing this port must
- * not be.
+ * The keys are snake_case because they are sent on the wire; `Stats` in `demo/frontend/src/muxws.ts`
+ * destructures them, and the Python backend sends the same keys.
  *
- * `history_cancelled` is the one that matters. WSM-ERR-012/013 say the opener's `cancel()` stops the
- * *backend* generator, and nothing on a screen can distinguish a backend that stopped from a frontend
- * that stopped looking. A number the generator increments itself can.
+ * `history_cancelled` is incremented by the backend history generator when the opener's `cancel()`
+ * stops it (WSM-ERR-012/013), so it shows that the backend stopped generating, not only that the
+ * frontend stopped displaying.
  */
 export interface Counters {
   history_started: number;
@@ -84,7 +77,7 @@ export interface Counters {
   quotes: number;
 }
 
-/** The three timings the tests dial down, mirroring `MarketService.__init__`'s keyword arguments. */
+/** Timing overrides in milliseconds, used by the tests; mirrors `MarketService.__init__`'s keyword arguments. */
 export interface MarketServiceOptions {
   tickIntervalMs?: number;
   historyDelayMs?: number;
@@ -94,11 +87,11 @@ export interface MarketServiceOptions {
 type Action = (peer: Peer, payload: unknown, stream: Stream) => Promise<void>;
 
 /**
- * One peer's pushed board: the streams it is pushing on, and the way to tell them to stop.
+ * One peer's pushed board: the tick streams and the controller that stops their generators.
  *
- * Python holds a list of `asyncio.Task`s and cancels them. TypeScript has no task to cancel, so the
- * handle is an `AbortController` the generators watch and the streams they own, held so `forget` can
- * close them without waiting for the generators to notice.
+ * The Python port cancels a list of `asyncio.Task`s. Here the generators watch `stop.signal`, and
+ * `streams` lets `forget` cancel the streams immediately instead of waiting for each generator to
+ * observe the abort.
  */
 interface Board {
   readonly stop: AbortController;
@@ -106,12 +99,10 @@ interface Board {
 }
 
 /**
- * `asyncio.sleep`, with the one thing a JavaScript `await` cannot otherwise do: end early.
+ * Waits `ms` milliseconds, or until `signal` aborts.
  *
- * It **resolves** on abort rather than rejecting, so a caller checks `signal.aborted` afterwards and
- * decides. A rejecting sleep would put a synthetic error into paths whose real question is only
- * "should I still be running", and would hide the genuine failures - `StreamReset`, `StreamClosed` -
- * that the same `try` has to tell apart.
+ * It resolves on abort instead of rejecting; the caller checks `signal.aborted` afterwards. The
+ * callers' `try` blocks therefore see only real failures such as `StreamReset` and `StreamClosed`.
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return Promise.resolve();
@@ -132,14 +123,14 @@ function fieldOf(payload: unknown, key: string): unknown {
   return (payload as Record<string, unknown>)[key];
 }
 
-/** Every action but `hello`, `stats` and `kill` names a symbol; a request that does not is an error. */
+/** Returns the payload's `symbol` field; throws `Error` if it is not a string. */
 function symbolOf(payload: unknown): string {
   const symbol = fieldOf(payload, 'symbol');
   if (typeof symbol !== 'string') throw new Error(`this action needs a symbol; got ${JSON.stringify(symbol)}`);
   return symbol;
 }
 
-/** The demo's backend, as one object: the market, the registry, and the pushed tick streams. */
+/** The demo backend: the market, the registry, the counters and the pushed tick streams. */
 export class MarketService {
   readonly market: Market;
 
@@ -154,10 +145,10 @@ export class MarketService {
     quotes: 0,
   };
 
-  /** One board per peer, held so nothing takes the board away from a connection still watching it. */
+  /** The board of each peer that sent a hello. */
   private readonly boards = new Map<Peer, Board>();
 
-  /** A `Map` and not an object literal: the repository's eslint config bans `for...in` outright. */
+  /** A `Map` rather than an object literal, because the repository's eslint config forbids `for...in`. */
   private readonly actionTable: Map<string, Action>;
 
   private tickInterval: number;
@@ -167,12 +158,8 @@ export class MarketService {
   private readonly killDelay: number;
 
   /**
-   * The kill switch's outstanding work.
-   *
-   * Python holds its task because the garbage collector may take an un-referenced one away mid-flight.
-   * A pending promise chain keeps itself alive, so this field buys no safety here - it is kept because
-   * an object that starts work in the background should be able to say what it started, and because
-   * the two ports are meant to be read side by side.
+   * The kill switch's pending close operation, or `null`. It mirrors the task reference the Python port
+   * holds; a pending promise does not need a reference to stay alive.
    */
   private killer: Promise<void> | null = null;
 
@@ -194,7 +181,7 @@ export class MarketService {
     ]);
   }
 
-  /** Every action the frontend may name. The test asserts each one answers. */
+  /** Names of the actions the frontend may request. */
   get actions(): string[] {
     return [...this.actionTable.keys()];
   }
@@ -207,11 +194,10 @@ export class MarketService {
   // ------------------------------------------------------------------ registration
 
   /**
-   * The `onStream` handler for one connection.
+   * Returns the `onStream` handler for one connection.
    *
-   * Bound per peer because a handler is handed `(payload, stream)` and the actions need the `Peer`: the
-   * hello has to tag and register *this* connection, and the board has to be pushed onto it. The route
-   * has the peer in scope, which is where the documented examples close over it too.
+   * A handler receives `(payload, stream)`, and the actions also need the `Peer`: the hello tags and
+   * registers this connection, and the board is pushed onto it. The returned closure captures the peer.
    */
   handlerFor(peer: Peer): StreamHandler {
     return async (payload: unknown, stream: Stream): Promise<void> => {
@@ -220,11 +206,10 @@ export class MarketService {
   }
 
   /**
-   * Route one stream to one action.
+   * Routes one stream to the action named by the payload's `action` field.
    *
-   * An unknown action throws, and that throw is the answer: WSM-STM-034 turns a handler failure into
-   * `reset(APPLICATION_ERROR)` - never `REFUSED`, which would promise the request had not been
-   * processed and would invite the browser to retry something that may already have run.
+   * An unknown action throws `Error`; the peer resets the stream with `APPLICATION_ERROR`
+   * (WSM-STM-034). `REFUSED` would state that the request was not processed and may be retried.
    */
   async dispatch(peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const action = fieldOf(payload, 'action');
@@ -236,13 +221,12 @@ export class MarketService {
   }
 
   /**
-   * Stop pushing to a peer and drop it from the index. Idempotent.
+   * Stops pushing to a peer and removes it from the registry. Idempotent.
    *
-   * Two steps where Python has one, and the second is the one TypeScript forces. `task.cancel()` raises
-   * inside a pending `await`; aborting a signal only *tells* a generator, and it learns on some later
-   * turn. `close()` will not wait that long - it drains every live stream before closing the socket
-   * (WSM-CON-024) - so the streams are closed here and now, and the abort is what stops the generators
-   * looping afterwards. `cancel()` is a no-op on an already-closed stream, so the two cannot collide.
+   * The Python port cancels the tasks, which raises inside their pending `await`. Aborting a signal
+   * only takes effect when the generator next checks it, while `close()` drains every live stream
+   * before closing the socket (WSM-CON-024). This method therefore cancels the streams immediately and
+   * aborts the signal to end the generator loops. `cancel()` is a no-op on a closed stream.
    */
   forget(peer: Peer): void {
     const board = this.boards.get(peer);
@@ -256,30 +240,28 @@ export class MarketService {
     this.registry.deregister(peer);
   }
 
-  // ------------------------------------------------------------------ the hello (D3)
+  // ------------------------------------------------------------------ the hello
 
   /**
-   * The subscription. It is an ordinary stream and nothing marks it on the wire (WSM-RCN-021).
+   * Handles the hello (the subscription). It is an ordinary stream with no wire marking (WSM-RCN-021).
    *
-   * The dialer sends it through `connect({hello})`, so it is replayed verbatim on every socket that
-   * peer ever gets (WSM-RCN-020) and this runs again, on a brand-new `Peer`, after every reconnect.
-   * That is the whole of why the acceptor re-indexes here rather than anywhere else: an acceptor's
-   * `tags` die with their connection (WSM-RCN-033), so whatever it indexes it must index again on
-   * every connection.
+   * The dialer sends it through `connect({hello})`, so it is replayed on every new socket
+   * (WSM-RCN-020) and this method runs on a new `Peer` after every reconnect. An acceptor's `tags` end
+   * with their connection (WSM-RCN-033), so the peer is tagged and registered here, on each connection.
    *
-   * The reply is a courtesy and nothing depends on it. `connect()`'s reconnect helper owns this stream
-   * and discards what comes back on it - the acknowledgement WSM-RCN-022 asks for is this handler
-   * *returning*. Everything the frontend actually needs arrives on the pushed streams below, which is
-   * what makes the backend the only source of truth about symbols (D1).
+   * The frontend does not use the reply: `connect()`'s reconnect helper owns this stream and discards
+   * its replies, and the acknowledgement WSM-RCN-022 requires is this handler returning. The symbol
+   * data arrives on the pushed tick streams.
    */
   private async hello(peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const tags = fieldOf(payload, 'tags');
     if (typeof tags === 'object' && tags !== null) {
-      // muxws never reads `tags` and defines no key of its own in it (WSM-REG-001/002); these are the
-      // frontend's own labels, and the index is built from exactly what it named.
+      // muxws does not read `tags` and defines no keys in it (WSM-REG-001/002); the keys are the
+      // frontend's labels, and the registry indexes them as sent.
       Object.assign(peer.tags, tags);
     }
-    // After the writes and never before: the registry indexes, it does not watch (WSM-REG-010).
+    // Registered after the tags are written: the registry indexes tags at registration and does not
+    // observe later changes (WSM-REG-010).
     this.registry.register(peer);
     this.startBoard(peer);
     await stream.reply({
@@ -290,14 +272,11 @@ export class MarketService {
   }
 
   /**
-   * Change how often each pushed stream carries a price.
+   * Sets the interval between price updates on each pushed stream, from the payload's `interval_ms`.
    *
-   * The demo's pacing is not the library's speed, and this control is what lets a reader see the
-   * difference. The interval is a `sleep` in the generator below and has nothing to do with what the
-   * transport can carry.
-   *
-   * The floor is 1 ms rather than zero. At zero the generator becomes a busy loop that starves the very
-   * event loop it needs to send on, which would demonstrate the opposite of the point.
+   * The interval is a `sleep` in the tick generator and is independent of transport throughput.
+   * Accepted values are 1 to 5000 ms; anything else throws `Error`. The minimum is 1 ms because at
+   * zero the twenty generators would occupy the event loop they send on.
    */
   private async rate(_peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const requested = fieldOf(payload, 'interval_ms');
@@ -311,58 +290,55 @@ export class MarketService {
   // ------------------------------------------------------------------ server push
 
   /**
-   * Twenty streams, opened by the acceptor on its own initiative (WSM-INV-002).
+   * Opens one tick stream per symbol from the acceptor side (WSM-INV-002).
    *
-   * One per symbol rather than one carrying all twenty, because the claim being witnessed is that a
-   * stream mid-way through a megabyte does not hold the wire: twenty independent lanes plus the export
-   * is the arrangement in which a FIFO and a round-robin writer look different.
+   * One stream per symbol, not one stream for all symbols: with twenty streams plus the export, a FIFO
+   * writer and a round-robin writer produce different frame orders, which shows that a 1 MB payload
+   * does not block other streams.
    */
   private startBoard(peer: Peer): void {
     if (this.boards.has(peer)) {
-      // A second hello on one socket must not double the board. It should not happen - the helper
-      // replays a hello per *connection* - but a duplicated tick stream would look like a protocol bug
-      // rather than like this.
+      // A second hello on the same socket does not start a second board. The reconnect helper sends
+      // one hello per connection; a duplicate would produce duplicate tick streams.
       return;
     }
     const board: Board = { stop: new AbortController(), streams: [] };
     this.boards.set(peer, board);
     this.market.symbols.forEach((symbol) => {
-      // Deliberately not awaited - these run for as long as the socket does - so the rejection has to
-      // be caught here: an unhandled rejection in Node takes the whole demo down, and a board stream
-      // that failed is one row going stale.
+      // Not awaited: these run for the lifetime of the socket. The rejection is caught here, because an
+      // unhandled rejection terminates the Node process; a failed tick stream stops updating one row.
       void this.pushTicks(peer, symbol, board).catch((error: unknown) => {
         logger.error(`muxws demo: the ${symbol} tick stream stopped`, error);
       });
     });
-    // Synchronous, because `onClose` handlers are. Without it a socket that dies with no route around
-    // it - a test, say - leaves twenty generators pushing into a peer that has been dead since
-    // WSM-RCN-042 discarded its writer.
+    // Synchronous, as `onClose` handlers are. Without it, a socket closed outside `serveConnection`
+    // (for example in a test) leaves twenty generators sending to a closed peer whose writer has been
+    // discarded (WSM-RCN-042).
     peer.onClose(() => {
       this.forget(peer);
     });
   }
 
   /**
-   * One symbol's price stream, for as long as the socket lasts.
+   * One symbol's price stream, for the lifetime of the socket.
    *
-   * `peer.open()` here is the same call the browser makes for a quote, on the same socket, with the
-   * same correlation and the same cancellation. There is no push API because there does not need to be
-   * one (WSM-INV-002).
+   * `peer.open()` is the same call the browser makes for a quote, with the same correlation and
+   * cancellation; muxws has no separate push API (WSM-INV-002).
    */
   private async pushTicks(peer: Peer, symbol: string, board: Board): Promise<void> {
     let stream: Stream;
     try {
       stream = peer.open({ topic: 'ticks', symbol });
     } catch (error) {
-      // The socket died between the hello and this generator's first turn. Nothing is buffered for a
-      // next one (WSM-RCN-042) and there is nothing to report.
+      // The socket closed between the hello and this generator's first step. Nothing is buffered for a
+      // later connection (WSM-RCN-042), and the error is not reported.
       if (error instanceof ConnectionLost || error instanceof ConnectionGoingAway) return;
       throw error;
     }
     board.streams.push(stream);
     try {
-      // The snapshot first, so a row can be drawn before any price has moved: the frontend holds no
-      // seed data and this is where a row comes from (D1).
+      // The snapshot is sent first, so the frontend can draw the row before the first price change;
+      // the frontend holds no symbol data of its own.
       await stream.send(this.market.snapshot(symbol));
       for (;;) {
         await sleep(this.tickInterval, board.stop.signal);
@@ -370,14 +346,13 @@ export class MarketService {
         await stream.send(this.market.tick(symbol));
       }
     } catch (error) {
-      // `ConnectionLost` is a `StreamReset`, so this covers the ordinary end of the demo: the socket
-      // went away and every live stream failed with it before `onClose` fired.
+      // `ConnectionLost` is a `StreamReset`, so this covers a closed socket: every live stream fails
+      // with it before `onClose` runs.
       if (!(error instanceof StreamReset) && !(error instanceof StreamClosed)) throw error;
     } finally {
-      // A board stream has no natural end, and `close()` lets every live stream finish before it closes
-      // the socket (WSM-CON-024/025). Twenty streams that never finish would hold that drain open for
-      // its whole window, so the producer that is going away says so. A no-op when the stream is
-      // already closed, which is the ordinary path.
+      // A board stream does not end by itself, and `close()` waits for every live stream to finish
+      // before closing the socket (WSM-CON-024/025). Without this cancel, twenty open tick streams would
+      // keep the drain waiting for its full window. A no-op when the stream is already closed.
       await stream.cancel('the board stopped');
     }
   }
@@ -391,17 +366,15 @@ export class MarketService {
   }
 
   /**
-   * Streaming, and cancellable. The cancellation is the point (WSM-ERR-012/013).
+   * Streaming and cancellable (WSM-ERR-012/013).
    *
-   * **This is the one place the two backends genuinely differ.** In Python the browser's `cancel()`
-   * cancels the task this handler runs on and `CancelledError` is raised at whatever it is awaiting.
-   * TypeScript cannot interrupt a pending `await` at all, so the peer aborts `stream.signal` at the
-   * same instant instead (WSM-API-023) and the handler cooperates: the sleep below ends early and the
-   * loop asks whether it should still be running. A generator that ignored the signal would keep
-   * producing points for a reader who has already left, which is precisely what WSM-ERR-012 forbids.
+   * In the Python port the browser's `cancel()` cancels the handler's task and `CancelledError` is
+   * raised at its pending `await`. TypeScript cannot interrupt a pending `await`, so the peer aborts
+   * `stream.signal` instead (WSM-API-023): the sleep below ends early and the loop checks
+   * `signal.aborted`. A handler that ignored the signal would keep producing points after the
+   * cancellation, which WSM-ERR-012 forbids.
    *
-   * The counter incremented below is how a reader sees that the *backend* stopped generating rather
-   * than that the frontend stopped looking.
+   * `history_cancelled` counts cancellations observed by this handler.
    */
   private async history(_peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const symbol = symbolOf(payload);
@@ -415,33 +388,30 @@ export class MarketService {
         if (stream.signal.aborted) throw stream.signal.reason ?? new Error(`stream ${stream.id} was cancelled`);
       }
     } catch (error) {
-      // A cancel that lands mid-`send` arrives as the stream's own failure rather than through the
-      // signal, so both paths end here and exactly one of them is a cancellation.
+      // A cancel during `send` is raised by `send` itself; a cancel during the sleep is detected through
+      // the signal. Both paths reach this block, and `signal.aborted` identifies a cancellation.
       if (!stream.signal.aborted) throw error;
       this.counters.history_cancelled += 1;
-      // Re-thrown, never swallowed (WSM-ERR-014). The peer sees an aborted handler and stays quiet;
-      // a handler that returned normally here would be claiming to have finished a response the
-      // browser had already abandoned. The state check in the library's `runHandler` would keep it off
-      // the wire, but the claim would still be wrong, and this is a demo about what the wire says.
+      // Re-thrown (WSM-ERR-014). The peer sends nothing for a handler that fails after its stream was
+      // cancelled. Returning normally would report a completed response for a cancelled stream; the
+      // state check in the library's `runHandler` would still keep the `end` off the wire.
       throw error;
     }
-    // Trailers ride the `end` frame: they are the things only known once the body is finished, and a
-    // separate trailing message would be a second frame the browser has to correlate.
+    // Trailers are carried on the `end` frame; they hold values known only after the body is complete.
     await stream.end({ trailers: { symbol, points: points.length } });
   }
 
-  /** A payload comfortably over MAX_FRAME_BYTES. Nothing here calls a splitter (WSM-FRG-010). */
+  /** Replies with a payload larger than MAX_FRAME_BYTES; the library fragments it (WSM-FRG-010). */
   private async depth(_peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     this.counters.depths += 1;
     await stream.reply(this.market.depth(symbolOf(payload)));
   }
 
   /**
-   * The stall test. One megabyte, one payload, one stream, and twenty others unaffected.
+   * Replies with about 1 MB as one payload on one stream.
    *
-   * This handler is deliberately unremarkable: the whole demonstration is what the *writer* does with
-   * what it enqueues here, which is to hand the socket back after every 64 KiB fragment so each of the
-   * twenty tick streams gets its turn (WSM-FRG-018/019, WSM-INV-004).
+   * The handler only calls `reply()`. The writer sends the payload in 64 KiB fragments and schedules
+   * frames of the twenty tick streams between them (WSM-FRG-018/019, WSM-INV-004).
    */
   private async export(_peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     this.counters.exports += 1;
@@ -450,26 +420,24 @@ export class MarketService {
 
   // ------------------------------------------------------------------ the diagnostics strip
 
-  /** What the backend knows about itself, asked for over the same socket as everything else. */
+  /** Replies with the counters and the backend's current peer, stream and symbol state. */
   private async stats(peer: Peer, _payload: unknown, stream: Stream): Promise<void> {
     await stream.reply({
       ...this.counters,
       peers: this.registry.peersFor().length,
       streams: peer.streams.size,
       symbols: this.market.symbols,
-      // The board's own period, in seconds because that is what the frontend already reads from the
-      // other backend. The hello ack carries it too, but `connect({hello})` owns that stream and
-      // discards what comes back on it (WSM-RCN-022).
+      // The tick interval in seconds, as the Python backend sends it. The hello reply also carries it,
+      // but `connect({hello})` discards that reply (WSM-RCN-022).
       tick_interval: this.tickInterval / 1000,
     });
   }
 
   /**
-   * Close every peer, so the browser can watch a reconnect it did not cause.
+   * Closes every registered peer after `killDelayMs`, so the browser reconnects.
    *
-   * Scheduled rather than awaited: `close()` sends `goaway`, drains and closes the socket
-   * (WSM-CON-025), and doing that inline would take down the socket this handler's own reply is still
-   * queued on.
+   * The close is scheduled, not awaited: `close()` sends `goaway`, drains and closes the socket
+   * (WSM-CON-025), and running it inline would close the socket this handler's reply is queued on.
    */
   private async kill(_peer: Peer, _payload: unknown, stream: Stream): Promise<void> {
     const peers = this.registry.peersFor();
@@ -483,9 +451,9 @@ export class MarketService {
   private async closeEveryPeer(peers: Peer[]): Promise<void> {
     await sleep(this.killDelay);
     for (const peer of peers) {
-      // The board first. `close()` drains every live stream before it closes the socket (WSM-CON-024),
-      // and the twenty pushed streams are exactly the ones that would never reach an end of their own -
-      // the drain would spend its full window waiting for them.
+      // The board is stopped first. `close()` drains every live stream before closing the socket
+      // (WSM-CON-024), and the twenty tick streams do not end by themselves, so the drain would wait
+      // for its full window.
       this.forget(peer);
       try {
         await peer.close({ code: ResetCode.NO_ERROR, reason: "the demo's kill switch" });

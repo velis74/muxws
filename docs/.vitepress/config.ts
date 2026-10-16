@@ -3,9 +3,7 @@ import { defineConfig } from 'vitepress';
 export default defineConfig({
   title: 'muxws',
   description: 'Multiplexed, cancellable streams over one WebSocket',
-  // The design material under docs/design/ is the record of how muxws was designed, not part of the
-  // published site. It is excluded here rather than moved so the briefs stay next to the code they
-  // describe. See GAPS.md, G-2.
+  // docs/design/ holds design documents that are not part of the published site.
   srcExclude: ['design/**'],
   head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/muxws-icon.svg' }]],
   themeConfig: {
@@ -15,9 +13,8 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/rationale' },
       { text: 'API Reference', link: '/api/' },
     ],
-    // Sidebar order is reading order. The guide opens with why the library exists and a quick start
-    // that works on its own; Concepts is what a reader needs to reason about a running connection;
-    // Integration is what they need to attach it to a particular server, codec or log.
+    // Sidebar order is reading order: Introduction (rationale and quick start), Concepts (behaviour
+    // of a running connection), Integration (servers, codecs, logging).
     sidebar: {
       '/guide/': [
         {
@@ -59,8 +56,8 @@ export default defineConfig({
           ],
         },
       ],
-      // The API pages in reading order: the two ways a connection starts, then the two objects an
-      // application holds, then everything a connection is configured with.
+      // API pages in reading order: `connect` and `accept`, then `Peer` and `Stream`, then the
+      // configuration and supporting types.
       '/api/': [
         {
           text: 'API Reference',
@@ -83,7 +80,7 @@ export default defineConfig({
     socialLinks: [{ icon: 'github', link: 'https://github.com/velis74/muxws' }],
     footer: { message: 'Released under the MIT License.', copyright: 'Copyright © 2025 Jure Erznožnik' },
   },
-  // Deliberately narrow: a dead internal link is a build failure. `docs/check-docs.mjs` asserts this
-  // value has not been widened, and resolves heading anchors as well, which VitePress does not.
+  // Only localhost links are ignored, so a dead internal link fails the build. `docs/check-docs.mjs`
+  // asserts this value and also checks heading anchors, which VitePress does not.
   ignoreDeadLinks: [/^http:\/\/localhost/],
 });

@@ -1,8 +1,7 @@
 """Starlette / FastAPI acceptor.
 
-Imports `starlette` inside the functions that need it, so the package keeps zero required runtime
-dependencies (WSM-PKG-002): installing muxws does not install a web framework, and importing this
-module is how an application says it wants one.
+Imports `starlette` inside the functions that need it, so the package has no required runtime
+dependencies (WSM-PKG-002).
 """
 
 from __future__ import annotations
@@ -48,9 +47,8 @@ class StarletteSocket:
     async def close(self, code: int = 1000, reason: str = "") -> None:
         """Close this side, tolerating a socket that is already disconnected.
 
-        Starlette raises on a second close, so the state is checked first: the protocol requires
-        `close` to be idempotent, and the peer legitimately closes a socket the client has already
-        walked away from.
+        Starlette raises on a second close, so the state is checked first: `close` must be idempotent,
+        and the peer may close a socket the client has already disconnected.
         """
         from starlette.websockets import WebSocketState
 
@@ -61,12 +59,12 @@ class StarletteSocket:
 async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     """Accept the upgrade, or **deny** it with HTTP 400 (WSM-CDC-022/026).
 
-    `accept()` performs the WebSocket accept itself because it is the only party that knows which
-    subprotocol to select; an application that accepted first has taken that decision away.
+    `accept()` performs the WebSocket accept itself because it selects the subprotocol; a socket the
+    application has already accepted raises `ProtocolError`.
 
-    On a mismatch the ASGI denial response goes out *before* any accept. `websocket.close()` before
-    accept renders 403, which is not what WSM-CDC-022 asks for: the upgrade must be refused with no
-    subprotocol selected and a 400.
+    On a mismatch the ASGI denial response is sent instead of an accept, and `CodecMismatch` is
+    raised. `websocket.close()` before accept would answer 403; WSM-CDC-022 requires a 400 with no
+    subprotocol selected.
     """
     from starlette.websockets import WebSocketState
 
@@ -81,9 +79,9 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     if selected is None:
         await websocket.send({"type": "websocket.http.response.start", "status": 400, "headers": []})
         await websocket.send({"type": "websocket.http.response.body", "body": b""})
-        # CodecMismatch rather than a bare ProtocolError: this is the acceptor's half of the same
-        # failure the dialer composes for itself (WSM-CDC-024/029), and `serve()` knows to answer it
-        # with silence because the 400 has already gone out.
+        # CodecMismatch, the same class the dialer raises for this failure (WSM-CDC-024/029).
+        # `serve()` returns quietly on it, because the 400 has already been sent.
+
         raise CodecMismatch(
             f"refused the upgrade: offered {offered!r}, this acceptor speaks {PREFIX}{configured}",
             configured=configured,

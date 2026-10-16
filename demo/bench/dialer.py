@@ -1,18 +1,17 @@
-"""The sending half of one cell. Prints one JSON object on stdout and nothing else.
+"""The sending end of one cell. Prints one JSON object on stdout and nothing else.
 
     python -m demo.bench.dialer --mode M --transport T --codec C --address A --payload N
                                 --streams K --seconds S
 
 The object carries `mode`, `transport`, `codec`, `payload_bytes`, `streams`, `messages` and
-`seconds`; `demo.bench.run_matrix` derives the rates from those and never re-measures anything here.
+`seconds`; `demo.bench.run_matrix` computes the rates from them.
 
-What is counted is what the **acceptor** reports, not what this process handed to a socket: those two
-differ by everything still in flight, and the drain is part of the cost. The warmup is counted too -
-the acceptor cannot tell it apart from the run - so it is subtracted here, where the number is known.
+The message count is the count the acceptor reports, not the number of payloads written to the
+socket; the two differ by the data in flight, and draining it is part of the measured time. The
+acceptor also counts warmup payloads, so this process subtracts them.
 
-The three modes reach the same shape through three different channels: `send()` once per payload,
-then a termination handshake whose answer is the count. The clock covers the sending and the
-handshake both.
+All three modes work the same way: `send()` once per payload, then a termination handshake whose
+reply is the count. The clock covers both the sending and the handshake.
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ from demo.bench import (
 
 
 class FramedChannel:
-    """One raw-socket connection: a length prefix, the payload, and a drain that is the backpressure."""
+    """One raw-socket connection: a length prefix and the payload, with `drain()` as backpressure."""
 
     #: Payloads the acceptor has already counted before the warmup begins.
     presends = 0
@@ -53,7 +52,7 @@ class FramedChannel:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, body: bytes) -> None:
         self._reader = reader
         self._writer = writer
-        #: Prefix and payload in one buffer, so a payload is one write rather than two.
+        #: Prefix and payload in one buffer, so each payload is a single write.
         self._frame = len(body).to_bytes(LENGTH_PREFIX_BYTES, "big") + body
 
     async def send(self) -> None:
@@ -61,7 +60,7 @@ class FramedChannel:
         await self._writer.drain()
 
     async def quiesce(self) -> None:
-        """`send()` already waited on the socket for every payload; this is the last of them."""
+        """Drain the writer; `send()` has already drained after every earlier payload."""
         await self._writer.drain()
 
     async def finish(self) -> int:
@@ -80,14 +79,14 @@ class WebSocketChannel:
     def __init__(self, connection: Any, data: str | bytes) -> None:
         self._connection = connection
         self._data = data
-        #: Text under a text codec, bytes under a binary one - the terminator does not change medium.
+        #: Text under a text codec, bytes under a binary one, like the payload messages.
         self._sentinel = SENTINEL_BYTES if isinstance(data, bytes) else SENTINEL_TEXT
 
     async def send(self) -> None:
         await self._connection.send(self._data)
 
     async def quiesce(self) -> None:
-        """Nothing is outstanding: `websockets` drains inside `send()` before it returns."""
+        """No-op: `websockets` drains inside `send()` before it returns."""
 
     async def finish(self) -> int:
         await self._connection.send(self._sentinel)
@@ -95,7 +94,7 @@ class WebSocketChannel:
 
 
 class MuxwsChannel:
-    """One muxws stream: `open()` carried the first payload, `send()` carries the rest."""
+    """One muxws stream: `open()` sends the first payload, `send()` the rest."""
 
     #: The `open` payload, which the acceptor counts like any other.
     presends = 1
@@ -119,15 +118,15 @@ class MuxwsChannel:
 
 
 class SendWindow:
-    """A cap on the payloads sitting between `send()` and the socket, one window for the whole peer.
+    """A limit on the payloads between `send()` and the socket, shared by all streams of the peer.
 
-    `Stream.send()` enqueues and returns, so a loop that only sends measures the writer's queue
-    rather than the wire, and at 256 KiB a payload that queue is the machine's memory. Waiting here
-    is what `drain()` gives the other two modes. The count comes from the peer's own frame hook, over
-    `data` frames: a fragmented payload is many of them and exactly one carries `more=False`.
+    `Stream.send()` enqueues and returns, so a loop that only sends measures the writer's queue, which
+    at 256 KiB per payload grows without bound. Waiting here gives the same backpressure `drain()`
+    gives the other two modes. Written payloads are counted from the peer's frame hook over `data`
+    frames: a fragmented payload has many, and exactly one carries `more=False`.
 
-    The same enqueueing is why a lost connection has to be an exit of its own. Frames stop being
-    written and nothing raises, so a wait keyed on the count alone would never end.
+    After a lost connection frames are not written and `send()` does not raise, so the wait
+    also ends when the peer reports a close.
     """
 
     def __init__(self, peer: Any, payload_bytes: int) -> None:
@@ -139,15 +138,12 @@ class SendWindow:
         peer.on_close(self._note_loss)
 
     def _note(self, direction: str, frame: Any, _length: int) -> None:
-        # `data` frames alone. An `open` carries a payload that `_sent` never counted and a ping is
-        # not a payload at all, so counting either would widen the window by however many of them the
-        # run happened to send.
+        # Only `data` frames: `_sent` does not count the `open` payload, and a ping is not a payload.
         if direction == "tx" and frame.type == "data" and not frame.more:
             self._written += 1
 
     def _note_loss(self, reason: Any) -> None:
-        # `send()` enqueues, so a lost connection reaches this loop as frames that stop being
-        # written rather than as an exception. Without this the wait below is unbounded.
+        # `send()` only enqueues, so a lost connection raises nothing there; this ends the wait below.
         self._lost = ConnectionError(f"the connection was lost before the run ended: {reason}")
 
     async def wait_for_room(self) -> None:
@@ -166,11 +162,10 @@ class SendWindow:
 
 
 async def measure(channels: list[Any], seconds: float) -> tuple[int, float]:
-    """Warm every channel, send for `seconds`, terminate, and wait to be told what arrived."""
+    """Warm every channel, send for `seconds`, terminate, and return the acceptor's count and the time."""
     warmed = await asyncio.gather(*(warm(channel) for channel in channels))
-    # Emptied before the clock starts. Draining is inside the measured interval by design, but a
-    # backlog left by the warmup is time charged to payloads that are then subtracted from the count,
-    # and the backlog is a different size in every mode.
+    # Drained before the clock starts. The final drain is part of the measured time, but the warmup
+    # backlog is not: its payloads are subtracted from the count, and its size differs between modes.
     await asyncio.gather(*(channel.quiesce() for channel in channels))
 
     started = time.perf_counter()
@@ -183,7 +178,7 @@ async def measure(channels: list[Any], seconds: float) -> tuple[int, float]:
 
 
 async def warm(channel: Any) -> int:
-    """Fill the pipe, and report how many payloads that took - the acceptor counts those too."""
+    """Send for `WARMUP_SECONDS` and return the number of payloads sent; the acceptor counts them too."""
     sent = 0
     deadline = time.perf_counter() + WARMUP_SECONDS
     while time.perf_counter() < deadline:
@@ -193,14 +188,14 @@ async def warm(channel: Any) -> int:
 
 
 async def pump(channel: Any, deadline: float) -> int:
-    """Send until the budget is spent, then terminate the run and return the acceptor's count."""
+    """Send until `deadline`, then terminate the run and return the acceptor's count."""
     while time.perf_counter() < deadline:
         await channel.send()
     return await channel.finish()
 
 
 async def run_raw_socket(options: argparse.Namespace, data: str | bytes, _payload: Any) -> tuple[int, float]:
-    """One connection per stream, carrying the codec's own bytes with a length prefix in front."""
+    """One connection per stream, sending the codec's encoded bytes with a length prefix."""
     body = data.encode("utf-8") if isinstance(data, str) else data
     channels = []
     for _ in range(options.streams):
@@ -216,8 +211,8 @@ async def run_raw_socket(options: argparse.Namespace, data: str | bytes, _payloa
 async def run_raw_websocket(options: argparse.Namespace, data: str | bytes, _payload: Any) -> tuple[int, float]:
     """One connection per stream, one WebSocket message per payload. Text under a text codec.
 
-    `compression=None` on this end as well as the acceptor's: the acceptor is what decides the
-    extension, and offering one it will refuse only puts a line in the handshake.
+    `compression=None` on this end as well: the acceptor refuses the extension, so offering it only
+    adds a header to the handshake.
     """
     from websockets.asyncio.client import connect, unix_connect
 
@@ -236,15 +231,14 @@ async def run_raw_websocket(options: argparse.Namespace, data: str | bytes, _pay
 
 
 async def run_muxws(options: argparse.Namespace, data: str | bytes, payload: Any) -> tuple[int, float]:
-    """One connection, one stream per stream, and the library's own `open()`/`send()`.
+    """One connection with `streams` muxws streams, using `open()`/`send()`.
 
-    The payload object, not its encoding: this is the one mode where the codec is muxws's to call.
+    Sends the payload object, not its encoding: in this mode muxws calls the codec.
     """
     from muxws import connect, Reconnect
 
-    # `max_attempts=0`: a cell whose acceptor died is over. With the default schedule the peer
-    # redials the dead address forever, `send()` goes on enqueueing, and the run has nothing left
-    # that could end it.
+    # `max_attempts=0`: a cell whose acceptor died ends. With the default schedule the peer redials
+    # indefinitely, `send()` keeps enqueueing, and the run never ends.
     peer = await connect(
         muxws_url(options.transport, options.address),
         codec=bench_codec(options.codec),
@@ -258,7 +252,7 @@ async def run_muxws(options: argparse.Namespace, data: str | bytes, payload: Any
         await peer.close()
 
 
-#: One coroutine per mode, all three with the same signature so the caller has no branch of its own.
+#: One coroutine per mode, all with the same signature.
 RUNNERS = {
     "raw-socket": run_raw_socket,
     "raw-websocket": run_raw_websocket,
@@ -279,7 +273,7 @@ def main(argv: list[str] | None = None) -> None:
                 "mode": options.mode,
                 "transport": options.transport,
                 "codec": options.codec,
-                # The length achieved, not the one asked for: it is what every rate is computed from.
+                # The length achieved, not the one requested; the rates are computed from it.
                 "payload_bytes": encoded_length(data),
                 "streams": options.streams,
                 "messages": messages,

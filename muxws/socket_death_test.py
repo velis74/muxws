@@ -18,8 +18,8 @@ from muxws.transports.memory import memory_pair
 async def test_second_await_after_death_returns_the_same_error(make_pair):
     """WSM-RCN-041/WSM-API-010: the memoized future is resolved **once**.
 
-    A second await that hung, or that raised something different, would mean the failure had been
-    delivered rather than recorded.
+    A second await raises the same exception immediately; the failure is stored on the future, not
+    delivered once.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -40,7 +40,7 @@ async def test_second_await_after_death_returns_the_same_error(make_pair):
 
 
 async def test_async_for_raises_rather_than_terminating_normally(make_pair):
-    """WSM-RCN-041: a clean end would read as 'the export finished', which is a lie."""
+    """WSM-RCN-041: iteration raises, because a normal end would indicate that the stream completed."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -73,10 +73,9 @@ async def test_async_for_raises_rather_than_terminating_normally(make_pair):
 async def test_cancel_and_reset_are_noops_after_death(make_pair):
     """WSM-RCN-041: no-ops, not errors, and not sends.
 
-    A stream is already closed by the time an application gets round to cancelling it, and the socket
-    it would have been cancelled on is gone. Raising here would make orderly cleanup - a `finally`
-    that cancels whatever it holds - into a second failure on top of the one that already happened,
-    and sending would be writing to a socket this peer has declared dead.
+    After socket death the stream is already closed and the socket is gone. Raising here would turn
+    cleanup code (a `finally` that cancels every stream it holds) into a second failure, and sending
+    would write to a socket the peer has declared dead.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -90,7 +89,7 @@ async def test_cancel_and_reset_are_noops_after_death(make_pair):
 
         await stream.cancel("changed my mind")
         await stream.reset(ResetCode.NO_ERROR)
-        # Twice, because a no-op that only holds the first time is a no-op nobody can rely on.
+        # Twice: the calls remain no-ops when repeated.
         await stream.cancel()
         await stream.reset(ResetCode.INTERNAL_ERROR)
 
@@ -113,7 +112,7 @@ async def test_is_open_false_for_the_whole_gap(make_pair):
         await pair.settle()
         assert pair.dialer.is_open is False
 
-        # A socket handed over is not yet an established connection - but it is what ends the gap.
+        # Adopting a socket ends the gap: `is_open` is true from `_adopt_socket()` on.
         left, _ = memory_pair()
         pair.dialer._adopt_socket(left)
         assert pair.dialer.is_open is True
@@ -148,7 +147,7 @@ async def test_on_close_fires_once_per_loss_with_correct_will_retry(make_pair):
 
 
 async def test_will_retry_follows_the_helpers_intention(make_pair):
-    """WSM-RCN-040: false only when `max_attempts` is exhausted or `close()` was deliberate."""
+    """WSM-RCN-040: false only when `max_attempts` is exhausted or the application called `close()`."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     seen: list[CloseReason] = []
@@ -221,10 +220,10 @@ async def test_peer_id_advances_on_every_reconnect(make_pair):
 
 
 async def test_tags_do_not_survive_on_the_acceptor_side(make_pair):
-    """WSM-RCN-033/WSM-INV-014: a tab that silenced something and died must not silence a successor.
+    """WSM-RCN-033/WSM-INV-014: tags set on a closed connection do not apply to its successor.
 
-    On the acceptor side a reconnect is a **new peer object**, so this is a statement about what the
-    acceptor builds rather than about what it clears.
+    On the acceptor side a reconnect is a new peer object, so the test checks the tags of the new
+    peer, not the clearing of the old one.
     """
     first = make_pair()
     first.acceptor.tags["muted"] = True
@@ -237,11 +236,11 @@ async def test_tags_do_not_survive_on_the_acceptor_side(make_pair):
 async def test_a_reconnect_clears_the_dead_sockets_exhaustion_shutdown(make_pair):
     """WSM-SID-007/WSM-RCN-031: the new socket's id space starts empty, so its shutdown does too.
 
-    Running out of stream ids schedules an orderly shutdown and remembers the task so a second
-    `open()` cannot schedule a second one. That memory belongs to the socket that ran out, not to the
-    `Peer`: carried into the next connection it makes `_begin_exhaustion_shutdown()` a no-op there,
-    and a connection that exhausts its ids never says goodbye and never closes - it simply refuses
-    every `open()` from then on, looking healthy the whole time.
+    Running out of stream ids schedules an orderly shutdown and stores the task so a second `open()`
+    does not schedule another. The stored task belongs to the socket that ran out, not to the `Peer`.
+    If it carried into the next connection, `_begin_exhaustion_shutdown()` would be a no-op there,
+    and a connection that exhausts its ids would never send `goaway` or close; it would refuse every
+    `open()` while `is_open` stays true.
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -265,9 +264,9 @@ async def test_a_reconnect_clears_the_dead_sockets_exhaustion_shutdown(make_pair
         assert pair.dialer._exhaustion_task is not None
         assert pair.dialer._exhaustion_task is not first, "and the new socket schedules its own"
     finally:
-        # Nothing is serving `fresh`, so the second shutdown would sit out its whole drain window
-        # waiting for a stream no read loop will ever end (WSM-CON-024). That it *started* is the
-        # assertion; running it out is `test_id_exhaustion_sends_goaway_drains_and_closes`'s job.
+        # Nothing serves `fresh`, so the second shutdown would wait out its whole drain window for a
+        # stream no read loop ends (WSM-CON-024). The test asserts only that it started;
+        # `test_id_exhaustion_sends_goaway_drains_and_closes` covers the full shutdown.
         second = pair.dialer._exhaustion_task
         if second is not None:
             second.cancel()
@@ -298,9 +297,9 @@ async def _hold(payload: Any, stream: Stream) -> None:
 async def test_a_new_socket_may_report_its_own_final_close(make_pair):
     """WSM-RCN-044 is per connection, not per `Peer` object.
 
-    The latch that stops one loss being reported twice must not outlive the connection it was set on.
-    A `Peer` handed a fresh socket after a `will_retry=False` close is a new connection, and its next
-    loss is a loss nobody has heard about - left unreset, it is reported to nobody at all.
+    The flag that prevents reporting one loss twice is reset with each connection. A `Peer` given a
+    new socket after a `will_retry=False` close has a new connection, and its next loss is reported;
+    if the flag were not reset, that loss would not be reported.
     """
     pair = make_pair()
     closes: list[CloseReason] = []

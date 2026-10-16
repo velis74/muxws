@@ -1,9 +1,9 @@
 /**
  * `peer.tags` and `PeerRegistry` (§9.5).
  *
- * A mirror of `muxws/registry_test.py`, test for test. The registry **indexes**; it does not watch,
- * and WSM-REG-013/014 exist to make a plain object provably the right choice for `tags` - so the
- * assertions below are as much about what the registry declines to do as about what it does.
+ * Mirrors `muxws/registry_test.py` test for test. The registry indexes `tags` when `register` is
+ * called; it does not observe later writes (WSM-REG-013/014), so `tags` is a plain object. The
+ * assertions below cover both what the registry does and what it does not do.
  */
 
 import { readFileSync } from 'node:fs';
@@ -66,12 +66,10 @@ async function until(predicate: () => boolean, timeoutMs = 3000, what = 'the con
 }
 
 /**
- * A dialable acceptor with no socket anywhere - `reconnect.spec.ts`'s rig, cut down to what a
- * registry test needs.
+ * A dialable acceptor without a real socket; a reduced version of the `reconnect.spec.ts` harness.
  *
- * WSM-RCN-033 is a claim about what a **reconnect** leaves behind, so the only honest way to assert
- * it is to drive a real one: two peers built side by side would prove nothing that `tags = {}` in the
- * constructor does not already prove.
+ * WSM-RCN-033 concerns the state after a reconnect, so the test drives a real reconnect. Two peers
+ * constructed separately would only test that the constructor sets `tags = {}`.
  */
 class FakeServer {
   readonly acceptors: Peer[] = [];
@@ -90,7 +88,7 @@ class FakeServer {
     return dialerSide;
   };
 
-  /** Socket death, from the server's side. */
+  /** Closes the socket from the server side. */
   drop(): void {
     this.acceptorSockets[this.acceptorSockets.length - 1]?.drop();
   }
@@ -112,18 +110,17 @@ describe('peer.tags', () => {
     peer.tags.session = 'abc';
     peer.tags.session = 'def';
     // Last write wins, with no copy and no snapshot in the read path: `tags` is a plain object, and
-    // WSM-REG-003 is what forbids the proxy an implementation is tempted to reach for.
+    // WSM-REG-003 forbids a proxy.
     expect(peer.tags.session).toBe('def');
     peer.tags.anything = { nested: true };
     expect(Object.getPrototypeOf(peer.tags)).toBe(Object.prototype);
   });
 
   it('starts empty on the peer a reconnect produces on the acceptor side - WSM-RCN-033/WSM-INV-014', async () => {
-    // Driven through the real reconnect driver rather than by building two peers by hand: the claim
-    // is about what a *reconnect* leaves behind. The acceptor never learns that the socket it just
-    // accepted belongs to the client that was here a moment ago, so there is nowhere for the old
-    // peer's tags to come from unless an implementation deliberately carries them - and a tab that
-    // silenced something and then died would keep a successor silent that never asked to be.
+    // Uses the real reconnect driver, because the rule concerns the state after a reconnect. The
+    // acceptor does not know that the new socket belongs to the previous client, so the old peer's
+    // tags could reach the new peer only if an implementation copied them. Copying would, for
+    // example, carry a mute set by a tab that has since disconnected to its successor.
     const server = new FakeServer();
     server.handler = (payload) => {
       const acceptor = server.acceptors[server.acceptors.length - 1];
@@ -144,7 +141,7 @@ describe('peer.tags', () => {
     loop.start();
 
     try {
-      // Something the *application* wrote on this connection, which no hello ever replays.
+      // A tag the application wrote on this connection; no hello replays it.
       const first = server.acceptors[0];
       first.tags.muted = true;
       registry.register(first);
@@ -157,7 +154,7 @@ describe('peer.tags', () => {
       expect(successor, 'the acceptor side of a reconnect is a new peer object').not.toBe(first);
       expect(successor.tags, 'carrying only what this connection itself set').toEqual({ tab: 'abc' });
 
-      // And the dead connection's index entries went with it, so nothing finds it either.
+      // The closed connection's index entries are removed as well.
       await until(() => registry.peersFor({ tab: 'abc' }).length === 1, 3000, 'the successor in the index');
       expect(registry.peersFor({ tab: 'abc' })).toEqual([successor]);
       expect(registry.peersFor({ muted: true }), 'a silenced tab must not silence its successor').toEqual([]);
@@ -175,7 +172,7 @@ describe('register', () => {
     Object.assign(peer.tags, { session: 'abc', tenant: 7, role: 'admin' });
     registry.register(peer);
 
-    // It has no notion of which keys matter, so all three answer.
+    // The registry indexes every key, so all three lookups find the peer.
     expect(registry.peersFor({ session: 'abc' })).toEqual([peer]);
     expect(registry.peersFor({ tenant: 7 })).toEqual([peer]);
     expect(registry.peersFor({ role: 'admin' })).toEqual([peer]);
@@ -185,8 +182,7 @@ describe('register', () => {
     const peer = makePair().dialer;
     Object.assign(peer.tags, { session: 'abc', profile: { deep: true }, seen: [1, 2] });
 
-    // Must not throw: the peer is simply not findable by that key, which is strictly better than a
-    // registration that fails because one unrelated tag happened to hold an object.
+    // Must not throw: the peer is not findable by that key, and the other tags are still indexed.
     registry.register(peer);
 
     expect(registry.peersFor({ session: 'abc' })).toEqual([peer]);
@@ -236,9 +232,9 @@ describe('register', () => {
   });
 
   it('keys the index by name and value, so two tags cannot collide into one bucket', () => {
-    // A string-concatenated key would put ('a', 1) and ('a1', undefined) in the same bucket, and the
-    // registry would answer `peersFor({ a: 1 })` with a peer that never carried that tag. The
-    // two-level `Map` is what makes that unrepresentable rather than merely unlikely.
+    // A string-concatenated key would put ('a', 1) and ('a1', undefined) in the same bucket, and
+    // `peersFor({ a: 1 })` would return a peer without that tag. The two-level `Map` makes such a
+    // collision impossible.
     const one = makePair().dialer;
     const other = makePair().dialer;
     one.tags.a = 1;
@@ -261,9 +257,9 @@ describe('peersFor', () => {
       peer.tags.room = 'lobby';
       peers.push(peer);
     }
-    // Registered youngest-first, so insertion order is the reverse of id order. A registry that
-    // returned whatever order its `Set` happened to hold would pass a test that registered them in
-    // order and fail this one - which is the difference between "stable" and "stable by accident".
+    // Registered newest-first, so insertion order is the reverse of id order. A registry that
+    // returned its `Set` insertion order would pass a test that registered peers in id order and
+    // fail this one.
     [...peers].reverse().forEach((peer) => registry.register(peer));
 
     const first = registry.peersFor({ room: 'lobby' });
@@ -283,8 +279,8 @@ describe('peersFor', () => {
 
     expect(registry.peersFor({ room: 'lobby', role: 'admin' })).toEqual([both]);
     expect(registry.peersFor({ room: 'lobby' })).toHaveLength(2);
-    // A key nobody carries, and a pair of keys both of which somebody carries but nobody carries
-    // together: two different ways of not matching, and both must answer with nothing.
+    // A key no peer has, and two keys that some peers have but no peer has together: both lookups
+    // must return an empty array.
     expect(registry.peersFor({ room: 'lobby', role: 'nobody' })).toEqual([]);
     const elsewhere = makePair().dialer;
     Object.assign(elsewhere.tags, { room: 'attic', role: 'auditor' });
@@ -322,7 +318,7 @@ describe('the registry lifetime', () => {
 
     expect(registry.peersFor({ session: 'abc' })).toEqual([pair.dialer]);
 
-    // Via the peer's own close hook - a consumer never has to prune the index.
+    // Removed through the peer's close hook; the consumer does not remove it.
     pair.dialerSocket.drop();
     await settle();
     await serving.catch(() => undefined);
@@ -350,12 +346,11 @@ describe('the registry lifetime', () => {
     expect(registry.peersFor({ session: 'abc' }), 'a throwing body must still deregister').toEqual([]);
   });
 
-  it('costs the peer no bookkeeping when it is re-registered - WSM-REG-001/012/017', () => {
+  it('adds no close handler to the peer when it is re-registered - WSM-REG-001/012/017', () => {
     // WSM-REG-017 tells a consumer that both looks up and mutates one key to call `register(peer)`
-    // after every write, so this is the documented pattern rather than a pathological one. A hook
-    // appended per call would leave a long-lived peer carrying one close handler per write, all of
-    // them doing the same already-idempotent deregistration, and nothing anywhere would look wrong -
-    // `Peer` has no way to remove a handler once it is on.
+    // after every write. A close handler added per call would leave a long-lived peer with one
+    // handler per write, each performing the same idempotent deregistration; `Peer` has no way to
+    // remove a handler.
     const peer = makePair().dialer;
     const hooked = vi.spyOn(peer, 'onClose');
 
@@ -381,8 +376,8 @@ describe('the registry lifetime', () => {
   });
 
   it('ships no cross-process backplane - WSM-REG-018', () => {
-    // Per-process, and nothing in this module reaches further. Asserted on the imports rather than on
-    // the prose, so a comment mentioning Redis cannot fail it and an actual dependency cannot pass.
+    // The registry is per-process. Asserted on the imports, not on the source text, so a comment
+    // mentioning Redis does not fail the test and an actual dependency does.
     const source = readFileSync(join(process.cwd(), 'ts', 'registry.ts'), 'utf8');
     const imported = [...source.matchAll(/^import\s.*?from\s+'([^']+)';$/gm)].map((match) => match[1]);
     expect(imported).toEqual(['./peer']);

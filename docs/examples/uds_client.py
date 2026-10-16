@@ -3,12 +3,12 @@
 Start `uds_server.py` first, then run `python uds_client.py`. The URL is
 `ws+unix://<tempdir>/muxws.sock:/ws` unless the `MUXWS_URL` environment variable says otherwise.
 
-There is no new argument, no adapter to choose and no second dialer: `connect()` reads the scheme off
-the URL, and everything after it - the codec offered at the handshake, the `CodecMismatch` an HTTP 400
-turns into, the heartbeat, the reconnect loop - is the code that already ran over TCP. Read the URL by
-splitting the path on the **first** colon: `/tmp/muxws.sock` is the file to open and `/ws` is the HTTP
-request target inside the upgrade. There is no `wss+unix://`: a filesystem socket is not reachable
-from another machine, and the socket's own permissions are the access control.
+`connect()` selects the transport from the URL scheme; no extra argument or adapter is needed. The
+codec offer at the handshake, the `CodecMismatch` raised for HTTP 400, the heartbeat and the reconnect
+loop use the same code as over TCP. The path is split at the first colon: `/tmp/muxws.sock` is the
+file to open and `/ws` is the HTTP request target of the upgrade. There is no `wss+unix://`: a
+filesystem socket is not reachable from another machine, and the socket file's permissions control
+access.
 """
 
 import asyncio
@@ -24,7 +24,7 @@ URL = os.environ.get("MUXWS_URL", f"ws+unix://{DEFAULT_SOCKET}:/ws")
 async def main() -> None:
     peer = await connect(URL)
     try:
-        # Unary, streaming: the two call shapes of the quick start, over a socket that is a file.
+        # The quick start's two call shapes, unary and streaming, over a Unix socket.
         answer = await peer.request({"say": "hello"})
         print(f"greeting: {answer['greeting']}")
 
@@ -32,9 +32,9 @@ async def main() -> None:
         async for chunk in stream:
             print(f"chunk {chunk['chunk']} of {chunk['of']}")
 
-        # The heartbeat is a muxws `ping` frame and travels the same way here. Its round-trip time is
-        # a measurement of the machine that ran it, so what gets printed is that a pong came back at
-        # all - a line carrying milliseconds could not be the fixture the guide asserts byte for byte.
+        # The heartbeat is a muxws `ping` frame, sent over the same socket. Only the arrival of the pong
+        # is printed: the round-trip time varies between runs, and the guide compares this output
+        # exactly.
         await peer.ping()
         print("ping: answered")
     finally:

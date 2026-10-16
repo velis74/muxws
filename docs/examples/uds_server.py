@@ -1,21 +1,18 @@
 """Unix-domain-socket acceptor: `unix_serve`, one muxws peer, and the caller named by the kernel.
 
 Run it with `python uds_server.py`. It binds `<tempdir>/muxws.sock` unless the `MUXWS_SOCKET`
-environment variable says otherwise - the documentation test binds it inside a short temporary
-directory that way, because a Unix socket path is capped at about 108 bytes and a longer one raises
-`OSError: AF_UNIX path too long` out of `bind()`, which names the reason but not the component to
-shorten.
+environment variable says otherwise. The documentation test sets it to a path in a short temporary
+directory: a Unix socket path is limited to about 108 bytes, and `bind()` raises
+`OSError: AF_UNIX path too long` for a longer one.
 
-Nothing about muxws changes here. `unix_serve` performs the same HTTP GET + Upgrade as
-`websockets.serve`, `select_subprotocol` is the same hook selecting the same `muxws.v1.<codec>`
-value, `accept()` wraps the connection in the same `WebsocketsSocket`, and a dialer offering a codec
-this acceptor does not speak is still refused with HTTP 400 before anything is accepted. The socket
-underneath is a file; that is the entire difference.
+The muxws code is the same as over TCP. `unix_serve` performs the same HTTP GET + Upgrade as
+`websockets.serve`, `select_subprotocol` selects the same `muxws.v1.<codec>` value, `accept()` wraps
+the connection in the same `WebsocketsSocket`, and a dialer offering an unsupported codec is refused
+with HTTP 400 before anything is accepted. Only the underlying socket differs.
 
-What the file buys is the `accepted a dialer:` line. The socket's own filesystem permissions decide
-who may connect at all, and `SO_PEERCRED` hands the acceptor the caller's pid, uid and gid straight
-from the kernel - so this connection is authenticated at the upgrade, before `accept()`, with no
-credential anywhere on the wire and nothing for the dialer to forge.
+The Unix socket adds the `accepted a dialer:` line. The socket file's permissions decide who may
+connect, and `SO_PEERCRED` gives the acceptor the caller's pid, uid and gid from the kernel. The
+connection is authenticated at the upgrade, before `accept()`, without a credential on the wire.
 """
 
 import asyncio
@@ -31,37 +28,35 @@ from websockets.asyncio.server import unix_serve
 
 from muxws import accept, select_subprotocol, Stream
 
-#: The socket file this acceptor binds. Kept short on purpose - see the note about 108 bytes above.
+#: The socket file this acceptor binds. Keep it short; see the 108-byte limit above.
 SOCKET_PATH = os.environ.get("MUXWS_SOCKET", os.path.join(tempfile.gettempdir(), "muxws.sock"))
 
 
 async def on_stream(payload: object, stream: Stream) -> None:
-    """The one incoming-stream handler - the same one the TCP quick start registers, unchanged."""
+    """The incoming-stream handler; the same as the TCP quick start's, apart from the greeting."""
     if isinstance(payload, dict) and payload.get("say") == "hello":
         # Unary: one payload and the end of the stream in a single call.
         await stream.reply({"greeting": "hello over a unix socket"})
         return
 
     if isinstance(payload, dict) and isinstance(payload.get("count"), int):
-        # Streaming response: as many payloads as we like, then an end.
+        # Streaming response: any number of payloads, then an end.
         total = payload["count"]
         for n in range(1, total + 1):
             await stream.send({"chunk": n, "of": total})
         await stream.end()
         return
 
-    # Anything else is acknowledged simply by returning: muxws ends a stream its handler left open.
+    # Any other stream is acknowledged by returning: muxws ends a stream its handler left open.
 
 
 def peer_credentials(connection: object) -> str:
     """The dialer's pid, uid and gid as the kernel reports them, or why they are unavailable.
 
-    `SO_PEERCRED` is a Linux socket option; macOS and the BSDs answer part of it through
-    `getpeereid()` — the uid and the gid, not the pid — which Python does not expose, and no other
-    transport muxws ships can answer it at all. Degrading to a string rather than raising is
-    deliberate: the credential is a bonus this transport happens to offer, and an acceptor that
-    crashed on a platform without it would make the example unrunnable on machines where the rest of
-    the file works perfectly.
+    `SO_PEERCRED` is a Linux socket option. macOS and the BSDs provide the uid and gid, but not the
+    pid, through `getpeereid()`, which Python does not expose; no other muxws transport provides peer
+    credentials. Where they are unavailable this returns a message instead of raising, so the example
+    runs on those platforms.
     """
     transport = getattr(connection, "transport", None)
     raw = transport.get_extra_info("socket") if transport is not None else None
@@ -75,7 +70,7 @@ def peer_credentials(connection: object) -> str:
 
 
 async def handle(connection: object) -> None:
-    """One connection, one peer. `unix_serve` calls this once per dialer, exactly as `serve` would."""
+    """One connection, one peer. `unix_serve` calls this once per dialer, as `serve` does."""
     print(f"accepted a dialer: {peer_credentials(connection)}", flush=True)
     peer = await accept(connection)
     peer.on_stream(on_stream)
@@ -83,17 +78,16 @@ async def handle(connection: object) -> None:
 
 
 def is_stale(path: str) -> bool:
-    """True when `path` is a socket file nobody is listening on - the corpse a killed run leaves.
+    """True when `path` is a socket file with no listener, as left behind by a killed acceptor.
 
-    A socket file outlives the process that bound it, so the next `bind()` fails with `EADDRINUSE`
-    until someone removes it. Removing it unconditionally would take the socket away from an acceptor
-    that is alive and serving, leaving two processes reachable under one path with no way for a
-    dialer to tell which it got. Connecting first answers that: a corpse refuses, a live acceptor
-    accepts.
+    A socket file remains after the process that bound it exits, and the next `bind()` fails with
+    `EADDRINUSE` until it is removed. Removing it unconditionally would detach a running acceptor
+    from its path. A connection attempt distinguishes the cases: it is refused when no process
+    listens, and accepted by a running acceptor.
 
-    The inode type is checked before the probe, because `connect()` on a regular file or a directory
-    also fails with `ECONNREFUSED`: a probe alone would report `MUXWS_SOCKET=~/notes.txt` as a corpse
-    and delete it. A path that is not a socket is never something this process may unlink.
+    The file type is checked before the connection attempt, because `connect()` on a regular file or
+    a directory also fails with `ECONNREFUSED`. A path that is not a socket exits with an error and is
+    never removed.
     """
     if not os.path.exists(path):
         return False

@@ -37,13 +37,12 @@ def test_json_is_registered_by_the_library():
 
 
 def test_codec_module_does_not_register_itself_on_import():
-    """WSM-CDC-014: a side-effecting import can never be tree-shaken out, so there must not be one.
+    """WSM-CDC-014: a codec module has no import side effect, because a side-effecting import cannot be tree-shaken.
 
     The rule is about a *codec module* carrying a registration call at module scope. It cannot be
     observed by importing one and inspecting the registry, because in Python importing
-    `muxws.codecs.json_` necessarily executes `muxws/__init__.py` first - and that file registers
-    JSON deliberately, as WSM-CDC-004 requires it to. The two rules are only separable by looking at
-    where the call is written, which is what this reads the source for. See GAPS.md.
+    `muxws.codecs.json_` executes `muxws/__init__.py` first, and that file registers JSON, as
+    WSM-CDC-004 requires. The test reads the source to check where the call is written.
     """
     import muxws.codecs.json_ as json_module
 
@@ -62,14 +61,14 @@ def test_codec_module_does_not_register_itself_on_import():
 
 
 def test_the_library_is_what_registers_json_not_the_codec_module():
-    """WSM-CDC-004 and WSM-CDC-014 pull in opposite directions; `muxws/__init__.py` is where they meet."""
+    """WSM-CDC-004 and WSM-CDC-014: `muxws/__init__.py` registers JSON; the codec module does not."""
     import muxws
 
     assert 'register_codec("json"' in inspect.getsource(muxws)
 
 
 def test_a_fresh_interpreter_that_never_imports_muxws_has_no_registry():
-    """The registry is process state built by explicit calls, not by anything ambient."""
+    """The registry is process state built by explicit calls only."""
     program = "import sys;print('muxws' in sys.modules)"
     # S603: the argument vector is this interpreter plus a literal program - nothing untrusted.
     result = subprocess.run(  # noqa: S603

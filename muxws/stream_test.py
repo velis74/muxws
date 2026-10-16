@@ -80,7 +80,7 @@ CELL_IDS = [f"{state}-{event}" for state, event in STATE_TABLE]
 
 
 def test_the_table_has_forty_five_cells():
-    """Five states by nine events. A shrinking table is a shrinking test suite."""
+    """Five states by nine events; the table has exactly 45 cells."""
     assert len(STATE_TABLE) == 45
 
 
@@ -115,8 +115,8 @@ async def test_every_state_table_cell(cell: tuple[str, str], outcome: str, make_
     """WSM-STM-010: every row, including every illegal cell."""
     state, event = cell
 
-    # `idle` exists only inside the indivisible allocate-and-enqueue step of WSM-SID-006, and the
-    # three `n/r` cells are the ones that would need a caller to reach inside it.
+    # `idle` exists only inside the indivisible allocate-and-enqueue step of WSM-SID-006; the three
+    # `n/r` cells are reachable only from inside that step.
     if state == "idle":
         pair = make_pair()
         pair.start()
@@ -153,9 +153,9 @@ async def _assert_idle_cell(pair: Pair, event: str, outcome: str) -> None:
         return
     if outcome == "n/r":
         # `idle` exists only inside the indivisible allocate-and-enqueue step (WSM-SID-006), so the
-        # cell is unreachable exactly when no stream the public API can hand out is ever in it.
-        # `open()` being synchronous is what makes that true: there is no suspension point at which
-        # a caller could be given a stream that has not yet been enqueued.
+        # cell is unreachable when no stream returned by the public API is in it. `open()` is
+        # synchronous, so it has no suspension point at which a caller could receive a stream that
+        # is not yet enqueued.
         assert not inspect.iscoroutinefunction(Peer.open)
 
         seen: list[Stream] = []
@@ -215,8 +215,8 @@ async def _assert_cell(pair: Pair, stream: Stream, event: str, outcome: str) -> 
     acceptor = pair.acceptor
 
     if event == "send_open":
-        # `open` is a peer-level call; a stream never re-opens. The RAISE column is about the stream
-        # already existing, which the allocator makes impossible - so assert the id never repeats.
+        # `open` is a peer-level call; a stream is never re-opened. The RAISE cell covers an id that
+        # already exists, which the allocator does not produce, so the test asserts the id is new.
         second = pair.dialer.open({"n": 2})
         assert second.id != stream.id
         return
@@ -297,7 +297,7 @@ async def test_id_readable_immediately_after_open(pair: Pair):
 
 
 async def test_unconsumed_open_emits_no_runtime_warning(pair: Pair):
-    """WSM-API-017: `Stream` is not a coroutine, so nothing is ever 'never awaited'."""
+    """WSM-API-017: `Stream` is not a coroutine, so an unawaited stream produces no 'never awaited' warning."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         pair.dialer.open({"a": 1})
@@ -306,7 +306,7 @@ async def test_unconsumed_open_emits_no_runtime_warning(pair: Pair):
 
 
 def test_open_takes_no_timeout_argument():
-    """WSM-API-018: deadlines live on the calls that wait, not on the one that returns at once."""
+    """WSM-API-018: timeouts are parameters of the calls that wait, not of `open()`, which returns at once."""
     assert "timeout" not in inspect.signature(Peer.open).parameters
     assert "timeout" in inspect.signature(Peer.request).parameters
     assert "timeout" in inspect.signature(Stream.result).parameters
@@ -336,7 +336,7 @@ async def test_await_twice_returns_same_value(make_pair):
         second = await stream
         assert first == {"answer": 42}
         # Identity, not equality: an implementation that re-read the queue would build an equal dict
-        # and pass an equality check while having consumed a payload that is not there twice.
+        # from a payload that is delivered only once.
         assert second is first
         future = stream._future
         assert future is not None
@@ -375,7 +375,7 @@ async def test_await_then_iterate_raises_and_first_consumer_got_everything(make_
 
 
 async def test_open_resolves_first_payload_while_request_raises(make_pair):
-    """WSM-API-006/007: only `request()` polices a second payload."""
+    """WSM-API-006/007: only `request()` rejects a second payload."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -407,8 +407,8 @@ async def test_result_timeout_uses_the_same_future(make_pair):
         stream = pair.dialer.open({"q": 1})
         first = await stream
         assert first == {"answer": 1}
-        # Same *object*, not merely an equal one: a second source would rebuild the value, and a
-        # stream whose remote sent two payloads would then hand out the second here (WSM-API-012).
+        # The same object, not an equal one: a second source would rebuild the value, and for a
+        # remote that sent two payloads it would return the second (WSM-API-012).
         assert await stream.result(timeout=1.0) is first
         assert await stream.result() is first
         assert stream._future is not None
@@ -439,8 +439,8 @@ async def test_result_timeout_expiry_sends_reset_timeout(make_pair):
 async def test_send_after_normal_close_raises_stream_closed(make_pair):
     """WSM-ERR-009 **(spec)**: three outcomes, three classes.
 
-    `StreamClosed` for a normal close is deliberately not a `StreamReset` and not a `ProtocolError`:
-    a last `send()` racing an orderly end is an expected outcome, not a failure and not a caller bug.
+    `StreamClosed` for a normal close is neither a `StreamReset` nor a `ProtocolError`: a last
+    `send()` that coincides with an orderly end is an expected outcome.
     """
     pair = make_pair()
 
@@ -626,7 +626,7 @@ async def test_send_with_end_half_closes_in_one_call(make_pair):
 
 
 async def test_awaiting_a_stream_that_ends_without_a_payload_raises(make_pair):
-    """An await that hung here would be a spinner nobody can explain."""
+    """Awaiting a stream that ends without a payload raises `ProtocolError` instead of hanging."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -643,7 +643,7 @@ async def test_awaiting_a_stream_that_ends_without_a_payload_raises(make_pair):
 
 
 async def test_a_second_failure_on_a_closed_stream_is_ignored(make_pair):
-    """Socket death after a reset must not overwrite the reason the stream actually died."""
+    """Socket death after a reset does not overwrite the reset as the stream's failure reason."""
     pair = make_pair()
     pair.acceptor.on_stream(_echo_handler)
     pair.start()
@@ -660,7 +660,7 @@ async def test_a_second_failure_on_a_closed_stream_is_ignored(make_pair):
 
 
 async def test_awaiting_after_the_stream_was_already_reset(make_pair):
-    """The memoized future is created on first await, and may already have an answer waiting."""
+    """The memoized future is created on first await, and the answer may already be queued."""
     pair = make_pair()
     pair.acceptor.on_stream(_echo_handler)
     pair.start()
@@ -676,7 +676,7 @@ async def test_awaiting_after_the_stream_was_already_reset(make_pair):
 
 
 async def test_awaiting_after_the_payload_already_arrived(make_pair):
-    """A payload that landed before the first await is what that await resolves with."""
+    """A payload that arrived before the first await is the value that await resolves with."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -739,8 +739,8 @@ async def test_stream_repr_names_its_state(pair: Pair):
 async def test_cancelling_an_await_sends_reset_cancelled(make_pair):
     """WSM-ERR-014 for the awaiting shapes, not only for `async for`.
 
-    The rule names `await stream.result()` explicitly: a consumer that walks away from an await
-    must not leave the remote producing for nobody.
+    The rule names `await stream.result()` explicitly: a cancelled await resets the stream, so the
+    remote stops producing.
     """
     for shape in ("result", "await"):
         pair = make_pair()
@@ -768,7 +768,7 @@ async def _await_shape(stream: Stream) -> Any:
 
 
 async def test_a_cancelled_await_does_not_destroy_the_memoized_future(make_pair):
-    """WSM-API-011: the shield is what keeps a second await from inheriting the first's cancellation."""
+    """WSM-API-011: the future is shielded, so a second await does not get the first await's cancellation."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -786,8 +786,8 @@ async def test_a_cancelled_await_does_not_destroy_the_memoized_future(make_pair)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
-        # The stream is reset by the cancellation, so a second await reports that - not a
-        # CancelledError leaked from the first awaiter.
+        # The cancellation reset the stream, so a second await raises the reset, not a
+        # CancelledError from the first awaiter.
         with pytest.raises(StreamReset) as info:
             await stream
         assert info.value.code is ResetCode.CANCELLED
@@ -806,7 +806,7 @@ async def test_the_application_cannot_put_an_unsendable_code_on_the_wire(code: A
 
 
 async def test_an_unconsumed_failure_reports_no_never_retrieved_warning(make_pair, capsys):
-    """The Python side of WSM-API-016: a failure nobody reads must not become asyncio noise."""
+    """Python side of WSM-API-016: an unread failure produces no asyncio "exception was never retrieved" log."""
     import gc
 
     pair = make_pair()
@@ -834,7 +834,7 @@ async def test_an_unconsumed_failure_reports_no_never_retrieved_warning(make_pai
 
 
 async def test_leading_headers_are_sendable_once_and_only_first(make_pair):
-    """WSM-API-024: one chance per peer per stream, and it is spent by the frame."""
+    """WSM-API-024: each peer sends leading headers at most once per stream, on its first frame."""
     pair = make_pair()
     answered: list[Stream] = []
 
@@ -851,9 +851,8 @@ async def test_leading_headers_are_sendable_once_and_only_first(make_pair):
         answering = answered[0]
 
         await answering.send_headers({"content-type": "text/csv"})
-        # The chance is spent by the *frame*, not by the argument: a second set raises whether it
-        # rides `send_headers`, `send` or `end`, and a port that only guarded the first would let two
-        # sets onto a wire whose rule is one.
+        # After the first frame, a second set of headers raises whether it is passed to
+        # `send_headers`, `send` or `end`.
         with pytest.raises(ProtocolError):
             await answering.send_headers({"late": True})
         with pytest.raises(ProtocolError):
@@ -861,8 +860,8 @@ async def test_leading_headers_are_sendable_once_and_only_first(make_pair):
         with pytest.raises(ProtocolError):
             await answering.end(headers={"late": True})
 
-        # Still sendable without them, which is the half a "raises on the second call" check misses:
-        # refusing the headers must not have refused the frame.
+        # The stream still accepts frames without headers; rejecting the headers did not block the
+        # frame.
         await answering.send({"row": 1})
         await pair.settle()
         data = pair.frames_of_type("acceptor", "data")
@@ -878,8 +877,8 @@ async def test_leading_headers_on_a_locally_opened_stream_point_at_open(make_pai
     pair.acceptor.on_stream(_echo_handler)
     pair.start()
     try:
-        # The opener's first frame was the `open`, so its one chance is already spent - and the error
-        # has to name `open()` rather than repeat the rule, since the caller has somewhere to put them.
+        # The opener's first frame was the `open`, so its headers are already sent; the error names
+        # `open()` as the place to pass them.
         stream = pair.dialer.open({"q": 1})
         with pytest.raises(ProtocolError, match=r"open\(\)"):
             await stream.send_headers({"trace": "abc"})
@@ -899,9 +898,9 @@ async def test_leading_headers_arrive_before_the_first_payload(make_pair):
     pair.start()
     try:
         stream = pair.dialer.open({"q": "export"}, end=True)
-        # The ordering is the whole feature: a consumer that learns the content type only after the
-        # body has started has learned it too late. `headers_arrived` fires on the frame that carried
-        # them, which arrived before the one carrying the payload.
+        # The headers arrive before the payload, so a consumer knows the content type before the body
+        # starts. `headers_arrived` fires on the frame that carried them, which arrived before the
+        # frame carrying the payload.
         await asyncio.wait_for(stream.reply_headers_arrived.wait(), 2)
         assert stream.reply_headers == {"content-type": "text/csv"}
         assert await stream == {"row": 1}
@@ -923,14 +922,14 @@ async def test_leading_headers_can_ride_the_first_payload(make_pair):
         assert await stream == {"rows": 2}
         await asyncio.wait_for(stream.reply_headers_arrived.wait(), 2)
         assert stream.reply_headers == {"content-type": "application/json"}
-        # One frame, not two: `reply` carried them rather than announcing them separately.
+        # One frame, not two: `reply` carried the headers in the payload frame.
         assert len(pair.frames_of_type("acceptor", "data")) == 1
     finally:
         await pair.stop()
 
 
 async def test_headers_after_the_first_frame_reset_the_stream_and_nothing_else(make_lone):
-    """The receiving half of WSM-FRM-016, which the local handle refuses to produce."""
+    """Receiving side of WSM-FRM-016: headers after the first frame reset that stream only."""
     lone = make_lone()
     lone.peer.on_stream(_echo_handler)
     lone.start()
@@ -954,7 +953,7 @@ async def test_headers_after_the_first_frame_reset_the_stream_and_nothing_else(m
 
 
 async def test_reply_headers_arrived_settles_on_every_path(make_pair):
-    """WSM-API-025: including the paths on which no headers will ever come."""
+    """WSM-API-025: `reply_headers_arrived` is set on every path, including a reset before any headers."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -964,9 +963,8 @@ async def test_reply_headers_arrived_settles_on_every_path(make_pair):
     pair.acceptor.on_stream(handler)
     pair.start()
     try:
-        # A remote that resets before answering sends no headers and never will. The rule makes that
-        # settle rather than hang: this wait is the assertion, and a port that only set the event on
-        # a first frame would fail it by timing out.
+        # A remote that resets before answering sends no headers. The event is still set; this wait
+        # is the assertion, and times out if the event is set only on a first frame.
         refused = pair.dialer.open({"q": 1})
         await asyncio.wait_for(refused.reply_headers_arrived.wait(), 2)
         assert refused.reply_headers == {}
@@ -989,7 +987,7 @@ async def test_an_opens_headers_are_the_acceptors_from_construction(make_pair):
         pair.dialer.open({"q": 1}, headers={"trace": "abc123"}, end=True)
         await pair.settle()
         assert answered[0].headers == {"trace": "abc123"}
-        # The open's headers are not the answer's: this handler has announced nothing yet.
+        # The open's headers are not the answer's; this handler has sent no headers yet.
         assert answered[0].reply_headers == {}
     finally:
         await pair.stop()

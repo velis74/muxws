@@ -4,20 +4,20 @@ outline: deep
 
 # Peer
 
-One `Peer` is one end of one WebSocket. There is exactly one peer type per language and both ends use
-it: a server pushing a stream to a browser calls the same `open()` the browser calls, and the browser
-receives it through the same `on_stream` handler the server uses. Server push is a client request
-with the roles swapped, with the same correlation and the same cancellation.
+A `Peer` is one end of one WebSocket. Each language has one peer type, and both ends use it: a server
+pushes a stream to a browser with the same `open()` the browser uses, and the browser receives it
+with the same `on_stream` handler the server uses. Server push is a client request with the roles
+swapped, with the same correlation and the same cancellation.
 
-A peer is obtained from [`connect()`](./connect.md) or [`accept()`](./accept.md). Constructing one
-directly is public and is what the in-memory examples below do, but an application over a real socket
-should use the factories, which resolve the codec and perform the handshake.
+A peer is obtained from [`connect()`](./connect.md) or [`accept()`](./accept.md). The constructor is
+public and the in-memory examples below use it; over a real socket, use the factories, which resolve
+the codec and perform the handshake.
 
-Two properties of the object are worth stating before the tables:
+Properties that apply throughout this page:
 
 - **`peer.id` is a per-process prefix plus a per-connection counter.** It is not unique across
   processes, and it **changes** when a reconnected peer takes a new socket.
-- **`open()` takes no deadline.** Deadlines belong to the calls that wait: `stream.result(timeout=)`
+- **`open()` takes no deadline.** Deadlines are parameters of the calls that wait: `stream.result(timeout=)`
   in seconds, `stream.result({ timeoutMs })` in milliseconds, and the same on `request()`.
 
 Durations are seconds as floats in Python and milliseconds as integers in TypeScript, at every
@@ -47,11 +47,11 @@ def __init__(
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `socket` | `SocketAdapter` | required | The transport. muxws never touches anything else about the connection. |
-| `codec` | `Codec` | required | The codec both ends agreed on at the handshake. It is not negotiated here and never switched later. |
-| `is_dialer` | `bool` | required | Which parity this peer allocates: the dialer takes odd stream ids, the acceptor even ones. Getting it wrong on both ends is how two peers collide on id 1. |
+| `socket` | `SocketAdapter` | required | The transport. The peer accesses the connection only through this adapter. |
+| `codec` | `Codec` | required | The codec both ends agreed on at the handshake. The peer does not negotiate it and never changes it. |
+| `is_dialer` | `bool` | required | Which parity this peer allocates: the dialer takes odd stream ids, the acceptor even ones. If both ends pass the same value, both allocate the same ids, starting with the same first id. |
 | `error_serializer` | `ErrorSerializer \| None` | `None` | Turns a handler's exception into the `reset(APPLICATION_ERROR)` payload. `None` means `default_error_serializer`, which puts the class name and message on the wire. |
-| `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | Test-only. A cap too small to hold an envelope plus one indivisible unit is rejected here rather than looping in the splitter. |
+| `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | For tests only. A cap too small to hold an envelope plus one indivisible unit raises `ProtocolError`. |
 | `max_payload_bytes` | `int` | `67_108_864` | This peer's own reassembly limit in bytes of encoded output. Never announced. |
 | `max_concurrent_streams` | `int` | `100` | How many streams the remote may hold open here at once. Never announced. |
 
@@ -142,7 +142,7 @@ export interface PeerOptions {
 | `codec` | `Codec` | required | The codec both ends agreed on at the handshake. |
 | `isDialer` | `boolean` | required | Odd stream ids when true, even when false. |
 | `errorSerializer` | `ErrorSerializer` | `defaultErrorSerializer` | Turns a handler's failure into the `reset(APPLICATION_ERROR)` payload. |
-| `maxFrameBytes` | `number` | `MAX_FRAME_BYTES` (65536) | Test-only lowering of the protocol frame cap. |
+| `maxFrameBytes` | `number` | `MAX_FRAME_BYTES` (65536) | Lowers the protocol frame cap; for tests only. |
 | `maxPayloadBytes` | `number` | `DEFAULT_MAX_PAYLOAD_BYTES` (67108864) | This peer's own reassembly limit in bytes. |
 | `maxConcurrentStreams` | `number` | `DEFAULT_MAX_CONCURRENT_STREAMS` (100) | How many streams the remote may hold open here. |
 
@@ -187,7 +187,7 @@ def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, en
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `Any` | `None` | The opening payload, encoded by the codec and fragmented automatically if it exceeds the frame cap. `None` puts a `null` payload on the wire. |
-| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame, as the peer's open interceptors leave it ([`intercept_open()`](#peer-intercept-open-python)). muxws never reads it; the remote handler sees it as `stream.headers`. Not a place for credentials - authentication belongs at the upgrade. |
+| `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame, as the peer's open interceptors leave it ([`intercept_open()`](#peer-intercept-open-python)). muxws does not interpret it; the remote handler sees it as `stream.headers`. Credentials go in the upgrade request, not here. |
 | `end` | `bool` | `False` | Send `end` on the `open` frame, which half-closes this side immediately: the request is complete and only the response is still to come. `end` is a flag on a frame, never a frame of its own. |
 
 ### Return
@@ -198,9 +198,10 @@ def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, en
 
 ### Raises
 
-All synchronous, and never one for concurrency:
+All raised synchronously. None is raised for the number of open streams.
 
-- `ConnectionLost` — the peer is between sockets. Nothing is buffered for the next one.
+- `ConnectionLost` — `is_open` is false: the peer is between sockets, closed, or a dialer still
+  waiting for its hello acknowledgement. Nothing is buffered for a later socket.
 - `ConnectionGoingAway` — a `goaway` has arrived, or this peer has sent one, or the connection's
   stream ids are exhausted.
 - whatever an open interceptor raises, unchanged (see [`intercept_open()`](#peer-intercept-open-python)).
@@ -269,7 +270,8 @@ claims it.
 
 Throws, synchronously:
 
-- `ConnectionLost` — the peer is between sockets.
+- `ConnectionLost` — `isOpen` is false: the peer is between sockets, closed, or a dialer still waiting
+  for its hello acknowledgement.
 - `ConnectionGoingAway` — a `goaway` has been received or sent, or the stream ids are exhausted.
 - whatever an open interceptor throws, unchanged (see [`interceptOpen()`](#peer-interceptopen-typescript)).
 - `TypeError` — an open interceptor returned a thenable, or the interceptors left a symbol key.
@@ -299,8 +301,8 @@ await dialer.close({ drainMs: 100 });
 
 ## `OpenOptions` (TypeScript)
 
-`open()`'s options object. It carries **no** `timeoutMs`, in this or any milestone: `open()` does not
-wait, so it has no deadline to take. The calls that wait are `stream.result({ timeoutMs })` and
+`open()`'s options object. It has **no** `timeoutMs`, because `open()` does not wait. The calls that
+wait are `stream.result({ timeoutMs })` and
 `peer.request(payload, { timeoutMs })`.
 
 ### Signature
@@ -344,7 +346,7 @@ console.log(stream.id, options.end, Object.keys(stream.headers ?? {}).length);
 
 ## `peer.notify()` (Python)
 
-One-shot push: open a stream, send the payload, end it, and hand back nothing at all.
+One-way push: open a stream carrying the payload, end it, and return `None`.
 
 ### Signature
 
@@ -356,19 +358,18 @@ async def notify(self, payload: Any = None, *, headers: dict[str, Any] | None = 
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `payload` | `Any` | `None` | The payload. It rides the `open` frame with `end` set. |
+| `payload` | `Any` | `None` | The payload. Sent on the `open` frame, with `end` set. |
 | `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on that frame, as the peer's open interceptors leave it. |
 
 ### Return
 
-`None` — deliberately. There is no handle to await, because there is nothing to wait for: a
-`notify()` that returned a stream would invite a caller to await a reply the shape does not promise.
+`None`. No stream handle is returned, because a notification has no reply to wait for.
 
 ### Raises
 
-The `open()` raises, for the same reasons:
+The exceptions of `open()`, under the same conditions:
 
-- `ConnectionLost` — the peer is between sockets.
+- `ConnectionLost` — `is_open` is false (see [`open()`](#peer-open-python)).
 - `ConnectionGoingAway` — a `goaway` has been received or sent, or the ids are exhausted.
 - whatever an open interceptor raises, and `TypeError` for an awaitable it returned or a non-`str`
   key it left (see [`intercept_open()`](#peer-intercept-open-python)).
@@ -421,22 +422,21 @@ async notify(payload?: unknown, options?: { headers?: Record<string, unknown> })
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `payload` | `unknown` | `null` | The payload, riding the `open` frame with `end` set. Unlike `open()`, a lone object here is always the payload; the options object is the second argument. |
+| `payload` | `unknown` | `null` | The payload, sent on the `open` frame with `end` set. Unlike `open()`, a lone object here is always the payload; the options object is the second argument. |
 | `options.headers` | `Record<string, unknown>` | none | Per-stream metadata on that frame, as the peer's open interceptors leave it. |
 
 ### Return
 
-`Promise<void>` — resolving to nothing. There is no stream handle: the stream behind a `notify()` is
-claimed internally so a failure on it is reported to `peer.onError` rather than lost.
+`Promise<void>`. No stream handle is returned; the stream is consumed internally, and a failure on it
+is reported to `peer.onError`.
 
 ### Raises
 
-Rejects with the `open()` throws: `ConnectionLost`, `ConnectionGoingAway`, whatever an open
+Rejects with the errors `open()` throws: `ConnectionLost`, `ConnectionGoingAway`, whatever an open
 interceptor throws, and `TypeError` for a thenable it returned or a symbol key it left (see
-[`interceptOpen()`](#peer-interceptopen-typescript)). They originate in
-the synchronous `open()` inside this call, but `notify` is an `async` method, so they reach you as a
-**rejection** rather than as a throw at the call site — `peer.notify(x).catch(...)` catches them, and
-a bare `try`/`catch` around an un-awaited `peer.notify(x)` does not.
+[`interceptOpen()`](#peer-interceptopen-typescript)). `notify` is an `async` method, so these arrive
+as a **rejection**, not as a synchronous throw: `peer.notify(x).catch(...)` catches them, and a
+`try`/`catch` around an un-awaited `peer.notify(x)` does not.
 
 ### Example
 
@@ -464,10 +464,10 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.request()` (Python)
 
-`open(payload, end=True)` awaited to the stream's end: the unary call.
+The unary call: `open(payload, end=True)`, awaited until the stream ends.
 
-Unlike `await stream`, it polices a second payload. A unary call that quietly discarded the extra
-values would hide a handler bug rather than report it.
+Unlike `await stream`, it raises `ProtocolError` when the remote sends a second payload, instead of
+discarding the extra values.
 
 ### Signature
 
@@ -487,7 +487,7 @@ async def request(
 |---|---|---|---|
 | `payload` | `Any` | `None` | The request payload. |
 | `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on the `open` frame, as the peer's open interceptors leave it. |
-| `timeout` | `float \| None` — seconds | `None` | The deadline, in seconds. `None` waits forever. When it expires the remote is sent `reset(TIMEOUT)` **before** the caller is told, so the remote stops working rather than finishing into a caller that has gone. |
+| `timeout` | `float \| None` — seconds | `None` | The deadline, in seconds. `None` waits forever. When it expires, `reset(TIMEOUT)` is sent to the remote **before** `StreamTimeout` is raised, so the remote stops processing the stream. |
 
 ### Return
 
@@ -495,12 +495,12 @@ async def request(
 
 ### Raises
 
-- `ConnectionLost` — the peer is between sockets when the call is made, or the socket died while
-  waiting.
+- `ConnectionLost` — `is_open` is false when the call is made (see [`open()`](#peer-open-python)),
+  or the socket closed while waiting.
 - `ConnectionGoingAway` — a `goaway` has been received or sent, or the ids are exhausted.
 - whatever an open interceptor raises, and `TypeError` for an awaitable it returned or a non-`str`
   key it left (see [`intercept_open()`](#peer-intercept-open-python)).
-- `StreamTimeout` — `timeout` seconds expired. The remote has already been told.
+- `StreamTimeout` — `timeout` seconds expired. `reset(TIMEOUT)` has already been sent to the remote.
 - `ProtocolError` — the remote sent more than one payload (its stream is reset with
   `PROTOCOL_ERROR`), or ended the stream without sending one.
 - `RemoteError` — the remote handler raised; `.payload` carries whatever its `error_serializer`
@@ -584,10 +584,9 @@ request<T = unknown>(options: RequestOptions): Promise<T>;
 Rejects with the same set as Python: `ConnectionLost`, `ConnectionGoingAway`, `StreamTimeout`,
 `ProtocolError` (more than one payload, or none at all), `RemoteError`, `StreamRefused`,
 `StreamReset`, plus whatever an open interceptor throws and `TypeError` for a thenable it returned
-or a symbol key it left (see [`interceptOpen()`](#peer-interceptopen-typescript)). `ConnectionLost`,
-`ConnectionGoingAway` and the interceptor failures originate in the synchronous `open()` inside this
-call, but `request` is an `async` method, so every one of them arrives as a **rejection** — there is
-no failure `request()` throws at the call site.
+or a symbol key it left (see [`interceptOpen()`](#peer-interceptopen-typescript)). `request` is an
+`async` method, so all of these arrive as a **rejection**, including the errors thrown by the
+synchronous `open()` inside it; `request()` never throws synchronously.
 
 ### Example
 
@@ -630,7 +629,7 @@ await dialer.close({ drainMs: 100 });
 
 ## `RequestOptions` (TypeScript)
 
-`OpenOptions` plus the deadline, because this call waits.
+`OpenOptions` plus `timeoutMs`, the deadline of `request()`.
 
 ### Signature
 
@@ -678,12 +677,12 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.on_stream()` (Python)
 
-Register the one incoming-stream handler. There is exactly one per peer: a second call replaces the
-first and logs a warning.
+Register the incoming-stream handler. A peer has at most one; a second call replaces the first and
+logs a warning.
 
-A peer with no handler answers every incoming `open` with `reset(REFUSED, "no on_stream handler")`,
-which is why `connect(on_stream=...)` exists - it registers the handler before the hello goes out, so
-an acceptor that pushes a stream the instant it sees the hello is not refused.
+A peer with no handler answers every incoming `open` with `reset(REFUSED, "no on_stream handler")`.
+`connect(on_stream=...)` registers the handler before the hello is sent, so a stream the acceptor
+opens as soon as it receives the hello is not refused.
 
 ### Signature
 
@@ -695,7 +694,7 @@ def on_stream(self, handler: StreamHandler) -> StreamHandler:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async. The payload is the opening payload, already reassembled. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR` and never with `REFUSED`, because `REFUSED` promises the work did not happen. |
+| `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async. The payload is the opening payload, already reassembled. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`, never with `REFUSED`, which states that no work was done. |
 
 ### Return
 
@@ -754,7 +753,7 @@ onStream(handler: StreamHandler): void;
 
 ### Return
 
-`void` — unlike Python's, this one does not hand the handler back, so there is no decorator form.
+`void`. Unlike the Python method, it does not return the handler, so it cannot be used as a decorator.
 
 ### Raises
 
@@ -782,8 +781,8 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.on_close()` (Python)
 
-Register a handler for socket loss. Every registered handler is called, each isolated from the
-others: one that raises is logged and costs the rest nothing.
+Register a handler for socket loss. Every registered handler is called. Handlers are isolated: an
+exception from one is logged and the others still run.
 
 ### Signature
 
@@ -795,7 +794,7 @@ def on_close(self, handler: Callable[[Any], None]) -> Callable[[Any], None]:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `Callable[[Any], None]` | required | Called with a `CloseReason` - `code`, `reason`, `was_clean`, `will_retry` - after every live stream has already been failed with `ConnectionLost`. `will_retry` is the only reliable way to tell "the helper is backing off" from "this peer is finished". |
+| `handler` | `Callable[[Any], None]` | required | Called with a `CloseReason` - `code`, `reason`, `was_clean`, `will_retry` - after every live stream has already been failed with `ConnectionLost`. `will_retry` is true when the reconnect helper will dial again and false when the peer is finished. |
 
 ### Return
 
@@ -805,8 +804,8 @@ def on_close(self, handler: Callable[[Any], None]) -> Callable[[Any], None]:
 
 Raises: nothing.
 
-There is at most one `will_retry=False` close per peer, ever: a peer that exhausted `max_attempts`
-does not also report the last socket loss a second time.
+A peer reports at most one close with `will_retry=False`. A peer that exhausted `max_attempts` does
+not report its last socket loss a second time.
 
 ### Example
 
@@ -887,13 +886,12 @@ console.log('isOpen:', dialer.isOpen);
 
 ## `peer.on_reconnect()` (Python)
 
-Register a handler that fires once per **re**-established connection. The first connection does not
-fire it: it was established, not re-established.
+Register a handler that is called once per **re**-established connection. The first connection does
+not call it.
 
-It guarantees exactly two things and nothing more: a live socket, and an identity the acceptor has
-already accepted on it. No stream survives a reconnect, nothing is replayed, and the new socket's id
-space starts empty. `tags` start empty on the acceptor's side, because over there a reconnect is a
-whole new `Peer`.
+When the handler runs, the socket is open and the acceptor has acknowledged the hello on it. No
+stream survives a reconnect, nothing is replayed, and the new socket starts with no allocated stream
+ids. On the acceptor a reconnect creates a new `Peer`, so its `tags` start empty.
 
 ### Signature
 
@@ -905,7 +903,7 @@ def on_reconnect(self, handler: Callable[[int, Any], None]) -> Callable[[int, An
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `Callable[[int, Any], None]` | required | Called `(attempt, peer)` where `attempt` counts re-establishments from 1. Fired after the hello has been acknowledged, never before - which is what makes "the acceptor already knows who this is" true when it runs. Isolated: a handler that raises is logged and cannot stop the reconnect loop. |
+| `handler` | `Callable[[int, Any], None]` | required | Called `(attempt, peer)` where `attempt` counts re-establishments from 1. Called after the hello has been acknowledged, so the acceptor has processed the hello when the handler runs. Isolated: an exception from the handler is logged and does not stop the reconnect loop. |
 
 ### Return
 
@@ -973,7 +971,7 @@ onReconnect(handler: (attempt: number, peer: Peer) => void): void;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `(attempt: number, peer: Peer) => void` | required | Called once per re-established connection, after the hello acknowledgement, with the re-establishment count starting at 1. Isolated from the supervisor: a handler that throws is logged and the loop survives. |
+| `handler` | `(attempt: number, peer: Peer) => void` | required | Called once per re-established connection, after the hello acknowledgement, with the re-establishment count starting at 1. Isolated: an exception from the handler is logged and does not stop the reconnect loop. |
 
 ### Return
 
@@ -1018,12 +1016,11 @@ server.close();
 
 ## `peer.on_frame()` (Python)
 
-Register a frame observer: every frame, both directions, before encode on the way out and after
-decode on the way in.
+Register a frame observer. It is called for every frame in both directions: before encoding for an
+outgoing frame, after decoding for an incoming one.
 
-The payload's **contents** never reach it in encoded form and are never logged by muxws itself - the
-observer is handed the logical frame, so what you do with `frame.payload` is your decision and your
-responsibility.
+The observer receives the logical frame, not the encoded bytes. muxws itself never logs payload
+**contents**; whether the observer logs `frame.payload` is up to the application.
 
 ### Signature
 
@@ -1035,7 +1032,7 @@ def on_frame(self, handler: Callable[[str, Frame, int], None]) -> Callable[[str,
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `Callable[[str, Frame, int], None]` | required | Called `(direction, frame, byte_length)`: `direction` is `"tx"` or `"rx"`, `frame` is the logical `Frame`, `byte_length` is the encoded size in bytes. It runs inside the read and write loops, so it is isolated - one that raises is logged and the connection survives - and it should be fast. |
+| `handler` | `Callable[[str, Frame, int], None]` | required | Called `(direction, frame, byte_length)`: `direction` is `"tx"` or `"rx"`, `frame` is the logical `Frame`, `byte_length` is the encoded size in bytes. It runs inside the read and write loops and should return quickly. Isolated: an exception from it is logged and the connection stays open. |
 
 ### Return
 
@@ -1093,7 +1090,7 @@ onFrame(handler: (direction: 'tx' | 'rx', frame: Frame, byteLength: number) => v
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `(direction: 'tx' \| 'rx', frame: Frame, byteLength: number) => void` | required | Called for every frame in both directions, before encode and after decode, with the encoded size in bytes. Isolated: one that throws is logged and the connection survives. |
+| `handler` | `(direction: 'tx' \| 'rx', frame: Frame, byteLength: number) => void` | required | Called for every frame in both directions, before encode and after decode, with the encoded size in bytes. Isolated: an exception from it is logged and the connection stays open. |
 
 ### Return
 
@@ -1127,13 +1124,13 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.onError()` (TypeScript)
 
-Register a handler for a stream failure that has **no consumer to hand it to**: a stream nobody
-awaited or iterated, or the fire-and-forget stream behind `notify()`, which has no handle at all.
+Register a handler for a stream failure that has **no consumer**: a stream that was never awaited or
+iterated, or the internal stream behind `notify()`, which returns no handle.
 
-This one has no Python twin. In Python a future nobody retrieved is a warning the runtime prints; in
-TypeScript an unhandled rejection can take a process down, so `Stream` silences its internal promise
-from the constructor and reports the failure here instead. With no handler registered, the failure is
-logged at debug level under `muxws`.
+There is no Python equivalent. In TypeScript an unhandled rejection can terminate the process, so
+`Stream` attaches a rejection handler to its internal promise in its constructor and reports the
+failure here. With no handler registered, the failure is logged at debug level through the muxws
+`logger`.
 
 ### Signature
 
@@ -1145,7 +1142,7 @@ onError(handler: (error: unknown, stream: Stream | null) => void): void;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `(error: unknown, stream: Stream \| null) => void` | required | Called with the failure and the stream it belongs to. Handlers run in registration order with **no per-handler isolation**, unlike `onClose`, `onReconnect` and `onFrame`: one that throws stops the rest. The throw itself is swallowed by the stream close path that reported it, so it cannot take a connection down - it just loses the remaining handlers. |
+| `handler` | `(error: unknown, stream: Stream \| null) => void` | required | Called with the failure and the stream it belongs to. Handlers run in registration order with **no per-handler isolation**, unlike `onClose`, `onReconnect` and `onFrame`: an exception from one stops the rest. The stream close path that reported the failure catches that exception, so the connection stays open; the remaining handlers are not called. |
 
 ### Return
 
@@ -1370,12 +1367,12 @@ def intercept_reply_headers(self, interceptor: ReplyHeadersInterceptor) -> Calla
 Registration raises nothing. During the call that sends the first frame:
 
 - whatever the interceptor raises, unchanged. No later interceptor runs, nothing is sent, and the
-  first frame is not spent, so a later call on the stream may still carry headers.
+  stream's first frame is still unsent, so a later call on the stream can carry headers.
 - `TypeError` — the interceptor returned an awaitable (a coroutine is closed first), or the
   interceptors left a key that is not a `str`.
 
-In the implicit end of a handler that returns without ending its stream, the failure is the
-handler's: the stream is reset with `APPLICATION_ERROR` and the error serializer's payload.
+In the implicit end of a handler that returns without ending its stream, the failure is treated as a
+handler failure: the stream is reset with `APPLICATION_ERROR` and the error serializer's payload.
 
 ### Example
 
@@ -1449,11 +1446,11 @@ interceptReplyHeaders(interceptor: ReplyHeadersInterceptor): () => void;
 Registration throws nothing. During the call that sends the first frame:
 
 - whatever the interceptor throws, unchanged, as a rejection of that call. No later interceptor runs,
-  nothing is sent, and the first frame is not spent.
+  nothing is sent, and the stream's first frame is still unsent.
 - `TypeError` — the interceptor returned a thenable, or the interceptors left a symbol key.
 
-In the implicit end of a handler that returns without ending its stream, the failure is the
-handler's: the stream is reset with `APPLICATION_ERROR`.
+In the implicit end of a handler that returns without ending its stream, the failure is treated as a
+handler failure: the stream is reset with `APPLICATION_ERROR`.
 
 ### Example
 
@@ -1516,7 +1513,7 @@ def intercept_incoming_headers(self, interceptor: IncomingHeadersInterceptor) ->
 
 Raises: nothing. An interceptor that raises, or returns an awaitable (a coroutine is closed without
 running), is logged on `muxws.frames`; the remaining interceptors still run, and the frame, the stream
-and the connection carry on unchanged.
+and the connection are processed as if no interceptor had failed.
 
 ### Example
 
@@ -1585,7 +1582,7 @@ interceptIncomingHeaders(interceptor: IncomingHeadersInterceptor): () => void;
 
 Raises: nothing. An interceptor that throws, or returns a thenable (its rejection is silenced), is
 logged through `logger.error`; the remaining interceptors still run, and the frame, the stream and the
-connection carry on unchanged.
+connection are processed as if no interceptor had failed.
 
 ### Example
 
@@ -1617,9 +1614,9 @@ await dialer.close({ drainMs: 100 });
 
 Send a `ping` frame and wait for its `pong`, returning the round-trip time in **seconds**.
 
-It is a muxws `ping` frame and not a WebSocket control frame, because browsers do not expose control
-frames to JavaScript: a liveness mechanism built on them cannot work on half the peers that exist.
-The remote echoes the nonce with no application involvement whatever.
+It is a muxws `ping` frame, not a WebSocket control frame, because browsers do not expose WebSocket
+control frames to JavaScript. The remote peer answers with the same nonce without involving the
+application.
 
 ### Signature
 
@@ -1640,11 +1637,11 @@ async def ping(self, timeout: float = 5.0) -> float:
 ### Raises
 
 - `ConnectionLost` — the peer is between sockets; there is nothing to ping.
-- `ConnectionClosed` — no `pong` within `timeout` seconds (code 1006), or the socket died while
-  waiting, in which case the death's own `ConnectionClosed` is raised.
+- `ConnectionClosed` — no `pong` within `timeout` seconds (code 1006), or the socket closed while
+  waiting, in which case the `ConnectionClosed` describing that closure is raised.
 
-A lost `pong` is not a lost connection: this call fails and the connection is untouched. Turning a
-run of them into a verdict is the heartbeat's job, not this one's.
+A missing `pong` fails only this call; the connection stays open. Closing a connection whose pings go
+unanswered is done by the heartbeat, not by this method.
 
 ### Example
 
@@ -1698,7 +1695,7 @@ async ping(timeoutMs: number = DEFAULT_PING_TIMEOUT_MS): Promise<number>;
 Rejects with:
 
 - `ConnectionLost` — the peer is between sockets.
-- `ConnectionClosed` — no `pong` within `timeoutMs` milliseconds (code 1006), or the socket died
+- `ConnectionClosed` — no `pong` within `timeoutMs` milliseconds (code 1006), or the socket closed
   while waiting.
 
 ### Example
@@ -1720,13 +1717,11 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.close()` (Python)
 
-Shut the connection down in order: send `goaway`, let the streams the remote is still allowed to
-finish drain, then close the socket.
+Close the connection in order: send `goaway`, wait up to the drain deadline for live streams to end,
+then close the socket.
 
-On a dialer it also stops the reconnect helper, **before** the `is_open` check, so a deliberate close
-during a backoff window really does stop the next dial. A close that returned early there would leave
-the helper to dial behind the caller's back and hand the application a live connection it had already
-given up on.
+On a dialer it first stops the reconnect helper, **before** the `is_open` check, so a `close()` called
+while the helper waits out a backoff delay prevents the next dial.
 
 ### Signature
 
@@ -1740,17 +1735,16 @@ async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None =
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code carried by the `goaway` frame. Positional, unlike most muxws options. |
 | `reason` | `str \| None` | `None` | Free text on the `goaway` and on the WebSocket close frame. |
-| `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish before the socket is closed regardless. A deadline, not a poll loop: a peer that waited for quiet would never close against a remote that keeps one stream open. Whatever is still live at the deadline fails locally with `ConnectionLost`. |
+| `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish before the socket is closed regardless. The socket is closed at the deadline even if the remote keeps a stream open. Streams still live at the deadline fail locally with `ConnectionLost`. |
 
 ### Return
 
-`None`. Calling it on a peer that is already closed is a no-op - except that the reconnect helper is
-stopped first, which is the point of the ordering.
+`None`. On a peer that is already closed it only stops the reconnect helper.
 
 ### Raises
 
-Raises: nothing of its own. An exception raised by the socket adapter's `close()` propagates: Python does not
-guard that call, where the TypeScript port does.
+Raises: nothing of its own. An exception raised by the socket adapter's `close()` propagates; the
+TypeScript `close()` catches and logs it instead.
 
 ### Example
 
@@ -1802,8 +1796,8 @@ async close(options: CloseOptions = {}): Promise<void>;
 
 ### Raises
 
-Raises: nothing. A socket that cannot be closed is already gone: the failure is logged as a warning and the
-peer still dies.
+Raises: nothing. An exception from the socket adapter's `close()` is logged as a warning, and the peer
+is still marked closed.
 
 ### Example
 
@@ -1841,7 +1835,7 @@ export interface CloseOptions {
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code on the `goaway` frame. |
 | `reason` | `string` | `null` | Free text on the `goaway` and the WebSocket close frame. |
-| `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish before closing regardless. The mirror of Python's `drain=10.0` seconds. |
+| `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish before closing regardless. The Python equivalent is `drain=10.0` seconds. |
 
 ### Return
 
@@ -1867,11 +1861,11 @@ console.log(options.drainMs, 'milliseconds of drain; isOpen', peer.isOpen);
 
 ## `peer.serve()` (Python)
 
-Run the read loop until the socket closes. Nothing is received before this is awaited, and the writer
-task is started by it.
+Run the read loop until the socket closes. No frame is received before this is awaited; it also
+starts the writer task.
 
-`connect()` and the module-level `serve()` call it for you. An application calls it directly only
-when it built the `Peer` itself, or when it wants to hold the task.
+`connect()` and the module-level `serve()` call it. An application calls it directly when it
+constructed the `Peer` itself or obtained it from `accept()`, or when it needs a handle to the task.
 
 ### Signature
 
@@ -1881,17 +1875,18 @@ async def serve(self) -> None:
 
 ### Parameters
 
-None — `serve()` takes no arguments. What it does is fixed by the peer it belongs to.
+None — `serve()` takes no arguments.
 
 ### Return
 
-`None` — it returns when the socket closes. A socket that dies is not an error here: the peer is
-declared dead, every live stream fails with `ConnectionLost`, `on_close` fires, and this returns.
+`None` — it returns when the socket closes. A socket closure, clean or not, raises nothing: the peer
+is marked closed, every live stream fails with `ConnectionLost`, the `on_close` handlers are called,
+and `serve()` returns.
 
 ### Raises
 
-- `asyncio.CancelledError` — if the task running it is cancelled, which is the ordinary way to stop a
-  peer you built yourself.
+- `asyncio.CancelledError` — the task running it was cancelled. Cancelling that task is how the read
+  loop of a directly constructed peer is stopped.
 - Whatever the socket adapter's `close()` raises while failing the connection on a protocol error.
 
 ### Example
@@ -1919,7 +1914,7 @@ async def main() -> None:
     print(await dialer.request("hi", timeout=5.0))
     await dialer.close(drain=0.1)
 
-    # The acceptor's socket ends with the dialer's, so its read loop returns on its own.
+    # The acceptor's socket closes with the dialer's, so its read loop returns.
     await asyncio.wait_for(serving, 5.0)
     print("acceptor serve() returned; is_open:", acceptor.is_open)
 
@@ -1944,14 +1939,13 @@ None — it takes no arguments.
 
 ### Return
 
-`Promise<void>` — resolves when the socket closes cleanly.
+`Promise<void>` — resolves when the socket closes, cleanly or not.
 
 ### Raises
 
-Rejects with whatever killed the read loop. Unlike Python's, which returns on any failure it can
-attribute, this one re-throws after declaring the peer dead: a peer whose read loop died while still
-reporting `isOpen` would be the worst possible state, so it dies first and rejects second. A socket
-that closes normally resolves rather than rejecting.
+Rejects with the error that ended the read loop, after marking the peer closed (code 1011), so
+`isOpen` is already false when the promise rejects. The Python `serve()` returns in the same
+situation. A socket closure resolves the promise and does not reject it.
 
 ### Example
 
@@ -1978,10 +1972,10 @@ console.log('acceptor serve() resolved; isOpen:', acceptor.isOpen);
 
 The connection's log correlation id.
 
-It is **three lowercase hex characters drawn once per process**, a hyphen, and a counter incremented
-once per connection in that process. So: it is not unique across processes, two processes can and
-will produce the same `id`, and it **changes when a reconnected peer takes a new socket** - by
-design, so a log shows a reconnect as a new `conn=` rather than as one continuous connection.
+It is **three lowercase hex characters chosen once per process**, a hyphen, and a counter incremented
+once per connection in that process. It is not unique across processes: two processes can produce
+the same `id`. It **changes when a reconnected peer adopts a new socket**, so a log shows each
+reconnect as a new `conn=`.
 
 ### Signature
 
@@ -1992,7 +1986,7 @@ self.id = f"{_PROCESS_PREFIX}-{next(_CONNECTION_COUNTER)}"
 ### Parameters
 
 None — `id` is a plain instance attribute, assigned in `__init__` and reassigned when the peer adopts
-a new socket. Writing to it is not forbidden and not useful; muxws re-derives it on the next adopt.
+a new socket. It is writable; muxws assigns a new value when the peer adopts its next socket.
 
 ### Return
 
@@ -2028,9 +2022,9 @@ asyncio.run(main())
 
 ## `peer.id` (TypeScript)
 
-The same shape and the same warnings: a per-module-load prefix of three hex characters, a hyphen, and
-a counter that advances once per connection. Not unique across processes, and it changes on
-reconnect.
+The same format as the Python attribute: a prefix of three hex characters chosen once per module
+load, a hyphen, and a counter incremented once per connection. Not unique across processes; it
+changes on reconnect.
 
 ### Signature
 
@@ -2067,13 +2061,13 @@ console.log('the prefix is per module load:', second.id.split('-')[0] === prefix
 
 ## `peer.tags` (Python)
 
-An ordinary dict, with ordinary dict semantics, that muxws never reads. It is where an application
-puts what it knows about the other end - a user id, a tenant, a set of subscriptions - so that a
-`PeerRegistry` can find this peer by it.
+A plain `dict` that muxws does not read. An application stores data about the remote end in it, such
+as a user id, a tenant or a set of subscriptions, and a `PeerRegistry` finds the peer by those
+values.
 
-It **dies with the socket**: on the acceptor a reconnect is a whole new `Peer` with an empty `tags`,
-so nothing an application put there survives a disconnect. Re-populating it is part of what the hello
-is for.
+On the acceptor, a reconnect creates a new `Peer` with an empty `tags`, so **nothing stored there
+survives a disconnect**. The acceptor repopulates it when it handles the hello of the new
+connection.
 
 ### Signature
 
@@ -2083,7 +2077,7 @@ self.tags: dict[str, Any] = {}
 
 ### Parameters
 
-None — it is a plain instance attribute. Mutate it like any dict.
+None — it is a plain instance attribute and is mutated like any dict.
 
 ### Return
 
@@ -2126,8 +2120,8 @@ readonly tags: Record<string, unknown> = {};
 
 ### Parameters
 
-None — a readonly reference to a mutable object: you may set and delete keys, you may not replace the
-object.
+None — a `readonly` property holding a mutable object: keys can be set and deleted, the object
+cannot be replaced.
 
 ### Return
 
@@ -2155,8 +2149,8 @@ console.log(peer.tags.user, peer.tags.rooms);
 
 The streams that are live on this connection right now, keyed by stream id.
 
-Nothing is retained per **closed** stream: a stream that ends is dropped from this map immediately,
-which is what keeps a long-lived connection's bookkeeping to two integers plus the live map.
+Nothing is retained per **closed** stream: a stream that ends is removed from this map immediately.
+The per-stream state of a connection is two integers plus this map of live streams.
 
 ### Signature
 
@@ -2171,7 +2165,7 @@ None — it is a read-only property.
 
 ### Return
 
-`Mapping[int, Stream]` — a **copy** taken at the moment you read it. Mutating it does not affect the
+`Mapping[int, Stream]` — a **copy** taken when the property is read. Mutating it does not affect the
 peer, and it does not update as streams open and close.
 
 ### Raises
@@ -2256,13 +2250,13 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.is_open` (Python)
 
-Whether this peer may be used right now. It is **two** things at once: the socket is open, and the
-connection is established.
+Whether this peer can be used now: true when the socket is open **and** the connection is
+established.
 
-The difference matters only to a dialer with a hello. Between adopting a socket and having that hello
-acknowledged, the socket is up but the connection is not: an application frame accepted in that
-window would reach an acceptor that has not yet been told who is speaking. `is_open` is false there,
-and `open()` refuses.
+The two conditions differ only for a dialer with a hello. Between adopting a socket and the
+acknowledgement of the hello, the socket is open but the connection is not established; an
+application frame sent then would reach the acceptor before the hello. `is_open` is false in that
+interval, and `open()` raises `ConnectionLost`.
 
 ### Signature
 
@@ -2327,7 +2321,7 @@ None — getter.
 
 ### Return
 
-`boolean` — socket-open **and** established, for the reason the Python entry gives.
+`boolean` — socket open **and** connection established, as described for the Python property.
 
 ### Raises
 
@@ -2353,8 +2347,8 @@ console.log('after the socket dies:', dialer.isOpen);
 
 ## `peer.is_dialer` (Python)
 
-Which end this is. The dialer allocates odd stream ids, the acceptor even ones; that is the whole of
-the asymmetry between them, plus the fact that only a dialer can have a reconnect helper.
+Which end this is. The dialer allocates odd stream ids, the acceptor even ones. Apart from that,
+only a dialer can have a reconnect helper.
 
 ### Signature
 
@@ -2436,8 +2430,8 @@ console.log('even ids for the acceptor:', acceptor.open('y').id % 2 === 0);
 
 When a frame last crossed this socket, in **either** direction, on the event loop's clock in seconds.
 
-It exists because idle means idle. The heartbeat reads this stamp rather than pinging on a fixed
-schedule, so a busy connection never spends a ping to learn what its own traffic already proved.
+The heartbeat reads this value and sends a `ping` only after `ping_interval` seconds without a frame
+in either direction, so a connection that carries traffic sends no heartbeat pings.
 
 ### Signature
 
@@ -2543,9 +2537,9 @@ None — it is a constant.
 
 ### Return
 
-`number` — 5000 milliseconds, the deadline an explicit `peer.ping()` uses when none is given. Python
-spells the same number `timeout: float = 5.0` seconds. It is **not** the heartbeat's deadline, which
-is 10000 milliseconds.
+`number` — 5000 milliseconds, the deadline an explicit `peer.ping()` uses when none is given. The
+Python equivalent is `timeout: float = 5.0` seconds. It is **not** the heartbeat's deadline, which
+defaults to 10000 milliseconds.
 
 ### Raises
 
@@ -2582,8 +2576,8 @@ None — it is a constant.
 
 ### Return
 
-`number` — 10000 milliseconds, `peer.close()`'s drain window when `drainMs` is not given. Python
-spells it `drain: float = 10.0` seconds.
+`number` — 10000 milliseconds, `peer.close()`'s drain window when `drainMs` is not given. The
+Python equivalent is `drain: float = 10.0` seconds.
 
 ### Raises
 
@@ -2599,7 +2593,7 @@ console.log(DEFAULT_DRAIN_MS, 'milliseconds of drain by default');
 const [socket] = memoryPair();
 const peer = new Peer(socket, { codec: new JsonCodec(), isDialer: true });
 void peer.serve();
-// Nothing is live, so even the full default window returns at once.
+// No stream is live, so close() returns without waiting for the default drain window.
 await peer.close({ drainMs: DEFAULT_DRAIN_MS });
 console.log('isOpen:', peer.isOpen);
 ```
@@ -2634,7 +2628,7 @@ import { DEFAULT_MAX_PAYLOAD_BYTES, JsonCodec, memoryPair, Peer } from 'muxws';
 console.log(DEFAULT_MAX_PAYLOAD_BYTES, 'bytes =', DEFAULT_MAX_PAYLOAD_BYTES / 1024 / 1024, 'MiB');
 
 const [socket] = memoryPair();
-// Raising it is done on the receiver; a sender has no say and is told nothing.
+// The limit is set on the receiving peer; the sending peer is not informed of it.
 const peer = new Peer(socket, { codec: new JsonCodec(), isDialer: false, maxPayloadBytes: DEFAULT_MAX_PAYLOAD_BYTES * 2 });
 console.log(peer.isOpen);
 ```
@@ -2654,8 +2648,8 @@ None — it is a constant.
 ### Return
 
 `number` — 100: how many streams the **remote** may hold open on a peer at once. Counted over the
-remote's opens alone; this peer's own streams do not consume it. Never announced, so a sender learns
-of it only from the `reset(REFUSED)` it provokes.
+remote's opens alone; this peer's own streams do not count against it. Never sent to the remote; the
+remote observes it only as the `reset(REFUSED)` it receives when it exceeds the limit.
 
 ### Raises
 

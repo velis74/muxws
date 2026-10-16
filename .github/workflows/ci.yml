@@ -9,8 +9,8 @@ on:
   pull_request:
 
 env:
-  # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and its corpus carries non-BMP
-  # characters, so the runner's locale is load-bearing rather than incidental.
+  # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and its corpus contains non-BMP
+  # characters; the tests require a UTF-8 locale.
   LANG: C.UTF-8
 
 jobs:
@@ -33,8 +33,7 @@ jobs:
         with:
           name: python-coverage
           path: coverage.json
-        # The incremental coverage check grades one revision, so uploading from every matrix leg
-        # would just overwrite the same artifact with an identical file.
+        # The incremental coverage check reads one coverage report, so only one matrix leg uploads it.
         if: matrix.python-version == '3.13'
 
   node:
@@ -44,21 +43,19 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
-      # `npm install`, not `npm ci`: package-lock.json is deliberately not committed, so that CI
-      # resolves dependencies afresh and tests against current upstream rather than a frozen tree.
-      # See GAPS.md.
+      # `npm install`, not `npm ci`: package-lock.json is not committed, so CI resolves dependencies
+      # on every run and tests against current upstream versions.
       - run: npm install
-      # `lint:ci`, not `lint`: the developer script carries `--fix`, which rewrites the violation and
-      # exits 0. In CI that rewrite is discarded with the runner, so an auto-fixable violation would
-      # be reported by nothing and reach main unnoticed.
+      # `lint:ci`, not `lint`: `lint` runs with `--fix`, which rewrites auto-fixable violations and
+      # exits 0, so in CI those violations would pass unreported.
       - run: npm run lint:ci
       - run: npm test
       - run: npm run build
-      # The documentation site: every exported symbol has an entry with all five sections, no
-      # duration without a unit, no dead link or anchor, SPEC.md linked from one page. Then the build,
-      # which fails on a dead internal link. The examples on the API pages run in `cross-language.yml`
-      # (TypeScript, against the Python acceptor) and in the python job above (`docs/examples` is in
-      # `testpaths`).
+      # The documentation site: `check-docs.mjs` checks that every exported symbol has an entry with
+      # all five sections, that every duration has a unit, that no link or anchor is dead and that a
+      # page links SPEC.md. The build then fails on a dead internal link. The examples on the API
+      # pages run in `cross-language.yml` (TypeScript, against the Python acceptor) and in the python
+      # job above (`docs/examples` is in `testpaths`).
       - run: npm run docs:check
       - run: npm run docs:build
       - uses: actions/upload-artifact@v4
@@ -90,9 +87,9 @@ jobs:
           coverage-files: |
             coverage.json
             coverage-final.json
-          # demo/, docs/ and interop/ are runnable examples and cross-language harnesses, not
-          # library code - neither pytest (scoped to muxws/) nor vitest (scoped to ts/) measures
-          # them, so grading them here would fail every PR that touches one on "no coverage data".
+          # demo/, docs/ and interop/ are runnable examples and cross-language harnesses, not library
+          # code. Neither pytest (scoped to muxws/) nor vitest (scoped to ts/) measures them, so they
+          # have no coverage data and are excluded.
           extra-ignore-patterns: |
             demo/**
             demo.py
@@ -104,6 +101,5 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pr-number: ${{ github.event.pull_request.number }}
 
-  # Interop belongs in `cross-language.yml`, which runs both role assignments over both codecs on
-  # the same triggers. A second copy here would be a strict subset of it: two places to keep in step,
-  # and the one that ships fewer codecs is the one that rots.
+  # Interop runs in `cross-language.yml`, in both role assignments over both codecs, on the same
+  # triggers as this workflow.

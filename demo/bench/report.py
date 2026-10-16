@@ -1,7 +1,6 @@
 """The printable report: one table of cells, one of round trips, and what was skipped.
 
-`format_report` prints nothing and returns the whole thing as a string, so the caller decides where
-it goes and a test can read it without capturing stdout.
+`format_report` returns the report as a string and prints nothing.
 """
 
 from __future__ import annotations
@@ -13,8 +12,8 @@ if TYPE_CHECKING:
 
     from demo.bench import Result, RoundTrip
 
-#: One row of the throughput table. Two header lines and every data line go through this, which is
-#: what makes the columns line up rather than a promise that they do.
+#: One row of the throughput table. Both header lines and every data line use it, so the columns
+#: align.
 _CELL = (
     "{transport:<11}{codec:<9}{payload:>9}{streams:>9}"
     "{raw_socket:>14}{raw_websocket:>15}{muxws:>13}{ratio:>11}{crossover:>11}"
@@ -23,10 +22,10 @@ _CELL = (
 #: One row of the round-trip table.
 _TRIP = "{transport:<11}{codec:<9}{median:>13}{share:>18}"
 
-#: What a cell that was not measured prints. A blank would read as a zero.
+#: Printed for a cell that was not measured, so it is not mistaken for zero.
 _UNMEASURED = "-"
 
-#: The link a round trip is put beside: an ordinary intercontinental one.
+#: Round-trip time of the reference link the round trip is compared with: a typical intercontinental link.
 _REFERENCE_LINK_MILLISECONDS = 40.0
 
 
@@ -46,7 +45,7 @@ def format_report(
 
 
 def _preamble() -> list[str]:
-    """What was measured, in what regime, and in what units."""
+    """The description of the measurement: modes, conditions and units."""
     return [
         "muxws throughput: the same payload carried three ways",
         "",
@@ -82,7 +81,7 @@ def _preamble() -> list[str]:
 
 
 def _throughput_table(results: Sequence[Result]) -> list[str]:
-    """A line per cell: the three modes, muxws against the denominator, and the crossover."""
+    """A line per cell: the three modes, muxws relative to the raw socket, and the crossover."""
     lines = [
         _CELL.format(
             transport="transport",
@@ -132,7 +131,7 @@ def _throughput_table(results: Sequence[Result]) -> list[str]:
 
 
 def _cells(results: Sequence[Result]) -> dict[tuple[str, str, int, int], dict[str, Result]]:
-    """The results as rows, keyed by the cell they belong to and in the order they were measured."""
+    """The results grouped by cell, in measurement order."""
     rows: dict[tuple[str, str, int, int], dict[str, Result]] = {}
     for result in results:
         key = (result.transport, result.codec, result.payload_bytes, result.streams)
@@ -145,21 +144,21 @@ def _rate(result: Result | None) -> str:
 
 
 def _ratio(muxws: Result | None, denominator: Result | None) -> str:
-    """muxws as a percentage of the raw socket, where both halves of the comparison exist."""
+    """muxws as a percentage of the raw socket, when both were measured."""
     if muxws is None or denominator is None or denominator.megabytes_per_second == 0:
         return _UNMEASURED
     return f"{100 * muxws.megabytes_per_second / denominator.megabytes_per_second:.1f}"
 
 
 def _crossover(muxws: Result | None) -> str:
-    """The link speed muxws's measured rate amounts to: MB/s x 8 bits, in gigabits."""
+    """muxws's measured rate as a link speed in gigabits per second: MB/s x 8 / 1000."""
     if muxws is None:
         return _UNMEASURED
     return f"{muxws.megabytes_per_second * 8 / 1_000:.2f}"
 
 
 def _round_trip_table(round_trips: Sequence[RoundTrip]) -> list[str]:
-    """What one `peer.request()` costs locally, and what fraction of a real link that is."""
+    """The local latency of one `peer.request()`, and its share of the reference link's round trip."""
     lines = [
         f"round trip: muxws peer.request(), median, against a {_REFERENCE_LINK_MILLISECONDS:.0f} ms link",
         "",
@@ -185,7 +184,7 @@ def _round_trip_table(round_trips: Sequence[RoundTrip]) -> list[str]:
 
 
 def _notes(notes: Sequence[str]) -> list[str]:
-    """What was left out. An empty list is itself worth printing: it says nothing was."""
+    """The skipped cells; when none were skipped, a line saying so."""
     if not notes:
         return ["notes: every transport and codec asked for was measured"]
     return ["notes:", *(f"  - {note}" for note in notes)]

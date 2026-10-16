@@ -1,26 +1,24 @@
-"""What the muxws envelope costs, against the same payload carried without it.
+"""Throughput of muxws compared with the same payload sent without muxws.
 
-`muxws/throughput_test.py` reports frames a second over the in-memory pair, which is a numerator
-with no denominator: nothing there says what the same machine does with muxws taken out of the path.
-This package supplies the denominator. Every cell is measured three ways, all three carrying the
-**same application payload bytes** and, under a text codec, sending them as text:
+`muxws/throughput_test.py` reports frames per second over the in-memory pair, without a baseline.
+This package measures the baseline on the same machine. Every cell is measured three ways, all three
+sending the same application payload bytes and, under a text codec, sending them as text:
 
     raw-socket      a socket and a 4-byte big-endian length prefix, no WebSocket at all
     raw-websocket   one WebSocket message per payload, no muxws
     muxws           `open()` once, then `send()` per payload
 
-so the difference between the rows is the WebSocket framing and then the envelope and the peer's
-bookkeeping, rather than one number standing on its own.
+The difference between the first two rows is the WebSocket framing; the difference between the last
+two is the muxws envelope and the peer's bookkeeping.
 
-Each half of a cell is a process of its own - `demo.bench.acceptor` and `demo.bench.dialer` - so the
-two ends get two cores and neither is measured through the other's event loop. Per cell: a warmup
-burst, then the clock starts, the dialer sends for a fixed wall-clock budget, then it terminates the
-run and waits for the acceptor to report how many payloads arrived. The clock stops on that answer,
-so the elapsed time includes draining whatever was still in flight.
+The two ends of a cell run in separate processes (`demo.bench.acceptor` and `demo.bench.dialer`), so
+they can use two cores and neither shares the other's event loop. Per cell: a warmup burst, then the
+clock starts, the dialer sends for a fixed wall-clock time, ends the run and waits for the acceptor
+to report how many payloads arrived. The clock stops on that report, so the elapsed time includes
+draining the data still in flight.
 
-The acceptors refuse permessage-deflate. With it negotiated the two WebSocket modes would be
-compressing a padded payload that the raw-socket mode sends verbatim, and the table would report the
-compressibility of the padding as a property of muxws.
+The acceptors refuse permessage-deflate. With it, the two WebSocket modes would compress a padded
+payload that the raw-socket mode sends uncompressed.
 """
 
 from __future__ import annotations
@@ -49,12 +47,10 @@ from muxws.codecs import Codec, get_codec, register_codec
 #: The three ways one cell is carried, in the order the report prints them.
 MODES = ("raw-socket", "raw-websocket", "muxws")
 
-#: The two transports. Both are local: the point of the table is the CPU cost of the envelope, and a
-#: real link measures the link.
+#: The two transports. Both are local, so the table measures CPU cost, not network links.
 TRANSPORTS = ("tcp", "unix")
 
-#: Measured wall clock per cell. Long enough for the rate to settle, short enough that the default
-#: matrix is a coffee-free wait.
+#: Measured wall-clock seconds per cell; long enough for the rate to settle.
 DEFAULT_SECONDS = 1.5
 
 #: Small, medium, large: an envelope-dominated payload, an ordinary one, and one that muxws must
@@ -65,64 +61,58 @@ DEFAULT_PAYLOADS = (128, 4096, 262_144)
 DEFAULT_CODECS = ("json",)
 FULL_CODECS = ("json", "msgpack")
 
-#: The concurrency cell: muxws streams on one connection, and for the raw modes that many
-#: connections, since a connection is all those modes have to multiplex with.
+#: The concurrency cell: this many muxws streams on one connection, and this many connections for the
+#: raw modes, which cannot multiplex within one connection.
 CONCURRENT_STREAMS = 20
 
 #: The payload the default matrix runs that concurrency cell at.
 CONCURRENT_PAYLOAD = 4096
 
-#: How long the dialer sends before the clock starts. A burst measured in wall clock rather than in
-#: payloads, because a count large enough to warm the smallest cell would spend minutes on the
-#: largest, which moves tens of payloads a second. The acceptor counts warmup payloads like any
-#: other, so the dialer subtracts what it sent and then waits for the pipe to empty before the clock
-#: starts - a backlog drained inside the measured interval is time charged for payloads that were
-#: subtracted from it.
+#: Seconds the dialer sends before the clock starts. Measured in time, not payloads: a payload count
+#: large enough to warm the smallest cell would take minutes in the largest. The acceptor counts
+#: warmup payloads like any other, so the dialer subtracts what it sent and waits for the backlog to
+#: drain before starting the clock; otherwise draining the warmup would count as measured time.
 WARMUP_SECONDS = 0.2
 
-#: `Stream.send()` enqueues and returns - it never waits for the socket - so a loop that only sends
-#: measures the queue rather than the wire, and at 256 KiB a payload the queue is the machine's
-#: memory. The dialer keeps at most this many bytes between `send()` and the socket, which is what
-#: `drain()` and the kernel's send buffer give the other two modes for free. In bytes rather than in
-#: payloads so that the run ends with the same amount left to drain whatever the payload size is: the
-#: drain is inside the measured time, and a window counted in payloads would put a hundred times more
-#: of it into the largest cell than into the smallest.
+#: `Stream.send()` enqueues and returns without waiting for the socket, so a loop that only sends
+#: measures the queue, which at 256 KiB per payload grows without bound. The dialer keeps at most
+#: this many bytes between `send()` and the socket; the other two modes get the same limit from
+#: `drain()` and the kernel's send buffer. Counted in bytes, not payloads, so the amount left to
+#: drain at the end of the measured time is the same for every payload size.
 MUXWS_SEND_WINDOW_BYTES = 262_144
 
 #: The length prefix of the raw-socket mode, and the width of the count it answers with.
 LENGTH_PREFIX_BYTES = 4
 COUNT_BYTES = 8
 
-#: What ends a raw-websocket run. Sent as text under a text codec and as bytes under a binary one, so
-#: that the terminator does not become the one message of the run that changes medium.
+#: The message that ends a raw-websocket run. Sent as text under a text codec and as bytes under a
+#: binary one, matching the other messages of the run.
 SENTINEL_TEXT = "muxws-bench-end"
 SENTINEL_BYTES = SENTINEL_TEXT.encode()
 
 #: The HTTP request target both WebSocket modes ask for. Neither acceptor routes on it.
 REQUEST_TARGET = "/bench"
 
-#: What the acceptor writes on stderr once its address is bound, and the only thing it writes on a
-#: run that works. Waiting for a line from the process that was started is what distinguishes it from
-#: whatever else may have taken the port between `_address` releasing it and the child binding it.
+#: The line the acceptor writes on stderr once its address is bound; on success it writes nothing
+#: else. Waiting for this line, instead of probing the address, avoids mistaking another process that
+#: took the port after `_address` released it for the acceptor.
 ACCEPTOR_READY = "muxws-bench-acceptor-ready"
 
-#: Round trips per transport: a few hundred, which is where the median stops moving.
+#: Round trips per transport, and warmup round trips before them.
 ROUND_TRIP_SAMPLES = 400
 ROUND_TRIP_WARMUP = 50
 
-#: What a round trip carries: the smallest payload there is, so the figure is the library's own
-#: latency and not a measurement of the codec. The acceptor answers it and iterates nothing.
+#: The payload of a round trip: minimal, so the figure is the library's latency and not the codec's
+#: cost. The acceptor replies to it without iterating the stream.
 ROUND_TRIP_PROBE = {"probe": True}
 
-#: How long an acceptor gets to bind before its cell is called a failure, and how long one gets to
-#: end and be read out before it is killed instead.
+#: Seconds an acceptor has to bind before its cell fails, and seconds it has to exit and be read
+#: before it is killed.
 STARTUP_TIMEOUT_SECONDS = 20.0
 TEARDOWN_TIMEOUT_SECONDS = 5.0
 
-#: What a dialer gets on top of its own budget before the cell is called a failure. Generous, because
-#: it is not a measurement: it is the difference between a cell that fails and a matrix that hangs -
-#: a dialer whose peer died mid-run has nothing left to end it, and the run is silent until the last
-#: cell has finished.
+#: Seconds a dialer may run beyond its own time budget before the cell fails. A dialer whose acceptor
+#: died mid-run does not end on its own; this limit makes the cell fail instead of hanging the matrix.
 DIALER_MARGIN_SECONDS = 60.0
 
 
@@ -133,7 +123,7 @@ class Result:
     mode: str
     transport: str
     codec: str
-    #: The encoded length actually achieved, which is what the rate is computed from.
+    #: The encoded length achieved; the rate is computed from it.
     payload_bytes: int
     streams: int
     messages: int
@@ -148,15 +138,15 @@ class RoundTrip:
 
     transport: str
     codec: str
-    #: The median of the round trips, not the mean: one scheduling hiccup moves a mean and not this.
+    #: The median of the round trips; unlike the mean, it is not moved by single scheduling delays.
     microseconds: float
 
 
 def bench_codec(name: str) -> Codec:
     """The codec both halves of a cell use, registering msgpack when that is the one asked for.
 
-    The library registers JSON and nothing else (WSM-CDC-014), so msgpack is a bootstrap step - and
-    every half of every cell is a process that has to perform it for itself.
+    The library registers only JSON (WSM-CDC-014), so each process of each cell registers msgpack
+    itself.
     """
     if name == "msgpack":
         from muxws.codecs.msgpack_ import MsgpackCodec
@@ -173,10 +163,9 @@ def encoded_length(data: str | bytes) -> int:
 def build_payload(target_bytes: int, codec: Codec) -> tuple[Any, str | bytes]:
     """One object whose encoded form is `target_bytes` long, and that encoded form.
 
-    A field is padded until the encoding measures what was asked for. The length that comes back is
-    the length achieved: an object cannot always be made to encode to an exact size - msgpack's
-    string header grows a byte at 32 and at 256 and at 65,536 - and reporting the requested figure
-    while sending a different one puts the error in every rate computed from it.
+    A field is padded until the encoding has the requested length. The returned encoding has the
+    length achieved, which can differ from the request: msgpack's string header grows at 32, 256 and
+    65,536 bytes, so not every size is reachable. Rates are computed from the achieved length.
     """
     padding = max(target_bytes - encoded_length(codec.encode_payload({"n": 0, "pad": ""})), 0)
     payload = {"n": 0, "pad": "x" * padding}
@@ -204,8 +193,7 @@ def run_matrix(
     """Measure every cell, then a round trip per transport. Third element: what was skipped and why.
 
     A cell whose transport or codec this machine cannot run is left out of the results and named in
-    the notes instead. A silent omission would leave a reader comparing a table against a differently
-    shaped one and calling the difference a measurement.
+    the notes.
     """
     notes: list[str] = []
     chosen_transports = _available_transports(transports or TRANSPORTS, notes)
@@ -258,9 +246,9 @@ def _available_codecs(wanted: Sequence[str], notes: list[str]) -> tuple[str, ...
 def _stream_counts(mode: str, payload: int, *, full: bool, override: Sequence[int] | None) -> tuple[int, ...]:
     """How many concurrent streams this mode runs this payload at.
 
-    The default matrix buys one concurrency figure and pays for one cell: muxws at the middle
-    payload. `--full` runs every mode at both counts, which is where the raw modes' 20 connections
-    become the thing muxws's 20 streams on one connection are compared against.
+    The default matrix runs one concurrency cell: muxws at the middle payload. `--full` runs every
+    mode at both counts, comparing the raw modes' 20 connections with muxws's 20 streams on one
+    connection.
     """
     if override is not None:
         return tuple(override)
@@ -349,9 +337,9 @@ async def _round_trip_median(transport: str, address: str, codec_name: str) -> f
 def _in_a_loop_of_its_own(factory: Callable[[], Any]) -> Any:
     """Run one coroutine to completion in a thread of its own.
 
-    `run_matrix` is a synchronous call, and `asyncio.run()` raises rather than blocks when there is
-    already a loop running in the calling thread. The thread makes the round trip callable from
-    either kind of caller.
+    `run_matrix` is synchronous, and `asyncio.run()` raises when an event loop is already running in
+    the calling thread. The separate thread makes the round trip callable with or without a running
+    loop.
     """
     import asyncio
 
@@ -386,10 +374,10 @@ def split_host_and_port(address: str) -> tuple[str, int]:
 
 @contextlib.contextmanager
 def _address(transport: str) -> Iterator[str]:
-    """An address nothing else holds: a free port, or a socket file in a directory of its own.
+    """A free address: a free port, or a socket file in a new directory.
 
-    The directory is made under the shortest temporary root there is, because `sun_path` is capped at
-    about 108 bytes and a long `TMPDIR` turns every unix cell into `OSError: AF_UNIX path too long`.
+    The directory is created under `/tmp`, not `TMPDIR`: `sun_path` is limited to about 108 bytes, and
+    a long `TMPDIR` would make every unix cell fail with `OSError: AF_UNIX path too long`.
     """
     if transport == "unix":
         directory = tempfile.mkdtemp(prefix="mux", dir="/tmp")  # noqa: S108 - see the docstring
@@ -408,7 +396,7 @@ def _address(transport: str) -> Iterator[str]:
 def _start_acceptor(
     mode: str, transport: str, codec_name: str, address: str, environment: dict[str, str]
 ) -> subprocess.Popen[str]:
-    """The counting half, in a process of its own so that both ends get a core."""
+    """Start the counting end in its own process, so that each end can use a core."""
     return subprocess.Popen(  # noqa: S603 - a fixed argv, and every value in it is ours
         [
             sys.executable,
@@ -442,7 +430,7 @@ def _run_dialer(
     environment: dict[str, str],
     acceptor: subprocess.Popen[str],
 ) -> dict[str, Any]:
-    """The sending half, run to completion; its one line of stdout, parsed."""
+    """Run the sending end to completion and return its stdout line, parsed."""
     try:
         completed = subprocess.run(  # noqa: S603 - a fixed argv, and every value in it is ours
             [
@@ -468,9 +456,8 @@ def _run_dialer(
             text=True,
             env=environment,
             check=False,
-            # The budget plus a margin. A dialer is bounded by its own clock only while its peer is
-            # answering; one whose acceptor died has no clock at all, and `subprocess.run` without
-            # this waits for it forever with the whole matrix behind it.
+            # The time budget plus a margin. A dialer whose acceptor died does not end on its own,
+            # and without a timeout `subprocess.run` would wait indefinitely.
             timeout=seconds + WARMUP_SECONDS + DIALER_MARGIN_SECONDS,
         )
     except subprocess.TimeoutExpired as expired:
@@ -487,17 +474,16 @@ def _run_dialer(
 
 
 def _wait_until_listening(address: str, acceptor: subprocess.Popen[str]) -> None:
-    """Block until this acceptor says it has bound, or say why it never will.
+    """Block until this acceptor reports that it has bound, or raise with the reason.
 
-    The proof is a line from the process that was started, not an answer from the address: a port is
-    only free at the instant it is probed, and a probe that accepts whatever answers would hand the
-    dialer a stranger's server and then wait for a count that never comes. An acceptor that exits at
-    once - a missing dependency, a socket file it refuses to unlink - closes the pipe instead, so
-    that case is reported as dead rather than waited out as slow.
+    Readiness is the acceptor's ready line, not a successful connection to the address: a port is
+    free only when probed, and another process may bind it afterwards. An acceptor that exits at once
+    (a missing dependency, a socket file it refuses to unlink) closes the pipe, and is reported as
+    failed immediately instead of after the timeout.
     """
     first: list[str] = []
-    # On a thread, because a pipe read has no deadline of its own and the alternative - polling a
-    # non-blocking pipe - is not the same call on every platform this runs on.
+    # Read on a thread, because a pipe read has no timeout, and non-blocking pipe reads differ
+    # between platforms.
     reader = threading.Thread(target=lambda: first.append(acceptor.stdout.readline()), daemon=True)
     reader.start()
     reader.join(STARTUP_TIMEOUT_SECONDS)
@@ -505,13 +491,13 @@ def _wait_until_listening(address: str, acceptor: subprocess.Popen[str]) -> None
     if first and first[0].strip() == ACCEPTOR_READY:
         return
     if reader.is_alive():
-        # Ended first, so the pipe reaches EOF and the reader can be joined: nothing else may read
-        # this pipe while that thread is still parked on it.
+        # Terminated first, so the pipe reaches EOF and the reader thread can be joined; nothing else
+        # may read the pipe while that thread is blocked on it.
         acceptor.terminate()
         reader.join()
         raise RuntimeError(f"the acceptor did not bind {address} within {STARTUP_TIMEOUT_SECONDS} seconds")
-    # An acceptor that said something else is failing, and it is still writing why: without this the
-    # harvest below terminates it partway through its own traceback and reports the first three lines.
+    # Any other first line means the acceptor is failing and may still be writing its traceback; the
+    # wait lets it finish before `_acceptor_output` terminates it.
     with contextlib.suppress(subprocess.TimeoutExpired):
         acceptor.wait(timeout=TEARDOWN_TIMEOUT_SECONDS)
     raise RuntimeError(f"the acceptor stopped before binding {address}\n{first[0]}{_acceptor_output(acceptor)}")
@@ -520,20 +506,18 @@ def _wait_until_listening(address: str, acceptor: subprocess.Popen[str]) -> None
 def _stop(acceptor: subprocess.Popen[str]) -> None:
     """End the acceptor, whatever state it is in.
 
-    It serves until it is stopped: with more than one connection in a cell there is no last
-    termination handshake for it to exit on, and a cell that ended by agreement would still leave the
-    process holding its address while the next cell tried to bind one.
+    The acceptor serves until it is stopped: with more than one connection in a cell there is no
+    single final handshake on which it could exit.
     """
     _acceptor_output(acceptor)
 
 
 def _acceptor_output(acceptor: subprocess.Popen[str]) -> str:
-    """Whatever the acceptor printed - nothing, on success - having ended it first.
+    """Terminate the acceptor and return its output (empty on success).
 
-    Ending it first is what makes this safe to call from a failure path: a pipe the child still holds
-    open reads until EOF, so an acceptor that is alive and serving would be read for as long as it
-    kept serving. Calling it twice is how the failure paths and `_stop` overlap, so a second call
-    finds the streams closed and answers with an empty string.
+    The acceptor is terminated first because reading a pipe the child still holds open blocks until
+    EOF. The failure paths and `_stop` can both call this; a second call finds the pipe closed and
+    returns an empty string.
     """
     if acceptor.poll() is None:
         acceptor.terminate()
@@ -557,9 +541,9 @@ def _cell_environment(codec_name: str) -> dict[str, str]:
 def _example_environment() -> dict[str, str]:
     """`demo.py`'s environment builder, loaded from the script beside this package.
 
-    `import demo` finds the package this module lives in and never the script, which is a file of the
-    same name one directory up, so it is loaded by path. Without it a child process imports whatever
-    copy of muxws the interpreter happens to have installed rather than the tree being measured.
+    `import demo` finds this package, not the script `demo.py` one directory up, so the script is
+    loaded by path. Without this environment a child process imports an installed muxws, if any,
+    instead of the checkout being measured.
     """
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     spec = importlib.util.spec_from_file_location("muxws_demo_script", os.path.join(root, "demo.py"))

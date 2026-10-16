@@ -1,14 +1,14 @@
 /**
- * The reconnect helper - and, more importantly, that anything calls it.
+ * The reconnect helper, and that `connect()` uses it.
  *
- * A mirror of `muxws/reconnect_test.py`. The first block goes through the **real** `connect()` against
- * a **real** `ws` server: kill the server, watch the peer re-dial, replay its hello and fire
- * `onReconnect`. A `ConnectionLoop` that `connect()` never constructs passes every unit test in this
- * file, and only that block can tell the difference.
+ * Mirrors `muxws/reconnect_test.py`. The first block uses the **real** `connect()` against a **real** `ws` server:
+ * it kills the server and checks that the peer re-dials, replays its hello and fires `onReconnect`. A
+ * `ConnectionLoop` that `connect()` never constructs passes every unit test in this file; only that block detects
+ * it.
  *
- * The blocks after it exercise the driver over `ts/transports/memory.ts`, which is where the ordering
- * rules of §7 are actually asserted. Durations are **milliseconds** here and seconds in Python (§9.3),
- * so the schedule the two suites assert is the same numbers scaled by a thousand.
+ * The blocks after it drive the reconnect loop over `ts/transports/memory.ts` and assert the ordering rules of §7.
+ * Durations are **milliseconds** here and seconds in Python (§9.3), so both suites assert the same schedule scaled
+ * by a thousand.
  */
 
 import { readFileSync } from 'node:fs';
@@ -21,8 +21,8 @@ import { WebSocketServer } from 'ws';
 import { JsonCodec } from './codec';
 import { ConnectionClosed, ConnectionLost, ResetCode, StreamTimeout } from './errors';
 import type { Frame } from './frames';
-// The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` deliberately does not,
-// so a spec that dials over `ws` still has to bring the registration in.
+// The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` does not, so a spec that dials over
+// `ws` imports the registration itself.
 import './index';
 import { connect, handleProtocols, serve } from './node';
 import type { CloseReason } from './observability';
@@ -55,18 +55,18 @@ function framesOn(socket: MemorySocket): Frame[] {
 }
 
 /**
- * A dialable acceptor with no socket anywhere - Python's `conftest.DialableServer`.
+ * A dialable acceptor without a real socket - Python's `conftest.DialableServer`.
  *
- * Every `dial()` builds a fresh `memoryPair()`, puts an acceptor `Peer` on one end with the handler
- * the test supplied, and returns the other. It can be told to refuse the next dials, to drop the
- * current socket, or to leave the acceptor unserved so nothing ever answers a ping.
+ * Every `dial()` builds a fresh `memoryPair()`, puts an acceptor `Peer` with the test's handler on one end, and
+ * returns the other end. It can refuse the next dials, drop the current socket, or leave the acceptor unserved so
+ * no ping is answered.
  */
 class FakeServer {
   readonly acceptors: Peer[] = [];
 
   readonly acceptorSockets: MemorySocket[] = [];
 
-  /** The dialer's end of each connection, which is where "byte-identical" is read from. */
+  /** The dialer's end of each connection, from which "byte-identical" is read. */
   readonly dialerSockets: MemorySocket[] = [];
 
   handler: StreamHandler = () => undefined;
@@ -123,8 +123,7 @@ function settle(ms = 20): Promise<void> {
 /**
  * A promise's outcome as a value: what it resolved to, or what it rejected with.
  *
- * Named for the outcome rather than `settled`, which one letter away from `settle` above would read
- * as the same helper at a glance.
+ * Named `outcome` rather than `settled` to distinguish it from the `settle` helper above.
  */
 function outcomeOf(work: PromiseLike<unknown>): Promise<unknown> {
   return Promise.resolve(work).then(
@@ -142,12 +141,11 @@ async function until(predicate: () => boolean, timeoutMs = 2000, what = 'the con
 }
 
 /**
- * Teardown for anything with a timer in it.
+ * Teardown for anything with a timer.
  *
- * Registered the moment it starts rather than at the end of the test body: a failing assertion skips
- * the rest of the body, and a supervisor or a heartbeat left running keeps the runner's event loop
- * alive forever - which turns one honest assertion failure into a suite that never finishes and says
- * nothing about why.
+ * Registered when the timer starts rather than at the end of the test body: a failing assertion skips the rest of
+ * the body, and a supervisor or heartbeat left running keeps the runner's event loop alive, so one assertion
+ * failure becomes a suite that never finishes and reports nothing.
  */
 const cleanups: (() => void)[] = [];
 
@@ -160,7 +158,7 @@ function dialerOver(socket: MemorySocket): Peer {
   return new Peer(socket, { codec: new JsonCodec(), isDialer: true });
 }
 
-// --------------------------------------------------------------------------- the seam
+// --------------------------------------------------------------------------- connect() and the reconnect driver
 
 describe('connect() is wired to the reconnect driver', () => {
   let server: WebSocketServer;
@@ -173,8 +171,8 @@ describe('connect() is wired to the reconnect driver', () => {
     server.on('connection', (socket) => {
       void serve(socket, {
         handler: (payload) => {
-          // The hello is an ordinary stream reaching an ordinary handler (WSM-RCN-021), and the
-          // handler returning is the whole of the acknowledgement (WSM-RCN-022).
+          // The hello is an ordinary stream reaching an ordinary handler (WSM-RCN-021), and the handler returning
+          // is the acknowledgement (WSM-RCN-022).
           hellos.push(payload);
         },
       });
@@ -211,10 +209,9 @@ describe('connect() is wired to the reconnect driver', () => {
   });
 
   it('raises on the first attempt with unlimited retries configured - WSM-RCN-006/WSM-INV-018', async () => {
-    // Nothing answers on this port. `reconnect` says retry forever; the FIRST attempt still throws,
-    // with the underlying error, and there is no `retryInitial`-style option that would change it -
-    // a caller who wants the first dial retried writes that loop where it can decide what a permanent
-    // failure looks like.
+    // Nothing listens on this port. `reconnect` allows unlimited retries; the FIRST attempt still throws the
+    // underlying error, and no `retryInitial`-style option changes that. A caller who wants the first dial retried
+    // writes that loop and decides there what counts as a permanent failure.
     const started = Date.now();
     const caught = await connect('ws://127.0.0.1:1', { reconnect: new Reconnect({ maxAttempts: Infinity }) }).then(
       () => null,
@@ -236,26 +233,23 @@ describe('connect() is wired to the reconnect driver', () => {
 
     const started = Date.now();
     const closes: CloseReason[] = [];
-    // Not a peer that retries in the background, and not ten seconds of `close()`'s drain window
-    // either: the connection never established, so there is nothing to drain.
+    // `connect()` neither returns a peer that retries in the background nor waits for `close()`'s ten-second drain
+    // window: the connection was never established, so there is nothing to drain.
     //
-    // The **class** is pinned, not merely that something was thrown: WSM-RCN-006 asks for the
-    // underlying error, and a hello deadline wrapped in a `ConnectionClosed` is not the underlying
-    // error - it is a report that the connection ended, which says nothing about what went wrong.
-    // `rejects.toThrow()` alone would pass against either, which is exactly what a rule about
-    // *which* error reaches the caller cannot afford. `muxws/reconnect_test.py` pins the same class.
+    // The test asserts the error **class**: WSM-RCN-006 requires the underlying error, and a hello deadline wrapped
+    // in a `ConnectionClosed` only reports that the connection ended, not the cause. `rejects.toThrow()` alone
+    // would pass for either. `muxws/reconnect_test.py` asserts the same class.
     await expect(
       connect(stalledUrl, { hello: { session: 'abc' }, helloTimeoutMs: 50, onClose: (r) => closes.push(r) }),
     ).rejects.toThrow(StreamTimeout);
     expect(Date.now() - started).toBeLessThan(1000);
-    // The failure reports itself exactly once, through the exception. Nothing was established, so
-    // nothing was lost - and a `CloseReason` handed to an application for a peer it never received
-    // would be the second report of one failure, in a shape reserved for losing a live connection
-    // (WSM-RCN-040/045). Python asserts the same silence.
+    // The failure is reported exactly once, through the exception. Nothing was established, so nothing was lost; a
+    // `CloseReason` for a peer the application never received would be a second report of one failure, in the form
+    // reserved for losing a live connection (WSM-RCN-040/045). Python asserts the same.
     expect(closes, 'nothing was established, so nothing was lost and nothing is reported').toEqual([]);
-    // And the socket it gave up on is closed rather than left open behind the exception: a `connect()`
-    // that threw while leaving a live socket and its read loop behind leaks one per failed attempt,
-    // and the server goes on holding a client nobody will ever speak for.
+    // The socket is closed rather than left open behind the exception: a `connect()` that threw and left a live
+    // socket and its read loop behind would leak one per failed attempt, and the server would keep a client
+    // connection that no application uses.
     await until(() => stalled.clients.size === 0, 2000, 'the abandoned socket closing');
 
     await new Promise<void>((resolve) => {
@@ -264,19 +258,19 @@ describe('connect() is wired to the reconnect driver', () => {
   });
 
   it('re-dials on a real socket whose pong is swallowed - WSM-RCN-011', async () => {
-    // The whole heartbeat path over a real socket, through the real `connect()`: a swallowed pong is
-    // noticed, the socket is closed locally so `serve()` settles, the supervisor sees the loss and
-    // dials again. Every other heartbeat test here drives `Heartbeat` or `ConnectionLoop` directly
-    // and stays green with `startHeartbeat()` deleted from the supervisor; this is the one that
-    // fails, because a heartbeat nothing starts detects nothing.
+    // The whole heartbeat path over a real socket, through the real `connect()`: a swallowed pong is detected, the
+    // socket is closed locally so `serve()` settles, and the supervisor sees the loss and dials again. Every other
+    // heartbeat test here drives `Heartbeat` or `ConnectionLoop` directly and passes with `startHeartbeat()`
+    // removed from the supervisor; this test fails in that case, because a heartbeat that is never started detects
+    // nothing.
     //
-    // No muxws peer on the server side, deliberately: `serve()` echoes a `ping` verbatim
-    // (WSM-CON-010), and a server that answers is the one case the heartbeat cannot detect.
+    // The server side has no muxws peer: `serve()` echoes a `ping` verbatim (WSM-CON-010), and the heartbeat cannot
+    // detect a loss when the server answers.
     //
-    // Unlike `muxws/reconnect_test.py::test_a_swallowed_pong_on_a_real_socket_re_dials`, this cannot
-    // also police the close *code*: `ws.close(1006)` throws, but it has already moved the socket to
-    // CLOSING by then, so the loss still surfaces and the re-dial still happens. Python's adapter
-    // leaves the socket open instead, which is why the rule is asserted there and only stated here.
+    // Unlike `muxws/reconnect_test.py::test_a_swallowed_pong_on_a_real_socket_re_dials`, this test cannot also
+    // check the close *code*: `ws.close(1006)` throws, but has already moved the socket to CLOSING, so the loss is
+    // still reported and the re-dial still happens. Python's adapter leaves the socket open in that case, so the
+    // rule is asserted there and only stated here.
     const deaf = new WebSocketServer({ port: 0, handleProtocols });
     const seen: unknown[] = [];
     deaf.on('connection', (socket) => seen.push(socket));
@@ -290,7 +284,7 @@ describe('connect() is wired to the reconnect driver', () => {
       pingTimeoutMs: 50,
       onClose: (reason) => closes.push(reason),
     });
-    // Nothing here waits on anything TCP-shaped: the whole detection budget is interval + timeout.
+    // No wait here depends on TCP timeouts: the whole detection budget is interval + timeout.
     await until(() => seen.length >= 2, 3000, 'the re-dial after the swallowed pong');
 
     expect(closes.length, 'a swallowed pong is a socket loss and is reported as one (WSM-RCN-040)').toBeGreaterThan(0);
@@ -312,9 +306,9 @@ describe('connect() is wired to the reconnect driver', () => {
   });
 
   it('does not change the wire when the hello object is mutated after connect - WSM-RCN-020', async () => {
-    // The application's own object, handed over once and then written to - which is exactly what an
-    // application that reuses a config object does. The helper captured it by value at `connect()`,
-    // so the replay three drops later is still the payload the server first saw.
+    // The application's own object, passed once and then modified, as happens when an application reuses a config
+    // object. The helper copies it by value at `connect()`, so the replay after three drops still sends the payload
+    // the server first received.
     const payload: Record<string, unknown> = { session: 'abc', rooms: ['lobby'] };
     const peer = await connect(url, {
       hello: payload,
@@ -340,8 +334,8 @@ describe('connect() is wired to the reconnect driver', () => {
 
 describe('the backoff schedule', () => {
   it('doubles from 250 ms and stops at 30 s, before jitter and after the cap - WSM-RCN-003', () => {
-    // A pure function of (attempts, options): no clock, no sleeping, no sampling - the whole point of
-    // computing the delay separately from waiting it out.
+    // A pure function of (attempts, options): no clock, no sleeping, no sampling. Computing the delay is separate
+    // from waiting it out.
     const options = new Reconnect();
     const schedule = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((attempt) => unjitteredDelay(attempt, options));
     expect(schedule).toEqual([250, 500, 1000, 2000, 4000, 8000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
@@ -366,8 +360,8 @@ describe('the backoff schedule', () => {
   });
 
   it('disperses N simultaneous reconnects across the jitter window - WSM-RCN-002', () => {
-    // Without this, a server coming back up is knocked over by the reconnection rather than by the
-    // load: N peers whose sockets died at the same instant would retry at the same instant.
+    // Without jitter, N peers whose sockets died at the same instant retry at the same instant, and a server that
+    // comes back up is overloaded by the reconnections.
     const options = new Reconnect();
     const draws = [...Array.from({ length: 200 }).keys()].map((index) => -1 + (2 * index) / 199);
     let next = 0;
@@ -381,7 +375,7 @@ describe('the backoff schedule', () => {
   });
 
   it('never computes a negative delay', () => {
-    // A jitter of 1.0 with the worst draw lands exactly on zero, never below it.
+    // A jitter of 1.0 with the lowest draw gives exactly zero, never less.
     expect(backoffDelay(0, new Reconnect({ jitter: 1 }), () => -1)).toBe(0);
   });
 
@@ -397,21 +391,20 @@ describe('the backoff schedule', () => {
     expect(unjitteredDelay(9, options)).toBe(250);
   });
 
-  it('refuses nonsense options at construction', () => {
-    // A `factor` below 1 is a schedule that shrinks, and it would read as a flaky server for a week.
+  it('rejects invalid options at construction', () => {
+    // A `factor` below 1 is a shrinking schedule, which would look like an unreliable server.
     expect(() => new Reconnect({ initialDelayMs: 0 })).toThrow(/initialDelayMs/);
     expect(() => new Reconnect({ factor: 0.5 })).toThrow(/factor/);
     expect(() => new Reconnect({ jitter: 1.5 })).toThrow(/jitter/);
   });
 
   it('uses Math.random and never a cryptographic source - WSM-RCN-005', () => {
-    // Reconnect jitter exists to disperse a thundering herd, not to resist an adversary. The ping
-    // nonce is the opposite case and does use one; conflating the two is the mistake this guards
-    // against, in the direction the rule names.
+    // Reconnect jitter disperses simultaneous reconnects; it does not need to resist an adversary. The ping nonce
+    // needs that and does use a cryptographic source; this test checks that the jitter does not.
     const source = readFileSync(join(process.cwd(), 'ts', 'reconnect.ts'), 'utf8');
     expect(source).toContain('Math.random');
-    // A call site, not the word: the comment above `uniform()` names `crypto.getRandomValues` in
-    // order to rule it out, and a test that banned the name would forbid saying why.
+    // The test looks for a call site, not the name: the comment above `uniform()` names `crypto.getRandomValues` to
+    // explain why it is not used.
     expect(source).not.toMatch(/getRandomValues\s*\(/);
     expect(source).toContain('not to resist an adversary');
   });
@@ -420,20 +413,20 @@ describe('the backoff schedule', () => {
 // --------------------------------------------------------------------------- the attempt counter
 
 describe('the attempt counter', () => {
-  it('is the helper entire persistent state - WSM-RCN-001', () => {
+  it("is the helper's entire persistent state - WSM-RCN-001", () => {
     const counter = new AttemptCounter();
     expect(counter.value).toBe(0);
     expect([counter.failed(), counter.failed(), counter.failed()]).toEqual([1, 2, 3]);
     counter.established();
     expect(counter.value).toBe(0);
-    // Everything else - the delay, the jitter, whether to give up - is computed from it, which is
-    // what makes the schedule a pure function.
+    // Everything else - the delay, the jitter, whether to give up - is computed from it, so the schedule is a pure
+    // function.
     expect(Object.getOwnPropertyNames(counter)).toEqual(['attempts']);
   });
 
   it('resets only on established, so socket-open alone leaves it climbing - WSM-RCN-004/WSM-INV-012', () => {
-    // A server that accepts sockets while its backend is down turns exponential backoff into a
-    // fixed-interval hammer if this is got wrong, and nothing about the peer looks broken.
+    // If the counter reset on socket-open, a server that accepts sockets while its backend is down would turn
+    // exponential backoff into a fixed-interval retry, with no visible fault on the peer.
     const options = new Reconnect();
     const counter = new AttemptCounter();
 
@@ -474,7 +467,7 @@ describe('the hello', () => {
     expect(hello.payloadForWire()).toEqual({ session: 'abc', tags: ['a'] });
   });
 
-  it('hands out a fresh copy each read, so one send cannot poison the next replay - WSM-RCN-027', () => {
+  it('hands out a fresh copy each read, so one send cannot alter the next replay - WSM-RCN-027', () => {
     const hello = new Hello({ payload: { session: 'abc' } });
     const first = hello.payloadForWire() as Record<string, unknown>;
     first.session = 'mutated on its way to the codec';
@@ -490,9 +483,8 @@ describe('the hello', () => {
 
 describe('the heartbeat', () => {
   it('detects a swallowed pong within intervalMs plus timeoutMs - WSM-RCN-011', async () => {
-    // Nothing serves the other end, so nobody will ever answer a ping. The clock is injected, so this
-    // waits on nothing resembling a TCP timeout - the real elapsed time is asserted below to be a
-    // rounding error next to the 30 s bound the rule states.
+    // Nothing serves the other end, so no ping is answered. The clock is injected, so no TCP timeout is involved;
+    // the real elapsed time asserted below is negligible next to the 30 s bound the rule states.
     const [dialerSide] = memoryPair();
     const peer = dialerOver(dialerSide);
     const closes: CloseReason[] = [];
@@ -506,10 +498,9 @@ describe('the heartbeat', () => {
 
     const intervalMs = DEFAULT_PING_INTERVAL_MS;
     const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS;
-    // `peer.ping()`'s own deadline is a real timer, and a test that waited it out for ten seconds
-    // would be the very thing WSM-RCN-011 rules out. What is under test is the heartbeat's
-    // arithmetic, so the ping is replaced by exactly what a swallowed pong does to it: the deadline
-    // passes on the injected clock, and it throws.
+    // `peer.ping()`'s own deadline is a real timer, and waiting ten seconds for it is what WSM-RCN-011 rules out.
+    // The test covers the heartbeat's arithmetic, so the ping is replaced by the effect of a swallowed pong: the
+    // deadline passes on the injected clock and the ping throws.
     const ping = vi.spyOn(peer, 'ping').mockImplementation(async (deadlineMs?: number) => {
       now += deadlineMs ?? 0;
       throw new ConnectionClosed(`no pong within ${deadlineMs ?? 0}ms`, { code: 1006 });
@@ -525,8 +516,8 @@ describe('the heartbeat', () => {
     );
     expect(Date.now() - wallClockStart, 'nothing here may wait on a real timeout').toBeLessThan(2000);
 
-    // Declared dead **and** closed locally: without the second the read loop stays parked inside
-    // `receive()` on a socket nobody will write to again, and the supervisor waits for it forever.
+    // Declared dead **and** closed locally: without the close the read loop stays blocked in `receive()` on a
+    // socket nothing writes to, and the supervisor waits for it indefinitely.
     expect(closes).toHaveLength(1);
     expect(closes[0].reason).toBe(`no pong within ${timeoutMs}ms`);
     expect(peer.isOpen).toBe(false);
@@ -549,27 +540,25 @@ describe('the heartbeat', () => {
     });
     void heartbeat.run().catch(() => undefined);
 
-    // Idle means idle: the timer is `lastActivity`, stamped by every frame in either direction, and
-    // not a fixed schedule - otherwise a busy connection spends a ping every interval to learn what
-    // its own traffic has already proved.
+    // The timer is `lastActivity`, updated by every frame in either direction, not a fixed schedule; otherwise a
+    // busy connection would send a ping every interval although its own traffic already shows it is alive.
     for (let round = 0; round < 12; round += 1) {
       await dialer.notify({ round });
       await settle(10);
     }
     expect(framesOn(left).filter((frame) => frame.type === 'ping')).toEqual([]);
 
-    // The control: stop the traffic and the very same heartbeat pings. Without it this test would
-    // pass just as well against a heartbeat that had already died.
+    // Control: when the traffic stops, the same heartbeat pings. Without it this test would also pass against a
+    // heartbeat that had stopped.
     await until(() => framesOn(left).some((frame) => frame.type === 'ping'), 2000, 'a ping on the idle socket');
   });
 
   it('touches nothing when it is stopped while a ping is in flight - WSM-RCN-011/040', async () => {
-    // Python cancels the heartbeat task, so a stopped heartbeat cannot reach its verdict; JavaScript
-    // cannot interrupt the `await` inside `ping()`, so the flag has to be re-read after it settles.
-    // The two cases this rules out are both silent: a `peer.close()` whose drain window outlives one
-    // ping deadline gets reported to the application as a swallowed pong rather than as the close it
-    // asked for, and a heartbeat stopped because its own socket died closes whatever socket the peer
-    // holds by then - which, one backoff later, is the replacement.
+    // Python cancels the heartbeat task, so a stopped heartbeat cannot act on a ping result; JavaScript cannot
+    // interrupt the `await` inside `ping()`, so the flag is re-read after it settles. The two failures this
+    // prevents are both silent: a `peer.close()` whose drain window exceeds one ping deadline would be reported to
+    // the application as a swallowed pong rather than as the requested close, and a heartbeat stopped because its
+    // socket died would close whatever socket the peer holds by then, which after one backoff is the replacement.
     const [dialerSide] = memoryPair();
     const peer = dialerOver(dialerSide);
     const closes: CloseReason[] = [];
@@ -603,13 +592,11 @@ describe('the heartbeat', () => {
   });
 
   it('counts a frame in either direction as activity - WSM-RCN-010', async () => {
-    // Both directions, and this is where that is actually pinned: a socket carrying inbound frames is
-    // demonstrably alive, and pinging it proves nothing new. The busy-socket test above cannot tell
-    // the two halves apart, because its traffic stamps both.
+    // Both directions are asserted here: a socket carrying inbound frames is alive, and a ping adds no information.
+    // The busy-socket test above cannot distinguish the two directions, because its traffic updates both.
     const [left, right] = memoryPair();
     const codec = new JsonCodec();
-    // The acceptor end is never served, so nothing answers and nothing comes back: every frame below
-    // travels in exactly one direction.
+    // The acceptor end is never served, so nothing is answered: every frame below travels in one direction only.
     const dialer = new Peer(left, { codec, isDialer: true });
     void dialer.serve().catch(() => undefined);
     cleanups.push(() => left.drop());
@@ -621,8 +608,7 @@ describe('the heartbeat', () => {
     const afterSending = dialer.lastActivity;
     expect(afterSending, 'a frame this peer sent must count').toBeGreaterThan(atStart);
 
-    // A `pong` for a nonce nobody is waiting for is dropped without a reply, so it is inbound and
-    // nothing else.
+    // A `pong` for a nonce no ping is waiting for is dropped without a reply, so it is inbound only.
     left.inject(codec.encode({ type: 'pong', nonce: 'nobody-asked-for-this' } as unknown as Frame));
     await settle(10);
     expect(dialer.lastActivity, 'a frame this peer received must count too').toBeGreaterThan(afterSending);
@@ -633,8 +619,8 @@ describe('the heartbeat', () => {
 
 describe('the reconnect driver', () => {
   it('is dialer-only: an acceptor cannot have a reconnect helper', () => {
-    // An acceptor has no url to dial and no idea who its remote was. A helper here would be a server
-    // trying to call its clients back, which is not what this protocol does.
+    // An acceptor has no url to dial and no record of its remote. A helper here would be a server calling its
+    // clients back, which this protocol does not do.
     const [socket] = memoryPair();
     const acceptor = new Peer(socket, { codec: new JsonCodec(), isDialer: false });
     expect(
@@ -661,9 +647,9 @@ describe('the reconnect driver', () => {
     await loop.establish();
     loop.start();
 
-    // From here the server accepts every socket and then never answers the hello - a backend that is
-    // down behind a load balancer that is not. A helper that reset its counter when `dial()` returned
-    // would hammer this server every 250 ms forever (WSM-INV-012).
+    // From here the server accepts every socket and never answers the hello, like a backend that is down behind a
+    // load balancer that is up. A helper that reset its counter when `dial()` returned would retry this server
+    // every 250 ms indefinitely (WSM-INV-012).
     server.handler = () => new Promise<void>(() => undefined);
     server.drop();
 
@@ -672,8 +658,8 @@ describe('the reconnect driver', () => {
 
     const delays = loop.delays;
     expect(delays).toEqual([250, 500, 1000, 2000]);
-    // A fresh array each read, so a caller cannot edit the driver's own record by editing what it
-    // was handed - Python returns `list(self._delays)` for the same reason.
+    // A fresh array each read, so a caller cannot modify the driver's own record through the returned value; Python
+    // returns `list(self._delays)` for the same reason.
     expect(loop.delays).not.toBe(loop.delays);
     expect(delays, 'a growing delay sequence is the whole assertion').toEqual([...delays].sort((a, b) => a - b));
     expect(reconnects, 'an attempt whose hello never completed is not a reconnection').toEqual([]);
@@ -682,11 +668,10 @@ describe('the reconnect driver', () => {
 
   it('backs off on a reset hello and on a timed-out hello alike - WSM-RCN-026', async () => {
     const server = new FakeServer();
-    // The acceptor decides from its own count rather than the test swapping handlers between
-    // attempts: with an injected sleep the two failing attempts happen within a millisecond of each
-    // other, and a test that polled between them would lose that race about as often as it won it.
-    // Hello 1 is the first connection and is acknowledged; hello 2 is refused outright; hello 3 is
-    // accepted and then never answered.
+    // The acceptor decides from its own count instead of the test swapping handlers between attempts: with an
+    // injected sleep the two failing attempts happen within a millisecond of each other, and a test that polled
+    // between them would be timing-dependent. Hello 1 is the first connection and is acknowledged; hello 2 is
+    // refused; hello 3 is accepted and never answered.
     let hellos = 0;
     server.handler = (_payload, stream: Stream) => {
       hellos += 1;
@@ -712,8 +697,8 @@ describe('the reconnect driver', () => {
     await loop.establish();
     loop.start();
 
-    // Both are failed *connection attempts*, not connections: no `onReconnect`, the counter climbs,
-    // and the socket each was on is closed.
+    // Both are failed *connection attempts*, not connections: no `onReconnect`, the counter increases, and the
+    // socket each was on is closed.
     server.drop();
 
     await until(() => closes.length === 3, 4000, 'the loss and the two failed attempts');
@@ -724,22 +709,22 @@ describe('the reconnect driver', () => {
     expect(loop.attempts).toBe(2);
     expect(reconnects).toEqual([]);
     expect(loop.reconnections).toBe(0);
-    // A failed hello is reported as the loss it is, with its own text rather than the socket's - and
-    // carrying **which** hello failure it was, because that is what an operator reads `reason` for
-    // (WSM-RCN-045): a refusal and a deadline are two different outages.
+    // A failed hello is reported as a loss, with its own text rather than the socket's, and states **which** hello
+    // failure it was, because operators read `reason` for that (WSM-RCN-045): a refusal and a deadline are
+    // different outages.
     expect(closes.map((reason) => reason.reason)).toEqual([
       '',
       'the hello did not complete: not today',
       'the hello did not complete: the hello was not acknowledged within 30ms',
     ]);
-    // `willRetry` is the helper's intention for *this* attempt, so it is set before the socket is
-    // adopted: the last attempt before the cap already knows it is the last (WSM-RCN-040).
+    // `willRetry` is the helper's intention for *this* attempt, so it is set before the socket is adopted: the last
+    // attempt before the cap already reports itself as the last (WSM-RCN-040).
     //
-    // And there are three closes, not four. The cap here is spent by failed *hellos*, so the last
-    // loss already reported `willRetry: false`; the helper's own give-up would be the same peer
-    // ending a second time, and it is suppressed (WSM-RCN-044).
+    // There are three closes, not four. The cap here is used up by failed *hellos*, so the last loss already
+    // reported `willRetry: false`; the helper's own give-up would report the same peer ending a second time, and it
+    // is suppressed (WSM-RCN-044).
     expect(closes.map((reason) => reason.willRetry)).toEqual([true, true, false]);
-    // The socket each failed hello was on is closed rather than left dangling, and both ends know.
+    // The socket each failed hello was on is closed, and both ends see the close.
     expect(server.dialerSockets[1].isClosed, 'the reset hello left its socket open').toBe(true);
     expect(server.dialerSockets[2].isClosed, 'the timed-out hello left its socket open').toBe(true);
     await loop.stop();
@@ -778,27 +763,27 @@ describe('the reconnect driver', () => {
       await until(() => reconnects.length === wanted, 3000, `reconnect ${wanted}`);
     }
 
-    // **Encoded bytes**, not decoded objects: two payloads can compare equal after decoding and still
-    // have gone out as different bytes - a different key order, a re-encoded number - and "verbatim"
-    // (WSM-RCN-020) is a claim about what crossed the wire.
+    // **Encoded bytes**, not decoded objects: two payloads can compare equal after decoding and still be sent as
+    // different bytes (a different key order, a re-encoded number), and "verbatim" (WSM-RCN-020) refers to the
+    // bytes on the wire.
     const onTheWire = [0, 1, 2, 3].map((index) => server.firstMessageOn(index));
     expect(typeof onTheWire[0]).toBe('string');
     expect(new Set(onTheWire).size, 'the four hellos must be byte-identical').toBe(1);
     expect(WIRE.decode(onTheWire[0] as string).payload).toEqual({ session: 'abc', rooms: ['lobby'] });
 
     expect(reconnects).toEqual([1, 2, 3]);
-    // Fired *after* each acknowledgement and never before (WSM-RCN-030): at reconnect n the server
-    // had acknowledged n + 1 hellos, the first connection's included.
+    // Fired *after* each acknowledgement, never before (WSM-RCN-030): at reconnect n the server had acknowledged n
+    // + 1 hellos, including the first connection's.
     expect(acknowledgedAtReconnect).toEqual([2, 3, 4]);
-    // Established every time, so the counter reset every time and the delay never grew.
+    // Established every time, so the counter reset every time and the delay did not grow.
     expect(loop.delays).toEqual([10, 10, 10]);
     await loop.stop();
   });
 
   it('leaves a peer findable in the registry even with no onReconnect handler - WSM-RCN-027', async () => {
-    // An application that registers no `onReconnect` still ends up with a peer the server can find:
-    // the hello is replayed by the *helper*, not by the application (WSM-INV-013), so the acceptor
-    // learns who this is without any application code running on either side of the reconnect.
+    // An application that registers no `onReconnect` still has a peer the server can find: the hello is replayed by
+    // the *helper*, not by the application (WSM-INV-013), so the acceptor identifies the client without application
+    // code running on either side of the reconnect.
     const server = new FakeServer();
     const registry = new PeerRegistry();
     const seen: unknown[] = [];
@@ -854,8 +839,8 @@ describe('the reconnect driver', () => {
     expect(seen[0].payload).toEqual({ session: 'abc' });
     expect(seen[0].stream.id, 'an ordinary first stream, on the ordinary dialer parity').toBe(1);
 
-    // And nothing marks it on the wire: byte for byte the same message an application `open()` with
-    // the same payload produces. muxws must not flag it, interpret it, or mark it in any way.
+    // Nothing marks it on the wire: it is byte for byte the message an application `open()` with the same payload
+    // produces. muxws must not flag, interpret or mark it.
     const [ordinaryLeft, ordinaryRight] = memoryPair();
     const ordinaryDialer = new Peer(ordinaryLeft, { codec: new JsonCodec(), isDialer: true });
     const ordinaryAcceptor = new Peer(ordinaryRight, { codec: new JsonCodec(), isDialer: false });
@@ -871,8 +856,8 @@ describe('the reconnect driver', () => {
   });
 
   it('does not interpret what an acceptor answers the hello with - WSM-RCN-021', async () => {
-    // muxws must not flag, interpret or mark the hello, and that cuts both ways: an acceptor is free
-    // to answer one, and whatever comes back is read and dropped rather than given a meaning.
+    // muxws must not flag, interpret or mark the hello in either direction: an acceptor may answer one, and the
+    // answer is read and discarded without interpretation.
     const server = new FakeServer();
     server.handler = (_payload, stream: Stream) => stream.reply({ welcome: true });
 
@@ -900,8 +885,8 @@ describe('the reconnect driver', () => {
     };
 
     const peer = dialerOver(await server.dial());
-    // `onReconnect` is the earliest moment an application learns it has a socket again, so an
-    // application that sends the instant it is told still cannot get ahead of the hello.
+    // `onReconnect` is the earliest point at which an application learns it has a socket again, so an application
+    // that sends immediately still cannot send before the hello.
     peer.onReconnect(() => {
       void peer.notify({ app: 'the first thing the application sends' });
     });
@@ -924,7 +909,7 @@ describe('the reconnect driver', () => {
     expect(replayed[0].type).toBe('open');
     expect(replayed[0].payload, 'the first frame on the new socket must be the hello').toEqual({ session: 'abc' });
     expect(replayed[1].payload).toEqual({ app: 'the first thing the application sends' });
-    // And from the server's side, in the order it saw them.
+    // Also from the server's side, in the order it received them.
     expect(seenByServer).toEqual([
       { session: 'abc' },
       { session: 'abc' },
@@ -934,17 +919,17 @@ describe('the reconnect driver', () => {
   });
 
   it('is not open for the length of the hello window, so nothing can precede the hello - WSM-RCN-043', async () => {
-    // The window WSM-RCN-043 is about: the socket is open and the connection is not, because the
-    // hello has not come back (WSM-RCN-004). A peer that reported itself open here would accept
-    // `open()`, `notify()` and `request()`, and every one of them would put an application frame
-    // ahead of the hello on the wire - which is WSM-RCN-023, broken by the same line.
+    // The window WSM-RCN-043 covers: the socket is open and the connection is not, because the hello has not been
+    // acknowledged (WSM-RCN-004). A peer that reported itself open here would accept `open()`, `notify()` and
+    // `request()`, and each would put an application frame ahead of the hello on the wire, which also violates
+    // WSM-RCN-023.
     const server = new FakeServer();
     let hellos = 0;
     let acknowledge: () => void = () => undefined;
     server.handler = () => {
       hellos += 1;
-      // The first hello is answered at once; the second is held open, which is the only way to stand
-      // still inside a window that is otherwise a few microtasks wide.
+      // The first hello is answered at once; the second is held open, which keeps the peer inside a window that
+      // otherwise lasts only a few microtasks.
       if (hellos === 1) return undefined;
       return new Promise<void>((resolve) => {
         acknowledge = resolve;
@@ -976,8 +961,8 @@ describe('the reconnect driver', () => {
     await until(() => loop.reconnections === 1, 3000, 'the acknowledgement');
     expect(peer.isOpen).toBe(true);
 
-    // The hello is the first frame on the new socket, and the only one: everything attempted in the
-    // window was refused rather than buffered for it (WSM-RCN-023/042).
+    // The hello is the first and only frame on the new socket: everything attempted in the window was refused, not
+    // buffered (WSM-RCN-023/042).
     const replayed = framesOn(server.dialerSockets[1]);
     expect(replayed[0].type).toBe('open');
     expect(replayed[0].payload).toEqual({ session: 'abc' });
@@ -986,19 +971,17 @@ describe('the reconnect driver', () => {
   });
 
   it('still puts a reset on the wire for a stream pushed inside the hello window - WSM-STM-021', async () => {
-    // Two different questions about one socket, and WSM-RCN-043 answers only the first. `isOpen`
-    // says "may the application start something here", which the hello window makes false. A reset
-    // already owed to the remote asks "is there a wire", which that window does not make false - the
-    // hello itself is travelling on it. Reading the wrong one drops the reset, and the acceptor is
-    // left holding a stream this side has already closed.
+    // Two different conditions apply to one socket, and WSM-RCN-043 covers only the first. `isOpen` answers "may
+    // the application start something here", which is false in the hello window. A reset owed to the remote needs
+    // only a writable socket, which the hello window has - the hello itself is sent on it. Checking `isOpen` drops
+    // the reset, and the acceptor keeps a stream this side has already closed.
     const server = new FakeServer();
     let hellos = 0;
     let acknowledge: () => void = () => undefined;
     server.handler = () => {
       hellos += 1;
       if (hellos === 1) return undefined;
-      // Pushed while our own hello is still outstanding, so the dialer answers it from inside the
-      // window.
+      // Pushed while this side's hello is still outstanding, so the dialer answers it inside the window.
       server.acceptors[server.acceptors.length - 1].open({ push: 'during the hello' });
       return new Promise<void>((resolve) => {
         acknowledge = resolve;
@@ -1022,8 +1005,8 @@ describe('the reconnect driver', () => {
 
     server.drop();
     await until(() => hellos === 2, 3000, 'the replayed hello reaching the acceptor');
-    // Bounded, and the rejection is swallowed so the expectation below reports what was actually on
-    // the wire: a test that hangs on the defect it exists to catch reads in CI as a bare timeout.
+    // Bounded, and the rejection is caught, so the expectation below reports what was on the wire: a test that
+    // hangs on the defect it checks for shows in CI only as a timeout.
     await until(
       () => framesOn(server.dialerSockets[1]).some((frame) => frame.type === 'reset'),
       2000,
@@ -1060,9 +1043,8 @@ describe('the reconnect driver', () => {
     await loop.establish();
     loop.start();
 
-    // There is no `settings` exchange, so the socket-open moment and the subprotocol moment coincide:
-    // for a peer with no hello "established" really is socket-open, the counter is reset and `isOpen`
-    // is true with no frame exchanged first.
+    // There is no `settings` exchange, so socket-open and the subprotocol accept coincide: for a peer with no
+    // hello, "established" is socket-open, the counter is reset and `isOpen` is true before any frame is exchanged.
     expect(loop.attempts).toBe(0);
     expect(peer.isOpen).toBe(true);
     expect(server.dialerSockets[0].sent, 'a peer given no hello sends none').toEqual([]);
@@ -1086,9 +1068,8 @@ describe('the reconnect driver', () => {
       const peer = dialerOver(await server.dial());
       const closes: boolean[] = [];
       peer.onClose((reason) => closes.push(reason.willRetry));
-      // The real sleep, not an injected one: the loop hands its `sleep` to the heartbeat too, and an
-      // instant sleep there would spin a heartbeat that never gets any older. 5 ms of real backoff is
-      // the price of running the two paths through the same code.
+      // The real sleep, not an injected one: the loop passes its `sleep` to the heartbeat too, and an instant sleep
+      // there would spin a heartbeat whose clock never advances. The test therefore waits 5 ms of real backoff.
       const loop = new ConnectionLoop(peer, server.dial, {
         options: new Reconnect({ initialDelayMs: 5, jitter: 0 }),
         hello: new Hello(),
@@ -1107,9 +1088,9 @@ describe('the reconnect driver', () => {
 
     const runDead = async (): Promise<Shape> => {
       const server = new FakeServer();
-      // The first acceptor is built but never served, so a `ping` on it is received by nobody. Every
-      // socket after it answers normally, so exactly one loss happens - by heartbeat rather than by
-      // a close frame, which is the only difference between the two runs.
+      // The first acceptor is built but never served, so a `ping` on it is not received. Every later socket answers
+      // normally, so exactly one loss happens, detected by the heartbeat instead of by a close frame; that is the
+      // only difference between the two runs.
       server.answering = false;
       const peer = dialerOver(await server.dial());
       server.answering = true;
@@ -1131,9 +1112,8 @@ describe('the reconnect driver', () => {
       return { delays: loop.delays, reconnections: loop.reconnections, closes };
     };
 
-    // There must be no second code path for a dead socket: the supervisor backs off and
-    // re-establishes exactly as after a drop, `onClose` fires for the loss with the same
-    // `willRetry`, and one delay is waited.
+    // A dead socket takes the same code path as a drop: the supervisor backs off and re-establishes, `onClose`
+    // fires for the loss with the same `willRetry`, and one delay is waited.
     expect(await runDead()).toEqual(await runClean());
   });
 
@@ -1161,9 +1141,9 @@ describe('the reconnect driver', () => {
     await until(() => closes.length === 2, 3000, 'the loss and the give-up');
     await settle(80);
 
-    // One close for the socket that died while the helper still meant to retry, one for the helper
-    // giving up. Never a third, and never another dial - a refused dial lost no socket, so it fires
-    // no close of its own (WSM-RCN-040).
+    // One close for the socket that died while the helper still intended to retry, one for the helper giving up. No
+    // third close and no further dial: a refused dial lost no socket, so it fires no close of its own
+    // (WSM-RCN-040).
     expect(closes.map((reason) => reason.willRetry)).toEqual([true, false]);
     expect(server.dials - dialsBefore, 'exactly maxAttempts dials, then silence').toBe(2);
     expect(peer.willRetry).toBe(false);
@@ -1171,10 +1151,9 @@ describe('the reconnect driver', () => {
   });
 
   it('reports the end once when the cap is spent by failed hellos - WSM-RCN-044', async () => {
-    // The path where two reports of one ending are easy to write: the cap runs out on a *hello* that
-    // never completed rather than on a refused dial, so the last loss already carries
-    // `willRetry: false` and the helper's own give-up would say the same thing again a moment later.
-    // An application counting endings would see this peer end twice.
+    // The cap runs out on a *hello* that never completed rather than on a refused dial, so the last loss already
+    // carries `willRetry: false` and the helper's own give-up would report the same ending again. An application
+    // counting endings would then see this peer end twice.
     const server = new FakeServer();
     let hellos = 0;
     server.handler = () => {
@@ -1199,8 +1178,7 @@ describe('the reconnect driver', () => {
 
     server.drop();
     await until(() => closes.length === 2, 3000, 'the loss and the failed hello');
-    // Longer than the give-up needs, so "there was no third" is a statement about suppression rather
-    // than about the test having been quick.
+    // Longer than the give-up needs, so the absence of a third close shows suppression and not a short wait.
     await settle(120);
 
     expect(
@@ -1211,9 +1189,9 @@ describe('the reconnect driver', () => {
   });
 
   it('marks the peer dead but reports nothing when the first hello fails - WSM-RCN-006', async () => {
-    // The `connect()`-level test above asserts the same silence from outside; this one is inside,
-    // where a handler is already attached and could hear a report if one were made. Both halves
-    // matter and they pull in opposite directions.
+    // The `connect()`-level test above asserts the same from outside; this one runs with a handler attached that
+    // would receive a report if one were made. The test asserts both that the peer is dead and that nothing is
+    // reported.
     const server = new FakeServer();
     server.handler = () => new Promise<void>(() => undefined);
 
@@ -1232,19 +1210,19 @@ describe('the reconnect driver', () => {
 
     await expect(loop.establish()).rejects.toThrow(StreamTimeout);
 
-    // Dead, and deterministically so: leaving `isOpen` to a race between the read loop and the
-    // socket close is how a peer whose hello never completed reads as alive.
+    // Dead, deterministically: if `isOpen` depended on a race between the read loop and the socket close, a peer
+    // whose hello never completed could report itself open.
     expect(peer.isOpen, 'a peer that never established is not open').toBe(false);
-    // And silent. Nothing was established, so nothing was lost, and `establish()` throwing is the
-    // report (WSM-RCN-006). A `CloseReason` here would be the second report of one failure.
+    // Nothing is reported. Nothing was established, so nothing was lost, and `establish()` throwing is the report
+    // (WSM-RCN-006). A `CloseReason` here would be a second report of one failure.
     expect(closes, 'a callback nobody could be listening to is not a report').toEqual([]);
   });
 
   it('keeps its record of delays bounded - WSM-RCN-001', async () => {
-    // `delays` is instrumentation hanging off an object that lives as long as the process. Against a
-    // server that is down for a week with no attempt cap, an unbounded record grows one entry per
-    // attempt forever - a memory leak in the one component whose whole job is to survive a long
-    // outage. The helper's persistent state is the counter; this is a log, and a log is trimmed.
+    // `delays` is instrumentation on an object that lives as long as the process. Against a server that is down for
+    // a week with no attempt cap, an unbounded record grows by one entry per attempt, a memory leak in the
+    // component meant to run through long outages. The helper's persistent state is the counter; `delays` is a log
+    // and is trimmed.
     const server = new FakeServer();
     const peer = dialerOver(await server.dial());
     const loop = new ConnectionLoop(peer, server.dial, {
@@ -1267,9 +1245,8 @@ describe('the reconnect driver', () => {
   });
 
   it('never dials at all when maxAttempts is zero - WSM-RCN-044', async () => {
-    // The degenerate cap, and the one an operator writes to mean "one connection, no reconnection".
-    // It must still *report* the loss, once, with `willRetry` false - a helper that returned silently
-    // here would leave the application waiting for a retry nobody intends to make.
+    // maxAttempts 0 means one connection and no reconnection. The loss is reported once, with `willRetry` false,
+    // so the application does not wait for a retry.
     const server = new FakeServer();
     const peer = dialerOver(await server.dial());
     const closes: CloseReason[] = [];
@@ -1298,13 +1275,12 @@ describe('the reconnect driver', () => {
   });
 
   it('decides by its own arithmetic and not by peer.willRetry - WSM-RCN-044/WSM-RCN-001', async () => {
-    // `willRetry` is peer state that anything holding the peer can write - `ts/peer.spec.ts` writes
-    // it, and so could an application. A supervisor that read it back as its own stop condition would
-    // let one stray assignment retire the reconnect loop, with nothing anywhere reporting that the
-    // peer had stopped trying: it would look exactly like a server that never came back. The attempt
-    // counter is the helper's entire persistent state (WSM-RCN-001) and the cap is read off it, so
-    // the field is only ever *read* by `CloseReason`. The `maxAttempts: 0` test above cannot see
-    // this: there the loss itself already carries `willRetry` false, so both readings agree.
+    // `willRetry` is peer state that any holder of the peer can write - `ts/peer.spec.ts` writes it, and so can an
+    // application. A supervisor that used it as its stop condition would let one stray assignment stop the
+    // reconnect loop, with nothing reporting that the peer stopped retrying; it would look like a server that never
+    // came back. The attempt counter is the helper's entire persistent state (WSM-RCN-001) and the cap is computed
+    // from it, so only `CloseReason` reads the field. The `maxAttempts: 0` test above does not cover this: there
+    // the loss already carries `willRetry` false, so both readings agree.
     const server = new FakeServer();
     const peer = dialerOver(await server.dial());
 
@@ -1328,10 +1304,9 @@ describe('the reconnect driver', () => {
   });
 
   it('keeps going when an application callback throws - WSM-RCN-011/030', async () => {
-    // A library whose reconnect loop can be killed by an application's logging call is not a
-    // reconnect loop. `onClose` and `onReconnect` are called from the supervisor, so an exception out
-    // of one of them unwinds into it and stops it for good: no further dial, no further report, and
-    // nothing anywhere saying why.
+    // An application callback that throws must not stop the reconnect loop. `onClose` and `onReconnect` are called
+    // from the supervisor, so an uncaught exception from one of them would unwind into it and stop it permanently:
+    // no further dial, no further report, and no indication why.
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const server = new FakeServer();
     const peer = dialerOver(await server.dial());
@@ -1360,15 +1335,15 @@ describe('the reconnect driver', () => {
 
     server.drop();
     await until(() => loop.reconnections === 1, 3000, 'the first recovery');
-    // The next handler in the fan-out still ran: the second handler is not the first one's business.
+    // The next handler in the fan-out still ran: one handler's failure does not affect the others.
     expect(order).toEqual(['close-1', 'close-2', 'reconnect-1', 'reconnect-2']);
 
-    // And the driver is still a driver: it re-dials a second time, through the same throwing
-    // handlers. This is the half a fan-out test alone cannot see.
+    // The driver re-dials a second time, through the same throwing handlers. A fan-out test alone does not cover
+    // this.
     server.drop();
     await until(() => loop.reconnections === 2, 3000, 'the second recovery');
     expect(peer.isOpen).toBe(true);
-    // Swallowed, not silenced: an application whose handler throws must be able to find out.
+    // Caught but reported: an application whose handler throws can find out.
     expect(errors.mock.calls.length, 'each failure is logged where an operator can see it').toBe(4);
     await loop.stop();
     errors.mockRestore();
@@ -1449,11 +1424,11 @@ describe('the reconnect driver', () => {
   });
 
   it('stops dialling on a deliberate close in the gap between sockets - WSM-RCN-040/044', async () => {
-    // The gap is the one moment `close()` has nothing to close: `isOpen` is already false, and the
-    // helper is asleep in a backoff nobody but the helper can end. A `close()` that took the peer's
-    // own state as the whole story and returned early here would stop nothing - the driver would dial
-    // on, re-establish, and hand the application back a live connection it had already given up. On
-    // the same `Peer` object, so it would never think to close it twice.
+    // In the gap between sockets `close()` has no socket to close: `isOpen` is already false, and the helper is
+    // sleeping in a backoff only the helper can end. A `close()` that relied on the peer's own state and returned
+    // early here would stop nothing: the driver would dial again, re-establish, and return a live connection the
+    // application had already closed, on the same `Peer` object, which the application would not close a second
+    // time.
     const server = new FakeServer();
     const peer = dialerOver(await server.dial());
     const loop = new ConnectionLoop(peer, server.dial, {
@@ -1463,7 +1438,7 @@ describe('the reconnect driver', () => {
       pingIntervalMs: 0,
     });
     cleanups.push(() => void loop.stop());
-    // What `connect()` does, and the only route `close()` has to the driver.
+    // This is what `connect()` does, and the only route from `close()` to the driver.
     peer.connectionLoop = loop;
     await loop.establish();
     loop.start();
@@ -1475,25 +1450,23 @@ describe('the reconnect driver', () => {
 
     await peer.close();
     const dials = server.dials;
-    // Longer than the backoff still to come, so "it never dialled again" is a statement about the
-    // driver having stopped rather than about the test having been quick.
+    // Longer than the remaining backoff, so the absence of another dial shows that the driver stopped and not a
+    // short wait.
     await settle(250);
     expect(server.dials, 'a close in the gap never dials again either').toBe(dials);
   });
 
   it("has connect()'s onStream listening before the first hello goes out - WSM-STM-033", async () => {
-    // The acceptor pushes a stream the instant the hello arrives, which is what a server that hands
-    // out a session, or that has something queued for this client, does. `connect()` registers the
-    // caller's handler **before** `establish()` runs, so the push cannot arrive to nobody: a handler
-    // attached after the hello would answer the first stream of every connection with
-    // `reset(REFUSED, 'no onStream handler')`, and the same protocol would behave differently in the
-    // two languages.
+    // The acceptor pushes a stream as soon as the hello arrives, as a server that issues a session or has queued
+    // work for this client does. `connect()` registers the caller's handler **before** `establish()` runs, so the
+    // push always finds a handler: a handler attached after the hello would answer the first stream of every
+    // connection with `reset(REFUSED, 'no onStream handler')`, and the two languages would behave differently.
     const server = new FakeServer();
     server.handler = async () => {
       server.acceptors[server.acceptors.length - 1].open({ pushed: 'at the hello' }, { end: true });
-      // The push reaches the dialer **before** the acknowledgement does, which is what makes this a
-      // test about *when* the handler is registered rather than about whether it ever is: a handler
-      // attached after `establish()` returned would be one frame too late.
+      // The push reaches the dialer **before** the acknowledgement, so the test checks *when* the handler is
+      // registered, not only whether it is: a handler attached after `establish()` returned would be one frame too
+      // late.
       await settle(20);
     };
 
@@ -1555,9 +1528,8 @@ describe('the reconnect driver', () => {
 
 describe('CloseReason', () => {
   it('has the same four fields in both languages, for every socket loss - WSM-RCN-045', async () => {
-    // Read out of `muxws/observability.py` rather than restated here: a hand-copied list would agree
-    // with itself forever while the two languages drifted apart, which is the one thing this test
-    // exists to catch.
+    // Read from `muxws/observability.py` rather than copied here: a hand-copied list would not detect the two
+    // languages diverging, which is what this test checks.
     const python = readFileSync(join(process.cwd(), 'muxws', 'observability.py'), 'utf8');
     const declaration = python.slice(python.indexOf('class CloseReason'), python.indexOf('\nlogger ='));
     const pythonFields = [...declaration.matchAll(/^ {4}(\w+): \w+/gm)]
@@ -1565,8 +1537,8 @@ describe('CloseReason', () => {
       .sort();
     expect(pythonFields).toEqual(['code', 'reason', 'wasClean', 'willRetry']);
 
-    // One type per language, used for every socket loss - so all three paths below are asserted
-    // against the same list: a drop, a deliberate close, and the helper giving up.
+    // One type per language for every socket loss, so all three paths below are asserted against the same list: a
+    // drop, a deliberate close, and the helper giving up.
     const server = new FakeServer();
     const peer = dialerOver(await server.dial());
     const closes: CloseReason[] = [];
@@ -1615,8 +1587,8 @@ function makeDeliberate(): [Promise<CloseReason>] {
 
 describe('header interceptors across a reconnect', () => {
   it('keeps both registrations on the Peer and leaves the hello alone - WSM-API-026/027', async () => {
-    // The hello comparison is on the encoded messages, as in WSM-RCN-027's own test: an interceptor
-    // that reached the hello would make the replay differ from the first one.
+    // The hello comparison is on the encoded messages, as in WSM-RCN-027's own test: an interceptor applied to the
+    // hello would make the replay differ from the first one.
     const server = new FakeServer();
     server.handler = async (_payload, stream) => {
       await stream.sendHeaders({ 'served-by': server.acceptors.length });

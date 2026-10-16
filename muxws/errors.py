@@ -9,8 +9,8 @@ from typing import Any
 class ResetCode(IntEnum):
     """Numeric on the wire, named in both APIs; shared by `reset` and `goaway`.
 
-    There are **nine** members. `5` is retired (it was `STREAM_LIMIT`, WSM-STM-022): the number MUST
-    NOT be reused and MUST NOT appear on the wire, so no name maps to it.
+    There are nine members. `5` is retired (WSM-STM-022): the number MUST NOT be reused and MUST NOT
+    appear on the wire, so no name maps to it.
     """
 
     NO_ERROR = 0
@@ -54,8 +54,8 @@ class StreamAlreadyConsumed(MuxwsError):
 class StreamClosed(MuxwsError):
     """`send()`/`end()`/`reply()` on a stream that closed **normally**.
 
-    Deliberately neither a `StreamReset` nor a `ProtocolError` (WSM-ERR-009): a normal close racing a
-    last `send()` is an expected outcome, not a failure and not a caller bug.
+    Neither a `StreamReset` nor a `ProtocolError` (WSM-ERR-009): a normal close that happens before a
+    last `send()` is an expected outcome.
     """
 
 
@@ -79,46 +79,40 @@ class CodecMismatch(CodecError):
 class TransportUrlError(MuxwsError, ValueError):
     """A transport was given an address it cannot open (WSM-ERR-016). Never raised directly.
 
-    The concrete class is the transport's - `muxws.transports.unix.UnixUrlError` for a `ws+unix:` URL
-    naming no socket file, the `websockets` adapter's for a `ws:` URL that library cannot parse - and
-    each lives in its own transport's module rather than here. The adapter seam is public
-    (WSM-API-021) and a third-party adapter cannot add a class to this file, so the convention has to
-    be one it can follow too. Only the base is shared, because `except TransportUrlError` must be
-    writable by an application that has not imported the transport whose URL was wrong.
+    The concrete classes are defined in the transport modules: `muxws.transports.unix.UnixUrlError`
+    for a `ws+unix:` URL naming no socket file, `muxws.transports.websockets_.WebsocketUrlError` for a
+    `ws:` URL that `websockets` cannot parse. The adapter interface is public (WSM-API-021), and a
+    third-party adapter defines its subclass in its own module in the same way. The base class lets
+    an application write `except TransportUrlError` without importing the transport.
 
-    A `ValueError` as well as a `MuxwsError`: a caller who never heard of this library is already
-    catching `ValueError` around a URL it typed, and an application that funnels every muxws failure
-    through one handler must not have a bad address leak through it.
+    Also a `ValueError`, so code that catches `ValueError` around URL handling catches it, and a
+    `MuxwsError`, so a handler for every muxws failure catches it.
 
-    Errors the `SocketAdapter` contract itself mandates stay in the shared vocabulary above:
-    `ConnectionClosed` is required of every adapter, so it is owned by the seam. A URL grammar, a
-    missing package or a missing kernel feature is owned by exactly one transport.
+    Errors required by the `SocketAdapter` contract itself, such as `ConnectionClosed`, are defined
+    in this module. Errors specific to one transport (its URL grammar, a missing package, a missing
+    kernel feature) are defined in that transport's module.
     """
 
 
 class TransportUnsupportedError(MuxwsError, RuntimeError):
     """This runtime cannot provide the transport at all (WSM-ERR-016). Never raised directly.
 
-    No `AF_UNIX` in the interpreter, an optional dependency that was never installed: conditions that
-    are local, permanent, and fixed by changing the environment rather than the address. A separate
-    base from `TransportUrlError` for that reason - that one means *retype the URL*, this one means
-    *the URL is fine, change where or how you are running*.
+    Examples: no `AF_UNIX` in the interpreter, or an optional dependency that is not installed. These
+    conditions are local and permanent and are fixed by changing the environment, not the address,
+    so this base is separate from `TransportUrlError`.
 
-    A `RuntimeError` rather than a `ValueError` says so to a caller who never heard of muxws, and a
-    `MuxwsError` so that an application-wide handler still catches it. A subclass raised for a
-    dependency that is not installed MUST name the install that fixes it - `pip install
-    muxws[websockets]` - because "no module named X" is what the interpreter already said. As with
-    `TransportUrlError`, the concrete subclasses belong to their transports' modules and are not
-    exported from the package root.
+    A `RuntimeError` and a `MuxwsError`. A subclass raised for a dependency that is not installed
+    MUST name the install command that provides it, for example `pip install muxws[websockets]`. As
+    with `TransportUrlError`, the concrete subclasses are defined in their transports' modules and
+    are not exported from the package root.
     """
 
 
 class StreamReset(MuxwsError):
     """A stream ended early. Carries the reset code, its reason and the stream id."""
 
-    #: A `ResetCode` for every code this generation defines, and a bare `int` for one it does not -
-    #: a peer of another generation, or an implementation using the retired 5, still reset the
-    #: stream, and refusing to represent that would be refusing to hear it.
+    #: A `ResetCode` for every code this generation defines, and a plain `int` for any other code, so
+    #: a reset with an undefined code (from another generation, or the retired 5) is still delivered.
     code: ResetCode | int = ResetCode.NO_ERROR
 
     def __init__(
@@ -138,9 +132,9 @@ class StreamReset(MuxwsError):
     def clone(self) -> StreamReset:
         """A fresh instance of the same failure, carrying no traceback of its own.
 
-        `send()` on a reset stream raises the stream's stored failure. Raising the stored *instance*
-        appends a frame to its traceback every time, so a caller that keeps trying grows an object
-        that is never released.
+        `send()` on a reset stream raises a clone of the stored failure. Raising the stored instance
+        would append to its traceback on every call, so it would grow without bound.
+
         """
         fresh = self.__class__.__new__(self.__class__)
         fresh.__dict__.update(self.__dict__)

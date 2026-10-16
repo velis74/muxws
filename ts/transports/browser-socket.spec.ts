@@ -1,11 +1,11 @@
 /**
- * The browser half of the adapter seam (WSM-API-021, WSM-CDC-020/024/028).
+ * The browser socket adapter (WSM-API-021, WSM-CDC-020/024/028).
  *
- * There is no Python twin for the adapter itself; what it must prove is the twin of
- * `transports/websockets_test.py`'s dialer tests - the muxws entry leads the offer, a refused
- * handshake is a `CodecMismatch` the dialer composes for itself, and a server that negotiated
- * something else is closed with 1008. The socket is a mock: a real one would need a server, and
- * "the handshake was refused" is not a state a real browser lets a test arrange.
+ * The adapter has no Python counterpart; these tests correspond to the dialer tests in
+ * `transports/websockets_test.py`: the muxws entry is first in the offer, a refused handshake
+ * produces a `CodecMismatch` composed by the dialer, and a socket on which the server negotiated
+ * another subprotocol is closed with 1008. The socket is a mock: a real one needs a server, and a
+ * real browser does not let a test produce a refused handshake.
  */
 
 // `describe`/`it`/`expect` are configured as globals; `vi` is imported because the shared eslint
@@ -26,10 +26,10 @@ const CLOSED = 3;
 type Listener = (event: Event) => void;
 
 /**
- * The global `WebSocket`, reduced to what the adapter is allowed to touch plus the server's half.
+ * The global `WebSocket`, reduced to the members the adapter uses, plus server-side controls.
  *
- * The three `server*` methods are the only way a test moves the connection: everything else mirrors
- * the platform object, so a call the adapter makes on a real socket is a call it makes on this one.
+ * Tests change the connection state only through the three `server*` methods. Every other member
+ * mirrors the platform object, so the adapter makes the same calls on this mock as on a real socket.
  */
 class MockWebSocket {
   readonly protocols: string[];
@@ -82,7 +82,7 @@ class MockWebSocket {
     this.emit('open', {});
   }
 
-  /** The upgrade was refused. All a browser reports is a generic error and then a close. */
+  /** The upgrade was refused. A browser reports only a generic error followed by a close. */
   serverRefuse(): void {
     this.emit('error', {});
     this.serverClose(1006, '');
@@ -116,7 +116,7 @@ function wrap(mock: MockWebSocket): BrowserSocket {
   return new BrowserSocket(mock as unknown as WebSocket);
 }
 
-/** A connected adapter, handshake and all, for the tests that are about what happens afterwards. */
+/** A connected adapter with a completed handshake, for tests of behaviour after the handshake. */
 async function connected(codecName = 'json'): Promise<{ adapter: BrowserSocket; mock: MockWebSocket }> {
   const pending = BrowserSocket.connect('ws://localhost/ws', codecName);
   const mock = lastSocket();
@@ -140,8 +140,8 @@ describe('the browser socket', () => {
 
     const adapter = wrap(mock);
 
-    // Not "eventually": the listeners are attached in the same constructor, so a message delivered
-    // on the next turn would already have been decoded under the wrong type.
+    // Set in the constructor because the listeners are attached there too; a message delivered on
+    // the next turn would otherwise be decoded with the wrong type.
     expect(mock.binaryType).toBe('arraybuffer');
     expect(adapter.isClosed).toBe(false);
   });
@@ -176,8 +176,8 @@ describe('the browser socket', () => {
 
     expect(error).toBeInstanceOf(CodecMismatch);
     expect((error as CodecMismatch).name).toBe('CodecMismatch');
-    // A browser cannot read the rejection body, so a bare connection failure would leave the reader
-    // with nothing to act on - which is the whole reason WSM-CDC-024 exists.
+    // A browser cannot read the rejection body, so a bare connection failure would give the caller
+    // no diagnostic; WSM-CDC-024 requires one.
     expect(error).not.toBeInstanceOf(ConnectionClosed);
     const { message } = error as CodecMismatch;
     expect(message).toContain('msgpack');
@@ -235,7 +235,7 @@ describe('the browser socket', () => {
       },
     );
 
-    // Nothing has arrived, so the receive is genuinely parked rather than already answered.
+    // No message has arrived, so the receive is pending.
     await Promise.resolve();
     expect(settled).toBe(false);
 
@@ -247,8 +247,8 @@ describe('the browser socket', () => {
     expect((error as ConnectionClosed).reason).toBe('the tab went away');
     expect((error as ConnectionClosed).wasClean).toBe(false);
     expect(adapter.isClosed).toBe(true);
-    // The failure is recorded, so a receive issued afterwards is refused too rather than parking
-    // forever on a socket that will never deliver again.
+    // The failure is recorded, so a later receive is also rejected instead of waiting on a closed
+    // socket indefinitely.
     await expect(adapter.receive()).rejects.toBeInstanceOf(ConnectionClosed);
   });
 
@@ -274,11 +274,11 @@ describe('the browser socket', () => {
     const { adapter, mock } = await connected();
     const buffer = new Uint8Array([0x00, 0xff]).buffer;
     mock.serverSend(buffer);
-    // Identity: the adapter is a wire, and re-copying every inbound frame would cost the peer a copy
-    // per message for nothing.
+    // Identity: the adapter passes an ArrayBuffer through without copying.
     expect(await adapter.receive()).toBe(buffer);
 
-    // A view may sit inside a longer buffer; unwrapping it would hand the peer the neighbours too.
+    // A view may cover part of a longer buffer; passing its `.buffer` would include the bytes outside
+    // the view.
     const view = new Uint8Array([1, 2, 3, 4, 5, 6]).subarray(2, 4);
     mock.serverSend(view);
     const received = await adapter.receive();
@@ -291,8 +291,8 @@ describe('the browser socket', () => {
     const pending = adapter.receive();
     mock.serverSend(new Blob(['x']));
 
-    // binaryType is 'arraybuffer', so a Blob means the socket disobeyed - not that muxws should
-    // start sniffing message types.
+    // binaryType is 'arraybuffer', so a Blob is a socket error; muxws does not inspect other message
+    // types.
     const error = await pending.catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(ProtocolError);
     expect((error as ProtocolError).message).toContain('Blob');
@@ -324,8 +324,8 @@ describe('the browser socket', () => {
     expect(adapter.isClosed).toBe(true);
     expect(mock.closeCalls).toEqual([[1000, '']]);
 
-    // The second close finds a CLOSED socket: no close event is coming, so it must answer from what
-    // it knows rather than await one that never fires.
+    // The second close finds a CLOSED socket: no close event follows, so it resolves from the
+    // recorded state instead of awaiting an event.
     await adapter.close();
     expect(adapter.isClosed).toBe(true);
   });

@@ -2,8 +2,8 @@
 
 ## Installation
 
-muxws has **no required runtime dependencies** in either language. A transport, a codec or a web
-framework is something you already have, or something you ask for by name.
+muxws has **no required runtime dependencies** in either language. Transports, codecs and web
+framework integrations are optional extras or optional peer dependencies.
 
 ```bash
 # Python. The extras are transports and codecs, and each one is optional:
@@ -20,27 +20,27 @@ pip install "muxws[starlette,websockets]" fastapi uvicorn
 # codec. `tsx` is here to run the .ts file below without a build step.
 npm install muxws ws
 npm install --save-dev tsx
-# The client below is an ES module - it uses `await` at the top level - and the package.json npm
-# just wrote for you does not say so. Without this line `npx tsx` refuses the file with
+# The client below is an ES module (it uses top-level `await`), and the package.json created by npm
+# does not declare `"type": "module"`. Without this line `npx tsx` rejects the file with
 # "Top-level await is currently not supported with the cjs output format".
 npm pkg set type=module
 ```
 
 ## Quick Start
 
-Three files, one socket, two call shapes: a unary request that gets exactly one answer, and a
-streaming response that arrives in pieces. The server is Python; the client is Python **or**
-TypeScript, and both print the same thing, because both speak the same wire.
+Three files, one socket, two call shapes: a unary request that receives exactly one answer, and a
+streaming response that arrives in several payloads. The server is Python; the client is Python **or**
+TypeScript. Both clients print the same output, because both use the same wire protocol.
 
 ### 1. The server
 
-The route hands the socket to `accept()` and then does nothing transport-specific ever again.
-`accept()` performs the WebSocket upgrade itself, because it is the only party that knows which
-`muxws.v1.<codec>` subprotocol to select.
+The route passes the socket to `accept()`; after that, the route contains no transport-specific code.
+`accept()` performs the WebSocket upgrade itself, because it selects the `muxws.v1.<codec>`
+subprotocol.
 
-There is one `on_stream` handler per peer, and every stream the other end opens arrives at it — the
-first one, and every one after that. `stream.reply()` is one payload plus the end of the stream;
-`stream.send()` as many times as you like, then `stream.end()`, is the streaming shape.
+Each peer has one `on_stream` handler, and every stream the other end opens is delivered to it.
+`stream.reply()` sends one payload and ends the stream; `stream.send()` any number of times followed by
+`stream.end()` is the streaming shape.
 
 <<< @/examples/quickstart_server.py
 
@@ -50,14 +50,14 @@ Run it:
 python quickstart_server.py
 ```
 
-It listens on `127.0.0.1:8000`. Set `MUXWS_PORT` to move it.
+It listens on `127.0.0.1:8000`. Set `MUXWS_PORT` to use another port.
 
 ### 2. The Python client
 
 `connect()` returns a peer that is already serving. `request()` is the unary shape: one payload out,
-exactly one payload back. `open()` is the general one — it is **synchronous**, it hands back the
-`Stream` in the same turn it allocated the id, and `end=True` says this side has nothing more to
-send.
+exactly one payload back. `open()` is the general shape. It is **synchronous** and returns the
+`Stream` in the same call that allocates the stream id; `end=True` means this side sends nothing
+more.
 
 <<< @/examples/quickstart_client.py
 
@@ -69,14 +69,14 @@ python quickstart_client.py
 
 ### 3. The TypeScript client
 
-The same two calls, against the same server. Two imports: `muxws` is the package, and importing it
-is what registers the built-in `json` codec; `muxws/node` is the subpath that owns the `ws` socket,
-and it is the only part of the package that touches `ws`. A browser dialer imports `connect` from
-`muxws` instead and changes nothing else.
+The same two calls, against the same server. There are two imports: `muxws` is the package, and
+importing it registers the built-in `json` codec; `muxws/node` is the subpath that provides the `ws`
+socket adapter, and it is the only part of the package that imports `ws`. A browser dialer imports
+`connect` from `muxws` instead; the rest of the code is unchanged.
 
-Note the units: every duration in the TypeScript port is **milliseconds as an integer**, where its
-Python twin is **seconds as a float**. Neither call below takes one, but that is the rule when you
-reach for `request(..., { timeoutMs })` or `result({ timeoutMs })`.
+Units: every duration in the TypeScript API is **milliseconds as an integer**; in the Python API it is
+**seconds as a float**. Neither call below takes a duration; the rule applies to
+`request(..., { timeoutMs })` and `result({ timeoutMs })`.
 
 <<< @/examples/quickstart-client.ts
 
@@ -90,7 +90,8 @@ Set `MUXWS_URL` to point either client somewhere other than `ws://127.0.0.1:8000
 
 ### 4. What you see
 
-Either client prints exactly this, and the documentation test asserts it byte for byte against both:
+Either client prints exactly this. The documentation test compares the output of both clients with
+this block byte for byte:
 
 <!-- expected-output: quickstart -->
 
@@ -101,27 +102,26 @@ chunk 2 of 3
 chunk 3 of 3
 ```
 
-The first line came back on one stream and the last three on another, both over the same socket —
-no second connection, and no correlation id you had to invent. This client finishes the request
-before it opens the second stream, but nothing requires that: had both been open at once, the writer
-would have interleaved their frames, because a stream holds at most one unsent fragment at a time and
-the writer takes the streams round-robin. That is what stops a 1 MB export from stalling a 200-byte
-progress update on another stream.
+The first line arrived on one stream and the other three on a second stream, over the same socket,
+without a second connection or an application-defined correlation id. This client completes the
+request before it opens the second stream, but this is not required. If both streams were open at
+once, the writer would interleave their frames, because a stream holds at most one unsent fragment
+at a time and the writer serves streams round-robin. For the same reason a 1 MB export does not delay
+a 200-byte progress update on another stream.
 
 ## Next: server push
 
-There is no push API, because there does not need to be one. `Peer` is a single symmetric type: the
-acceptor calls `peer.open()` exactly as the dialer did, on the socket that is already there, and the
-dialer receives it in **its** `on_stream` handler. Same correlation, same cancellation, same
-everything.
+muxws has no separate push API. `Peer` is a single symmetric type: the acceptor calls `peer.open()`
+in the same way as the dialer, on the existing socket, and the dialer receives the stream in its own
+`on_stream` handler. Correlation and cancellation work the same way in both directions.
 
-The acceptor side — `peer` is in scope in the route, so the handler closes over it:
+The acceptor side. `peer` is in scope in the route, and the handler uses it:
 
 <<< @/examples/push_server.py
 
-The dialer side. The handler is passed to `connect()` rather than registered after it returns,
-because the acceptor may push a stream the instant it sees this dialer, and a handler registered one
-`await` later would meet that push with `reset(REFUSED)`:
+The dialer side. The handler is passed to `connect()` rather than registered after `connect()`
+returns. The acceptor may open a stream as soon as the connection is accepted, and a stream that
+arrives before a handler is registered is answered with `reset(REFUSED)`:
 
 <<< @/examples/push_client.py
 
@@ -140,30 +140,30 @@ tick 2
 tick 3
 ```
 
-## Next: surviving a disconnect
+## Next: reconnecting after a disconnect
 
-Reconnection is a **dialer-only** helper, and you get it by passing two more arguments to
-`connect()`: a `hello` and a `Reconnect`.
+Reconnection is a **dialer-only** helper, enabled by passing two more arguments to `connect()`: a
+`hello` and a `Reconnect`.
 
 <<< @/examples/reconnect_client.py
 
-What that buys you: when an established connection is lost, the dialer redials on a jittered
-exponential schedule — `initial_delay` 0.25 seconds, doubling, capped at `max_delay` 30.0 seconds,
-±30 % jitter — and replays the `hello` verbatim on every socket it ever gets. The acceptor sees the
-hello as an ordinary stream in its ordinary `on_stream` handler and acknowledges it by returning, so
-your identity is re-established without any code on the accepting side.
+When an established connection is lost, the dialer redials on a jittered exponential schedule
+(`initial_delay` 0.25 seconds, `factor` 2.0, capped at `max_delay` 30.0 seconds, `jitter` ±30 %) and
+replays the `hello` verbatim on every new socket. The acceptor receives the hello as an ordinary stream
+in its `on_stream` handler and acknowledges it by returning, so the dialer's identity is re-established
+without reconnect-specific code on the acceptor.
 
-What it does **not** buy you: **no stream survives**. Every stream that was open when the socket died
-is already dead, nothing was buffered while the peer was between sockets, the stream id space starts
-over at 1, and `peer.id` changes — a reconnected peer reads as a new connection in the log, on
-purpose. A reconnect restores a live socket and an accepted identity, and that is the whole list.
+**No stream survives a reconnect.** Every stream that was open when the socket closed has failed,
+nothing is buffered while the peer has no socket, stream ids start again at 1, and `peer.id` changes,
+so the log shows a reconnected peer as a new connection. A reconnect restores a socket and the
+identity established by the hello, and nothing else.
 
-One thing it deliberately does not do either: if the **first** `connect()` fails, it raises, whatever
-`reconnect=` says. A typo in the URL that retried forever would never surface.
+If the **first** `connect()` fails, it raises regardless of `reconnect=`, so a wrong URL is reported
+immediately instead of being retried indefinitely.
 
-Run it against the same `quickstart_server.py`. It connects, asks once and exits, so on a healthy
-socket the `on_reconnect` line never appears — it is in the file to show you where a reconnection
-surfaces, not because a two-second run will see one:
+Run it against the same `quickstart_server.py`. It connects, sends one request and exits, so on a
+working connection the `on_reconnect` line is never printed; the file contains it to show where a
+reconnection is reported:
 
 <!-- expected-output: reconnect -->
 

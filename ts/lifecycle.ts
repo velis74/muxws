@@ -1,35 +1,31 @@
 /**
  * Connection liveness and orderly shutdown (§6).
  *
- * A port of `muxws/lifecycle.py`, which is the specification of behaviour.
+ * Mirrors `muxws/lifecycle.py`.
  *
- * There is **no post-socket handshake**. A connection is established the moment the socket is open
- * with the subprotocol accepted (WSM-CON-030), and this module adds nothing a peer must send or wait
- * for before anything else. What it adds is a defined *end*: liveness that does not depend on
- * WebSocket control frames a browser cannot see (WSM-CON-011), and a shutdown that lets in-flight
- * work finish.
+ * There is no handshake after the WebSocket upgrade. A connection is established when the socket is
+ * open with the subprotocol accepted (WSM-CON-030); a peer sends and waits for nothing before using
+ * it. This module provides liveness checks that do not depend on WebSocket control frames, which a
+ * browser cannot observe (WSM-CON-011), and an orderly shutdown that lets in-flight streams finish.
  *
- * There is no `settings` frame anywhere in this project (WSM-CON-031), so there is no value object
- * here holding an announced/effective pair and no ack bookkeeping.
+ * There is no `settings` frame (WSM-CON-031), and therefore no announced settings or acknowledgement
+ * state.
  */
 
 /**
- * The largest stream id the protocol allows. The next allocation past it is impossible, so the
- * exhausting peer shuts the connection down in an orderly way rather than wrapping (WSM-SID-007).
+ * The largest stream id the protocol allows. A peer that has exhausted its ids shuts the connection
+ * down in an orderly way instead of wrapping around (WSM-SID-007).
  */
 export const MAX_STREAM_ID = 2 ** 31 - 1;
 
 /**
- * A ping nonce: sixteen lowercase hex characters, the same shape Python's `secrets.token_hex(8)`
- * produces.
+ * A ping nonce: sixteen lowercase hex characters, the format of Python's `secrets.token_hex(8)`.
  *
- * `crypto.getRandomValues` rather than `Math.random`, for the same reason Python reaches for
- * `secrets` rather than `random` here: this one is cheap and there is no reason to make a nonce
- * guessable. (The reconnect jitter is the opposite case and uses `Math.random`, as does the
- * connection id in `peer.ts`.) The function is a Web Crypto global, so it exists in a
- * browser and in Node alike and pulls in no dependency (WSM-PKG-003). It is reached through
- * `globalThis` because the shared eslint configuration does not list it as a global, and a
- * `no-undef` disable comment would suppress more than the one name it is about.
+ * Uses `crypto.getRandomValues`, not `Math.random`, as Python uses `secrets`, not `random`, so the
+ * nonce is not predictable. (The reconnect jitter and the connection id in `peer.ts` use
+ * `Math.random`.) `crypto` is a Web Crypto global available in browsers and Node without a dependency
+ * (WSM-PKG-003). It is accessed through `globalThis` because the shared eslint configuration does not
+ * declare it as a global, and a `no-undef` disable comment would cover more than this one name.
  */
 export function newNonce(): string {
   const bytes = new Uint8Array(8);
@@ -45,17 +41,16 @@ interface Pending {
 }
 
 /**
- * Outstanding pings, keyed by **nonce rather than by order**.
+ * Outstanding pings, keyed by nonce, not by order.
  *
- * Order would be wrong: a `pong` may arrive after its ping's deadline has already expired and been
- * given up on, and matching by position would then credit it to the next ping and report a
- * round-trip time that never happened. An unknown nonce is simply dropped (it is a late echo, not an
- * error).
+ * A `pong` may arrive after its ping has timed out and been removed; matching by position would
+ * attribute it to the next ping and report a wrong round-trip time. A `pong` with an unknown nonce is
+ * a late reply and is ignored, not treated as an error.
  */
 export class PingRegistry {
   private readonly pending = new Map<string, Pending>();
 
-  /** How many pings are still waiting for an answer. Python spells this `len(registry)`. */
+  /** The number of pings awaiting a `pong`. Python: `len(registry)`. */
   get size(): number {
     return this.pending.size;
   }
@@ -70,9 +65,9 @@ export class PingRegistry {
     });
     const entry: Pending = { promise, resolve, reject, settled: false };
     this.pending.set(nonce, entry);
-    // A ping given up on before `failAll` runs leaves a promise nobody is holding. Attaching the
-    // no-op handler here - the same guarantee `Stream` makes in its constructor - is what keeps that
-    // from surfacing as an unhandled rejection, which in Node is fatal by default.
+    // A ping removed by `giveUp` and later rejected by `failAll` has no remaining holder. The no-op
+    // handler (as in the `Stream` constructor) prevents an unhandled rejection, which terminates a
+    // Node process by default.
     void promise.catch(() => undefined);
     return promise;
   }
@@ -91,7 +86,7 @@ export class PingRegistry {
     this.pending.delete(nonce);
   }
 
-  /** Socket death: nobody is going to answer, so nobody should keep waiting. */
+  /** Reject every outstanding ping with `error`. Called when the socket is lost. */
   failAll(error: Error): void {
     this.pending.forEach((entry) => {
       if (entry.settled) return;
@@ -103,12 +98,11 @@ export class PingRegistry {
 }
 
 /**
- * What each peer knows about the other's intention to stop.
+ * The `goaway` state of a connection, tracked separately per direction.
  *
- * The two directions are tracked separately because they mean different things. Having *sent* one
- * means this peer refuses new work (WSM-CON-021); having *received* one means `open()` throws here
- * (WSM-CON-022) and that streams above the remote's `lastStream` were never processed and are safe to
- * retry elsewhere (WSM-CON-023).
+ * After sending a `goaway` this peer refuses new streams (WSM-CON-021). After receiving one, `open()`
+ * throws (WSM-CON-022), and streams above the remote's `lastStream` were not processed and may be
+ * retried elsewhere (WSM-CON-023).
  */
 export class GoawayState {
   sent = false;
@@ -116,8 +110,8 @@ export class GoawayState {
   received = false;
 
   /**
-   * The highest id **the remote opened** that it promises to still complete. Their parity, not ours -
-   * getting that backwards silently resets everything on every drain.
+   * The `last_stream` from the received `goaway`: the highest stream id this peer opened that the
+   * remote will still process. It has this peer's parity, not the remote's.
    */
   remoteLastStream: number | null = null;
 
@@ -132,10 +126,10 @@ export class GoawayState {
   }
 
   /**
-   * True when a stream of ours is at or below what the remote promised to finish.
+   * True when `streamId` is at or below the remote's `last_stream`.
    *
-   * With no `lastStream` known - a `goaway` we sent rather than received - every live stream is
-   * allowed its drain window; the remote has told us nothing that would cut it short.
+   * When no `goaway` has been received (`remoteLastStream` is `null`), every live stream gets the
+   * full drain window.
    */
   survivesDrain(streamId: number): boolean {
     if (this.remoteLastStream === null) return true;

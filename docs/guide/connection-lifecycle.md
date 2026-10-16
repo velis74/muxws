@@ -1,55 +1,53 @@
 # Connection lifecycle
 
-A muxws connection has a beginning that costs nothing, a middle with one liveness mechanism, and a
-defined end. There is nothing in between them that you have to wait for.
+A muxws connection is established when the WebSocket opens, uses `ping` / `pong` frames for liveness,
+and ends with `goaway`, a drain window and a socket close. Neither end waits for a setup exchange
+before sending frames.
 
 ## A connection is established when the socket is
 
-A connection is **established** the moment the WebSocket is open and the `muxws.v1.<codec>`
-subprotocol has been accepted. That is the whole of it.
+A connection is **established** when the WebSocket is open and the `muxws.v1.<codec>` subprotocol has
+been accepted.
 
-There is **no** post-socket handshake phase. There is **no** capability exchange. There is **no**
-`settings` frame - the frame type does not exist. There is no frame that either side must send
-before any other, in either direction. A peer may open a stream on its very first frame, and an
-acceptor may push one to a dialer before the dialer has sent anything at all.
+muxws has no handshake phase after the WebSocket upgrade, no capability exchange, and no `settings`
+frame type. Neither side is required to send a particular frame first. A peer may open a stream with
+its first frame, and an acceptor may open a stream to a dialer before the dialer has sent any frame.
 
 ```python
 # fragment
 peer = await connect("ws://localhost:8000/ws")
-# Nothing to await first. This is legal on the next line:
+# No setup to await. A request is valid immediately:
 answer = await peer.request({"action": "list"})
 ```
 
 The subprotocol is an **assertion, not a negotiation**. The dialer offers `muxws.v1.<codec>` as the
 first entry of its subprotocol list; the acceptor either selects exactly that value or refuses the
-upgrade with a 400, which surfaces as `CodecMismatch`. There is no fallback encoding, no list of
-acceptable alternatives, and no runtime codec branching anywhere in the peer. The `v1` in that name
-is also the only version on the wire. See [Codecs](/guide/codecs) and [Interop](/guide/interop).
+upgrade with HTTP 400, which the dialer raises as `CodecMismatch`. The peer has no fallback encoding,
+no list of acceptable alternatives, and no runtime codec branching. The `v1` in that name is the only
+version identifier on the wire. See [Codecs](/guide/codecs) and [Interop](/guide/interop).
 
 ::: info The hello is not a handshake
-A dialer using the reconnect helper may configure a `hello=` payload. It is an ordinary stream, one
-the acceptor's normal `on_stream` handler receives, and nothing marks it on the wire. It is
-dialer-only and opt-in: a peer given no hello sends none and is established the instant its socket
-is. When one **is** configured, `peer.is_open` / `peer.isOpen` stays false until that hello has been
-acknowledged, so that no application frame can precede it. See [Reconnect](/guide/reconnect).
+A dialer using the reconnect helper may configure a `hello=` payload. The hello is an ordinary
+stream, received by the acceptor's `on_stream` handler, and no field marks it on the wire. It is
+optional and dialer-only: a peer without a hello sends none and is established when its socket opens.
+When a hello **is** configured, `peer.is_open` / `peer.isOpen` stays false until the hello has been
+acknowledged, so no application frame is sent before it. See [Reconnect](/guide/reconnect).
 :::
 
 ## No limit is ever negotiated
 
-No limit appears on the wire in any form. There is no capability list, no advertised maximum, and
-nothing to parse from the remote about what it will accept. There are exactly three numbers, and
-they are three different kinds of thing.
+No limit is sent on the wire. A peer does not advertise a capability list or a maximum, and does not
+receive the remote's limits. muxws has three size and concurrency limits, each of a different kind:
 
 | Number | Default | Whose is it | How the other end learns it |
 |---|---|---|---|
-| `MAX_FRAME_BYTES` | 65536 bytes | **The protocol's.** A constant, not a setting. | It does not have to - both ends already know it. |
-| `max_payload_bytes` / `maxPayloadBytes` | 67108864 bytes (64 MiB) | **The receiver's own defence.** | Only from the `PAYLOAD_TOO_LARGE` reset it provokes. |
-| `max_concurrent_streams` / `maxConcurrentStreams` | 100 streams | **The receiver's own defence.** | Only from the `REFUSED` reset it provokes. |
+| `MAX_FRAME_BYTES` | 65536 bytes | **The protocol.** A constant, not a setting. | Both ends have the same constant. |
+| `max_payload_bytes` / `maxPayloadBytes` | 67108864 bytes (64 MiB) | **The receiver.** A local limit. | Only from the `PAYLOAD_TOO_LARGE` reset sent when it is exceeded. |
+| `max_concurrent_streams` / `maxConcurrentStreams` | 100 streams | **The receiver.** A local limit. | Only from the `REFUSED` reset sent when it is exceeded. |
 
-`MAX_FRAME_BYTES` is never read from configuration and never negotiated: a sender always fragments
-at it, and a receiver accepts anything up to it. See
-[Sizes & fragmentation](/guide/sizes-and-fragmentation) for why a bigger frame would be worse rather
-than better.
+`MAX_FRAME_BYTES` is not configurable and not negotiated: a sender always fragments at it, and a
+receiver accepts any frame up to it. See [Sizes & fragmentation](/guide/sizes-and-fragmentation) for
+the effect of the frame size on interleaving.
 
 The other two are set per peer, on `connect()` and on `accept()`, and they constrain what the
 **remote** may do to this peer:
@@ -71,30 +69,28 @@ const peer = await connect('ws://localhost:8000/ws', {
 });
 ```
 
-Three consequences that follow directly from "not announced":
+Because the limits are not sent to the remote:
 
-- **The sender never checks them.** `open()` does not raise when the receiver is already at its
-  concurrency limit - it cannot know, and it puts the `open` frame on the wire like any other. The
-  refusal comes back asynchronously as `StreamRefused` on the pending await, and `REFUSED` means the
-  handler never ran, so the work is safe to retry elsewhere.
-- **Raising a limit is done on the receiving peer.** The sender has no say. If your clients are
-  uploading 100 MiB payloads, `max_payload_bytes` has to go up on the server.
-- **The two ends may disagree, permanently and legitimately.** A browser-facing peer holding a
-  smaller limit than an internal one is a normal deployment, not a misconfiguration.
+- **The sender does not check them.** `open()` does not raise when the receiver is at its concurrency
+  limit; the sender does not know the limit and sends the `open` frame. The refusal arrives
+  asynchronously as `StreamRefused` on the pending await. `REFUSED` means the handler did not run, so
+  the work can be retried elsewhere.
+- **A limit is raised on the receiving peer.** The sender cannot change it. For clients that upload
+  100 MiB payloads, `max_payload_bytes` must be raised on the server.
+- **The two ends may have different limits.** For example, a browser-facing peer may have a smaller
+  limit than an internal one.
 
 `max_concurrent_streams` counts only the streams the **remote** opened on this peer. Streams this
-peer opened itself never count against it - the limit exists to bound work the other side can
-impose.
+peer opened do not count against it; the limit bounds the work the remote can start on this peer.
 
 ## `ping` / `pong` and `peer.ping()`
 
-Liveness uses muxws `ping` and `pong` frames, not WebSocket control frames. That is not stylistic:
-browsers do not expose WebSocket ping/pong to JavaScript at all, so a liveness mechanism built on
-them cannot work on half the peers that exist.
+Liveness uses muxws `ping` and `pong` frames, not WebSocket control frames. Browsers do not expose
+WebSocket ping/pong to JavaScript, so a mechanism based on them would not work in a browser peer.
 
-A `ping` carries a `nonce`. The receiver echoes it verbatim in a `pong`, promptly, with **no**
-application involvement - your `on_stream` handler never sees a ping and there is nothing to
-implement.
+A `ping` carries a `nonce`. The receiver echoes it unchanged in a `pong` immediately, without
+application involvement: the `on_stream` handler does not receive pings, and the application
+implements nothing.
 
 `peer.ping()` measures the round trip:
 
@@ -110,26 +106,25 @@ const rtt = await peer.ping();          // milliseconds; default deadline 5000 m
 const fast = await peer.ping(2000);     // 2000 milliseconds
 ```
 
-Two failure modes, and they are different:
+`ping()` fails in two ways:
 
-- Calling it while the peer is between sockets raises `ConnectionLost` immediately.
-- No `pong` within the deadline raises `ConnectionClosed`. A single lost `pong` does **not** kill the
-  connection: the call fails and the socket is left alone.
+- Called while the peer is between sockets, it raises `ConnectionLost` immediately.
+- If no `pong` arrives within the deadline, it raises `ConnectionClosed`. The connection stays open:
+  only the call fails.
 
-Pings are matched by nonce rather than by order, so a `pong` that arrives after its ping's deadline
-has already expired is dropped rather than credited to the next ping and reported as a round-trip
-time that never happened.
+Pings are matched by nonce, not by order. A `pong` that arrives after its ping's deadline is dropped;
+it is not matched to a later ping.
 
-A dialer using the reconnect helper also gets an automatic heartbeat, which pings only an
-**otherwise idle** socket and bounds detection of a dead one by
+A dialer using the reconnect helper also runs an automatic heartbeat. The heartbeat pings only an
+**otherwise idle** socket, and detects a dead socket within
 `ping_interval + ping_timeout` (default 20.0 seconds + 10.0 seconds) /
 `pingIntervalMs + pingTimeoutMs` (default 20000 milliseconds + 10000 milliseconds). See
 [Reconnect](/guide/reconnect).
 
 ## Going away: `goaway`, `last_stream` and the drain window
 
-`goaway` is how a peer says "I am stopping" without cutting off work already in progress. It carries
-three fields:
+A peer sends `goaway` to stop accepting new streams while streams already in progress finish. It
+carries three fields:
 
 | Field | Meaning |
 |---|---|
@@ -137,21 +132,21 @@ three fields:
 | `reason` | free text for a human reading a log |
 | `last_stream` | the highest id **the other peer opened** that this peer has processed and will still complete |
 
-`last_stream` is the important one, and it is the other peer's parity, not this peer's. It draws a
-line through the other end's work:
+`last_stream` is an id of the other peer's parity, not this peer's. It divides the other peer's
+streams into two sets:
 
-- Streams **at or below** `last_stream` were accepted and will be finished if they can be.
-- Streams **above** it were never processed. On receiving the `goaway`, the peer resets those of its
-  own streams locally with `REFUSED` - so their awaits raise `StreamRefused` - and sends nothing for
-  them, because the remote has already stopped reading. `REFUSED` promises nothing ran, so those
-  requests are safe to retry on a new connection.
+- Streams **at or below** `last_stream` were accepted and are completed if possible.
+- Streams **above** it were not processed. On receiving the `goaway`, the peer resets those of its
+  own streams locally with `REFUSED`, so their awaits raise `StreamRefused`, and sends no frame for
+  them, because the remote has stopped reading them. `REFUSED` means the handler did not run, so those
+  requests can be retried on a new connection.
 
-After **sending** `goaway`, a peer opens no new streams of its own - `open()` raises
-`ConnectionGoingAway` - and answers any new incoming `open` with `reset(REFUSED)` without invoking
-the handler.
+After **sending** `goaway`, a peer opens no new streams (`open()` raises `ConnectionGoingAway`) and
+answers each new incoming `open` with `reset(REFUSED)` without invoking the handler.
 
 After **receiving** `goaway`, `open()` raises `ConnectionGoingAway` synchronously at the call site.
-The connection is not dead; it just cannot start anything new. Dial again to get one that can.
+Existing streams continue, but no new stream can be opened on the connection. Dial a new connection
+to open new streams.
 
 ```python
 # fragment
@@ -164,16 +159,16 @@ except ConnectionGoingAway:
 
 ### The drain window
 
-`goaway` is followed by a **drain window**: surviving streams are given a bounded amount of time to
-finish, and then the socket is closed regardless of whether they did. It is a deadline, not a poll
-loop - a peer that waited for quiet would never close against a remote that keeps one stream open.
+`goaway` is followed by a **drain window**: the remaining streams have a fixed time to finish, after
+which the socket is closed whether or not they have finished. The window is a deadline, so a remote
+that keeps a stream open does not prevent the close.
 
-Whatever is still live when the deadline expires takes the socket-death path: it fails locally with
-`ConnectionLost` and nothing is sent for it, because the socket is about to be gone.
+Streams still live when the deadline expires are handled as on socket death: each fails locally with
+`ConnectionLost`, and no frame is sent for it.
 
 ### `peer.close()`
 
-`close()` is the whole sequence in one call: send `goaway(NO_ERROR)`, drain, then close the socket.
+`close()` performs the whole sequence: send `goaway(NO_ERROR)`, drain, then close the socket.
 
 ```python
 # fragment
@@ -187,25 +182,23 @@ await peer.close();                                              // drainMs defa
 await peer.close({ reason: 'deploying', drainMs: 2000 });        // 2000 milliseconds
 ```
 
-`close()` is also the one call that means "and do not come back". On a dialer with a reconnect
-helper it stops the helper **before** anything else, including when the peer is between sockets and
-the helper is asleep in its backoff - so a deliberate close never dials again.
+`close()` also ends reconnection. On a dialer with a reconnect helper, it stops the helper **first**,
+including when the peer is between sockets and the helper is waiting in its backoff, so the peer does
+not dial again after `close()`.
 
 ### Running out of stream ids
 
-Ids are allocated monotonically, two at a time - the dialer takes the odd ones, the acceptor the
-even - and are never reused. A peer whose next id would exceed 2³¹−1 cannot open another stream on
-that connection. That is not an error: the peer starts exactly the shutdown above - `goaway`, drain,
-close - and the stream that exhausted the space gets its drain window like any other. Applications
-that hold one connection open for months should expect an ordinary reconnect, not an exception.
+Ids are allocated in increasing order, in steps of two (the dialer uses odd ids, the acceptor even
+ids), and are never reused. When a peer allocates the last id at or below 2³¹−1, it starts the
+shutdown described above (`goaway`, drain, close), and the stream that received that id gets the drain
+window like any other stream. Further `open()` calls on that connection raise `ConnectionGoingAway`.
+An application that keeps one connection open for a long time sees this as an ordinary reconnect.
 
 ## The end: `on_close`
 
-Every socket death on a peer you are holding fires `on_close` once with a `CloseReason` carrying
-four fields: `code`,
-`reason`, `was_clean` / `wasClean`, and `will_retry` / `willRetry`. Every live stream has already
-been failed with `ConnectionLost` by the time it fires, so a handler can assume there is nothing
-left to tidy up on the stream side.
+Each socket death fires `on_close` once with a `CloseReason` that has four fields: `code`, `reason`,
+`was_clean` / `wasClean`, and `will_retry` / `willRetry`. Before it fires, every live stream has been
+failed with `ConnectionLost`, so the handler has no stream cleanup to do.
 
 ```python
 # fragment
@@ -214,9 +207,9 @@ def closed(reason):
     print(reason.code, reason.reason, reason.was_clean, reason.will_retry)
 ```
 
-`will_retry` is false only when the reconnect helper has given up or `close()` was deliberate, and a
-peer reports `will_retry=False` at most once, ever - so teardown in an `on_close` handler runs once
-rather than twice.
+`will_retry` is true only when a reconnect helper will dial again. It is false on a peer without a
+reconnect helper, when the helper has stopped retrying, and after `close()`. A peer reports
+`will_retry=False` at most once, so teardown code guarded by it in an `on_close` handler runs once.
 
 ## See also
 

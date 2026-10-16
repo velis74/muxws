@@ -30,7 +30,7 @@ def configured_codec(monkeypatch: pytest.MonkeyPatch):
 
 
 class _DialRecorder:
-    """Stands in for the socket layer, so 'no socket was opened' is a fact rather than a hope."""
+    """Replaces the socket layer and records every dial, so a test can assert that no socket was opened."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -95,7 +95,7 @@ def test_settings_is_read_at_call_time_not_import_time(configured_codec):
 
 
 def test_codec_argument_overrides_settings(configured_codec):
-    """WSM-CDC-012: a test override and an escape hatch, documented as nothing else."""
+    """WSM-CDC-012: the argument overrides `settings.codec`; it is documented only as a test override."""
     configured_codec("msgpack")  # not registered - resolving by name would raise
     override = JsonCodec()
     assert resolve_codec(override) is override
@@ -150,7 +150,7 @@ def test_the_dialer_composes_its_own_mismatch_error():
 
 
 def test_post_open_verification_reports_the_mismatch():
-    """WSM-CDC-028: the last resort, for a transport with neither hook."""
+    """WSM-CDC-028: the check after the socket opens, for a transport with neither hook."""
     verify_negotiated("muxws.v1.json", "json")
     with pytest.raises(CodecMismatch):
         verify_negotiated("muxws.v1.msgpack", "json")
@@ -160,7 +160,7 @@ def test_post_open_verification_reports_the_mismatch():
 
 
 def test_no_codec_branching_exists_in_the_peer():
-    """WSM-CDC-023: an assertion, not a negotiation - so there is nothing to branch on."""
+    """WSM-CDC-023: the codec is asserted, not negotiated, so the peer has no codec-dependent branch."""
     import inspect
 
     from muxws import peer, stream
@@ -179,7 +179,7 @@ def test_the_generation_prefix_is_the_only_version():
 
 
 def test_a_different_generation_is_named_as_such(caplog):
-    """WSM-CDC-025 is its own case: an offer from a future peer is not an absent muxws entry."""
+    """WSM-CDC-025: an offer with a different generation is reported as such, not as a missing muxws entry."""
     with caplog.at_level(logging.ERROR, logger="muxws.codec"):
         assert select(["muxws.v2.json"], "json") is None
     logged = "\n".join(record.getMessage() for record in caplog.records)

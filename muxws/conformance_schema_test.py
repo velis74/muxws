@@ -1,8 +1,8 @@
 """Schema checks over the shared corpus.
 
-This module proves the fixtures well-formed; `conformance_test.py` executes them. A fixture that has
-quietly lost a field, or a required case that has quietly disappeared, would otherwise show up as a
-suite that passes by testing nothing.
+This module checks that the fixtures are well-formed; `conformance_test.py` executes them. A fixture
+with a missing field, or a missing required case, fails here instead of making the conformance suite
+pass without testing it.
 """
 
 import json
@@ -59,12 +59,12 @@ def test_invalid_fixtures_parse(path: Path):
 
 
 def test_every_invalid_case_of_wsm_tst_003_has_a_fixture():
-    """Without this, a deleted fixture is a silently passing suite."""
+    """A deleted fixture fails this test."""
     assert {p.stem for p in INVALID_FILES} == REQUIRED_INVALID_CASES
 
 
 def test_connection_level_cases_die_and_stream_level_cases_survive():
-    """WSM-STM-020/023: the discriminator is whether the peers can still agree about other streams."""
+    """WSM-STM-020/023: an error is connection-level when the peers can no longer agree about other streams."""
     survival = {p.stem: _load(p)["connection_survives"] for p in INVALID_FILES}
     assert survival == {
         "open-wrong-parity": False,
@@ -100,9 +100,8 @@ def test_frame_fixtures_are_name_frame_wire_triples(path: Path):
         assert set(case) == {"name", "frame", "json_wire"}
         assert "type" in case["frame"]
         # Shape only: the pinned wire parses to an object carrying the same frame type. The semantic
-        # check is `decode(json_wire) == frame`, and it belongs where the codec is: this module
-        # asserts that a fixture is *well-formed*, `conformance_test.py` asserts that it is *true*
-        # (WSM-TST-001, WSM-CDC-005).
+        # check `decode(json_wire) == frame` is in `conformance_test.py`; this module asserts that a
+        # fixture is well-formed (WSM-TST-001, WSM-CDC-005).
         wire = json.loads(case["json_wire"])
         assert isinstance(wire, dict)
         assert wire["type"] == case["frame"]["type"]
@@ -143,6 +142,7 @@ def test_boundary_fixtures_are_name_cap_payload_fragments(path: Path):
 
 
 def test_every_boundary_hazard_has_a_case():
-    """Astral planes, multi-byte codepoints and escape expansion are the three ways this drifts."""
+    """Covers the three cases where boundaries differ: astral-plane characters, multi-byte codepoints and
+    escape expansion."""
     names = {case["name"] for case in _load(BOUNDARY_FILES[0])}
     assert {"astral-plane", "two-byte-codepoints", "three-byte-codepoints", "control-characters"} <= names

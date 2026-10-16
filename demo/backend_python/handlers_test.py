@@ -1,9 +1,7 @@
 """The demo's backend against the in-memory transport.
 
-A demo with no tests rots into a screenshot. The headline is
-`test_ticks_keep_flowing_during_an_export`: the panel is the demonstration, this is the proof, and it
-is written against `on_frame`'s record rather than against anything on a screen so that it fails if
-the round-robin writer is ever replaced by a FIFO.
+The main test is `test_ticks_keep_flowing_during_an_export`. It asserts on the frames recorded by
+`on_frame`, and fails if the round-robin writer is replaced by a FIFO writer.
 """
 
 from __future__ import annotations
@@ -24,17 +22,17 @@ from muxws.codecs.json_ import JsonCodec
 from muxws.transports.memory import memory_pair, MemorySocket
 
 #: Frames each tick stream has queued when the export's sends are released: more than the export
-#: has fragments, so no tick stream runs dry while the export is still on the wire.
+#: has fragments, so every tick stream has a frame to send between any two export fragments.
 BACKLOG = 32
 
 
 class GatedSocket:
     """A `MemorySocket` whose sends wait while `gate` is clear. Implements `SocketAdapter`.
 
-    With the gate set, a send is the wrapped socket's send and adds no suspension: `Event.wait()` on a
-    set event returns without yielding. With it clear, the write loop holds at its next send and every
-    frame enqueued meanwhile stays in the writer, so a test can fix what the rotation has to choose
-    from before it chooses.
+    With the gate set, a send is the wrapped socket's send with no added suspension: `Event.wait()` on
+    a set event returns without yielding. With the gate clear, the write loop blocks at its next send
+    and every frame enqueued meanwhile stays in the writer, so a test can fill the writer's queues
+    before the writer chooses between them.
     """
 
     def __init__(self, socket: MemorySocket) -> None:
@@ -58,14 +56,12 @@ class GatedSocket:
 
 
 class Wire:
-    """A browser and a backend, wired to each other, with the demo's real handler on the acceptor.
+    """A browser peer and a backend peer connected in memory, with the demo's handler on the acceptor.
 
-    Over a plain `MemorySocket`, and that is what makes WSM-INV-004 observable here: `Peer._write_loop`
-    takes one event-loop turn per frame, so the rotation has lanes to rotate over without the
-    transport supplying any suspension of its own. A socket double that slept in proportion to frame
-    size would supply that yield instead, and the interleaving asserted below would then be the
-    double's rather than the writer's. The backend's sends pass a `GatedSocket`, which is open unless
-    a test closes it.
+    The browser side uses a plain `MemorySocket`. `Peer._write_loop` takes one event-loop turn per
+    frame, so the writer interleaves streams without the transport adding suspensions; a socket double
+    that slept in proportion to frame size would cause interleaving of its own. The backend's sends
+    pass through a `GatedSocket`, which is open unless a test clears its gate.
     """
 
     def __init__(
@@ -81,18 +77,14 @@ class Wire:
         self.service = service
         self.sockets = sockets
         self.backend = backend
-        #: Every frame the *browser* saw, in arrival order. WSM-OBS-003's hook is the only witness
-        #: the headline test below uses.
+        #: Every frame the browser saw, in order, recorded through the WSM-OBS-003 hook.
         self.seen: list[tuple[str, Frame, int]] = []
-        #: What the browser knows about the market, and it knows nothing the socket did not tell it
-        #: (D1). Filled by the pushed streams alone.
+        #: The browser's market data, filled only from the pushed streams (D1).
         self.board: dict[str, Any] = {}
-        #: The **first** row each symbol pushed, kept separately because the latest one overwrites it.
-        #: A board that could only draw a row once a price had moved would leave the grid empty for a
-        #: whole tick interval, which is what the snapshot exists to prevent.
+        #: The first row each symbol pushed, kept separately because `board` holds the latest one.
+        #: The first row is the snapshot, which lets the grid be drawn before the first tick.
         self.first: dict[str, Any] = {}
-        #: Every `CloseReason` the browser was handed. The kill-switch panel's claim is that the UI
-        #: is *told*, rather than left with a frozen screen.
+        #: Every `CloseReason` passed to the browser's `on_close`.
         self.closes: list[Any] = []
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -105,16 +97,16 @@ class Wire:
 
     def start(self) -> None:
         self.dialer.on_frame(lambda direction, frame, length: self.seen.append((direction, frame, length)))
-        # Registered **before** anything goes out, because the backend pushes the board the instant it
-        # sees the hello and a handler registered one await later meets that push with
+        # Registered before anything is sent: the backend pushes the board as soon as it receives the
+        # hello, and a push that arrives before a handler is registered is answered with
         # `reset(REFUSED, "no on_stream handler")` (WSM-STM-033). `connect()` takes `on_stream=` as a
-        # parameter for exactly this reason.
+        # parameter for this reason.
         self.dialer.on_stream(self._on_push)
         self.dialer.on_close(self.closes.append)
         self._tasks = [asyncio.create_task(self.dialer.serve()), asyncio.create_task(self.acceptor.serve())]
 
     async def hello(self, **tags: Any) -> Any:
-        """What `connect(hello=...)` puts on the wire, sent by hand so the ack can be read (D3)."""
+        """Send the hello `connect(hello=...)` would send, as a request so the reply can be read (D3)."""
         return await self.dialer.request({"action": "hello", "tags": tags or {"topic": "board"}})
 
     def received(self, direction: str = "rx") -> list[Frame]:
@@ -135,7 +127,7 @@ class Wire:
     async def until_backlogged(self, stream_id: int, depth: int, timeout: float = 5.0) -> None:
         """Wait until `stream_id` has a frame queued and every tick stream has `depth` frames queued.
 
-        Meaningful only while `backend.gate` is clear: the writer then holds every frame enqueued.
+        Used only while `backend.gate` is clear, when the writer holds every enqueued frame.
         """
         writer = self.acceptor._writer
         deadline = asyncio.get_running_loop().time() + timeout
@@ -154,14 +146,13 @@ class Wire:
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
-            # A cancelled serve() is the expected end of a test; whatever it raises on the way out is
-            # teardown noise rather than a result.
+            # A cancelled serve() is the normal end of a test; its exceptions are ignored.
             await asyncio.gather(task, return_exceptions=True)
 
 
 @asynccontextmanager
 async def market_wire(**service_options: Any) -> AsyncIterator[Wire]:
-    """One browser, one backend, one socket - the demo's own objects and nobody's test doubles."""
+    """One browser peer and one backend peer on one in-memory socket pair, using the demo's own objects."""
     left, right = memory_pair()
     browser_side, backend_side = left, right
     codec = JsonCodec()
@@ -178,19 +169,18 @@ async def market_wire(**service_options: Any) -> AsyncIterator[Wire]:
         await wire.stop()
 
 
-# ---------------------------------------------------------------------------- the headline
+# ---------------------------------------------------------------------------- export and ticks
 
 
 async def test_ticks_keep_flowing_during_an_export() -> None:
-    """WSM-INV-004, as a test: a megabyte on one stream does not stall the twenty others.
+    """WSM-INV-004: a megabyte on one stream does not stall the twenty other streams.
 
-    Asserted from what the *browser's* `on_frame` recorded, not from anything visual and not from the
-    handler's own bookkeeping. The backend's sends are held while the export is enqueued, until every
-    tick stream has more frames queued than the export has fragments; then they are released. What
-    the writer sends from that state does not depend on scheduling. A FIFO decides the order at
-    enqueue time, so the ticks queued before the export would go out first and every fragment of the
-    export after them, back to back. The round-robin writer gives the export one fragment per turn and
-    every tick stream one frame in between (WSM-FRG-017/018/019).
+    Asserted on the frames the browser's `on_frame` recorded. The backend's sends are held while the
+    export is enqueued, until every tick stream has more frames queued than the export has fragments;
+    then they are released. From that state the writer's output does not depend on scheduling. A FIFO
+    writer orders frames at enqueue time, so the ticks queued before the export would be sent first
+    and all export fragments after them, consecutively. The round-robin writer sends one export
+    fragment per turn and one frame of every tick stream in between (WSM-FRG-017/018/019).
     """
     async with market_wire(tick_interval=0.005) as wire:
         await wire.hello()
@@ -211,19 +201,19 @@ async def test_ticks_keep_flowing_during_an_export() -> None:
             if frame.stream == export.id and frame.type == "data" and frame.fragment is not None
         ]
         print(f"export fragments={len(fragments)} span={fragments[0]}..{fragments[-1]} of {len(received)} frames")
-        # A megabyte really did have to be fragmented; otherwise there was nothing to stall behind.
+        # The export is fragmented; with a single frame there is nothing to interleave.
         assert len(fragments) >= 8, f"the export arrived in {len(fragments)} fragments; it cannot stall anything"
         assert len(fragments) < BACKLOG, "the tick streams ran dry before the export finished"
         assert payload["count"] == EXPORT_ROWS
 
-        # Between any two fragments of the export, every tick stream delivered exactly one frame and
-        # nothing else went out: the rotation asks every lane once before it asks any lane twice.
+        # Between any two export fragments, every tick stream sent exactly one frame and nothing else
+        # was sent: the rotation visits every stream once before visiting any stream twice.
         for before, after in itertools.pairwise(fragments):
             between = sorted(frame.stream for frame in received[before + 1 : after])
             assert between == sorted(ticks), f"frames {before}..{after} carried streams {between}"
 
 
-# ---------------------------------------------------------------------------- section 6's rest
+# ---------------------------------------------------------------------------- the other actions
 
 
 async def test_every_action_answers() -> None:
@@ -232,18 +222,17 @@ async def test_every_action_answers() -> None:
         acknowledgement = await wire.hello(topic="board", session="demo")
         assert acknowledgement["ok"] is True
         assert acknowledgement["symbols"] == len(SYMBOLS)
-        # D3: the peer is findable under the tags the *frontend* named, and under nothing muxws chose.
+        # D3: the peer is indexed under the tags the frontend sent.
         assert wire.service.registry.peers_for(topic="board") == [wire.acceptor]
         assert wire.service.registry.peers_for(session="demo") == [wire.acceptor]
 
-        # Server push, and D1 with it: the browser asked for no symbol list and holds no seed data,
-        # and yet it knows all twenty - because the acceptor opened twenty streams of its own accord
-        # and the browser received them through its own `on_stream` handler (WSM-INV-002).
+        # Server push and D1: the browser requested no symbol list and holds no seed data; it learns
+        # all twenty symbols from the streams the acceptor opened, received through the browser's own
+        # `on_stream` handler (WSM-INV-002).
         await wire.until_the_board_is_live()
         assert sorted(wire.board) == sorted(symbol for symbol, _name, _price in SYMBOLS)
-        # The first frame of every pushed stream is the snapshot, not a tick: the grid is drawable
-        # the moment it is subscribed rather than a tick interval later. A backend that pushed only
-        # movements would fill the board just as surely and leave it blank until it did.
+        # The first frame of every pushed stream is the snapshot, not a tick, so the grid can be drawn
+        # on subscription instead of after the first tick interval.
         assert [row["ticks"] for row in wire.first.values()] == [0] * len(SYMBOLS)
 
         quote = await wire.dialer.request({"action": "quote", "symbol": "ACME"})
@@ -254,17 +243,16 @@ async def test_every_action_answers() -> None:
         points = [point async for point in history]
         assert len(points) == HISTORY_POINTS
         assert [point["t"] for point in points] == list(range(HISTORY_POINTS))
-        # Trailers ride the `end` frame and are readable only once the iteration is over.
+        # Trailers are carried on the `end` frame and are available once the iteration has finished.
         assert history.trailers == {"symbol": "ACME", "points": HISTORY_POINTS}
 
         before = len(wire.seen)
         depth = await wire.dialer.request({"action": "depth", "symbol": "ACME"})
         assert len(depth["bids"]) == len(depth["asks"]) == depth["levels"]
         assert depth["bids"][0]["px"] < depth["asks"][0]["px"]
-        # WSM-FRG-010, which is the entire claim of the "full depth" panel and is not implied by the
-        # three assertions above: a book of five levels is internally consistent, arrives whole, and
-        # witnesses nothing. The payload has to cross MAX_FRAME_BYTES for there to be a reassembly to
-        # watch, and nothing in the handler or here asked for one.
+        # WSM-FRG-010, not covered by the assertions above, which a five-level book would also pass:
+        # the payload exceeds MAX_FRAME_BYTES and is fragmented and reassembled without the handler or
+        # the test requesting it.
         pieces = [length for way, frame, length in wire.seen[before:] if way == "rx" and frame.fragment is not None]
         print(f"depth: {len(pieces)} fragments, {sum(pieces)} bytes on the wire")
         assert len(pieces) > 1, "the order book arrived in one frame; there was nothing to reassemble"
@@ -279,8 +267,8 @@ async def test_every_action_answers() -> None:
         assert stats["exports"] == 1
         assert stats["peers"] == 1
 
-        # An action nobody defined is an application error, never a refusal: REFUSED would promise
-        # the request had not been processed and invite the browser to retry it (WSM-STM-034).
+        # An unknown action is an application error, not a refusal: REFUSED would state that the
+        # request was not processed and may be retried (WSM-STM-034).
         try:
             await wire.dialer.request({"action": "buy", "symbol": "ACME"})
         except RemoteError as refused:
@@ -290,13 +278,12 @@ async def test_every_action_answers() -> None:
 
 
 async def test_the_rate_action_changes_how_often_the_board_pushes() -> None:
-    """The pacing is the demo's and not the library's, and a reader has to be able to prove that.
+    """The `rate` action sets the board's tick interval, within bounds.
 
-    `TICK_INTERVAL` is a `sleep` in the generator. Over the same transport this test uses, a peer pair
-    moves ~25,000 frames a second across twenty streams (`muxws/throughput_test.py`), while the
-    board's default asks for eighty - the rate on the screen is a choice, not a ceiling. This asserts
-    the choice is reachable, and that it is bounded: zero would turn the generator into a busy loop
-    that starves the loop it sends on.
+    `TICK_INTERVAL` is a `sleep` in the generator and does not reflect the transport's capacity
+    (`muxws/throughput_test.py` measures that); the board's default sends eighty frames per second.
+    This asserts that the interval can be changed and that it is bounded: zero would turn the
+    generator into a busy loop that starves the event loop it sends on.
     """
     async with market_wire() as wire:
         answer = await wire.dialer.request({"action": "rate", "interval_ms": 10})
@@ -314,11 +301,10 @@ async def test_the_rate_action_changes_how_often_the_board_pushes() -> None:
 
 
 async def test_cancelling_history_stops_the_generator() -> None:
-    """WSM-ERR-012/013: `cancel()` stops the *backend*, and a counter it increments says so.
+    """WSM-ERR-012/013: `cancel()` stops the backend generator, as its counters show.
 
-    Asserted from that counter and never from the absence of frames. A frontend that stopped reading
-    would produce exactly the same silence on the wire, and the panel's whole claim is that the
-    backend stopped generating.
+    Asserted on the backend's counters, not on the absence of frames: a frontend that stopped reading
+    would also receive no further frames.
     """
     async with market_wire(tick_interval=0.5, history_delay=0.005) as wire:
         await wire.hello()
@@ -329,9 +315,8 @@ async def test_cancelling_history_stops_the_generator() -> None:
             received += 1
             if received == 3:
                 break
-        # Python does not observe a `break` out of an `async for`, so the consumer cancels the stream
-        # itself - which is what the guide tells a consumer to do and what the frontend does when the
-        # reader clicks another row.
+        # A `break` out of an `async for` does not cancel the stream in Python, so the consumer cancels
+        # it explicitly, as the guide describes and as the frontend does when another row is selected.
         await history.cancel("switched symbols")
         await asyncio.sleep(0.05)
 
@@ -341,14 +326,14 @@ async def test_cancelling_history_stops_the_generator() -> None:
 
         stopped_at = counters.history_points_sent
         assert stopped_at < HISTORY_POINTS, "the generator ran to completion despite the cancellation"
-        # Long enough for a dozen more points had anything still been generating them.
+        # Long enough for several more points if the generator were still running.
         await asyncio.sleep(0.1)
         print(f"points sent before the cancellation: {stopped_at}; after another 100ms: {counters.history_points_sent}")
         assert counters.history_points_sent == stopped_at, "the backend kept generating after it was cancelled"
 
 
 async def test_the_export_payload_fragments() -> None:
-    """WSM-FRG-010: over MAX_FRAME_BYTES on the wire, whole on arrival, and nothing asked for it."""
+    """WSM-FRG-010: the export exceeds MAX_FRAME_BYTES, is fragmented on the wire and arrives whole."""
     async with market_wire(tick_interval=0.5) as wire:
         await wire.hello()
         export = wire.dialer.open({"action": "export", "symbol": "ACME"}, end=True)
@@ -361,11 +346,10 @@ async def test_the_export_payload_fragments() -> None:
         print(f"export: {len(fragments)} fragments, {total} bytes on the wire")
         assert len(fragments) > 1, "a megabyte arrived in one frame; nothing was fragmented"
         assert total > 1_000_000, f"the export was only {total} bytes; it is meant to be about a megabyte"
-        # A receiver must accept anything up to the cap and a sender must never exceed it. The cap is
-        # a protocol constant, not a setting - nothing in the demo passed `max_frame_bytes` at all.
+        # No fragment exceeds the limit. The demo passes no `max_frame_bytes`, so the default applies.
         for frame, length in fragments:
             assert length <= MAX_FRAME_BYTES, f"fragment {frame.fragment is not None} of {length} bytes exceeds the cap"
-        # `more: true` on every fragment but the last, which is how the receiver knows it is done.
+        # `more: true` on every fragment except the last.
         assert [frame.more for frame, _length in fragments] == [True] * (len(fragments) - 1) + [False]
 
         assert payload["count"] == EXPORT_ROWS
@@ -374,13 +358,11 @@ async def test_the_export_payload_fragments() -> None:
 
 
 def test_the_market_is_deterministic_whatever_the_reader_clicked() -> None:
-    """D2, and the half of it that a single seeded generator would not give you.
+    """D2: values do not depend on which other requests were made.
 
-    Seeding one shared stream of randomness makes a run reproducible only if it is *driven*
-    identically: ACME's tenth price would then depend on whether anybody asked for an export first,
-    and the screenshot in the documentation would stop being true the moment a reader clicked in a
-    different order. One generator per (seed, purpose, symbol) is what makes the claim hold, so this
-    drives two markets differently on purpose and expects the same numbers out of both.
+    With one shared seeded generator, ACME's tenth price would depend on whether an export was
+    requested first. With one generator per (seed, purpose, symbol) it does not, so two markets
+    driven with different requests produce the same numbers.
     """
     quiet, busy = Market(), Market()
     ten = [quiet.tick("ACME") for _ in range(10)]
@@ -391,17 +373,17 @@ def test_the_market_is_deterministic_whatever_the_reader_clicked() -> None:
     busy.tick("BOLT")
     assert [busy.tick("ACME") for _ in range(10)] == ten, "ACME's prices depended on what else was asked for"
 
-    # And across processes, which is what a screenshot actually needs: `random.Random` hashes the
-    # string seed itself rather than through `hash()`, so this owes nothing to PYTHONHASHSEED.
+    # Also across processes: `random.Random` hashes a string seed itself, not through `hash()`, so the
+    # result does not depend on PYTHONHASHSEED.
     assert Market().history("ACME") == quiet.history("ACME")
-    # The book's prices hang off the symbol's *current* price, which `busy` has moved on purpose, so
-    # what is compared is the drawn part: the quantities are the same draws in the same order.
+    # The book's prices derive from the symbol's current price, which differs in `busy`, so only the
+    # randomly drawn quantities are compared.
     drawn = lambda book: [(level["qty"], level["orders"]) for level in book["bids"][:5]]
     assert drawn(Market().depth("BOLT")) == drawn(busy.depth("BOLT"))
 
 
 async def test_the_kill_switch_closes_every_peer() -> None:
-    """The "kill the backend" panel: every live stream fails and the browser is told, not frozen."""
+    """The kill switch closes every peer: live streams fail and the browser's `on_close` is called."""
     async with market_wire(tick_interval=0.02, kill_delay=0.01) as wire:
         await wire.hello()
         await wire.until_the_board_is_live()
@@ -413,21 +395,18 @@ async def test_the_kill_switch_closes_every_peer() -> None:
         deadline = asyncio.get_running_loop().time() + 2.0
         while not wire.closes and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.005)
-        # The browser is *told*, which is the whole of the panel: a UI that only froze would be
-        # indistinguishable from a slow backend.
+        # The browser's `on_close` is called.
         assert wire.closes, "the kill switch closed nothing the browser could observe"
         print(f"the browser was told: code={wire.closes[0].code} clean={wire.closes[0].was_clean}")
         assert wire.dialer.is_open is False
         assert wire.dialer.streams == {}
-        # WSM-REG-016 end to end, and it is the *library* this witnesses rather than the demo: the
-        # registry hooks `on_close` itself, so this stays empty even if `MarketService.forget` never
-        # called `deregister`. That is worth one line here because the kill switch is the only place
-        # in the demo where a registered peer dies, and a registry that answered with sockets that
-        # have been shut since would make the next `peers_for()` count a fiction.
+        # WSM-REG-016: the registry removes a closed peer through its own `on_close` hook, independently
+        # of `MarketService.forget`. The kill switch is the only place in the demo where a registered
+        # peer closes.
         assert wire.service.registry.peers_for() == [], "a closed peer is still in the registry"
 
-        # Every open stream is closed rather than left hanging, and a send on one raises
-        # (WSM-ERR-002 keeps socket death out of a stream's own vocabulary and gives it its own).
+        # Every open stream is closed, and a send on one raises (WSM-ERR-002: a lost connection has
+        # its own error, distinct from a stream's).
         assert watching.closed.is_set()
         try:
             await watching.send({"anything": True})

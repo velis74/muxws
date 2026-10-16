@@ -1,8 +1,8 @@
 """The `websockets` library: a dialer, and the acceptor's handshake hook.
 
-The module keeps its trailing underscore: a `websockets.py` inside this package would shadow the
-library it imports. `websockets` is imported inside the functions, so the package keeps zero
-required runtime dependencies (WSM-PKG-002).
+The module name has a trailing underscore because a `websockets.py` inside this package would shadow
+the library it imports. `websockets` is imported inside the functions, so the package has no required
+runtime dependencies (WSM-PKG-002).
 """
 
 from __future__ import annotations
@@ -20,9 +20,8 @@ logger = logging.getLogger("muxws.codec")
 #: at all and the mismatch can only be discovered on an already-open socket (WSM-CDC-028).
 POLICY_VIOLATION = 1008
 
-#: The extra that installs this transport's dependency, spelled the way a reader can paste it. Named
-#: once, here, because the whole value of `WebsocketsNotInstalledError` over a bare `ImportError` is
-#: that it carries the remedy, and a remedy that drifts out of date is worse than none (WSM-ERR-016).
+#: The install command for this transport's dependency, quoted in `WebsocketsNotInstalledError`
+#: (WSM-ERR-016).
 INSTALL_HINT = "pip install muxws[websockets]"
 
 
@@ -30,49 +29,42 @@ class WebsocketUrlError(TransportUrlError):
     """A `ws:`/`wss:` URL the `websockets` library cannot turn into something to dial.
 
     No hostname (`ws:/nohost`), a scheme that is neither `ws` nor `wss`, a port that is not an
-    integer, or a string that is not a URL at all. It is a `TransportUrlError` - and so a
-    `MuxwsError` and a `ValueError` - so that one `except MuxwsError` around `connect()` catches an
-    unusable URL whichever scheme it names (WSM-ERR-016).
+    integer, or a string that is not a URL. A `TransportUrlError`, and so a `MuxwsError` and a
+    `ValueError`, so `except MuxwsError` around `connect()` catches an unusable URL of any scheme
+    (WSM-ERR-016).
 
-    The library's own diagnostic is not replaced, only framed: it is quoted in the message and the
-    original exception is chained with `from exc`, because `websockets` says *which* part of the URL
-    it objected to and this class does not.
+    The message quotes the `websockets` diagnostic, which names the offending part of the URL, and
+    the original exception is chained with `from exc`.
     """
 
 
 class WebsocketsNotInstalledError(TransportUnsupportedError):
     """`connect()` was called and `import websockets` failed; the message names the extra.
 
-    One class for both dial arms: a `ws://` dial and a `ws+unix://` dial fail on the identical
-    `import websockets`, because it is the identical dependency.
+    Raised for both `ws://` and `ws+unix://` dials, which import the same package.
 
-    `NotInstalled` rather than `Unavailable`: "unavailable" in a traceback out of a dial reads as a
-    transient endpoint failure a caller may retry, and this is a permanent local condition no retry
-    and no different URL can fix. That is also why the base is `TransportUnsupportedError` (a
-    `RuntimeError`) and not `TransportUrlError`.
+    The condition is local and permanent; retrying or changing the URL does not help. The base is
+    therefore `TransportUnsupportedError` (a `RuntimeError`), not `TransportUrlError`.
 
-    Only the package being absent becomes this class. A `websockets` that is present but broken keeps
-    its own `ImportError` - see `require_websockets`, and the same narrowing in
-    `ts/node.ts::WsNotInstalledError`.
+    Raised only when the package is absent. A `websockets` that is present but fails to import keeps
+    its own `ImportError`; see `require_websockets`, and `ts/node.ts::WsNotInstalledError`.
     """
 
 
 def require_websockets() -> Any:
     """Import `websockets`, or raise `WebsocketsNotInstalledError` naming the extra.
 
-    The gate for both dial arms, and why this module has no module-scope `import websockets`: the
-    package has zero required runtime dependencies (WSM-PKG-002), so the absence can only be detected
-    where it is needed and reported as a muxws error that says what to install (WSM-ERR-016).
+    Used by both dial arms. The package has no required runtime dependencies (WSM-PKG-002), so the
+    import happens here and its absence is reported as a muxws error naming the install command
+    (WSM-ERR-016).
 
-    Called from `verify_dialable_url` before the URL is parsed, because the URL parser is supplied by
-    the dependency: a caller with neither gets the failure that blocks the other, rather than an
-    `ImportError` out of the middle of a URL check.
+    Called from `verify_dialable_url` before the URL is parsed, because `websockets` supplies the URL
+    parser.
 
-    Only the package actually being absent becomes this class. `ModuleNotFoundError` with `name`
-    exactly `"websockets"` is the one shape that means absent; a missing *sub*module (`name` of
-    `"websockets.asyncio"`) or a plain `ImportError` means the package was found and something inside
-    it failed, and answering that with `pip install muxws[websockets]` would hide the only message
-    naming the real fault. `ts/node.ts::requireWs` narrows the same way on `ERR_MODULE_NOT_FOUND`.
+    Only a `ModuleNotFoundError` whose `name` is exactly `"websockets"` becomes
+    `WebsocketsNotInstalledError`. A missing submodule (`name` of `"websockets.asyncio"`) or another
+    `ImportError` means the package is present and failed to import, and is re-raised unchanged.
+    `ts/node.ts::requireWs` applies the same rule to `ERR_MODULE_NOT_FOUND`.
     """
     try:
         import websockets
@@ -89,24 +81,21 @@ def require_websockets() -> Any:
 def verify_dialable_url(url: str, *, uri: str | None = None) -> None:
     """Refuse a URL `websockets` cannot dial, before anything opens a socket.
 
-    `uri` is the *logical* `ws://` URL a `ws+unix:` dial synthesises and hands to
-    `unix_connect(uri=...)`; it is what that arm's handshake actually parses, so it is what gets
-    checked. For a TCP dial there is nothing to synthesise and `url` is checked as it stands. Both
-    arms go through here because both arms parse a URL with the same parser from the same package.
+    `uri` is the logical `ws://` URL that a `ws+unix:` dial passes to `unix_connect(uri=...)`; that
+    URL is parsed by the handshake, so it is the one checked. For a TCP dial `url` is checked.
 
-    Called outside `connect()`'s dial closure, never inside the closure's `except`. That handler
-    translates a refused upgrade into `CodecMismatch` (WSM-CDC-022/024) by reading a 400 out of the
-    exception, and its string fallback matches `HTTP 400` anywhere in the message - including in an
-    `InvalidURI` that is merely quoting the URL back, so `connect("ws:/HTTP 400")` would be reported
-    as a codec mismatch on a connection that was never made. An unparseable URL never reaches the
-    closure, and no real refusal changes: a real 400 requires a dial that reached a server, which
-    requires a URL that parsed (WSM-ERR-016).
+    Called outside `connect()`'s dial closure. The closure's exception handler translates a refused
+    upgrade into `CodecMismatch` (WSM-CDC-022/024), and its string fallback matches `HTTP 400`
+    anywhere in the message, including an `InvalidURI` that quotes the URL: `connect("ws:/HTTP 400")`
+    would be reported as a codec mismatch. A real 400 requires a URL that parsed, so checking here
+    does not change how a real refusal is reported (WSM-ERR-016).
 
-    `parse_uri` raises `InvalidURI` for a scheme or hostname it rejects and a plain `ValueError` out
-    of `urllib.parse` for a port that is not an integer; `InvalidURI` is not a `ValueError`, so
-    catching either alone misses half the shapes. Catching `ValueError` this broadly is safe only
-    because nothing but URL parsing runs inside the `try` - the same catch inside the dial's handler
-    would also see a `ValueError` raised while building headers.
+    `parse_uri` raises `InvalidURI` for a rejected scheme or hostname and a `ValueError` from
+    `urllib.parse` for a non-integer port; `InvalidURI` is not a `ValueError`, so both are caught.
+    Only URL parsing runs inside the `try`, so no other `ValueError` is caught.
+
+    Raises `WebsocketsNotInstalledError` when `websockets` is absent and `WebsocketUrlError` when the
+    URL cannot be parsed.
     """
     require_websockets()
 
@@ -173,12 +162,10 @@ def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
     The `websockets` library completes the handshake before calling the handler, so the decision is
     handed to it up front (WSM-CDC-027).
 
-    The refusal is **raised, not returned**. Returning None here answers 101 with no
-    `Sec-WebSocket-Protocol` header and leaves the mismatch to be found on an already-open socket -
-    precisely the "complete the handshake and close afterwards" that WSM-CDC-022 forbids wherever
-    the transport offers a choice. `ServerProtocol.accept` turns an `InvalidHandshake` out of this
-    hook into HTTP 400 and anything else into 500, so `NegotiationError` is the one exception that
-    produces the status the rule names.
+    A refusal raises `NegotiationError`. Returning None would answer 101 with no
+    `Sec-WebSocket-Protocol` header and leave the mismatch to be detected on an open socket, which
+    WSM-CDC-022 forbids where the transport offers a choice. `ServerProtocol.accept` turns an
+    `InvalidHandshake` raised by this hook into HTTP 400 and any other exception into 500.
     """
     _ = connection
     from websockets.exceptions import NegotiationError
@@ -187,9 +174,8 @@ def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
 
     selected = select(list(subprotocols), settings.codec)
     if selected is None:
-        # `select` has already logged which codec was offered against which is configured
-        # (WSM-CDC-029); this message is only what fits in the 400's body, and it deliberately
-        # reflects nothing the dialer sent.
+        # `select` has already logged the offered and the configured codec (WSM-CDC-029). This
+        # message becomes the 400 response body and contains nothing the dialer sent.
         raise NegotiationError(f"muxws requires the {PREFIX}{settings.codec} subprotocol")
     return selected
 
@@ -197,8 +183,9 @@ def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
 def verify_negotiated(negotiated: str | None, configured: str) -> None:
     """Check the subprotocol on an already-open socket (WSM-CDC-028).
 
-    The last resort, for a transport that offers neither a selection hook nor a way to deny the
-    upgrade. The caller closes with 1008 when this raises.
+    For a transport that offers neither a selection hook nor a way to deny the upgrade. Raises
+    `CodecMismatch` when `negotiated` is not `muxws.v1.<configured>`; the caller then closes with 1008.
+
     """
     from muxws.subprotocol import mismatch_error
 

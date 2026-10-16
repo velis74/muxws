@@ -1,32 +1,24 @@
 /**
- * The fake market: deterministic prices, a deep order book, and a megabyte to export.
+ * The simulated market: deterministic prices, a 1500-level order book and a 1 MB export.
  *
- * A port of `demo/backend_python/market.py`, shape for shape. Nothing here touches a network - real
- * market data is out of scope for a demo, and a demo that needed an upstream feed could not be run by
- * a reader at all.
+ * A port of `demo/backend_python/market.py` with the same data shapes. It makes no network calls; all
+ * data is generated locally.
  *
- * The **numbers deliberately differ from the Python backend** and no effort is made to make them
- * agree. Node has no Mersenne Twister and `Math.random()` cannot be seeded, so the generator below is
- * this file's own; matching Python's draws would mean porting `random.Random` itself, which would buy
- * a price series nobody reads. What has to agree is the *format*, because the format is what the
- * frontend destructures (`demo/frontend/src/muxws.ts`) and the wire is the contract this second
- * backend exists to demonstrate.
+ * The numbers differ from the Python backend's. Node has no Mersenne Twister and `Math.random()`
+ * cannot be seeded, so this file uses its own generator. The payload format is identical to the Python
+ * backend's, because the frontend destructures it (`demo/frontend/src/muxws.ts`).
  *
- * What does survive the port is D2: every number is drawn from a generator seeded from the symbol and
- * the purpose, never from one shared stream of randomness. That is the difference between
- * "deterministic" and "deterministic if nobody clicks anything" - a shared generator would make a
- * symbol's tenth price depend on whether the reader happened to ask for an export first, and a
- * screenshot in the documentation would stop being reproducible the moment the demo was driven
- * differently.
+ * Every number is drawn from a generator seeded from the market seed, a purpose and the symbol, not
+ * from one shared generator. A symbol's Nth price is therefore the same in every run regardless of
+ * which other requests were made before it.
  */
 
 /**
- * Twenty symbols, because the headline is a 1 MB export fragmenting on one stream while ticks keep
- * arriving on twenty *others*. With one symbol a round-robin writer and a FIFO produce the same wire
- * and WSM-INV-004 has nothing to be witnessed against.
+ * The twenty traded symbols: `[symbol, name, base price]`. The demo sends a 1 MB export on one stream
+ * while ticks arrive on twenty other streams; with a single stream, a round-robin writer and a FIFO
+ * writer would produce the same frame order and WSM-INV-004 would not be observable.
  *
- * The same twenty the Python backend trades, so a reader switching backends sees the same board and
- * only the prices move differently.
+ * The list is identical to the Python backend's.
  */
 export const SYMBOLS: readonly [string, string, number][] = [
   ['ACME', 'Acme Industrial', 128.4],
@@ -51,39 +43,37 @@ export const SYMBOLS: readonly [string, string, number][] = [
   ['TIDE', 'Tidewater Marine', 38.75],
 ];
 
-/** Fixed rather than drawn from the clock, so the demo starts from the same market every time (D2). */
+/** A fixed seed, so every run starts from the same market. */
 export const DEFAULT_SEED = 1_234_567;
 
 /**
- * One side of the book. 1500 levels a side puts the depth reply around 190 KB - comfortably over
- * MAX_FRAME_BYTES (65_536), so it is fragmented on the way out and reassembled on the way in without
- * the application doing anything at all (WSM-FRG-010).
+ * Levels per side of the order book. With 1500 levels a side the depth reply is about 190 KB, above
+ * MAX_FRAME_BYTES (65_536), so the writer fragments it and the receiver reassembles it without
+ * application code (WSM-FRG-010).
  */
 export const DEPTH_LEVELS = 1_500;
 
 /**
- * The stall test's payload: a little over 1 MB, which the 64 KiB frame cap turns into sixteen
- * fragments. Sixteen chances to starve a 200-byte tick on another stream, and sixteen times it is not
- * starved (WSM-INV-004).
+ * Rows in the export payload: a little over 1 MB, which the 64 KiB frame limit splits into sixteen
+ * fragments. Ticks on other streams are interleaved between those fragments (WSM-INV-004).
  */
 export const EXPORT_ROWS = 8_000;
 
 /**
- * Hex characters of filler per exported row. The filler is drawn rather than repeated so the payload
- * is a megabyte of genuinely different bytes: a megabyte of "aaaa..." would fragment identically but
- * would look like a trick to a reader watching the network tab.
+ * Hex characters of filler per exported row. The filler is random, so the payload contains no
+ * repeated content.
  */
 export const NOTE_WIDTH = 64;
 
 /**
- * How many points a history request answers with. Enough that the chart fills in visibly, which is
- * what makes cancelling it mid-flight something a reader can actually catch.
+ * Points in a history reply. The handler sends them one at a time with a delay between points, so the
+ * chart fills in progressively and the request can be cancelled while it streams.
  */
 export const HISTORY_POINTS = 120;
 
 // --------------------------------------------------------------------------- what the wire carries
 
-/** One board row. The same eight fields `BoardRow` in `demo/frontend/src/muxws.ts` destructures. */
+/** One board row; the same eight fields as `BoardRow` in `demo/frontend/src/muxws.ts`. */
 export interface BoardRow {
   symbol: string;
   name: string;
@@ -143,11 +133,8 @@ export interface ExportPayload {
 // --------------------------------------------------------------------------- the seeded generator
 
 /**
- * FNV-1a over the seed string, because `mulberry32` wants 32 bits and D2 wants a *string* seed.
- *
- * Not `hashCode`-by-multiplication and not `Math.random()`: the seed has to be a pure function of
- * `(seed, purpose, symbol)` and of nothing else, or the same symbol's tenth price stops being the
- * same number across runs and the screenshot in the documentation stops being true.
+ * 32-bit FNV-1a hash of the seed string; `mulberry32` takes a 32-bit state and the seed is a string.
+ * The result depends only on `text`.
  */
 function seedOf(text: string): number {
   let hash = 0x811c9dc5;
@@ -159,10 +146,8 @@ function seedOf(text: string): number {
 }
 
 /**
- * mulberry32: thirty-two bits of state, four operations, and a period long enough for a demo.
- *
- * A fake price is not security-sensitive, which is the whole reason a seedable generator is allowed
- * here at all - `crypto.getRandomValues` cannot be seeded, and D2 needs it to be.
+ * mulberry32: a seedable PRNG with 32 bits of state, returning floats in [0, 1). Not cryptographically
+ * secure; `crypto.getRandomValues` cannot be seeded. The values are simulated prices only.
  */
 function mulberry32(state: number): () => number {
   let value = state >>> 0;
@@ -175,11 +160,8 @@ function mulberry32(state: number): () => number {
 }
 
 /**
- * The four draws this market needs, spelled the way `random.Random` spells them.
- *
- * Named after their Python counterparts on purpose: the two `market` modules are meant to be read
- * side by side, and a reader comparing them should be comparing the market rather than translating
- * `randint` into `Math.floor` twice a line.
+ * The four draws this market uses, named after their `random.Random` counterparts in
+ * `demo/backend_python/market.py`.
  */
 class Rng {
   private readonly next: () => number;
@@ -203,7 +185,7 @@ class Rng {
     return start + step * Math.floor(this.next() * Math.ceil((stop - start) / step));
   }
 
-  /** `f"{getrandbits(4 * width):0{width}x}"`: exactly `width` hex characters, eight bits per draw. */
+  /** `f"{getrandbits(4 * width):0{width}x}"`: exactly `width` hex characters, 32 bits per draw. */
   hex(width: number): string {
     let out = '';
     while (out.length < width) {
@@ -215,17 +197,16 @@ class Rng {
   }
 }
 
-/** One generator per (seed, purpose, symbol), which is the whole of D2. */
+/** A generator seeded from `(seed, purpose, symbol)`. */
 function generator(seed: number, purpose: string, symbol: string): Rng {
   return new Rng(`${seed}:${purpose}:${symbol}`);
 }
 
 /**
- * Two decimals, the way a price is quoted.
+ * Rounds to two decimals.
  *
- * `Math.round` is half-up where Python's `round` is half-to-even, so a value landing exactly on a
- * half rounds the other way here. That is one more reason the two backends' numbers differ and no
- * reason to reach for a decimal library: the frontend renders whatever arrives.
+ * `Math.round` rounds halves up; Python's `round` rounds halves to even. A value exactly on a half can
+ * therefore round differently than in the Python backend.
  */
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
@@ -233,7 +214,7 @@ function round2(value: number): number {
 
 // --------------------------------------------------------------------------- the market
 
-/** One symbol's price walk. Its own generator, so its Nth tick never depends on the others. */
+/** One symbol's price walk. It has its own generator, so its Nth tick is independent of other symbols. */
 class Instrument {
   readonly symbol: string;
 
@@ -266,7 +247,7 @@ class Instrument {
     return this.row();
   }
 
-  /** What a board row needs, and nothing else - this goes out twenty times a tick. */
+  /** The board row for this symbol; contains only the fields the board renders. */
   row(): BoardRow {
     const change = round2(this.price - this.openPrice);
     return {
@@ -283,12 +264,9 @@ class Instrument {
 }
 
 /**
- * The demo's only source of truth about symbols (D1).
+ * The only source of symbol data in the demo.
  *
- * The frontend holds no seed data of any kind: every symbol it renders arrived over the socket. A
- * board that could draw itself without a connection would prove nothing about the transport - and it
- * would prove even less here, where the point is that the frontend cannot tell which language filled
- * it in.
+ * The frontend holds no symbol data; every symbol it renders is received over the socket.
  */
 export class Market {
   readonly seed: number;
@@ -307,11 +285,10 @@ export class Market {
   }
 
   /**
-   * A symbol nobody trades is an application error, and reaches the caller as one.
+   * Returns the instrument for `symbol`, or throws `Error` for an unknown symbol.
    *
-   * Throwing here is deliberate: the handler lets it out, and WSM-STM-034 turns it into
-   * `reset(APPLICATION_ERROR)` - never `REFUSED`, which would promise the request had not been
-   * processed and invite a retry.
+   * The handler does not catch the error, so the stream is reset with `APPLICATION_ERROR`
+   * (WSM-STM-034). `REFUSED` would state that the request was not processed and may be retried.
    */
   private instrument(symbol: unknown): Instrument {
     const found = typeof symbol === 'string' ? this.instruments.get(symbol) : undefined;
@@ -319,7 +296,7 @@ export class Market {
     return found;
   }
 
-  /** The row as it stands, without advancing it - the first frame of a pushed tick stream. */
+  /** The current row, without advancing the price; the first frame of a pushed tick stream. */
   snapshot(symbol: string): BoardRow {
     return this.instrument(symbol).row();
   }
@@ -328,7 +305,7 @@ export class Market {
     return this.instrument(symbol).advance();
   }
 
-  /** The unary shape's answer: one payload, and the stream ends with it (WSM-API-006). */
+  /** The reply to a unary request: one payload, and the stream ends with it (WSM-API-006). */
   quote(symbol: string): Quote {
     const instrument = this.instrument(symbol);
     const spread = round2(Math.max(0.01, instrument.price * 0.0004));
@@ -345,11 +322,9 @@ export class Market {
   }
 
   /**
-   * A price series ending at the current price, oldest first.
+   * A price series of `points` points, oldest first.
    *
-   * Built whole and streamed one point at a time by the handler. The handler, not this: what the
-   * streaming shape demonstrates is a response arriving progressively, and a generator that also
-   * computed the numbers would leave a reader wondering which of the two the pauses came from.
+   * The series is computed in full here; the handler streams it one point at a time.
    */
   history(symbol: string, points: number = HISTORY_POINTS): HistoryPoint[] {
     const instrument = this.instrument(symbol);
@@ -363,7 +338,7 @@ export class Market {
     return series;
   }
 
-  /** The full order book: one payload the writer has to fragment (WSM-FRG-010). */
+  /** The full order book as one payload, larger than one frame, so the writer fragments it (WSM-FRG-010). */
   depth(symbol: string, levels: number = DEPTH_LEVELS): DepthBook {
     const instrument = this.instrument(symbol);
     const random = generator(this.seed, 'depth', symbol);
@@ -389,10 +364,10 @@ export class Market {
   }
 
   /**
-   * The stall test's payload: one megabyte, as one payload, on one stream.
+   * The export payload: about 1 MB as one payload on one stream.
    *
-   * The application never calls a splitter. The writer fragments it at MAX_FRAME_BYTES on the way out
-   * and the receiver reassembles it, and in between every other stream keeps its turn
+   * The application does not split it. The writer fragments it at MAX_FRAME_BYTES and the receiver
+   * reassembles it; frames of other streams are interleaved between the fragments
    * (WSM-FRG-017/018/019, WSM-INV-004).
    */
   export(symbol: string, rows: number = EXPORT_ROWS): ExportPayload {

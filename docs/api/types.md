@@ -4,22 +4,20 @@ outline: deep
 
 # Types
 
-The shared vocabulary: the frame model that every codec encodes, the constants that bound it, and the
-callable types the peer takes as hooks.
+The types shared by both ports: the frame model that every codec encodes, the constants that limit
+it, and the callable types the peer accepts as hooks.
 
-Field names are spelled out, never abbreviated, and stay **snake_case in both languages** —
-`last_stream` is `last_stream` in TypeScript too, because it is a wire name and the wire has one
-spelling.
+Field names are not abbreviated and are **snake_case in both languages**: `last_stream` is
+`last_stream` in TypeScript too, because it is a wire name.
 
 ## `Frame`
 
 One logical protocol unit, and one WebSocket message. Python's is a frozen slotted dataclass compared
 by value; TypeScript's is a readonly interface compared with `framesEqual`.
 
-Twelve fields, of which most frames carry three or four. A field still at its default is **omitted
-from the envelope entirely**, which is why the JSON form of a `ping` is
-`{"type":"ping","nonce":"771c698c25d5c0d1"}` — 42 bytes, two keys, and nothing for the ten fields it
-does not use.
+A frame has twelve fields; most frames set three or four. A field at its default is **omitted from
+the envelope**, so the JSON form of a `ping` is `{"type":"ping","nonce":"771c698c25d5c0d1"}`: 42
+bytes and two keys.
 
 ### The envelope fields
 
@@ -27,23 +25,23 @@ does not use.
 |---|---|---|---|
 | `type` | `str` / `string` | required | The frame type. A v1 peer sends `open`, `data`, `reset`, `ping`, `pong` or `goaway`. Always emitted, even though it has no default to compare against. |
 | `stream` | `int \| None` / `number \| null` | `None` / `null` | Which stream this frame belongs to. Absent on `ping`, `pong` and `goaway`, which are connection-level. Odd ids are the dialer's, even ids the acceptor's. |
-| `payload` | `Any` / `unknown \| Absent` | `ABSENT` | The application value. The **one** field whose default is not null: `ABSENT` omits the key entirely, while `None` / `null` emits `"payload": null`. That distinction is why the sentinel exists — "no payload" and "a payload that is null" are different frames. |
+| `payload` | `Any` / `unknown \| Absent` | `ABSENT` | The application value. The **only** field whose default is not null: `ABSENT` omits the key, while `None` / `null` emits `"payload": null`. "No payload" and "a payload that is null" are different frames; the sentinel distinguishes them. |
 | `fragment` | `str \| bytes \| None` / `string \| ArrayBuffer \| null` | `None` / `null` | One slice of an encoded payload. A frame carries `payload` **or** `fragment`, never both. |
 | `more` | `bool` / `boolean` | `False` / `false` | True on every fragment but the last. The receiver concatenates until it sees a fragment without it. |
-| `headers` | `dict[str, Any] \| None` / `Record<string, unknown> \| null` | `None` / `null` | Per-stream metadata, sent once with the `open`. They ride the **first** fragment and are never split across fragments. |
-| `end` | `bool` / `boolean` | `False` / `false` | This side is done sending. A **flag on a frame, never a frame of its own** — there is no "end" frame type. It rides the last fragment. |
-| `trailers` | `dict[str, Any] \| None` / `Record<string, unknown> \| null` | `None` / `null` | Metadata that could only be known after the payloads — a row count, a checksum. Rides the `end` frame, and only the last fragment of it. |
-| `code` | `int \| None` / `number \| null` | `None` / `null` | A `ResetCode` value, on `reset` and `goaway`. Carried as an integer, so a code this generation does not define survives the trip. |
+| `headers` | `dict[str, Any] \| None` / `Record<string, unknown> \| null` | `None` / `null` | Per-stream metadata, sent once with the `open`. Carried on the **first** fragment and never split across fragments. |
+| `end` | `bool` / `boolean` | `False` / `false` | This side is done sending. A **flag on a frame, not a frame type**: there is no "end" frame type. Carried on the last fragment. |
+| `trailers` | `dict[str, Any] \| None` / `Record<string, unknown> \| null` | `None` / `null` | Metadata known only after the payloads, such as a row count or a checksum. Carried on the `end` frame, on its last fragment only. |
+| `code` | `int \| None` / `number \| null` | `None` / `null` | A `ResetCode` value, on `reset` and `goaway`. Carried as an integer, so a code this generation does not define is preserved. |
 | `reason` | `str \| None` / `string \| null` | `None` / `null` | Human-readable text accompanying `code`. Never parsed for meaning. |
-| `nonce` | `str \| None` / `string \| null` | `None` / `null` | Correlates a `pong` with the `ping` that provoked it. Echoed back verbatim. |
-| `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has dispatched. Everything above it was never processed and is safe to retry elsewhere. |
+| `nonce` | `str \| None` / `string \| null` | `None` / `null` | Correlates a `pong` with the `ping` it answers. Echoed back verbatim. |
+| `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has dispatched. Streams above it were not processed and can be retried elsewhere. |
 
 Envelope keys are emitted in a fixed order — `type`, then `stream`, then the rest alphabetically —
 so that two implementations produce byte-identical output for the same frame.
 
-Unknown keys arriving on the wire are **dropped**, not preserved. An unrecognised `type` survives as
-an ordinary `Frame`; it is the peer, not the codec, that ignores it. Both are what let a later
-generation add a field or a frame type without breaking a 1.0 peer.
+Unknown keys arriving on the wire are **dropped**, not preserved. An unrecognised `type` is decoded
+as an ordinary `Frame`; the peer, not the codec, ignores it. A later generation can therefore add a
+field or a frame type without breaking a 1.0 peer.
 
 ### Signature
 
@@ -109,8 +107,8 @@ Python: a frozen `Frame` instance; assigning to a field raises `FrozenInstanceEr
 
 ### Raises
 
-Raises: nothing. Python's dataclass raises `TypeError` only for the usual reasons — a missing `type`,
-or an argument that is not a field.
+Raises: nothing. Python's dataclass raises `TypeError` for a missing `type` or an argument that is
+not a field.
 
 ### Example
 
@@ -135,7 +133,7 @@ print(codec.encode(Frame("data", stream=1, payload=ABSENT, end=True)))
 print(codec.encode(Frame("data", stream=1, payload=None, end=True)))
 
 try:
-    setattr(opening, "type", "data")  # noqa: B010 - the point of the example is that this fails
+    setattr(opening, "type", "data")  # noqa: B010 - the example shows that this fails
 except dataclasses.FrozenInstanceError:
     print("frames are frozen; dataclasses.replace() builds a new one instead")
 print(dataclasses.replace(opening, type="data").type)
@@ -164,11 +162,11 @@ The sentinel that distinguishes "no payload" from an explicit `null`. It is the 
 `Frame.payload`, and it is what `Assembler.feed` returns while more fragments are expected.
 
 Python's is a single module-level instance of a private class. It is **falsy**, so `if frame.payload:`
-behaves the way a reader expects, and its `repr` is `ABSENT` rather than a memory address.
-TypeScript's is a `unique symbol`: it cannot be forged, cannot be serialized by accident, and prints
-as `Symbol(ABSENT)` in a failing assertion. `Absent` is its type.
+is false for it, and its `repr` is `ABSENT`. `copy.copy` and `copy.deepcopy` return the same
+instance. TypeScript's is a `unique symbol`: no other value equals it, JSON serialization does not
+emit it, and it prints as `Symbol(ABSENT)`. `Absent` is its type.
 
-Compare with identity — `is ABSENT` / `=== ABSENT` — never with `==`.
+Compare with identity (`is ABSENT` / `=== ABSENT`), not with `==`.
 
 ### Signature
 
@@ -185,7 +183,7 @@ export type Absent = typeof ABSENT;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| *(none)* | — | — | A value, not a callable. There is exactly one of it per process. |
+| *(none)* | — | — | A value, not a callable. There is one instance per process. |
 
 ### Return
 
@@ -227,11 +225,11 @@ console.log('the type has one inhabitant:', nothing === ABSENT);
 
 ## `V1_FRAME_TYPES`
 
-The frame types a v1 peer **sends**. A receiver tolerates anything not in this set: an unknown type
-is ignored, not an error, which is what lets a later generation add one without breaking a 1.0 peer.
+The frame types a v1 peer **sends**. A receiver ignores a frame whose type is not in this set; it is
+not an error, so a later generation can add a frame type without breaking a 1.0 peer.
 
-`window_update` is reserved and unimplemented, and there is no `settings` frame — no limit is ever
-negotiated on this wire.
+`window_update` is reserved and unimplemented. There is no `settings` frame: no limit is negotiated
+on this wire.
 
 TypeScript exports it from the package root; in Python, import it from `muxws.frames`.
 
@@ -280,10 +278,10 @@ console.log('there is no settings frame:', V1_FRAME_TYPES.has('settings'));
 
 ## `to_mapping` / `toMapping`
 
-Renders a frame as an envelope — a plain dict / object, ready for a codec to serialize. Every field
-still at its default is omitted; keys come out `type`, then `stream`, then the rest alphabetically.
+Renders a frame as an envelope: a plain dict / object for a codec to serialize. Every field at its
+default is omitted; keys are ordered `type`, then `stream`, then the rest alphabetically.
 
-A codec calls this. You call it when you want to see what a frame *is* without picking a codec.
+Codecs call this function. An application can call it to inspect a frame without a codec.
 
 ### Signature
 
@@ -336,10 +334,11 @@ console.log('key order:', Object.keys(toMapping({ type: 'reset', stream: 3, code
 ## `from_mapping` / `fromMapping`
 
 Builds a `Frame` from a decoded envelope. The inverse of `to_mapping` / `toMapping`, with two
-deliberate asymmetries: unknown keys are dropped rather than preserved, and an unrecognised `type`
-survives as an ordinary frame.
+differences: unknown keys are dropped rather than preserved, and an unrecognised `type` is kept as an
+ordinary frame.
 
-Dropping unknown keys is what keeps `decode(encode(frame)) == frame` from passing on garbage.
+Because unknown keys are dropped, `decode(encode(frame)) == frame` cannot pass on a frame carrying
+extra keys.
 
 ### Signature
 
@@ -364,7 +363,7 @@ A `Frame`.
 ### Raises
 
 `ProtocolError` when the mapping has no `type` key, and `ProtocolError` when it carries both
-`payload` and `fragment` — a frame is one or the other.
+`payload` and `fragment`; a frame carries one or the other.
 
 ### Example
 
@@ -408,10 +407,10 @@ TypeScript only. Structural equality over the twelve envelope fields, with defau
 so a frame written `{ type: 'ping' }` compares equal to one written
 `{ type: 'ping', stream: null, more: false }`.
 
-Python needs no equivalent: `Frame` is a frozen dataclass and `==` already does this.
+Python has no equivalent: `Frame` is a frozen dataclass, and `==` compares by value.
 
-`ArrayBuffer`s are compared byte by byte, which is what makes a round-tripped bytes payload compare
-equal to the one that went in.
+`ArrayBuffer`s are compared byte by byte, so a round-tripped bytes payload compares equal to the
+original.
 
 ### Signature
 
@@ -451,17 +450,16 @@ console.log('round trip:', framesEqual(original, codec.decode(codec.encode(origi
 
 The largest encoded message a sender may emit: **65 536 bytes, exactly 64 KiB**.
 
-It is a **protocol constant, not a setting**. It is never negotiated, never announced and never read
-from configuration, and it is deliberately not configurable. A larger frame is not better: the cap
-bounds how long one stream can monopolise a socket that has a single global message order, so raising
-it would optimise the wrong direction — a 1 MB frame would stall every other stream behind it.
+It is a **protocol constant, not a setting**. It is not negotiated, not announced, not read from
+configuration and not configurable. The cap limits how long one stream can occupy a socket that has a
+single global message order: a 1 MB frame would delay every other stream until it was sent.
 
-A receiver accepts anything up to it and may accept more; a sender always fragments at it regardless
-of what the remote appears willing to accept.
+A receiver accepts any message up to this size and may accept larger ones; a sender always fragments
+at this size, whatever the remote accepts.
 
-The peer's constructor takes a `max_frame_bytes` / `maxFrameBytes` that defaults to this value. That
-parameter exists for the conformance runner, which lowers it to exercise fragmentation without
-megabyte fixtures. It is not a tuning knob.
+The peer's constructor takes a `max_frame_bytes` / `maxFrameBytes` that defaults to this value. The
+conformance runner lowers it to exercise fragmentation with small fixtures. It is not a tuning
+parameter.
 
 ### Signature
 
@@ -516,18 +514,16 @@ console.log('largest:', largest, '<=', MAX_FRAME_BYTES);
 
 ## `__version__` / `VERSION`
 
-The version of the library you are holding, as a string. Python spells it `muxws.__version__`;
-TypeScript spells it `VERSION`, and exports the same string from all three entry points — `muxws`,
-`muxws/node` and `muxws/msgpack`.
+The installed library version, as a string. Python names it `muxws.__version__`; TypeScript names it
+`VERSION` and exports the same string from all three entry points: `muxws`, `muxws/node` and
+`muxws/msgpack`.
 
-The two packages ship one version stream: the number here and the `version` field of `package.json`
-are asserted equal by the test suite, so a Python `0.1.0` and an npm `0.1.0` are the same release.
+The two packages share one version number: the test suite asserts that this value equals the
+`version` field of `package.json`, so a Python `0.1.0` and an npm `0.1.0` are the same release.
 
-It is **not** the protocol version, and nothing about it reaches the wire. The only version on the
-wire is the `v1` inside the `muxws.v1.<codec>` subprotocol, which changes only for a breaking wire
-change - so the wire is already at its first generation while the package is still below 1.0. A 1.7.0
-peer and a 0.1.0 peer speak `muxws.v1.json` to each other without either one knowing what the other's
-package version is.
+It is **not** the protocol version and is never sent on the wire. The only version on the wire is the
+`v1` in the `muxws.v1.<codec>` subprotocol, which changes only for a breaking wire change. A 1.7.0
+peer and a 0.1.0 peer both speak `muxws.v1.json`, and neither learns the other's package version.
 
 ### Signature
 
@@ -562,7 +558,7 @@ from muxws.subprotocol import PREFIX
 
 print(muxws.__version__)
 print("three components:", len(muxws.__version__.split(".")) == 3)
-# The package version is not the wire version: that one lives in the subprotocol and stays v1.
+# The package version is not the wire version; the wire version is in the subprotocol name.
 print("the wire says:", f"{PREFIX}json")
 ```
 
@@ -572,7 +568,7 @@ import { VERSION as NODE_VERSION } from 'muxws/node';
 
 console.log(VERSION);
 console.log('one version stream:', VERSION === NODE_VERSION);
-// The package version is not the wire version: that one lives in the subprotocol and stays v1.
+// The package version is not the wire version; the wire version is in the subprotocol name.
 console.log('the wire says:', `${PREFIX}json`);
 ```
 
@@ -580,10 +576,9 @@ console.log('the wire says:', `${PREFIX}json`);
 
 The byte length of an encoded message: UTF-8 bytes for text, buffer length for bytes.
 
-This is the measurement every size limit in muxws is counted in — **bytes of encoded output**, not
-characters. A JavaScript string's `.length` counts UTF-16 code units and disagrees with this on every
-non-BMP character, which is why the measurement is spelled out rather than left to each language's
-idea of "length".
+Every size limit in muxws is measured with this function, in **bytes of encoded output**, not
+characters. A JavaScript string's `.length` counts UTF-16 code units and differs from the UTF-8 byte
+count for every non-ASCII character.
 
 ### Signature
 
@@ -629,21 +624,21 @@ console.log('accented text:', 'café'.length, 'code units,', encodedLength('caf�
 
 ## `split_frame` / `splitFrame`
 
-Every fragment of a frame at once. Returns the frame unchanged, as a one-element list, when it
-already fits under the cap.
+Returns every fragment of a frame. Returns the frame unchanged, as a one-element list, when it fits
+under the cap.
 
-Fragmentation is automatic and mandatory — the writer does this for you on every send, one slice at a
-time so that a 1 MB export does not stall a 200-byte progress update behind it. `split_frame` is the
-same computation exposed as a pure function, for tests, for the conformance corpus, and for anyone
-who wants to see the boundaries.
+Fragmentation is automatic and mandatory: the writer fragments every send, one slice at a time, so a
+1 MB export does not delay a 200-byte progress update on another stream. `split_frame` performs the
+same computation as a pure function, for tests, the conformance corpus and inspection of fragment
+boundaries.
 
-It is a pure function of `(frame, cap, codec)`: it reads nothing else and mutates neither argument.
-The sender encodes the logical payload with the codec, slices *that* encoded form, and puts each
-slice into a frame the codec then encodes again — so both language ports cut in exactly the same
-places. Text is cut on whole Unicode codepoints, never inside a multi-byte sequence.
+It is a pure function of `(frame, cap, codec)`: it reads nothing else and mutates no argument. It
+encodes the logical payload with the codec, slices the encoded form, and puts each slice into a frame
+that the codec encodes again, so both ports cut at the same places. Text is cut on whole Unicode
+code points, never inside a multi-byte sequence.
 
-`headers` ride the first fragment; `end` and `trailers` ride the last; `more` is true on every
-fragment but the last.
+`headers` are on the first fragment; `end` and `trailers` are on the last; `more` is true on every
+fragment except the last.
 
 ### Signature
 
@@ -660,8 +655,8 @@ export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: 
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `frame` | `Frame` | required | The frame to split. Not mutated. |
-| `cap` | `int` / `number` | `MAX_FRAME_BYTES` (65 536) | The largest encoded frame to produce, in bytes. A smaller value comes only from a test or the conformance runner; it is never a value read off the wire. |
-| `codec` | `Codec \| None` / `Codec \| undefined` | `None` / `undefined` | The codec whose output the boundaries are measured over. **Required in practice** despite the default: omitting it raises, because fragment boundaries are undefined without one. |
+| `cap` | `int` / `number` | `MAX_FRAME_BYTES` (65 536) | The largest encoded frame to produce, in bytes. Only tests and the conformance runner pass a smaller value; it is never read from the wire. |
+| `codec` | `Codec \| None` / `Codec \| undefined` | `None` / `undefined` | The codec whose output the boundaries are measured over. **Required** despite the default: omitting it raises `ProtocolError`, because fragment boundaries are defined over the codec's output. |
 
 ### Return
 
@@ -673,8 +668,8 @@ no bytes at all.
 
 `ProtocolError` when `codec` is omitted; when `cap` is below 2; when the frame exceeds the cap but
 carries no payload to fragment (headers are never fragmented); when the cap cannot hold the envelope
-plus one indivisible unit of payload; and when the closing fragment does not fit even carrying no
-payload, because `trailers` ride it whole.
+plus one indivisible unit of payload; and when the closing fragment does not fit even with no
+payload, because it carries `trailers` whole.
 
 ### Example
 
@@ -730,13 +725,13 @@ try {
 
 ## `Assembler`
 
-The receive side of fragmentation: concatenates `fragment` values and decodes once the last one
-lands. One assembler per stream, held by the stream itself — you rarely construct one, but the type
-is public because a third implementation needs it and because `byte_length` / `byteLength` is what a
-receiver's payload limit is checked against.
+The receive side of fragmentation: concatenates `fragment` values and decodes them when the last one
+arrives. Each stream holds one assembler. Applications rarely construct one; the type is public for
+use by other implementations, and because a receiver's payload limit is checked against
+`byte_length` / `byteLength`.
 
-That check happens **as fragments arrive**, not after reassembly. A receiver that assembled a payload
-in order to measure it has already spent what the limit was protecting.
+The limit is checked **as fragments arrive**, not after reassembly, so an oversized payload is
+rejected before it is fully buffered.
 
 ### Signature
 
@@ -821,8 +816,8 @@ console.log('after:', assembler.inProgress, assembler.byteLength);
 
 ## `CloseReason`
 
-Why a socket ended. One type per language, used for every socket loss, and handed to every `on_close`
-/ `onClose` handler. Four fields, the same four in both languages.
+Why a socket ended. One type per language, used for every socket loss and passed to every
+`on_close` / `onClose` handler. It has the same four fields in both languages.
 
 Python's is a frozen slotted dataclass; TypeScript's is an interface.
 
@@ -852,11 +847,11 @@ export interface CloseReason {
 |---|---|---|---|
 | `code` | `int` / `number` | required | The WebSocket close code. `1000` for a clean close, `1006` when the socket died without a close frame, `1008` for a policy violation such as a subprotocol mismatch. |
 | `reason` | `str` / `string` | required | The close frame's reason text, or `""` when there was none. |
-| `was_clean` / `wasClean` | `bool` / `boolean` | required | Whether a close handshake actually completed. |
-| `will_retry` / `willRetry` | `bool` / `boolean` | `False` in Python; **required** in TypeScript | Whether the reconnect helper intends to dial again. False when the attempt budget is exhausted, when `close()` was called deliberately, and on any peer with no reconnect helper at all. A handler that tears down application state should look at this: a close with `will_retry` true is an interruption, not an ending. |
+| `was_clean` / `wasClean` | `bool` / `boolean` | required | Whether a close handshake completed. |
+| `will_retry` / `willRetry` | `bool` / `boolean` | `False` in Python; **required** in TypeScript | Whether the reconnect helper will dial again. False when the attempt budget is exhausted, when `close()` was called, and on any peer without the reconnect helper. A handler that tears down application state should check it: a close with `will_retry` true is followed by a reconnect attempt. |
 
-The default on `will_retry` is the one shape difference between the two: Python's dataclass gives it
-one, TypeScript's interface has no defaults to give.
+The default on `will_retry` is the only difference between the two: Python's dataclass has one, and
+a TypeScript interface cannot declare defaults.
 
 ### Return
 
@@ -927,18 +922,18 @@ void main();
 
 ## `StreamHandler`
 
-The type of the one incoming-stream handler per peer — what `peer.on_stream(...)` /
-`peer.onStream(...)` takes, and what `connect(on_stream=...)` and `serve(handler=...)` take.
+The type of a peer's incoming-stream handler (one per peer): the argument of `peer.on_stream(...)` /
+`peer.onStream(...)`, `connect(on_stream=...)` and `serve(handler=...)`.
 
-It is called once per stream the **remote** opens, with the opening payload and the `Stream` itself.
-It may be a coroutine / return a promise, and usually is. Its return value is discarded: a unary
-handler answers by calling `stream.reply(...)`, not by returning.
+It is called once per stream the **remote** opens, with the opening payload and the `Stream`. It is
+usually a coroutine function / returns a promise. Its return value is discarded: a unary handler
+answers by calling `stream.reply(...)`.
 
-Symmetry is the point. An acceptor's handler receives a client's request; a dialer's handler receives
-a server push. Same type, same signature, same semantics.
+The type is the same on both ends: an acceptor's handler receives a client's request, and a dialer's
+handler receives a server push, with the same signature and semantics.
 
 A handler that raises produces `reset(APPLICATION_ERROR)` on that stream, with the reason text and
-the `error_serializer`'s payload — never `REFUSED`, which is reserved for streams that were
+the `error_serializer`'s payload. It never produces `REFUSED`, which is reserved for streams that were
 definitively not processed. Only one handler is registered per peer; registering a second replaces
 the first and logs a warning.
 
@@ -958,19 +953,19 @@ The parameters of the callable itself:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `payload` | `Any` / `any` | none — positional | The opening payload, already decoded and reassembled. `None` / `null` when the remote opened with none. |
-| `stream` | `Stream` | none — positional | The stream. Reply on it, iterate it, send on it, or reset it. Its `headers` are the opening frame's. |
+| `payload` | `Any` / `any` | none; positional | The opening payload, already decoded and reassembled. `None` / `null` when the remote opened with none. |
+| `stream` | `Stream` | none; positional | The stream. Reply on it, iterate it, send on it, or reset it. Its `headers` are the opening frame's. |
 
 ### Return
 
 Python's alias returns `Any` and the value is ignored; a coroutine function is the normal case.
-TypeScript's returns `void | Promise<void>`. Returning a value is not how a handler answers — that is
-what `stream.reply(...)` is for.
+TypeScript's returns `void | Promise<void>`. A handler answers with `stream.reply(...)`, not with a
+return value.
 
 ### Raises
 
 The type raises nothing. An implementation that raises causes `reset(APPLICATION_ERROR)` on its
-stream; the connection survives.
+stream; the connection stays open.
 
 ### Example
 
@@ -982,7 +977,7 @@ from muxws.transports.memory import memory_pair
 
 
 async def handle(payload, stream: Stream) -> None:
-    """One handler covering two call shapes, which is the usual arrangement."""
+    """One handler serving both a unary request and a streamed response."""
     if (payload or {}).get("action") == "stream":
         for index in range(3):
             await stream.send({"chunk": index})
@@ -1015,7 +1010,7 @@ asyncio.run(main())
 ```ts
 import { JsonCodec, Peer, type Stream, type StreamHandler, memoryPair } from 'muxws';
 
-/** One handler covering two call shapes, which is the usual arrangement. */
+/** One handler serving both a unary request and a streamed response. */
 const handle: StreamHandler = async (payload: { action?: string } | null, stream: Stream) => {
   if (payload?.action === 'stream') {
     for (const index of [0, 1, 2]) await stream.send({ chunk: index });
@@ -1050,16 +1045,17 @@ The type of the hook that turns a handler's failure into the `payload` of the
 `connect()` and `accept()`, and defaulting to `default_error_serializer` /
 `defaultErrorSerializer`.
 
-It is chosen **per peer**, which is the whole reason it is a parameter rather than a global: one
-process can redact on its browser-facing connection and not on its internal one.
+It is set **per peer**, not globally, so one process can redact on a browser-facing connection and
+not on an internal one.
 
 ::: warning
-Whatever this returns goes on the wire. The default puts the exception's message text there, and
-exception messages routinely contain file paths, SQL and identifiers the remote has no business
-seeing. A public-facing deployment should pass a redacting implementation.
+The return value is sent on the wire. The default includes the exception's message text, and
+exception messages often contain file paths, SQL and identifiers that must not reach the remote. A
+public-facing deployment should pass a redacting implementation.
 :::
 
-Its return value must be representable by the configured codec — under JSON that means no `bytes`.
+Its return value must be representable by the configured codec; under JSON it cannot contain
+`bytes`.
 
 ### Signature
 
@@ -1077,17 +1073,18 @@ The parameters of the callable itself:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `exc` / `error` | `BaseException` / `unknown` | none — positional | The exception the handler raised. Python types it `BaseException` rather than `Exception`; TypeScript types it `unknown` because JavaScript permits throwing anything. |
+| `exc` / `error` | `BaseException` / `unknown` | none; positional | The exception the handler raised. Python types it `BaseException` rather than `Exception`; TypeScript types it `unknown` because JavaScript permits throwing anything. |
 
 ### Return
 
 `Any` / `unknown`: the value that becomes the reset frame's `payload`, and that arrives at the remote
-as `RemoteError.payload`. Return `None` / `null` to send no structured payload at all — the `reason`
-text still goes.
+as `RemoteError.payload`. Return `None` / `null` to send no structured payload; the `reason` text is
+still sent.
 
 ### Raises
 
-The type raises nothing. An implementation that raises is a bug in the implementation; keep it total.
+The type raises nothing. If an implementation raises, the `reset(APPLICATION_ERROR)` is still sent,
+with the reason text and no payload.
 
 ### Example
 
@@ -1187,8 +1184,8 @@ The parameters of the callable itself:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `headers` | `dict[str, Any]` / `Record<string, unknown>` | none — positional | The headers the `open` frame will carry, as left by the interceptors registered before this one. Mutate it; keys must be strings. Changes made after the call returned have no effect. |
-| `payload` | `Any` / `unknown` | none — positional | The opening payload, `None` / `null` when the caller passed none. For reading only. |
+| `headers` | `dict[str, Any]` / `Record<string, unknown>` | none; positional | The headers the `open` frame will carry, as left by the interceptors registered before this one. Mutate it; keys must be strings. Changes made after the call returned have no effect. |
+| `payload` | `Any` / `unknown` | none; positional | The opening payload, `None` / `null` when the caller passed none. For reading only. |
 
 ### Return
 
@@ -1281,8 +1278,8 @@ The parameters of the callable itself:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `headers` | `dict[str, Any]` / `Record<string, unknown>` | none — positional | The headers this peer's first frame on the stream will carry, as left by the interceptors registered before this one. Mutate it; keys must be strings. Changes made after the call returned have no effect. |
-| `stream` | `Stream` | none — positional | The stream being answered: `stream.headers` and `stream.payload` are the opener's. For reading. |
+| `headers` | `dict[str, Any]` / `Record<string, unknown>` | none; positional | The headers this peer's first frame on the stream will carry, as left by the interceptors registered before this one. Mutate it; keys must be strings. Changes made after the call returned have no effect. |
+| `stream` | `Stream` | none; positional | The stream being answered: `stream.headers` and `stream.payload` are the opener's. For reading. |
 
 ### Return
 
@@ -1378,8 +1375,8 @@ The parameters of the callable itself:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `headers` | `Mapping[str, Any]` / `Readonly<Record<string, unknown>>` | none — positional | A read-only view of the headers that frame carried: a `MappingProxyType` in Python, a frozen copy in TypeScript. Empty when the frame carried none. |
-| `stream` | `Stream` | none — positional | The stream. `stream.local` is false for a stream the remote opened (the headers are `stream.headers`) and true for the answer to one this peer opened (the headers are `stream.reply_headers` / `stream.replyHeaders`). |
+| `headers` | `Mapping[str, Any]` / `Readonly<Record<string, unknown>>` | none; positional | A read-only view of the headers that frame carried: a `MappingProxyType` in Python, a frozen copy in TypeScript. Empty when the frame carried none. |
+| `stream` | `Stream` | none; positional | The stream. `stream.local` is false for a stream the remote opened (the headers are `stream.headers`) and true for the answer to one this peer opened (the headers are `stream.reply_headers` / `stream.replyHeaders`). |
 
 ### Return
 
@@ -1449,16 +1446,15 @@ await dialer.close({ drainMs: 100 });
 
 ## `logger` and `LogLevel` (TypeScript)
 
-TypeScript's stand-in for the logging module Python gets from its standard library.
+TypeScript's replacement for Python's standard `logging` module.
 
-There is no Python counterpart and there should not be: Python names a logger
-(`logging.getLogger("muxws.frames")`) and the application configures it. The browser entry point may
-not depend on anything (WSM-PKG-003), so the TypeScript port carries a four-method shim over
-`console` instead, and `logger.level` is the only way to turn frame logging on.
+Python has no counterpart: it uses a named logger (`logging.getLogger("muxws.frames")`) that the
+application configures. The browser entry point has no dependencies (WSM-PKG-003), so the TypeScript
+port provides a four-method wrapper over `console`, and setting `logger.level` is the only way to
+enable frame logging.
 
-It starts at `'warn'`, which is what an unconfigured Python logger does — `logger.info` and
-`logger.debug` print nothing until an application asks for them. A port that spammed every frame to
-the console by default would not be mirroring Python, it would be shouting.
+The default level is `'warn'`, matching an unconfigured Python logger: `logger.info` and
+`logger.debug` print nothing until the application lowers the level.
 
 Frame lines are emitted at `'debug'` and never carry payload **contents** at any level (WSM-OBS-002).
 
@@ -1487,13 +1483,13 @@ export const logger: {
 
 ### Return
 
-`logger.isEnabledFor` returns a `boolean`; the four emitters return `void`. `logger` itself is a
-mutable object, not a factory — there is one, and assigning `level` reconfigures it process-wide.
+`logger.isEnabledFor` returns a `boolean`; the four emitters return `void`. `logger` is a single
+mutable object, not a factory; assigning `level` changes it for the whole process.
 
 ### Raises
 
-Raises: nothing. An unknown `level` string is a type error at compile time and is treated as the
-highest threshold at runtime, so the failure is silence rather than an exception.
+Raises: nothing. An unknown `level` string is a type error at compile time; at runtime it disables
+every level, and nothing is printed.
 
 ### Example
 
@@ -1516,8 +1512,8 @@ logger.level = 'warn';
 
 Which way a frame was travelling, as handed to `peer.onFrame` (WSM-OBS-003).
 
-`'tx'` is reported **before** the codec encodes, `'rx'` **after** it decodes — so a handler always
-sees a logical `Frame`, never bytes, in both directions. Python's `on_frame` takes the same two
+`'tx'` is reported **before** the codec encodes, `'rx'` **after** it decodes, so a handler receives a
+logical `Frame`, not bytes, in both directions. Python's `on_frame` takes the same two
 strings and needs no type alias for them.
 
 ### Signature
@@ -1569,23 +1565,23 @@ await acceptor.close();
 The subprotocol prefix, `muxws.v1.`. A dialer offers `` `${PREFIX}${codecName}` `` as its **first**
 subprotocol entry (WSM-CDC-020), and the acceptor accepts only that exact value.
 
-The `v1` in it is the **only version anywhere on the wire** (WSM-CON-009): it pins the
-breaking-change generation, not the package's semver. muxws 2.0.0 could still speak `muxws.v1.`, and
-a peer offering `muxws.v2.json` is rejected at the handshake by a v1 acceptor (WSM-CDC-025).
+The `v1` in it is the **only version on the wire** (WSM-CON-009): it identifies the breaking-change
+generation, not the package's semver. muxws 2.0.0 can still speak `muxws.v1.`, and a v1 acceptor
+rejects a peer offering `muxws.v2.json` at the handshake (WSM-CDC-025).
 
-Exported because a consumer building a subprotocol list by hand needs the constant. The machinery
-that builds and reads the offer is not exported — that is the library's own business.
+It is exported for applications that build a subprotocol list by hand. The functions that build and
+read the offer are internal and not exported.
 
 TypeScript exports it from the package root; in Python, import it from `muxws.subprotocol`.
 
 ### Signature
 
 ```python
-PREFIX: Final[str] = "muxws.v1."
+PREFIX = "muxws.v1."
 ```
 
 ```ts
-export const PREFIX: string;
+export const PREFIX = 'muxws.v1.';
 ```
 
 ### Parameters
@@ -1625,5 +1621,5 @@ console.log('the only version on the wire is the generation:', PREFIX.split('.')
 - [Codec](./codec.md) — what turns a `Frame` into bytes, and `Codec.encode_payload`, whose output
   `split_frame` slices.
 - [Errors](./errors.md) — `default_error_serializer`, the `ErrorSerializer` you get if you pass none.
-- [Peer](./peer.md) — `on_stream`, `on_close` and `on_frame`, the three hooks these types describe.
+- [Peer](./peer.md) — `on_stream`, `on_close`, `on_frame` and the `intercept_*` methods, which take these types.
 - [Stream](./stream.md) — what a `StreamHandler` is handed.

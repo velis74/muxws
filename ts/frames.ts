@@ -1,8 +1,8 @@
 /**
  * The logical frame model and its envelope mapping (§3).
  *
- * One frame per WebSocket message. Field names are spelled out, never abbreviated, and stay
- * snake_case in both languages - `last_stream` is `last_stream` here too.
+ * One frame per WebSocket message. Field names are unabbreviated and snake_case in both languages
+ * (`last_stream` in TypeScript as well).
  */
 
 import { ProtocolError } from './errors';
@@ -10,8 +10,8 @@ import { ProtocolError } from './errors';
 /**
  * The sentinel distinguishing "no payload" from an explicit `null` (D1).
  *
- * A unique symbol rather than a class instance: it cannot be forged, cannot be serialized by
- * accident, and prints as `Symbol(ABSENT)` in a failing assertion.
+ * A unique symbol: no other value compares equal to it, `JSON.stringify` does not serialize it, and
+ * it prints as `Symbol(ABSENT)` in assertion output.
  */
 export const ABSENT: unique symbol = Symbol('ABSENT');
 export type Absent = typeof ABSENT;
@@ -116,9 +116,9 @@ export function toMapping(frame: Frame): Record<string, unknown> {
 /**
  * Build a `Frame` from a decoded envelope.
  *
- * Unknown keys are dropped rather than preserved (WSM-FRM-001, D2) - a decoder that round-tripped
- * them would make `decode(encode(frame)) === frame` pass on garbage. An unrecognised `type` survives
- * as an ordinary `Frame` (D4); it is the peer, not the codec, that ignores it (WSM-FRM-002).
+ * Unknown keys are dropped (WSM-FRM-001, D2), so a decoded frame contains only envelope fields. An
+ * unrecognised `type` is returned as an ordinary `Frame` (D4); the peer, not the codec, ignores it
+ * (WSM-FRM-002).
  */
 export function fromMapping(mapping: Record<string, unknown>): Frame {
   if (!('type' in mapping)) {

@@ -119,14 +119,14 @@ async def test_ping_returns_round_trip_time_in_seconds(make_pair):
     try:
         elapsed = await pair.dialer.ping()
         assert isinstance(elapsed, float)
-        # An in-memory round trip is fast. If this were milliseconds the number would be ~1000x this.
+        # An in-memory round trip takes far less than a second; a value in milliseconds would not.
         assert 0 <= elapsed < 1.0
     finally:
         await pair.stop()
 
 
 async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
-    """The call fails; the connection is untouched. A lost pong is a failed ping, not a dead peer."""
+    """The call raises; the connection stays open. A missing pong fails the ping only."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -152,7 +152,7 @@ async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
 
 
 async def test_unknown_pong_nonce_is_ignored(make_pair):
-    """A late echo of a ping whose deadline already expired is not an error."""
+    """A pong for a ping whose deadline has expired is ignored."""
     pair = make_pair()
     pair.start()
     try:
@@ -164,7 +164,7 @@ async def test_unknown_pong_nonce_is_ignored(make_pair):
 
 
 async def test_pings_are_keyed_by_nonce_not_by_order(make_pair):
-    """Matching by position would credit a late echo to the next ping and invent an RTT."""
+    """Matching by position would attribute a late pong to the next ping and report a wrong RTT."""
     pair = make_pair()
     pair.start()
     try:
@@ -192,7 +192,7 @@ def test_a_nonce_is_not_guessable():
 
 
 async def test_socket_death_fails_a_pending_ping(make_pair):
-    """Nobody is going to answer, so nobody should keep waiting."""
+    """A pending ping raises when the socket dies, because no pong can arrive."""
     pair = make_pair()
     pair.start()
     try:
@@ -242,10 +242,9 @@ async def test_goaway_carries_code_reason_and_last_stream(make_pair):
 async def test_after_sending_goaway_incoming_opens_are_refused():
     """WSM-CON-021: nothing new runs here, and this peer opens nothing either.
 
-    A lone acceptor with injected frames, rather than a live pair: sending a `goaway` and then
-    feeding it an `open` its counterpart never made would leave the two peers disagreeing about the
-    id space, and the dialer would kill the connection for a reset it cannot account for - correctly,
-    and entirely beside the point being tested here.
+    Uses a lone acceptor with injected frames. In a live pair, an `open` the dialer never sent leaves
+    the two peers disagreeing about the id space, and the dialer closes the connection when it
+    receives a reset for an unknown stream.
     """
     from muxws.codecs.json_ import JsonCodec
     from muxws.peer import Peer
@@ -303,7 +302,7 @@ async def test_open_after_receiving_goaway_raises_synchronously(make_pair):
 
 
 async def test_streams_above_last_stream_are_reset_refused_locally(make_pair):
-    """WSM-CON-023: never processed, so safe to retry - and nothing goes out for them."""
+    """WSM-CON-023: these streams were not processed, so a retry is safe; no frame is sent for them."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -327,7 +326,7 @@ async def test_streams_above_last_stream_are_reset_refused_locally(make_pair):
 
 
 async def test_streams_at_or_below_last_stream_finish_within_drain(make_pair):
-    """WSM-CON-024: work the remote promised to complete is allowed to complete."""
+    """WSM-CON-024: streams at or below `last_stream` run to completion within the drain window."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -348,7 +347,7 @@ async def test_streams_at_or_below_last_stream_finish_within_drain(make_pair):
 
 
 async def test_drain_deadline_closes_the_socket_with_streams_still_live(make_pair):
-    """WSM-CON-024: then the socket closes regardless, and those streams fail locally."""
+    """WSM-CON-024: at the drain deadline the socket closes, and the streams still live fail locally."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -366,7 +365,7 @@ async def test_drain_deadline_closes_the_socket_with_streams_still_live(make_pai
 
 
 async def test_close_sends_goaway_then_drains_then_closes(make_pair):
-    """WSM-CON-025: assert the order, because the order is the whole rule."""
+    """WSM-CON-025: `goaway`, drain and close happen in this order."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -396,11 +395,10 @@ async def test_close_is_idempotent(make_pair):
 
 
 async def test_id_exhaustion_sends_goaway_drains_and_closes(make_pair):
-    """WSM-SID-007 asks for four things, not one.
+    """WSM-SID-007: refuse further opens, send `goaway`, drain, close.
 
-    Refusing to open again is the easy quarter. The rule also requires the exhausting peer to send
-    `goaway`, let in-flight streams drain, and then close - none of which `open()` can do by
-    returning.
+    Besides refusing further opens, the exhausting peer sends `goaway`, lets in-flight streams drain,
+    and then closes the connection.
     """
     assert MAX_STREAM_ID == 2**31 - 1
 
@@ -408,7 +406,7 @@ async def test_id_exhaustion_sends_goaway_drains_and_closes(make_pair):
     pair.acceptor.on_stream(_reply_now)
     pair.start()
     try:
-        # One id left. Taking it is what triggers the shutdown.
+        # One id left. Allocating it triggers the shutdown.
         pair.dialer._next_id = MAX_STREAM_ID
         last = pair.dialer.open({"q": 1}, end=True)
         assert last.id == MAX_STREAM_ID
@@ -455,7 +453,7 @@ async def test_the_last_stream_still_gets_its_drain_window(make_pair):
 
 
 def test_goaway_state_tracks_the_two_directions_separately():
-    """Having sent one and having received one mean different things."""
+    """A sent and a received `goaway` restrict different directions, so they are tracked separately."""
     state = GoawayState()
     assert state.is_going_away is False
 

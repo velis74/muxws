@@ -103,8 +103,8 @@ def _take(text: str, start: int, budget: int) -> str:
 def _first_codepoint_width(text: str, start: int) -> int | None:
     """Bytes in the codepoint at byte offset `start`, or None when nothing is left.
 
-    Read off the string rather than off the byte pattern, so the invariant below is checked against
-    what UTF-8 means and not against the way the splitter reads it.
+    Computed from the string rather than from the byte pattern, so the invariant below is checked
+    against UTF-8 itself and not against the splitter's byte decoding.
     """
     remainder = text.encode("utf-8")[start:].decode("utf-8")
     return len(remainder[0].encode("utf-8")) if remainder else None
@@ -141,11 +141,11 @@ def _assert_take_invariant(text: str, start: int, budget: int) -> None:
 def test_the_take_invariant_holds_over_generated_strings_offsets_and_budgets():
     """Prefix, within budget, maximal, and empty only when the first codepoint does not fit.
 
-    Seeded, so a failure names a case that reproduces instead of one that vanishes on the rerun. The
-    sweep is exhaustive per string - every codepoint boundary as an offset, every budget from zero to
-    past the end of the string - because a slicer goes wrong at an edge and not in the middle.
+    Seeded, so a failing case reproduces on the rerun. The sweep is exhaustive per string: every
+    codepoint boundary as an offset, and every budget from zero to past the end of the string, which
+    covers every edge case.
     """
-    rng = random.Random(20260814)  # noqa: S311 - a fixed seed is the point; nothing here is a secret
+    rng = random.Random(20260814)  # noqa: S311 - a fixed seed for reproducibility; nothing here is a secret
     pool = "aZ0 -\nčšžđé—ъ中あ\ufeff🛰𝕄🌍😀"
     cases = 0
     for _ in range(150):
@@ -158,7 +158,7 @@ def test_the_take_invariant_holds_over_generated_strings_offsets_and_budgets():
 
 
 def test_a_budget_smaller_than_the_first_codepoint_takes_nothing():
-    """The empty take is an answer, not a failure: the caller turns it into a whole unit or an error."""
+    """An empty take is a valid result; the caller turns it into a whole unit or an error."""
     assert _take("🌍a", 0, 3) == ""
     assert _take("🌍a", 0, 4) == "🌍"
     assert _take("č", 0, 1) == ""
@@ -194,7 +194,7 @@ def test_a_budget_of_zero_takes_nothing():
 
 
 def test_an_all_non_ascii_string_cuts_only_between_codepoints():
-    """No ASCII anywhere: every cut point the budget lands on is inside a codepoint half the time."""
+    """No ASCII characters, so many budgets end inside a multi-byte codepoint."""
     text = "ъђћјљњ" * 4
     data = text.encode("utf-8")
     assert len(data) == 2 * len(text)
@@ -220,10 +220,10 @@ def test_the_first_codepoint_is_taken_whole_even_when_it_overruns_the_budget():
 class _BareCodec:
     """A codec whose fragment frames are the fragment and nothing else.
 
-    It lets the reservation be narrower than one codepoint while a fragment carrying that codepoint
-    still fits under the cap. Under any real envelope the cap would have to be smaller than the
-    envelope for that to happen and the splitter would raise instead (WSM-FRG-034), which leaves the
-    one-unit floor unobservable.
+    With it, the reservation can be narrower than one codepoint while a fragment carrying that
+    codepoint still fits under the cap. With a real envelope this requires a cap smaller than the
+    envelope, and the splitter raises instead (WSM-FRG-034), so the one-unit minimum is not
+    observable.
     """
 
     name = "bare"
@@ -247,8 +247,8 @@ class _BareCodec:
 def test_a_codepoint_wider_than_the_reservation_is_taken_whole():
     """WSM-FRG-013: a cap of 5 reserves 2, leaving a budget of 3 against four-byte codepoints.
 
-    The budget floors onto the offset the fragment starts at, and a fragment carrying nothing leaves
-    the loop no way forward, so the unit is taken whole and the cap check below decides its fate.
+    The budget rounds down to the fragment's start offset, and an empty fragment would not advance
+    the loop, so the unit is taken whole and the cap check below accepts or rejects it.
     """
     parts = split_frame(Frame("data", stream=1, payload="𝕄" * 5), 5, _BareCodec())
 
@@ -265,7 +265,7 @@ def test_a_codepoint_wider_than_the_whole_budget_raises_rather_than_looping(code
 def test_generated_unicode_payloads_fragment_and_reassemble_at_hostile_caps(codec: JsonCodec):
     """Mixed-width text at small caps: every fragment is whole codepoints and the whole sequence joins.
 
-    Seeded for the same reason as the invariant sweep - the failing payload has to survive the rerun.
+    Seeded, like the invariant sweep, so a failing payload reproduces on the rerun.
     """
     rng = random.Random(4711)  # noqa: S311 - a fixed seed, so the failing payload survives the rerun
     pool = 'aZ0 "\\\nčšž—ъ中\ufeff🛰𝕄🌍'
@@ -281,14 +281,14 @@ def test_generated_unicode_payloads_fragment_and_reassemble_at_hostile_caps(code
 
 
 def test_control_character_payload_is_resplit_not_emitted_over_cap(codec: JsonCodec):
-    """WSM-FRG-014: JSON escaping expands control characters sixfold; the loop is the guarantee."""
+    """WSM-FRG-014: JSON escaping expands control characters sixfold; re-splitting keeps fragments under the cap."""
     frame = Frame("data", stream=1, payload=PAYLOADS["control-characters"], end=True)
     parts = split_frame(frame, 128, codec)
     assert len(parts) > 1
     sizes = [encoded_length(codec.encode(p)) for p in parts]
     assert max(sizes) <= 128
-    # The reservation alone (min(512, cap//2) = 64) would have allowed a 64-byte slice, which escapes
-    # to ~384 bytes. Landing under the cap therefore proves the verify-and-re-split loop ran.
+    # The reservation alone (min(512, cap//2) = 64) allows a 64-byte slice, which escapes to about
+    # 384 bytes. A result under the cap shows that the verify-and-re-split loop ran.
     assert _reassemble(parts, codec) == PAYLOADS["control-characters"]
 
 
@@ -314,7 +314,7 @@ def test_end_and_trailers_only_on_the_last_fragment(codec: JsonCodec):
 
 
 def test_headers_are_never_fragmented(codec: JsonCodec):
-    """WSM-FRG-021: headers ride the first fragment whole; they are never sliced."""
+    """WSM-FRG-021: headers are carried whole on the first fragment; they are never sliced."""
     headers = {"trace": "t" * 300}
     frame = Frame("open", stream=1, payload=PAYLOADS["ascii"], headers=headers)
     parts = split_frame(frame, 1024, codec)
@@ -420,9 +420,9 @@ def test_corpus_payloads_survive_a_small_cap(case: dict[str, Any], codec: JsonCo
 class _BinaryJsonCodec:
     """A toy binary codec, so the byte-boundary half of the splitter has something to exercise.
 
-    The real binary codec is msgpack; this one exists only to prove that the splitter slices bytes at
-    byte boundaries and that `binary` is declared rather than inferred. `latin-1` round-trips any
-    byte sequence one-to-one, which is all the envelope needs.
+    The shipped binary codec is msgpack; this one tests that the splitter slices bytes at byte
+    boundaries and that `binary` is declared rather than inferred. `latin-1` round-trips any byte
+    sequence one-to-one.
     """
 
     name = "binary-json"
@@ -469,9 +469,9 @@ def test_binary_codec_slices_at_byte_boundaries():
 def test_both_ports_agree_on_fragment_boundaries(case: dict[str, Any], codec: JsonCodec):
     """WSM-FRG-016: the pinned fragments are the contract both ports are held to.
 
-    A boundary disagreement between Python and TypeScript is invisible until two peers of different
-    languages try to reassemble each other's payloads, at which point it looks like corruption. This
-    fixture turns it into a failing unit test in whichever port drifted.
+    A boundary disagreement between Python and TypeScript shows up as corrupted payloads only when
+    peers in the two languages reassemble each other's payloads. This fixture makes it fail a unit
+    test in the port that disagrees.
     """
     frame = Frame("data", stream=1, payload=case["payload"], end=True)
     parts = split_frame(frame, case["cap"], codec)
@@ -483,9 +483,9 @@ def test_a_fragment_sequence_always_terminates(codec: JsonCodec):
     """WSM-FRG-020/030: the last fragment must carry `more: false`, even if it carries no bytes.
 
     Trailers larger than the reservation make the closing frame too big at every slice point. A loop
-    that answered that by emitting middle fragments until the payload ran out would leave a sequence
-    with no terminator: the receiver's assembler never fires, the payload never reaches the
-    application, and nothing anywhere reports an error.
+    that emitted middle fragments until the payload ran out would produce a sequence with no
+    terminator: the receiver's assembler never completes, the payload never reaches the application,
+    and no error is reported.
     """
     frame = Frame("data", stream=1, payload={"body": "x" * 900}, end=True, trailers={"checksum": "d" * 130})
     parts = split_frame(frame, 256, codec)
@@ -504,7 +504,7 @@ def test_a_fragment_sequence_always_terminates(codec: JsonCodec):
 
 
 def test_trailers_too_large_for_the_cap_raise_rather_than_split(codec: JsonCodec):
-    """`trailers` ride the closing fragment whole, exactly as `headers` ride the first one."""
+    """`trailers` are carried whole on the closing fragment, as `headers` are on the first one."""
     frame = Frame("data", stream=1, payload={"a": 1}, end=True, trailers={"x": "y" * 500})
     with pytest.raises(ProtocolError, match="closing envelope"):
         split_frame(frame, 256, codec)
@@ -519,24 +519,20 @@ def test_the_closing_fragment_may_be_empty(codec: JsonCodec):
 
 
 def test_how_much_encoding_one_megabyte_costs():
-    """What splitting a megabyte costs the sender, pinned as a ceiling.
+    """The number of `encode` calls needed to split a megabyte, asserted against an upper bound.
 
-    `iter_fragments` asks the codec "does the rest fit?" on every pass, and the reservation
-    `min(512, cap // 2)` is short of what JSON escaping needs often enough that the binary search in
-    `_largest_fitting_count` runs on nearly every fragment rather than as the exceptional path its
-    comment describes. Nothing here is incorrect - the cuts are right and the function stays pure -
-    but a large payload costs the sender far more encoding than it should, and that cost is
-    synchronous: it blocks the event loop, which is the same latency WSM-INV-004 exists to prevent
-    arriving by another road.
+    `iter_fragments` encodes the remaining payload on every pass, and the reservation
+    `min(512, cap // 2)` is often smaller than what JSON escaping needs, so the binary search in
+    `_largest_fitting_count` runs on nearly every fragment. The cuts are correct and the function is
+    pure, but the encoding work is synchronous and blocks the event loop, which adds the latency
+    WSM-INV-004 limits.
 
-    The reservation may not simply be raised to make the search rare. It decides the boundary
-    whenever its first guess *fits* - the search runs only when it does not - so a larger guess cuts
-    in different places, and fragment boundaries are frozen: WSM-FRG-016 requires both ports to cut
-    identically and `conformance/frames/` pins where. Changing the cost here is a generation
-    concern, not an optimisation.
+    Raising the reservation would change the boundaries: the reservation decides the boundary
+    whenever its first guess fits, and the search runs only when it does not. WSM-FRG-016 requires
+    both ports to cut identically and `conformance/frames/` pins the boundaries, so changing them
+    requires a new generation.
 
-    The ceiling is a ceiling, not the value, so this records the cost without tripping on every
-    unrelated change.
+    The assertion is an upper bound, not the exact count, so unrelated changes do not fail it.
     """
     codec = JsonCodec()
     calls = 0
@@ -550,8 +546,8 @@ def test_how_much_encoding_one_megabyte_costs():
         encoded_bytes += len(rendered)
         return rendered
 
-    # `encode`, the frame-level call: that is what the splitter asks "does this fit?" with, and each
-    # of those questions renders the whole candidate.
+    # `encode`, the frame-level call: the splitter calls it to check whether a candidate fits, and
+    # each call encodes the whole candidate frame.
     codec.encode = counted  # type: ignore[method-assign]
     payload = {"rows": [{"i": index, "name": f"row-{index}"} for index in range(40_000)]}
     frame = Frame("data", stream=1, payload=payload, end=True)

@@ -1,11 +1,10 @@
 /**
  * Connection liveness and orderly shutdown (§6).
  *
- * A mirror of `muxws/lifecycle_test.py`, test for test. Where an assertion is spelled differently it
- * is because JavaScript offers a different witness of the same fact - `stream.signal.aborted` where
- * Python reads `stream.closed.is_set()`, a rejected promise where Python raises out of an `await` -
- * and each of those places says so. The one substantive difference is the unit: `peer.ping()` returns
- * **milliseconds** here and seconds in Python (WSM-CON-012).
+ * Mirrors `muxws/lifecycle_test.py` test for test. Where an assertion differs from Python it uses the JavaScript
+ * observable for the same fact - `stream.signal.aborted` for Python's `stream.closed.is_set()`, a rejected promise
+ * where Python raises out of an `await` - and a comment at that place names it. The one semantic difference is the
+ * unit: `peer.ping()` returns **milliseconds** here and seconds in Python (WSM-CON-012).
  */
 
 // `describe`/`it`/`expect` are configured as globals; `vi` is imported because the shared eslint
@@ -114,8 +113,8 @@ function makePair(): Pair {
 /**
  * The peer's private bookkeeping, which the Python suite reads as `_next_id` and `_send_goaway`.
  *
- * Reaching for it is deliberate and mirrors what the Python tests do: driving the allocator to
- * exhaustion and sending a `goaway` without a counterpart are not things the public API offers.
+ * As in the Python tests: the public API offers no way to drive the allocator to exhaustion or to send a `goaway`
+ * without a counterpart.
  */
 interface PeerInternals {
   nextId: number;
@@ -127,7 +126,7 @@ function internals(peer: Peer): PeerInternals {
   return peer as unknown as PeerInternals;
 }
 
-/** `pytest.raises`, as a value: the rejection reason, or a failure if there was none. */
+/** Equivalent of `pytest.raises`: the rejection reason, or a test failure if the promise resolves. */
 async function rejection(work: PromiseLike<unknown>): Promise<unknown> {
   try {
     await work;
@@ -153,7 +152,7 @@ afterEach(async () => {
 
 // --------------------------------------------------------------------------- helpers
 
-/** Python's `_hold`: keep the stream open until somebody else closes it. */
+/** Python's `_hold`: keep the stream open until the other side closes it. */
 async function hold(payload: unknown, stream: Stream): Promise<void> {
   await stream.closed;
 }
@@ -264,12 +263,12 @@ describe('ping and pong', () => {
 
     const quick = await pair.dialer.ping();
     expect(typeof quick).toBe('number');
-    // An in-memory round trip is fast, so this alone cannot tell the two units apart.
+    // An in-memory round trip is fast, so this alone does not distinguish the two units.
     expect(quick).toBeGreaterThanOrEqual(0);
     expect(quick).toBeLessThan(1000);
 
-    // What does tell them apart: hold the pong back for a known delay. Sixty milliseconds reads as
-    // ~60 here and would read as ~0.06 if this returned seconds.
+    // To distinguish them, the pong is held back for a known delay: sixty milliseconds reads as ~60 here and would
+    // read as ~0.06 in seconds.
     const held = 60;
     const acceptor = internals(pair.acceptor);
     const original = acceptor.dispatch.bind(pair.acceptor);
@@ -283,8 +282,7 @@ describe('ping and pong', () => {
   });
 
   it('raises on a ping timeout without killing the connection', async () => {
-    // The call fails; the connection is untouched, which is what lets liveness detection be built on
-    // top of it.
+    // The call fails and the connection is unaffected, so liveness detection can be built on it.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();
@@ -304,9 +302,9 @@ describe('ping and pong', () => {
   });
 
   it('never uses native websocket ping frames', async () => {
-    // WSM-CON-011, and TypeScript-only: browsers do not expose control frames to JavaScript, so
-    // liveness has to be built out of ordinary messages. The witness is that `sendText`/`sendBytes`
-    // are the only send paths taken and the port offers no other.
+    // WSM-CON-011, TypeScript only: browsers do not expose control frames to JavaScript, so liveness uses ordinary
+    // messages. The test checks that `sendText`/`sendBytes` are the only send paths used and that the port offers
+    // no other.
     const pair = makePair();
     pair.start();
     const socket = pair.dialerSocket;
@@ -345,8 +343,8 @@ describe('ping and pong', () => {
     expect(registry.settle('bbb', 0.5)).toBe(true);
     expect(await second).toBe(0.5);
 
-    // `first` is untouched. An already-resolved sentinel wins the race only against a promise that
-    // has not settled, which is this language's reading of Python's `assert not first.done()`.
+    // `first` is still pending: an already-resolved sentinel wins the race only against a promise that has not
+    // settled, which is the equivalent of Python's `assert not first.done()`.
     const pending = Symbol('pending');
     expect(await Promise.race([first, Promise.resolve(pending)])).toBe(pending);
 
@@ -356,7 +354,7 @@ describe('ping and pong', () => {
   });
 
   it('produces a nonce that is not guessable', () => {
-    // `crypto.getRandomValues`, not `Math.random`: the reconnect jitter is the opposite case.
+    // `crypto.getRandomValues`, not `Math.random`; the reconnect jitter uses `Math.random`.
     const nonces = new Set(Array.from({ length: 50 }, () => newNonce()));
     expect(nonces.size).toBe(50);
     [...nonces].forEach((nonce) => {
@@ -365,7 +363,7 @@ describe('ping and pong', () => {
   });
 
   it('fails a pending ping when the socket dies', async () => {
-    // Nobody is going to answer, so nobody should keep waiting.
+    // No answer will arrive, so the pending ping fails.
     const pair = makePair();
     pair.start();
 
@@ -388,7 +386,7 @@ describe('ping and pong', () => {
 
 describe('goaway', () => {
   it('carries code, reason and the remote parity last_stream', async () => {
-    // WSM-CON-020: `last_stream` is the **remote's** parity, not ours.
+    // WSM-CON-020: `last_stream` has the **remote's** parity, not this peer's.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -397,8 +395,8 @@ describe('goaway', () => {
     pair.dialer.open({ q: 2 });
     await pair.settle();
 
-    // A short drain, because both held streams are still live and the default would sit out the
-    // whole ten seconds; the frame under test is already on the wire before the drain begins.
+    // A short drain, because both held streams are still open and the default would wait the whole ten seconds; the
+    // frame under test is on the wire before the drain begins.
     await pair.acceptor.close({ code: ResetCode.NO_ERROR, reason: 'shutting down', drainMs: 20 });
     await pair.settle();
 
@@ -414,10 +412,9 @@ describe('goaway', () => {
   it('refuses incoming opens after sending goaway', async () => {
     // WSM-CON-021: nothing new runs here, and this peer opens nothing either.
     //
-    // A lone acceptor with injected frames, rather than a live pair: sending a `goaway` and then
-    // feeding it an `open` its counterpart never made would leave the two peers disagreeing about the
-    // id space, and the dialer would kill the connection for a reset it cannot account for -
-    // correctly, and entirely beside the point being tested here.
+    // A lone acceptor with injected frames rather than a live pair: sending a `goaway` and then feeding it an
+    // `open` its counterpart never sent would leave the two peers disagreeing about the id space, and the dialer
+    // would kill the connection on receiving an unexpected reset, which is unrelated to this test.
     const handled: unknown[] = [];
     const codec = new JsonCodec();
     const [, socket] = memoryPair();
@@ -465,7 +462,7 @@ describe('goaway', () => {
   });
 
   it('resets streams above last_stream locally with REFUSED', async () => {
-    // WSM-CON-023: never processed, so safe to retry - and nothing goes out for them.
+    // WSM-CON-023: never processed, so safe to retry, and nothing is sent for them.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -486,7 +483,7 @@ describe('goaway', () => {
   });
 
   it('lets streams at or below last_stream finish within the drain window', async () => {
-    // WSM-CON-024: work the remote promised to complete is allowed to complete.
+    // WSM-CON-024: streams the remote promised to complete may complete.
     const pair = makePair();
     pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
       await sleep(20);
@@ -522,7 +519,7 @@ describe('goaway', () => {
   });
 
   it('sends goaway, then drains, then closes', async () => {
-    // WSM-CON-025: assert the order, because the order is the whole rule.
+    // WSM-CON-025: the rule is the order, so the order is asserted.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();
@@ -549,8 +546,8 @@ describe('goaway', () => {
   });
 
   it('sends goaway, drains and closes when ids run out - WSM-SID-007', async () => {
-    // The rule asks for four things, not one: refusing to open again, and then the goaway, the drain
-    // and the close, all of which a peer that only refused would skip.
+    // The rule requires four things: refusing further opens, then the goaway, the drain and the close. A peer that
+    // only refused would skip the last three.
     expect(MAX_STREAM_ID).toBe(2 ** 31 - 1);
 
     const pair = makePair();
@@ -583,7 +580,7 @@ describe('goaway', () => {
 
 describe('GoawayState', () => {
   it('tracks the two directions separately', () => {
-    // Having sent one and having received one mean different things.
+    // Having sent one and having received one have different consequences.
     const state = new GoawayState();
     expect(state.isGoingAway).toBe(false);
 

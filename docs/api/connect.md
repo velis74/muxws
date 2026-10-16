@@ -5,22 +5,22 @@ outline: deep
 # connect
 
 `connect()` dials a URL, asserts the codec at the WebSocket handshake, sends the hello if one is
-configured, starts the read loop, and hands back a `Peer` that is already serving. It is the dialer's
-only entry point; everything an application does afterwards is done on the `Peer`.
+configured, starts the read loop, and returns a `Peer` that is already serving. It is the dialer's
+only entry point; all further work is done on the returned `Peer`.
 
-Three things about it are worth knowing before the tables below:
+Behaviour common to every `connect()`:
 
-- **A failed first attempt raises.** Reconnection covers connections that were established and then
-  lost, never the first dial - a peer that retried a typo in the URL forever would report nothing at
-  all. There is no option that changes this.
-- **`max_payload_bytes`, `max_concurrent_streams` and `error_serializer` belong to this peer alone.**
-  None of them is announced, negotiated or visible to the remote; the remote learns of a limit only
-  from the reset it provokes.
-- **Durations are seconds as floats in Python and milliseconds as integers in TypeScript.** The two
-  ports carry the same defaults expressed in their own unit.
+- **A failed first attempt raises.** Reconnection applies only to a connection that was established
+  and then lost. The first dial is never retried, and no option changes this, so an unreachable or
+  mistyped URL is reported as an exception from `connect()`.
+- **`max_payload_bytes`, `max_concurrent_streams` and `error_serializer` apply to this peer only.**
+  None of them is sent to or negotiated with the remote. The remote observes a limit only as the
+  reset it receives when it exceeds the limit.
+- **Durations are seconds as floats in Python and milliseconds as integers in TypeScript.** The
+  defaults are the same in both ports, each expressed in its own unit.
 
-The Python package dials with the `websockets` library, version 14 or newer, so
-`pip install muxws[websockets]` is what makes `connect()` work. In TypeScript there are two
+The Python package dials with the `websockets` library, version 14 or newer; `connect()` requires
+`pip install muxws[websockets]`. In TypeScript there are two
 `connect()` functions: the one exported from `muxws` dials with the platform `WebSocket` (the browser,
 and Node 22+ where that global exists), and the one exported from `muxws/node` dials with the `ws`
 package and can set handshake headers.
@@ -29,9 +29,8 @@ A `ws+unix://` URL dials a Unix domain socket. Python's `connect()` and the one 
 open one: each parses the scheme itself and hands its WebSocket library a socket path plus a logical
 `ws://` URL to put on the request line. The browser `connect()` refuses the scheme up front with
 `UnixSocketsUnsupportedError`, whose message names `muxws/node`, because neither a browser nor Node's
-global `WebSocket` can open a filesystem socket. Nothing else about the call changes in any of the
-three: the handshake, the subprotocol offer, the HTTP 400 and every option below are what they are
-over TCP. See [Unix domain sockets](/guide/transports#unix-domain-sockets).
+global `WebSocket` can open a filesystem socket. In all three, the handshake, the subprotocol offer,
+the HTTP 400 refusal and every option below behave as they do over TCP. See [Unix domain sockets](/guide/transports#unix-domain-sockets).
 
 ## `connect()` (Python)
 
@@ -70,21 +69,21 @@ async def connect(
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `url` | `str` | required | The WebSocket URL to dial: `ws://`, `wss://`, or `ws+unix://<socket path>:<request target>` for a Unix domain socket. In the `ws+unix:` form the URL's path and query are split on the **first** colon: what is in front is the file to open, what is behind is the HTTP request target, and the target is `/` both when there is no colon and when nothing follows it. The scheme is case-insensitive and `ws+unix:/run/api.sock:/ws` names the same file as `ws+unix:///run/api.sock:/ws`. An authority, if one is given, becomes the `Host` header and nothing else; with none, the header is `localhost`. There is no `wss+unix://`. Re-dialled unchanged on every reconnection. |
-| `headers` | `dict[str, str] \| None` | `None` | Extra HTTP headers for the upgrade request, passed to `websockets.connect(additional_headers=...)`. This is where a credential belongs, not in the hello. |
-| `subprotocols` | `list[str] \| None` | `None` | Extra subprotocol entries appended **after** the `muxws.v1.<codec>` entry. The acceptor ignores every one of them; they exist for application-level handshake tricks. |
-| `hello` | `Any` | `None` | The opening payload replayed verbatim on every connection this peer ever makes. Captured by value at this call and never re-read, so mutating your own object afterwards changes nothing. |
+| `headers` | `dict[str, str] \| None` | `None` | Extra HTTP headers for the upgrade request, passed to `websockets.connect(additional_headers=...)`. Credentials go here, not in the hello. |
+| `subprotocols` | `list[str] \| None` | `None` | Extra subprotocol entries appended **after** the `muxws.v1.<codec>` entry. A muxws acceptor never selects them; they are available to application-level handshake logic. |
+| `hello` | `Any` | `None` | The opening payload replayed verbatim on every connection this peer ever makes. Deep-copied at this call and never re-read; later changes to the passed object do not affect the replay. |
 | `hello_headers` | `dict[str, Any] \| None` | `None` | Headers for the hello's `open` frame, captured by value alongside `hello`. Supplying either one makes the peer "hello-configured": it is not established until the acceptor's handler ends that stream. |
 | `reconnect` | `Reconnect \| None` | `None` | The backoff schedule. `None` means `Reconnect()` - the defaults, with unlimited attempts. Reconnection applies only after a connection has been established once. |
 | `ping_interval` | `float` — seconds | `20.0` | How long the socket may be **idle** before the heartbeat sends a `ping` frame. Idle means no frame in either direction. `0` or less disables the heartbeat. |
-| `ping_timeout` | `float` — seconds | `10.0` | How long the heartbeat waits for the matching `pong` before declaring the socket dead. Detection is bounded by `ping_interval + ping_timeout` seconds. Not the same number as `peer.ping()`'s own default of 5.0 seconds. |
-| `hello_timeout` | `float` — seconds | `10.0` | How long a hello may go unacknowledged before the attempt is failed. On the first connection that failure is what `connect()` raises. |
+| `ping_timeout` | `float` — seconds | `10.0` | How long the heartbeat waits for the matching `pong` before treating the socket as lost. Detection is bounded by `ping_interval + ping_timeout` seconds. `peer.ping()` has a separate default of 5.0 seconds. |
+| `hello_timeout` | `float` — seconds | `10.0` | How long a hello may go unacknowledged before the attempt fails. On the first connection, `connect()` raises `StreamTimeout`. |
 | `max_payload_bytes` | `int` | `67_108_864` | The largest reassembled payload **this** peer accepts, in bytes of encoded output. Local, never announced; a sender that crosses it gets `reset(PAYLOAD_TOO_LARGE)` on the fragment that crossed it. |
 | `max_concurrent_streams` | `int` | `100` | How many streams the **remote** may have open here at once. Local, never announced; the excess open is refused without the handler running. |
 | `error_serializer` | `ErrorSerializer \| None` | `None` | Turns a handler's exception into the payload of the `reset(APPLICATION_ERROR)` frame. `None` means `default_error_serializer`, which puts the exception's class name and `str(exc)` **on the wire** - replace it with a redacting one on any public-facing connection. |
 | `codec` | `Codec \| None` | `None` | An explicit codec, which wins over `settings.codec`. `None` looks the configured name up in the registry and never falls back to JSON. |
-| `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | Test-only. The frame cap is a protocol constant; the conformance runner lowers it to exercise fragmentation without megabyte fixtures. |
-| `on_stream` | `StreamHandler \| None` | `None` | The incoming-stream handler, registered **before** the hello goes out. Passing it here rather than calling `peer.on_stream(...)` afterwards is what stops an acceptor's immediate push from being answered `reset(REFUSED, "no on_stream handler")`. |
-| `on_close` | `Callable[[Any], None] \| None` | `None` | Called with a `CloseReason` on every socket loss after this one. A first connection that never establishes reports itself by raising, not through this handler. |
+| `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | For tests only. The frame cap is a protocol constant; a lower value makes small payloads fragment, which the conformance runner uses. |
+| `on_stream` | `StreamHandler \| None` | `None` | The incoming-stream handler, registered **before** the hello goes out, so it receives a stream the acceptor opens as soon as it sees the hello. A handler registered with `peer.on_stream(...)` after `connect()` returns is too late for such a stream, which is answered `reset(REFUSED, "no on_stream handler")`. |
+| `on_close` | `Callable[[Any], None] \| None` | `None` | Called with a `CloseReason` on every socket loss after the first connection is established. When the first connection fails, `connect()` raises and this handler is not called. |
 | `on_reconnect` | `Callable[[int, Any], None] \| None` | `None` | Called `(attempt, peer)` once per **re**-established connection, after the hello is acknowledged. The first connection does not fire it. |
 | `open_interceptors` | `Sequence[OpenInterceptor]` | `()` | Registered in order with [`peer.intercept_open()`](./peer.md#peer-intercept-open-python) before the hello goes out. The hello itself does not pass through them. |
 | `reply_headers_interceptors` | `Sequence[ReplyHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python) before the hello goes out. |
@@ -104,52 +103,52 @@ returns.
   something other than `muxws.v1.<codec>`. The socket is closed with 1008 in the second case. A
   `ws+unix://` dial takes the same path: the refusal is an HTTP status on an ordinary upgrade.
 - `ProtocolError` — `max_frame_bytes` is too small to hold an envelope plus one indivisible unit.
-  Raised by the `Peer` constructor, which runs **after** the dial: the socket is open by then and
-  nothing closes it.
+  Raised by the `Peer` constructor, which runs **after** the dial; the socket is open at that point and
+  is not closed.
 - `StreamTimeout` — the hello was not acknowledged within `hello_timeout` seconds.
 - `StreamReset` (or a subclass: `StreamRefused`, `RemoteError`, `ConnectionLost`) — the acceptor reset
-  the hello stream, or the socket died under it.
+  the hello stream, or the socket closed before the hello was acknowledged.
 - `muxws.transports.websockets_.WebsocketsNotInstalledError` — `websockets` is not installed. A
-  `TransportUnsupportedError`, so it is a `MuxwsError` and a `RuntimeError`, and its message names the
-  install that fixes it: `pip install muxws[websockets]`. Both a `ws://` dial and a `ws+unix://` dial
-  fail on the identical import, so one class covers both.
+  `TransportUnsupportedError`, so it is a `MuxwsError` and a `RuntimeError`. Its message contains
+  `pip install muxws[websockets]`. Raised for `ws://`, `wss://` and `ws+unix://` URLs alike.
 - Whatever the dial itself raised — `OSError` for a refused TCP connection, `websockets`'
   `InvalidHandshake` family for a broken upgrade, `ValueError` for a `subprotocols` entry that is not
   a valid HTTP token. It is propagated unaltered. Over `ws+unix://` the same clause covers a socket
   file that is not there (`FileNotFoundError`) and one no process is listening on
-  (`ConnectionRefusedError`), both of them `OSError` subclasses. A dial that failed is not an address
-  that could not be read.
+  (`ConnectionRefusedError`), both of them `OSError` subclasses. None of these is wrapped in a
+  `TransportUrlError`.
 - `muxws.transports.websockets_.WebsocketUrlError` — a URL `websockets` cannot parse into a dialable
   target: no hostname, a scheme that is not `ws`/`wss` (`http://example.com/x`), a port that is not an
   integer, or a string that is not a URL at all. A `TransportUrlError`, so a `MuxwsError` and a
   `ValueError`; the `InvalidURI` or `ValueError` from `websockets.uri.parse_uri` is chained as
   `__cause__`. It also covers a `ws+unix://` URL whose *authority* is unusable, because the string
   checked for that arm is the logical `ws://` URI the dial synthesises: `ws+unix://user@/a.sock:/y`
-  raises `WebsocketUrlError` about `ws://user@/y`. Raised **before** the dial, which is what keeps a
-  URL whose own text contains `HTTP 400` from being reported as a `CodecMismatch`.
-- A bare `ValueError` — an authority with an unbalanced `[`, as in `ws://[::1`. That shape is refused
-  by `urllib.parse.urlsplit` at the top of the scheme check, ahead of both URL checks below, so it is
-  the one unusable address that arrives as neither a `TransportUrlError` nor any other `MuxwsError`.
+  raises `WebsocketUrlError` about `ws://user@/y`. Raised **before** the dial, so a URL whose text
+  contains `HTTP 400` is not reported as a `CodecMismatch`.
+- A bare `ValueError` — an authority with an unbalanced `[`, as in `ws://[::1`. `urllib.parse.urlsplit`
+  rejects it at the start of the scheme check, before both URL checks below. It is not a
+  `TransportUrlError` and not a `MuxwsError`.
 - `muxws.transports.unix.UnixUrlError` — a `ws+unix://` URL naming no socket file, or one whose request
   target does not begin with `/`, or a `wss+unix://` URL, which does not exist. Also a
   `TransportUrlError`, and raised before any socket is touched. Checked before the `websockets` URL
   parse and with stdlib alone, so it answers the same whether or not `websockets` is installed.
 - `muxws.transports.unix.UnixSocketsUnsupportedError` — a `ws+unix://` URL on a platform with no
-  `AF_UNIX`, which is Windows. A `TransportUnsupportedError`, raised from the URL parse, so the failure
-  names the platform and the scheme and arrives out of the `connect()` call rather than out of a later
-  background reconnection. The platform check runs before the two grammar checks, so on Windows a
-  malformed `ws+unix://` URL is this class rather than `UnixUrlError`; `wss+unix://` stays a
-  `UnixUrlError` everywhere, because the scheme check comes first.
+  `AF_UNIX`, which is Windows. A `TransportUnsupportedError`, raised by the URL parse inside the
+  `connect()` call; its message names the scheme and the missing `socket.AF_UNIX`. The platform check
+  runs before the two grammar checks, so on Windows a malformed `ws+unix://` URL raises this class
+  rather than `UnixUrlError`. `wss+unix://` raises `UnixUrlError` on every platform, because the
+  scheme check runs first.
 
 The four transport classes above — `WebsocketsNotInstalledError`, `WebsocketUrlError`, `UnixUrlError`
 and `UnixSocketsUnsupportedError` — live in their transport's module and are not exported from
 `muxws`. An application that does not want to import a transport to catch its failures writes
-`except TransportUrlError` or `except TransportUnsupportedError`, both of which *are* root-exported —
-the first for "the address is unusable", the second for "this process or platform cannot dial it".
+`except TransportUrlError` or `except TransportUnsupportedError`, both exported from `muxws`.
+`TransportUrlError` means the address is unusable; `TransportUnsupportedError` means this process or
+platform cannot dial it.
 
-**A failed first attempt raises whatever `reconnect` says.** Passing `reconnect=Reconnect()` does not
-make `connect()` retry the first dial, and no option does; a caller who wants the first dial retried
-writes that loop itself, where it can decide what a permanent failure looks like.
+**The first attempt is not retried.** For every `reconnect` value, including `Reconnect()`, a failure
+of the first dial or of the first hello raises from `connect()`. An application that needs the first
+dial retried calls `connect()` in its own loop.
 
 ### Example
 
@@ -189,8 +188,8 @@ asyncio.run(main())
 ## `connect()` (TypeScript, `muxws`)
 
 Dial `url` with the platform `WebSocket` and return a serving peer. This is the browser entry point;
-it also works on any Node that exposes a global `WebSocket`. It cannot set handshake headers, because
-a browser cannot.
+it also works on any Node that exposes a global `WebSocket`. It takes no handshake headers, because
+the browser `WebSocket` API cannot set them.
 
 ### Signature
 
@@ -215,35 +214,33 @@ already acknowledged. `peer.isOpen` is true when it resolves.
 Rejects with:
 
 - `CodecNotRegistered` — the configured codec name is not in the registry. Thrown before any socket is
-  touched. Note that importing only `muxws/node` registers nothing; the JSON registration is a side
-  effect of importing `muxws`.
+  touched. Importing only `muxws/node` registers no codec; JSON is registered as a side effect of
+  importing `muxws`.
 - `CodecMismatch` — the acceptor refused the handshake, or negotiated something other than
   `muxws.v1.<codec>`.
 - `StreamTimeout` — the hello was not acknowledged within `helloTimeoutMs` milliseconds.
 - `StreamReset` (or `StreamRefused`, `RemoteError`, `ConnectionLost`) — the acceptor reset the hello
-  stream, or the socket died under it.
+  stream, or the socket closed before the hello was acknowledged.
 - `ProtocolError` — `maxFrameBytes` is too small to hold an envelope plus one indivisible unit. The
-  `Peer` constructor runs after the dial, so the socket is open by then and nothing closes it.
-- `UnixSocketsUnsupportedError` — the URL's scheme is `ws+unix:`. Rejected before the codec is looked
-  up and before any socket is opened, so it can never surface later out of a background reconnection;
-  `connect()` is an `async function`, so it arrives as a rejected promise and not as a synchronous
-  throw. The message names `muxws/node` as the entry point that can dial it — the platform's own
-  parsers reject the scheme too, but with prose that names neither this library nor the import that
-  would have worked. A `TransportUnsupportedError`, because nothing is wrong with the URL: this build
-  simply has no filesystem transport in it (WSM-API-022).
+  `Peer` constructor runs after the dial; the socket is open at that point and is not closed.
+- `UnixSocketsUnsupportedError` — the URL's scheme is `ws+unix:` (compared case-insensitively, after
+  trimming leading whitespace). Rejected before the codec lookup and before any socket is opened.
+  `connect()` is an `async function`, so the error arrives as a rejected promise, not as a synchronous
+  throw. The message names `muxws/node` as the entry point that dials this scheme; the platform's own
+  URL parsers also reject the scheme, with a message that names neither. A `TransportUnsupportedError`:
+  the URL is valid, and this entry point has no filesystem transport (WSM-API-022).
 - Whatever the underlying `WebSocket` failed with. An unreachable host surfaces as the platform's own
   error, and so does a **malformed URL**: the platform's constructor throws a `DOMException` named
   `SyntaxError` (`The URL 'nonsense' is invalid.` under jsdom, `TypeError: Invalid URL` under undici),
-  which is not a `MuxwsError`. This is the only entry point where that is true of every bad address.
-  `muxws/node` frames all of its own, and Python frames every one its parsers reach — the exception
-  there is an unbalanced `[` in the authority (`ws://[::1`), which `urllib.parse.urlsplit` refuses
-  ahead of both checks, so it leaves Python's `connect()` as a bare `ValueError`.
+  which is not a `MuxwsError`. This entry point wraps no URL error. `muxws/node` wraps them in
+  `WsUrlError`, and Python's `connect()` wraps them in `WebsocketUrlError` except for an unbalanced `[`
+  in the authority (`ws://[::1`), which `urllib.parse.urlsplit` rejects as a bare `ValueError`.
 
 `UnixSocketsUnsupportedError` is exported from `muxws`, the entry point that ships this transport, and
 from nowhere else; `TransportUrlError` and `TransportUnsupportedError` are the root-exported bases to
 catch when the concrete class does not matter.
 
-**A failed first attempt rejects whatever `reconnect` says**, for the reason the Python entry gives.
+**The first attempt is not retried**, for every `reconnect` value; its failure rejects the promise.
 
 ### Example
 
@@ -252,7 +249,7 @@ import { connect, JsonCodec, registerCodec, type Stream } from 'muxws';
 import { accept, handleProtocols, refuseMismatchedUpgrade } from 'muxws/node';
 import { WebSocketServer } from 'ws';
 
-// `muxws/node` registers no codec of its own; importing `muxws` is what ships JSON registered.
+// `muxws/node` registers no codec; importing `muxws` registers JSON.
 registerCodec('json', new JsonCodec());
 
 const server = refuseMismatchedUpgrade(new WebSocketServer({ port: 0, handleProtocols }));
@@ -279,7 +276,8 @@ server.close();
 
 ## `connect()` (TypeScript, `muxws/node`)
 
-The same contract over the `ws` package, and the only one of the two that can set handshake headers.
+Dial `url` over the `ws` package and return a serving peer. The behaviour is that of the browser
+`connect()`, with two additions: handshake headers, and `ws+unix://` URLs.
 
 ### Signature
 
@@ -291,7 +289,7 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `url` | `string` | required | The WebSocket URL to dial, over the `ws` package - including `ws+unix://<socket path>:<request target>`, whose path and query are split on the **first** colon, exactly as in Python, and whose authority becomes the `Host` header (`localhost` when there is none). `ws` splits on every colon, so `muxws/node` parses the scheme itself and hands `ws` the synthesised `ws://` URL; see [Unix domain sockets](../guide/transports.md#unix-domain-sockets). An `http://` or `https://` URL is dialled, `ws` having upgraded it to `ws:`/`wss:`. |
+| `url` | `string` | required | The WebSocket URL to dial, over the `ws` package - including `ws+unix://<socket path>:<request target>`, whose path and query are split on the **first** colon, exactly as in Python, and whose authority becomes the `Host` header (`localhost` when there is none). `ws` splits on every colon, so `muxws/node` parses the scheme itself and passes `ws` the synthesised `ws://` URL; see [Unix domain sockets](../guide/transports.md#unix-domain-sockets). An `http://` or `https://` URL is converted to `ws:`/`wss:` by `ws` and dialled. |
 | `options` | `NodeConnectOptions` | `{}` | `ConnectOptions` plus `headers`. See [`NodeConnectOptions`](#nodeconnectoptions-typescript). |
 
 ### Return
@@ -305,23 +303,21 @@ The same set as the browser `connect()`, plus:
 - `Error` with the message `unexpected server response: <status>` — the upgrade was answered with a
   status other than 101 and other than the 400 that means a refused muxws handshake.
 - A `ws` transport error — an unreachable host, a TLS failure, a socket reset during the upgrade.
-  Propagated untouched: a dial that failed is not an address that could not be read.
+  Propagated unchanged, not wrapped in a `TransportUrlError`.
 - `SyntaxError` from `ws` — `An invalid or duplicated subprotocol was specified`, for a `subprotocols`
-  entry that is not a valid HTTP token. It is not a `MuxwsError`: `ws`'s own throw is rethrown
-  untouched, because the URL was fine. Python's twin raises `ValueError: invalid subprotocol: …`.
+  entry that is not a valid HTTP token. Rethrown unchanged, because the URL itself is valid; it is not
+  a `MuxwsError`. Python's `connect()` raises `ValueError: invalid subprotocol: …` for the same input.
 - `UnixUrlError` — a `ws+unix://` URL this module's grammar refuses: a request target that does not
-  begin with `/`, a URL naming no socket file, or `wss+unix://`. Rejected before the dial, because a
-  relative target is folded into the authority instead: `…/a.sock:ws` synthesises `ws://localhostws`,
-  a valid URL, so the dial opens the right file and asks for `/`, and against an acceptor that does
-  not route on the target the handshake succeeds. Named identically to the Python twin,
-  `muxws.transports.unix.UnixUrlError`; both are `TransportUrlError`s.
+  begin with `/`, a URL naming no socket file, or `wss+unix://`. Rejected before the dial. Without
+  this check a relative target would be appended to the authority: `…/a.sock:ws` would synthesise
+  `ws://localhostws`, a valid URL, and the dial would open the socket file and request `/` instead of
+  the given target. The Python class has the same name, `muxws.transports.unix.UnixUrlError`; both
+  are `TransportUrlError`s.
 - `WsUrlError` — a URL `ws` itself cannot parse. A `TransportUrlError` framing `ws`'s own
   `SyntaxError: Invalid URL: …`, which is kept on `cause`.
 - `WsNotInstalledError` — the optional peer dependency `ws` is not installed. A
-  `TransportUnsupportedError` whose message names `npm install ws`, in place of the
-  `ERR_MODULE_NOT_FOUND` that would otherwise name a file inside `node_modules` and no remedy. An
-  import failure that is *not* the package being absent is rethrown untouched, so a broken install is
-  never reported as a missing one.
+  `TransportUnsupportedError` whose message contains `npm install ws`, raised in place of Node's
+  `ERR_MODULE_NOT_FOUND`. Any other failure to import `ws` is rethrown unchanged.
 
 `ws` is an optional peer dependency imported inside the dial closure, so `accept()` and
 `handleProtocols()` keep working in a process that never dials; only a dial needs it, and only a dial
@@ -393,7 +389,7 @@ export interface ConnectOptions {
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `hello` | `unknown` | none sent | The opening payload replayed verbatim on every connection. Deep-copied in at `connect()` and deep-copied out for every send, so neither your object nor the codec's can change a later replay. A value `structuredClone` refuses is rejected here rather than three hours into a reconnect storm. |
+| `hello` | `unknown` | none sent | The opening payload replayed verbatim on every connection. Deep-copied in at `connect()` and deep-copied out for every send, so neither your object nor the codec's can change a later replay. A value `structuredClone` cannot copy makes `connect()` reject with the `structuredClone` error. |
 | `helloHeaders` | `Record<string, unknown>` | none | Headers on the hello's `open` frame, captured the same way. Supplying `hello` or `helloHeaders` makes the peer hello-configured. |
 | `reconnect` | `Reconnect` | `new Reconnect()` | The backoff schedule. |
 | `pingIntervalMs` | `number` — milliseconds | `20_000` | Idle time before the heartbeat sends a `ping` frame. `0` or less disables the heartbeat. |
@@ -401,7 +397,7 @@ export interface ConnectOptions {
 | `helloTimeoutMs` | `number` — milliseconds | `10_000` | How long the hello may go unacknowledged before the attempt fails. |
 | `codec` | `Codec` | `getCodec(settings.codec)` | An explicit codec, which wins over the configured name. |
 | `onStream` | `StreamHandler` | none | Registered **before** the hello goes out, so an acceptor pushing a stream at the hello is not answered `reset(REFUSED)`. |
-| `onClose` | `(reason: CloseReason) => void` | none | Registered **after** the first connection stands, which is what makes a failed `connect()` report itself exactly once, through the rejection. |
+| `onClose` | `(reason: CloseReason) => void` | none | Registered **after** the first connection is established, so it is not called when `connect()` rejects. |
 | `onReconnect` | `(attempt: number, peer: Peer) => void` | none | Fires once per re-established connection, after the hello acknowledgement. |
 | `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) before the hello goes out. The hello itself does not pass through them. |
 | `replyHeadersInterceptors` | `readonly ReplyHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript) before the hello goes out. |
@@ -444,7 +440,7 @@ console.log(options.pingIntervalMs, options.reconnect?.maxDelayMs);
 
 ## `NodeConnectOptions` (TypeScript)
 
-`ConnectOptions` plus the one field only Node can honour.
+`ConnectOptions` plus `headers`, which only the `ws` dial can send.
 
 ### Signature
 
@@ -458,7 +454,7 @@ export interface NodeConnectOptions extends ConnectOptions {
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `headers` | `Record<string, string>` | none | HTTP headers for the upgrade request, handed to `new WebSocket(url, protocols, { headers })`. Authentication belongs here - at the upgrade - and not in the hello. |
+| `headers` | `Record<string, string>` | none | HTTP headers for the upgrade request, handed to `new WebSocket(url, protocols, { headers })`. Credentials go here, not in the hello. |
 | *(inherited)* | `ConnectOptions` | — | Every field of [`ConnectOptions`](#connectoptions-typescript), unchanged. |
 
 ### Return

@@ -4,21 +4,19 @@ outline: deep
 
 # Reconnect
 
-The reconnect helper is **dialer-only**. An acceptor cannot dial, so it has none: over there a
-reconnection is simply a new connection with a new `Peer`.
-
-Four things about it, before the tables:
+The reconnect helper is **dialer-only**. An acceptor cannot dial and has no reconnect helper; on the
+acceptor's side a reconnection is a new connection with a new `Peer`.
 
 - **`connect()` raises when the first attempt fails**, whatever is configured here. Reconnection
-  covers connections that were established and then lost. A peer that retried its first dial forever
-  would turn a typo in the URL into silence.
-- **The attempt counter resets only on an *established* connection** - the socket open with the
-  subprotocol accepted, *and* the hello acknowledged. Resetting it when the socket opened would turn
-  exponential backoff into a fixed-interval hammer against a server that accepts sockets while its
-  backend is down.
+  applies only to connections that were established and then lost. If the first dial were retried, a
+  typo in the URL would produce no error.
+- **The attempt counter resets only on an *established* connection**: the socket is open with the
+  subprotocol accepted, *and* the hello is acknowledged. If the counter reset when the socket opened,
+  a server that accepts sockets while its backend is down would be redialled at a fixed interval
+  instead of with exponential backoff.
 - **A reconnect restores a live socket and an accepted identity, and nothing else.** No stream
   survives, nothing is replayed, the stream id space starts empty, and `tags` start empty on the
-  acceptor's side, because over there this is a whole new `Peer`.
+  acceptor's side, where the connection has a new `Peer`.
 - **Durations are seconds as floats in Python and milliseconds as integers in TypeScript.**
   `Reconnect(initial_delay=0.25)` and `new Reconnect({ initialDelayMs: 250 })` are the same schedule.
 
@@ -29,13 +27,13 @@ delay = min(initial_delay * factor ** attempts, max_delay)
 delay = delay * (1 + uniform(-jitter, +jitter))
 ```
 
-Jitter is applied to **every** computed delay, including the capped ones: without it, N peers whose
-sockets died at the same instant retry at the same instant, and a server coming back up is knocked
-over by the reconnection rather than by the load.
+Jitter is applied to **every** computed delay, including the capped ones. Without jitter, peers whose
+sockets closed at the same instant retry at the same instant, and a restarting server receives all
+their reconnections at once.
 
 ## `Reconnect` (Python)
 
-The backoff options, and the whole of what an application configures.
+The backoff options. These are the only reconnect settings an application configures.
 
 ### Signature
 
@@ -56,24 +54,23 @@ class Reconnect:
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `initial_delay` | `float` — seconds | `0.25` | The unjittered delay before the first retry, in seconds. Every later delay is this multiplied by `factor` for each failed attempt. |
-| `factor` | `float` | `2.0` | The multiplier per failed attempt. `1.0` gives a fixed interval; below 1 is a schedule that shrinks and is rejected. |
+| `factor` | `float` | `2.0` | The multiplier per failed attempt. `1.0` gives a fixed interval; a value below 1 is rejected. |
 | `max_delay` | `float` — seconds | `30.0` | The ceiling on the unjittered delay, in seconds. Jitter is still applied after the cap, so capped retries stay dispersed. |
-| `jitter` | `float` | `0.3` | The dispersion, as a fraction between 0 and 1: the delay is multiplied by `1 + uniform(-jitter, +jitter)`. `0` disables it - and means every peer that lost its socket at the same instant retries at the same instant. |
+| `jitter` | `float` | `0.3` | The dispersion, as a fraction between 0 and 1: the delay is multiplied by `1 + uniform(-jitter, +jitter)`. `0` disables jitter, so peers that lost their sockets at the same instant retry at the same instant. |
 | `max_attempts` | `int \| None` | `None` | How many consecutive failed attempts before the helper gives up. `None` is unlimited. Exhausting it fires `on_close` exactly once with `will_retry` false and never dials again; `0` gives up without dialling at all. |
 
 ### Return
 
-An immutable `Reconnect` instance. It is frozen, so a schedule cannot be edited under a running
-helper; build a new one instead.
+An immutable `Reconnect` instance. It is frozen, so a running helper's schedule cannot be changed;
+construct a new instance instead.
 
 ### Raises
 
 - `ValueError` — `initial_delay` is not greater than zero, `factor` is below 1, or `jitter` is
-  outside the range 0 to 1. Validated at construction, where the mistake was made, rather than a week
-  later when a shrinking schedule reads as a flaky server.
+  outside the range 0 to 1. Validated at construction.
 
-`max_delay` and `max_attempts` are **not** validated: a `max_delay` below `initial_delay` simply caps
-every delay at `max_delay`, and a negative `max_attempts` behaves as 0.
+`max_delay` and `max_attempts` are **not** validated: a `max_delay` below `initial_delay` caps every
+delay at `max_delay`, and a negative `max_attempts` behaves as 0.
 
 ### Example
 
@@ -101,8 +98,8 @@ asyncio.run(main())
 
 ## `Reconnect` (TypeScript)
 
-A class rather than a bare interface, so the defaults live in one place and the three impossible
-configurations are rejected where they are written.
+A class rather than an interface, so the defaults are defined in one place and the three invalid
+configurations are rejected at construction.
 
 ### Signature
 
@@ -127,7 +124,7 @@ export class Reconnect {
 | `factor` | `number` | `2` | The multiplier per failed attempt. |
 | `maxDelayMs` | `number` — milliseconds | `30_000` | The ceiling on the unjittered delay, in milliseconds. Jitter is applied after the cap. |
 | `jitter` | `number` | `0.3` | The dispersion as a fraction between 0 and 1. |
-| `maxAttempts` | `number` | `Infinity` | How many consecutive failed attempts before giving up. `Infinity` is unlimited - Python spells the same thing `None`. |
+| `maxAttempts` | `number` | `Infinity` | How many consecutive failed attempts before giving up. `Infinity` is unlimited; Python uses `None`. |
 
 ### Return
 
@@ -136,8 +133,8 @@ A `Reconnect` instance whose five fields are `readonly`.
 ### Raises
 
 - `Error` — `initialDelayMs` is not greater than zero, `factor` is below 1, or `jitter` is outside 0
-  to 1. A plain `Error` and deliberately not a muxws error class: this is a programming mistake, not
-  a protocol or connection failure.
+  to 1. A plain `Error`, not a muxws error class, because it is a configuration error, not a protocol
+  or connection failure.
 
 ### Example
 
@@ -161,8 +158,7 @@ console.log('unlimited by default:', new Reconnect().maxAttempts);
 
 ## `ReconnectOptions` (TypeScript)
 
-The shape a caller may pass to `new Reconnect()`. Every field has a default, so `new Reconnect()` is
-the whole API.
+The options object of `new Reconnect()`. Every field is optional and has a default.
 
 ### Signature
 
@@ -188,7 +184,7 @@ export interface ReconnectOptions {
 
 ### Return
 
-None — `ReconnectOptions` is an interface, not a call.
+None: `ReconnectOptions` is an interface, not a call.
 
 ### Raises
 
@@ -209,19 +205,18 @@ console.log(new Reconnect({}).initialDelayMs, 'milliseconds by default');
 
 ## `Hello` (Python)
 
-The opening payload replayed on every connection this peer ever makes.
+The opening payload sent on every connection this peer makes.
 
-`connect(hello=..., hello_headers=...)` builds one for you; it is exported so an application can
-construct and inspect one. The point of the type is that the payload is **captured once, by value**:
-it is deep-copied in at construction and deep-copied out again for every replay, so neither your own
-later mutation nor anything the codec does to one send can change what the next connection sends.
+`connect(hello=..., hello_headers=...)` constructs one; the class is exported so an application can
+construct and inspect one. The payload is **captured once, by value**: it is deep-copied at
+construction and deep-copied again for every replay, so neither a later mutation of the
+application's object nor anything the codec does to one send changes what the next connection sends.
 
 The hello is an ordinary `open(payload, headers=..., end=True)`. Nothing marks it on the wire, and
-the acceptor's ordinary `on_stream` handler sees it exactly as it sees any other stream. The
-acknowledgement is that handler **returning**, which ends the stream implicitly - no application code
-is required to send one.
+the acceptor's `on_stream` handler receives it like any other stream. The acknowledgement is that
+handler **returning**, which ends the stream implicitly; no application code sends it.
 
-A credential must not be carried here: authentication is a handshake concern.
+A credential must not be carried in the hello: authentication belongs to the handshake.
 
 ### Signature
 
@@ -231,8 +226,8 @@ class Hello:
     payload: Any = None
     headers: dict[str, Any] | None = None
     timeout: float = 10.0
-    #: The capture. Never read by an application, never re-read from `payload`: the copy taken here
-    #: is the only thing that ever reaches the wire.
+    #: The copies taken at construction. Only these reach the wire; `payload` and `headers` are not
+    #: read again.
     _captured_payload: Any = field(init=False, repr=False, compare=False, default=None)
     _captured_headers: dict[str, Any] | None = field(init=False, repr=False, compare=False, default=None)
 ```
@@ -243,12 +238,12 @@ class Hello:
 |---|---|---|---|
 | `payload` | `Any` | `None` | The hello payload, deep-copied at construction. |
 | `headers` | `dict[str, Any] \| None` | `None` | Headers for the hello's `open` frame, deep-copied at construction. |
-| `timeout` | `float` — seconds | `10.0` | How long, in seconds, the hello may go unacknowledged before the attempt is failed. On the first connection that failure is what `connect()` raises; on a later one it is a failed attempt, and the counter climbs. |
-| `_captured_payload` | `Any` | `None` | Not passed by a caller: `init=False`. The deep copy taken at construction, and the only thing that ever reaches the wire. |
+| `timeout` | `float` — seconds | `10.0` | How long, in seconds, the hello may go unacknowledged before the attempt fails. On the first connection `connect()` raises that failure; on a later one it counts as a failed attempt and increments the counter. |
+| `_captured_payload` | `Any` | `None` | Not passed by a caller (`init=False`). The deep copy taken at construction; the only payload value sent on the wire. |
 | `_captured_headers` | `dict[str, Any] \| None` | `None` | The same for the headers. |
 
-Three read-only properties come with it: `configured` (true when a payload or headers were given -
-a peer given no hello sends none and is established as soon as its socket is), `payload_for_wire` and
+It has three read-only properties: `configured` (true when a payload or headers were given; a peer
+with no hello sends none and is established when its socket opens), `payload_for_wire` and
 `headers_for_wire`, each returning a **fresh** copy per read.
 
 ### Return
@@ -257,9 +252,8 @@ An immutable `Hello`.
 
 ### Raises
 
-- Whatever `copy.deepcopy` raises for a value that cannot be copied - a `TypeError` for a payload
-  holding something like a socket or a lock. It surfaces here, at construction, rather than as an
-  unreplayable hello three hours into a reconnect storm.
+- Whatever `copy.deepcopy` raises for a value that cannot be copied, for example a `TypeError` for a
+  payload holding a socket or a lock. It is raised at construction, not during a later reconnect.
 
 ### Example
 
@@ -287,7 +281,7 @@ asyncio.run(main())
 
 ## `Hello` (TypeScript)
 
-The same contract, with `structuredClone` where Python uses `copy.deepcopy`.
+The same contract as the Python class, with `structuredClone` in place of `copy.deepcopy`.
 
 ### Signature
 
@@ -311,15 +305,16 @@ export class Hello {
 
 ### Return
 
-A `Hello`. `configured` is true when a payload or headers were given; `payloadForWire()` and
-`headersForWire()` each return a **fresh** deep copy per call, so the object one connection handed to
-the codec can never be the object the next connection sends.
+A `Hello`. `configured` is true when a payload or headers were given. `payloadForWire()` and
+`headersForWire()` each return a **fresh** deep copy per call, so the object passed to the codec on
+one connection is never the object the next connection sends. `headersForWire()` returns `undefined`
+when no headers were given.
 
 ### Raises
 
-- `DataCloneError` — `structuredClone` refuses the payload or the headers: a function, a class
-  instance with methods, a `Symbol`. It throws at construction, which is where the application can
-  still see it.
+- `DataCloneError` — `structuredClone` cannot copy the payload or the headers, for example a
+  function or a `Symbol`, or an object that contains one. Thrown at construction, not during a later
+  reconnect. A class instance does not throw; it is copied as a plain object without its prototype.
 
 ### Example
 
@@ -367,7 +362,7 @@ export interface HelloOptions {
 
 ### Return
 
-None — `HelloOptions` is an interface, not a call.
+None: `HelloOptions` is an interface, not a call.
 
 ### Raises
 
@@ -388,7 +383,7 @@ console.log(new Hello(none).configured, new Hello(none).timeoutMs, 'milliseconds
 ## `backoff_delay()` (Python)
 
 The delay before retry number `attempts`, jittered. The helper calls it; it is exported so an
-operator can answer "when will it try again" without reading the source.
+application can compute when the next retry will happen.
 
 ### Signature
 
@@ -402,11 +397,11 @@ def backoff_delay(attempts: int, options: Reconnect, draw: RandomDraw = _uniform
 |---|---|---|---|
 | `attempts` | `int` | required | How many consecutive attempts have already failed. `0` is the first retry after a loss. |
 | `options` | `Reconnect` | required | The schedule to compute from. |
-| `draw` | `RandomDraw` | `_uniform` | A callable returning a float in the range -1 to 1, the jitter draw. Injected so the schedule can be tested as the pure function it is rather than sampled and hoped about. The default uses `random`, deliberately and not `secrets`: jitter disperses a thundering herd, it does not resist an adversary. |
+| `draw` | `RandomDraw` | `_uniform` | A callable returning a float in the range -1 to 1, the jitter draw. Injectable, so the schedule can be tested as a pure function. The default uses `random`, not `secrets`: jitter spreads reconnects over time and has no security function. |
 
 ### Return
 
-`float` — the delay in **seconds**, never negative: the jittered value is clamped at zero.
+`float`: the delay in **seconds**, never negative; the jittered value is clamped at zero.
 
 ### Raises
 
@@ -451,11 +446,11 @@ export function backoffDelay(attempts: number, options: Reconnect, draw: RandomD
 |---|---|---|---|
 | `attempts` | `number` | required | How many consecutive attempts have already failed. |
 | `options` | `Reconnect` | required | The schedule to compute from. |
-| `draw` | `RandomDraw` | `uniform` | A callable returning a number in the range -1 to 1. The default is built on `Math.random`, deliberately and not on `crypto.getRandomValues`. |
+| `draw` | `RandomDraw` | `uniform` | A callable returning a number in the range -1 to 1. The default uses `Math.random`, not `crypto.getRandomValues`. |
 
 ### Return
 
-`number` — the delay in **milliseconds**, clamped at zero.
+`number`: the delay in **milliseconds**, clamped at zero.
 
 ### Raises
 
@@ -482,7 +477,7 @@ try {
 
 ## `unjittered_delay()` (Python)
 
-The schedule before jitter and after the cap: the half that is exactly predictable.
+The delay before jitter and after the cap. It is deterministic.
 
 ### Signature
 
@@ -499,11 +494,12 @@ def unjittered_delay(attempts: int, options: Reconnect) -> float:
 
 ### Return
 
-`float` — `min(initial_delay * factor ** attempts, max_delay)`, in **seconds**.
+`float`: `min(initial_delay * factor ** attempts, max_delay)`, in **seconds**. When
+`factor ** attempts` overflows the float range, the result is `max_delay`.
 
 ### Raises
 
-Raises: nothing. Unlike `backoff_delay`, it does not check `attempts`: a negative value simply produces a
+Raises: nothing. Unlike `backoff_delay`, it does not check `attempts`: a negative value produces a
 delay smaller than `initial_delay`.
 
 ### Example
@@ -540,7 +536,7 @@ export function unjitteredDelay(attempts: number, options: Reconnect): number;
 
 ### Return
 
-`number` — `min(initialDelayMs * factor ** attempts, maxDelayMs)`, in **milliseconds**.
+`number`: `min(initialDelayMs * factor ** attempts, maxDelayMs)`, in **milliseconds**.
 
 ### Raises
 
@@ -558,8 +554,8 @@ console.log('the cap holds:', unjitteredDelay(50, schedule), 'milliseconds');
 
 ## `should_retry()` (Python)
 
-Whether another attempt is allowed. The helper asks this, and only this, before every dial - never a
-mutable field on the peer, so the cap is enforced by the schedule's own arithmetic.
+Whether another attempt is allowed. The helper calls it before every dial; the attempt limit is
+computed from the attempt count and the schedule, not stored on the peer.
 
 ### Signature
 
@@ -576,8 +572,8 @@ def should_retry(attempts: int, options: Reconnect) -> bool:
 
 ### Return
 
-`bool` — `True` while `max_attempts` is `None` or `attempts` is below it. When it turns `False` the
-helper fires `on_close` once with `will_retry` false and never dials again.
+`bool`: `True` while `max_attempts` is `None` or `attempts` is below it. When it returns `False`, the
+helper fires `on_close` once with `will_retry` false and does not dial again.
 
 ### Raises
 
@@ -619,7 +615,7 @@ export function shouldRetry(attempts: number, options: Reconnect): boolean;
 
 ### Return
 
-`boolean` — `attempts < options.maxAttempts`, which is always true for the default `Infinity`.
+`boolean`: `attempts < options.maxAttempts`, which is always true for the default `Infinity`.
 
 ### Raises
 
@@ -639,7 +635,7 @@ console.log('maxAttempts 0 never dials:', shouldRetry(0, new Reconnect({ maxAtte
 
 ## See also
 
-- [`connect()`](./connect.md) — where a `Reconnect` and a hello are handed over, and why a failed
-  first attempt raises.
+- [`connect()`](./connect.md) — where a `Reconnect` and a hello are passed, and why a failed first
+  attempt raises.
 - [`Peer`](./peer.md) — `on_reconnect`, `on_close` and `peer.id`, which changes on every new socket.
 - [Errors](./errors.md) — `StreamTimeout` and `StreamRefused`, the two ways a hello fails.

@@ -1,27 +1,25 @@
-"""The counting half of one cell. Answers the dialer with what arrived; stdout stays empty.
+"""The counting end of one cell. Reports to the dialer how many payloads arrived; writes nothing to stdout.
 
     python -m demo.bench.acceptor --mode M --transport T --codec C --address A
 
-One process per cell, started by `demo.bench.run_matrix`, killed by it when the dialer has reported.
-`ACCEPTOR_READY` goes to stderr the moment the address is bound, and it is the only thing this
-process writes on a run that works. Its parent waits for that line rather than for the address to
-answer: a port picked as free a moment earlier can be taken by anything, and a probe that accepts any
-answer would hand the dialer a foreign server to measure.
+One process per cell, started by `demo.bench.run_matrix` and terminated by it after the dialer has
+reported. `ACCEPTOR_READY` is written to stderr once the address is bound; on success nothing else is
+written. The parent waits for that line instead of probing the address, because another process can
+bind a port between its selection and this process binding it.
 
-Each mode carries its own termination handshake, because the clock the dialer keeps has to include
-draining and can only be stopped by an answer from this end:
+Each mode has its own termination handshake. The dialer's clock includes draining, so it stops only
+on a reply from this end:
 
     raw-socket      a zero-length frame ends the run; the count goes back as 8 big-endian bytes
     raw-websocket   the sentinel message ends the run; the count goes back as text
     muxws           the dialer ends its stream; the handler, having iterated it to the end, sends
                     the count on that same stream and ends it
 
-Every count is per connection, and per stream under muxws: the dialer adds them up. Nothing here is
-shared between connections, so a cell with twenty of them needs no coordination and no lock.
+Every count is per connection, and per stream under muxws; the dialer sums them. No state is shared
+between connections, so a cell with twenty connections needs no locking.
 
-`compression=None`: with permessage-deflate negotiated the two WebSocket modes would be compressing
-padding that the raw-socket mode sends verbatim, and the table would report how compressible the
-padding is as a property of muxws.
+`compression=None`: with permessage-deflate the two WebSocket modes would compress padding that the
+raw-socket mode sends uncompressed.
 """
 
 from __future__ import annotations
@@ -46,31 +44,28 @@ from demo.bench import (
     TRANSPORTS,
 )
 
-#: The parent reads the first line this process writes as the answer to whether it bound, and
-#: everything after it as the reason a cell failed. Silenced so that a library log line can be
-#: neither of those.
+#: The parent reads this process's first output line as the ready signal and the rest as the failure
+#: reason, so library log output is suppressed.
 _QUIET = logging.CRITICAL
 
 
 class FramedCounter(asyncio.Protocol):
     """One raw-socket connection: length-prefixed payloads counted as their bytes arrive.
 
-    Only the boundaries are tracked; the payload bytes are counted and dropped. A reader that
-    reassembled each payload - `StreamReader.readexactly`, the obvious way to write this - copies it
-    out of a buffer that the transport keeps pausing, and above about 64 KiB that copy costs several
-    times what the socket does. This mode is the denominator the other two are measured against, so a
-    baseline spending its time in a buffer would measure the buffer and land under the WebSocket mode
-    it exists to bound.
+    Only frame boundaries are tracked; payload bytes are counted and discarded. Reassembling each
+    payload (for example with `StreamReader.readexactly`) copies it out of a buffer, and above about
+    64 KiB that copy costs more than the socket transfer, so the baseline would be slower than the
+    WebSocket mode.
 
-    A zero-length frame ends the run and the count goes back as `COUNT_BYTES` big-endian bytes. A
-    dialer that goes away without terminating is answered by nobody, which is what the parent's
-    teardown does to every acceptor it started.
+    A zero-length frame ends the run and the count is sent back as `COUNT_BYTES` big-endian bytes. A
+    dialer that disconnects without the terminating frame gets no reply; the parent terminates the
+    acceptor in either case.
     """
 
     def __init__(self) -> None:
         self._transport: asyncio.Transport | None = None
         self._count = 0
-        #: Payload bytes still owed to the frame being read, and the prefix bytes of the next one.
+        #: Payload bytes still to read for the current frame, and the prefix bytes read for the next one.
         self._remaining = 0
         self._header = b""
 
@@ -87,7 +82,7 @@ class FramedCounter(asyncio.Protocol):
                 if not self._remaining:
                     self._count += 1
                 continue
-            # One `data_received` can split a prefix, so it is accumulated rather than assumed whole.
+            # A prefix can be split across `data_received` calls, so it is accumulated.
             wanted = LENGTH_PREFIX_BYTES - len(self._header)
             self._header += bytes(view[:wanted])
             view = view[wanted:]
@@ -113,11 +108,11 @@ async def count_messages(connection: Any) -> None:
 async def count_stream(payload: Any, stream: Any) -> None:
     """One muxws stream: the opening payload, then every payload until the dialer ends it.
 
-    The answer goes back on the same stream, which is what the dialer is awaiting: `open()` carried a
-    payload, so the first thing this handler sees is already message number one.
+    The count is sent back on the same stream, where the dialer awaits it. `open()` carries a
+    payload, so the opening payload counts as message one.
 
-    A probe is the round-trip shape. `peer.request()` puts its `end` on the open frame itself, so
-    that stream's whole content is the payload already in hand and there is nothing to iterate.
+    A probe is a round-trip request. `peer.request()` sets `end` on the open frame, so the opening
+    payload is the stream's whole content and there is nothing to iterate.
     """
     if isinstance(payload, dict) and payload.get("probe"):
         await stream.reply({"count": 1})
@@ -130,7 +125,7 @@ async def count_stream(payload: Any, stream: Any) -> None:
 
 
 async def serve_framed(transport: str, address: str) -> None:
-    """A socket and a length prefix, no WebSocket anywhere: the denominator for the other two."""
+    """Serve a plain socket with a length prefix and no WebSocket; the baseline for the other modes."""
     loop = asyncio.get_running_loop()
     if transport == "unix":
         server = await loop.create_unix_server(FramedCounter, address)
@@ -156,11 +151,10 @@ async def serve_websocket(transport: str, address: str, handler: Any, **options:
 
 
 async def serve_until_stopped() -> None:
-    """Say the address is bound, then serve until the parent ends this process.
+    """Report that the address is bound, then serve until the parent terminates this process.
 
-    The line is what `run_matrix` waits on, and it is written only from inside a bound server's
-    context, so a parent that has read it knows the dialer's peer is this process and not whatever
-    else the port was handed to.
+    `run_matrix` waits for this line. It is written only inside a bound server's context, so after
+    reading it the parent knows that this process holds the address.
     """
     print(ACCEPTOR_READY, file=sys.stderr, flush=True)
     await asyncio.Future()

@@ -1,8 +1,7 @@
 /**
  * The round-robin writer and the one-unsent-fragment rule (§4.2).
  *
- * A mirror of `muxws/writer_test.py`, test for test. The two suites assert the same thirteen things
- * because the two writers must make the same thirteen promises.
+ * Mirrors `muxws/writer_test.py` test for test; both suites make the same assertions.
  */
 
 import { readFileSync } from 'node:fs';
@@ -26,11 +25,11 @@ function big(size = 4000): Record<string, unknown> {
 }
 
 /**
- * The two members `writer_test.py` reaches for through Python's underscore convention.
+ * The two private members `writer_test.py` accesses through Python's underscore convention.
  *
- * `rotate` is one turn of the rotation by hand - the peer drives the writer through `nextFrame`, but
- * a test that wants to watch the *order* has to step it. `queues` is how the retirement test sees
- * that a spent lane left nothing behind.
+ * `rotate` performs one step of the rotation. The peer drives the writer through `nextFrame`; tests
+ * that check the order step it directly. `queues` lets the retirement test check that a finished
+ * lane is removed.
  */
 interface WriterInternals {
   rotate(): Frame | null;
@@ -90,19 +89,19 @@ describe('the writer', () => {
   });
 
   /**
-   * WSM-INV-004, the reason all of this exists.
+   * WSM-INV-004, the invariant the round-robin writer provides.
    *
    * A 200-byte update on one stream must not wait for a megabyte on another. Without the rotation it
-   * would go out last; with it, it goes out on the second turn.
+   * is sent last; with it, it is sent on the second turn.
    */
-  it('lets a small frame overtake a fragmented payload - WSM-INV-004', () => {
+  it('sends a small frame before a fragmented payload completes - WSM-INV-004', () => {
     const writer = makeWriter();
     writer.enqueue({ type: 'data', stream: 1, payload: big(40_000) });
     writer.enqueue({ type: 'data', stream: 3, payload: { progress: 42 } });
 
     const order = drain(writer, 40).map((frame) => frame.stream);
     expect(order.indexOf(3)).toBeLessThanOrEqual(2);
-    // The big payload must still be fragmenting when the small one lands.
+    // Fragments of the large payload remain after the small frame is sent.
     expect(order.filter((streamId) => streamId === 1).length).toBeGreaterThan(10);
   });
 
@@ -138,7 +137,7 @@ describe('the writer', () => {
     );
   });
 
-  it('makes connection-level frames take their turn', () => {
+  it('includes connection-level frames in the rotation', () => {
     const writer = makeWriter();
     writer.enqueue({ type: 'data', stream: 1, payload: big(20_000) });
     writer.enqueue({ type: 'ping', nonce: 'abc' });
@@ -147,11 +146,11 @@ describe('the writer', () => {
     expect(order.indexOf('ping')).toBeLessThanOrEqual(2);
   });
 
-  /** WSM-FRG-019 spelled as a source check: the ordering decision is not made at enqueue time. */
+  /** WSM-FRG-019 as a source check: the ordering decision is not made at enqueue time. */
   it('has no FIFO of frames anywhere in the send path - WSM-FRG-019', () => {
     const source = readFileSync(join(process.cwd(), 'ts', 'writer.ts'), 'utf8');
-    // A single array of *frames* spanning streams is exactly what the rule forbids. The per-stream
-    // `waiting` array is fine and necessary - contiguity (WSM-FRG-017) requires it.
+    // The rule forbids a single array of frames spanning streams. The per-stream `waiting` array is
+    // allowed and required for contiguity (WSM-FRG-017).
     const marker = 'Frame[]';
     expect(source).toContain(marker);
     expect(source.split(marker).length - 1).toBe(1);
@@ -207,7 +206,7 @@ describe('the writer', () => {
 });
 
 describe('a stream queue', () => {
-  it('holds one prepared fragment - the rule as a unit, without a writer around it', () => {
+  it('holds one prepared fragment, tested without a writer', () => {
     const queue = new StreamQueue(1);
     queue.put({ type: 'data', stream: 1, payload: big() });
 
@@ -224,9 +223,9 @@ describe('a stream queue', () => {
 
 describe('the peer actually uses the writer', () => {
   /**
-   * The rotation has to be on the peer's send path, not merely implemented in `ts/writer.ts`: a peer
+   * The rotation must be on the peer's send path, not only implemented in `ts/writer.ts`: a peer
    * that queued its own frames FIFO would pass every test above and still serialise the streams.
-   * Only an end-to-end run observes which of the two orders reaches the socket.
+   * Only an end-to-end run shows which order reaches the socket.
    */
   it('interleaves a small frame with a fragmenting one, end to end - WSM-INV-004', async () => {
     const codec = new JsonCodec();
@@ -263,12 +262,12 @@ describe('the peer actually uses the writer', () => {
 });
 
 describe('WSM-INV-004 on a fast socket', () => {
-  it('yields per frame, so the rotation has something to rotate between', async () => {
-    // The round-robin is only worth having if another stream can get a frame into the writer while a
-    // large payload is going out. `await` on a promise that is already resolved drains the microtask
-    // queue but never lets a timer run, and a memory socket resolves immediately - so a send loop
-    // that only awaits the socket gives a producer driven by setTimeout, which is what a real ticking
-    // backend looks like, no turn at all until the export is finished.
+  it('yields to the event loop per frame, so other streams can enqueue during a large payload', async () => {
+    // The round-robin requires that another stream can enqueue a frame while a large payload is
+    // being sent. `await` on an already resolved promise drains the microtask queue but does not run
+    // timers, and a memory socket resolves immediately. A send loop that only awaits the socket would
+    // therefore give a producer driven by setTimeout (as in a periodic backend) no turn until the
+    // export is finished.
     const [left, right] = memoryPair();
     const dialer = new Peer(left, { codec, isDialer: true });
     const acceptor = new Peer(right, { codec, isDialer: false });

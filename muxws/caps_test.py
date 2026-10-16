@@ -1,7 +1,7 @@
 """The three receive-side caps, and the observability hooks (§4.3, §12).
 
-All three are **local defences**. None is announced, none has a remote counterpart to consult, and a
-sender learns of one only from the reset it provokes (WSM-CON-031, WSM-FRG-035, WSM-STM-036).
+All three are local defences. None is announced or has a remote counterpart, and a sender learns of
+one only from the reset it causes (WSM-CON-031, WSM-FRG-035, WSM-STM-036).
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ async def test_the_fragment_field_alone_is_not_what_is_measured(make_lone):
 
 
 def test_a_cap_below_the_envelope_floor_is_rejected_at_construction():
-    """WSM-FRG-034: found here, not later as an infinite split loop."""
+    """WSM-FRG-034: the constructor raises; a cap below the envelope would make the splitter loop forever."""
     _, socket = memory_pair()
     with pytest.raises(ProtocolError, match="WSM-FRG-034"):
         Peer(socket, codec=JsonCodec(), is_dialer=False, max_frame_bytes=16)
@@ -92,8 +92,8 @@ def test_a_cap_below_the_envelope_floor_is_rejected_at_construction():
 async def test_oversize_payload_resets_on_the_crossing_fragment(make_lone):
     """WSM-FRG-032/WSM-INV-017 **(spec)**: the reset goes out **before the final fragment arrives**.
 
-    A receiver that assembled the payload in order to measure it has already spent everything the
-    limit existed to protect. The partial buffer is dropped in the same step, for the same reason.
+    The receiver does not assemble the payload to measure it, because assembling it allocates the
+    memory the limit protects. The partial buffer is dropped in the same step.
     """
     lone = make_lone(max_frame_bytes=512, max_payload_bytes=2000)
     lone.peer.on_stream(_hold)
@@ -211,7 +211,7 @@ async def test_closing_a_stream_frees_a_slot(make_pair):
 
 
 async def test_the_limit_is_never_announced_and_never_checked_by_the_sender(make_pair):
-    """WSM-STM-036/WSM-INV-007: a sender that counted its own opens has rebuilt the announced quota."""
+    """WSM-STM-036/WSM-INV-007: the sender does not count its opens against the receiver's limit."""
     import inspect
 
     from muxws import peer as module
