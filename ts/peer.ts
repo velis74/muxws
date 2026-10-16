@@ -176,6 +176,25 @@ const yieldToOtherTasks: () => Promise<void> = (() => {
   return () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 })();
 
+/** The longest close reason a WebSocket close frame carries (RFC 6455 5.5: 125 bytes less the code). */
+const MAX_CLOSE_REASON_BYTES = 123;
+
+/**
+ * @internal `reason` cut to the 123 UTF-8 bytes a WebSocket close frame carries, at a character boundary.
+ *
+ * `ws` throws on a longer reason, and a browser `WebSocket` throws a `SyntaxError`; either leaves the
+ * socket open. The `goaway` frame and `onClose` carry the full text.
+ */
+export function closeFrameReason(reason: string): string {
+  const bytes = new TextEncoder().encode(reason);
+  let end = Math.min(bytes.length, MAX_CLOSE_REASON_BYTES);
+  // Back off over UTF-8 continuation bytes (10xxxxxx) so no character is split.
+  if (end < bytes.length) {
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  }
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
 /** Python's `str(exc)`. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -837,7 +856,7 @@ export class Peer {
         if (error instanceof LaneEncodingError) {
           // A codec error inside the writer fails only that lane's stream; the write loop and the
           // connection continue.
-          this.failLane(error);
+          await this.failLane(error);
           continue;
         }
         throw error;
@@ -860,30 +879,39 @@ export class Peer {
         // The socket is closed; the read loop in `serve()` marks the peer as dead.
         if (error instanceof ConnectionClosed) return;
         logger.error(`muxws conn=${this.id} could not send a ${frame.type} frame`, error);
-        this.failUnsendable(frame, error);
+        await this.failUnsendable(frame, error);
       }
     }
   }
 
-  /** A frame on one lane could not be encoded. Fail its stream; the connection continues. */
-  private failLane(failure: LaneEncodingError): void {
+  /**
+   * A frame on one lane could not be encoded. Fail its stream; the connection continues.
+   *
+   * With no live stream on the lane, the peer is marked dead and the socket is closed with 1011.
+   */
+  private async failLane(failure: LaneEncodingError): Promise<void> {
     const detail = errorMessage(failure.cause);
+    logger.error(`muxws conn=${this.id} could not encode a frame on stream ${failure.lane}`, failure.cause);
     const stream = this.liveStreams.get(failure.lane);
     if (stream === undefined) {
-      this.die(new ConnectionClosed(String(failure), { code: 1011 }));
+      await this.dieAndClose(new ConnectionClosed(String(failure), { code: 1011, reason: String(failure) }));
       return;
     }
-    logger.error(`muxws conn=${this.id} could not encode a frame on stream ${failure.lane}`, failure.cause);
     this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
     stream.fail(exceptionForReset(ResetCode.INTERNAL_ERROR, detail, { streamId: stream.id }));
   }
 
-  /** A frame could not be encoded or sent. Fail its stream; the connection continues. */
-  private failUnsendable(frame: Frame, error: unknown): void {
+  /**
+   * A frame could not be encoded or sent. Fail its stream; the connection continues.
+   *
+   * With no live stream for the frame, the peer is marked dead and the socket is closed with 1011.
+   */
+  private async failUnsendable(frame: Frame, error: unknown): Promise<void> {
     const detail = errorMessage(error);
     const stream = frame.stream === null || frame.stream === undefined ? undefined : this.liveStreams.get(frame.stream);
     if (stream === undefined) {
-      this.die(new ConnectionClosed(`could not encode a ${frame.type} frame: ${detail}`, { code: 1011 }));
+      const reason = `could not encode a ${frame.type} frame: ${detail}`;
+      await this.dieAndClose(new ConnectionClosed(reason, { code: 1011, reason }));
       return;
     }
     this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
@@ -915,10 +943,12 @@ export class Peer {
     try {
       await this.readLoop();
     } catch (error) {
-      // `readLoop` is not expected to throw. If it does, the peer is marked dead before `serve()`
-      // rejects with the error, so `isOpen` does not stay true after the read loop has stopped.
+      // `readLoop` is not expected to throw. If it does, the peer is marked dead and the socket closed
+      // before `serve()` rejects with the error, so `isOpen` does not stay true after the read loop has
+      // stopped, and `isOpen` is not false while the socket stays open.
+      logger.error(`muxws conn=${this.id} read loop failed`, error);
       const detail = errorMessage(error);
-      this.die(new ConnectionClosed(`read loop failed: ${detail}`, { code: 1011, reason: detail }));
+      await this.failInternal(`read loop failed: ${detail}`, detail);
       throw error;
     } finally {
       await this.stopWriter();
@@ -954,11 +984,12 @@ export class Peer {
       try {
         keepGoing = await this.dispatch(frame);
       } catch (error) {
-        // An exception from `dispatch` closes the connection. Otherwise pending awaits would never
-        // settle, `onClose` would not fire, and `open()` would keep succeeding on a stopped read loop.
+        // An exception from `dispatch` closes the connection and the socket. Otherwise pending awaits
+        // would never settle, `onClose` would not fire, `open()` would keep succeeding on a stopped
+        // read loop, and an open socket would leave the remote waiting on a peer that reads nothing.
         logger.error(`muxws conn=${this.id} read loop failed on a ${frame.type} frame`, error);
         const detail = errorMessage(error);
-        this.die(new ConnectionClosed(`read loop failed: ${detail}`, { code: 1011, reason: detail }));
+        await this.failInternal(`read loop failed: ${detail}`, detail);
         return;
       }
       if (!keepGoing) return;
@@ -1217,7 +1248,7 @@ export class Peer {
       stream.opening = true;
       // The payload cap applies to a fragmented `open` as to fragmented `data` (WSM-FRG-032).
       if (!this.withinPayloadCap(stream, frame)) return true;
-      const payload = stream.assembler.feed(frame, this.codec);
+      const payload = this.reassemble(stream, frame);
       if (isAbsent(payload)) return true;
       stream.opening = false;
       stream.payload = payload;
@@ -1254,7 +1285,7 @@ export class Peer {
   /** Handle a later fragment of an opening payload; it is not a second open (WSM-STM-031). */
   private continueOpen(stream: Stream, frame: Frame): boolean {
     if (!this.withinPayloadCap(stream, frame)) return true;
-    const payload = stream.assembler.feed(frame, this.codec);
+    const payload = this.reassemble(stream, frame);
     if (isAbsent(payload)) return true;
     stream.opening = false;
     stream.payload = payload;
@@ -1444,7 +1475,7 @@ export class Peer {
 
     if (hasFragment(frame)) {
       if (!this.withinPayloadCap(stream, frame)) return true;
-      const payload = stream.assembler.feed(frame, this.codec);
+      const payload = this.reassemble(stream, frame);
       if (isAbsent(payload)) return true;
       stream.acceptPayload(payload);
     } else {
@@ -1502,6 +1533,23 @@ export class Peer {
     return false;
   }
 
+  /**
+   * Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
+   *
+   * Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset this stream with
+   * PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the peers still agree about every other
+   * stream and the connection stays open (WSM-STM-020/024).
+   */
+  private reassemble(stream: Stream, frame: Frame): unknown {
+    try {
+      return stream.assembler.feed(frame, this.codec);
+    } catch (error) {
+      if (!(error instanceof ProtocolError)) throw error;
+      this.resetStream(stream, ResetCode.PROTOCOL_ERROR, `undecodable reassembled payload: ${errorMessage(error)}`);
+      return ABSENT;
+    }
+  }
+
   private resetStream(stream: Stream, code: ResetCode, reason: string): void {
     this.enqueue({ type: 'reset', stream: stream.id, code, reason });
     stream.fail(exceptionForReset(code, reason, { streamId: stream.id }));
@@ -1524,12 +1572,36 @@ export class Peer {
     });
     await this.drainOutbound(monotonicNowMs() + FAILURE_DRAIN_MS);
     try {
-      await this.socket.close(1002, reason);
+      await this.socket.close(1002, closeFrameReason(reason));
     } catch (error) {
       // A socket whose close fails is already closed; the peer is still marked dead below.
       logger.warn(`muxws conn=${this.id} closing the socket failed`, error);
     }
     this.die(new ConnectionClosed(reason, { code: 1002, reason, wasClean: false }));
+  }
+
+  /** A failure inside this peer: goaway(INTERNAL_ERROR), then mark the peer dead and close the socket (1011). */
+  private async failInternal(message: string, reason: string): Promise<void> {
+    if (this.open_) {
+      // Marked as sent before the drain, so no stream is opened while the queued frames are sent
+      // (WSM-CON-021).
+      this.goaway.sent = true;
+      this.goaway.sentCode = ResetCode.INTERNAL_ERROR;
+      this.enqueue({ type: 'goaway', code: ResetCode.INTERNAL_ERROR, reason, last_stream: this.highestRemoteOpen });
+      await this.drainOutbound(monotonicNowMs() + FAILURE_DRAIN_MS);
+    }
+    await this.dieAndClose(new ConnectionClosed(message, { code: 1011, reason }));
+  }
+
+  /**
+   * Mark the peer dead with `cause`, then close the socket with 1011.
+   *
+   * The peer is marked dead first, so `onClose` reports `cause` and not the closure the read loop
+   * observes. The close reason is fixed and short: a WebSocket close reason is limited to 123 bytes.
+   */
+  private async dieAndClose(cause: ConnectionClosed): Promise<void> {
+    this.die(cause);
+    await this.closeSocketLocally(1011, 'internal error');
   }
 
   /**

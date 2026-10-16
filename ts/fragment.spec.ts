@@ -386,6 +386,15 @@ describe('Assembler', () => {
   it('rejects a frame carrying no fragment', () => {
     expect(() => new Assembler().feed({ type: 'data', stream: 1, payload: { a: 1 } }, codec)).toThrow(/no fragment/);
   });
+
+  it('rejects fragments that mix text and binary values and drops the partial buffer', () => {
+    const assembler = new Assembler();
+    assembler.feed({ type: 'data', stream: 1, fragment: '\u0081', more: true }, codec);
+    const binary = new Uint8Array([0xa1, 0x61, 0x01]).buffer;
+    expect(() => assembler.feed({ type: 'data', stream: 1, fragment: binary }, codec)).toThrow(ProtocolError);
+    expect(assembler.inProgress).toBe(false);
+    expect(assembler.byteLength).toBe(0);
+  });
 });
 
 describe('the binary path', () => {

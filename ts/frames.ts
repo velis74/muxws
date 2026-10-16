@@ -119,6 +119,9 @@ export function toMapping(frame: Frame): Record<string, unknown> {
  * Unknown keys are dropped (WSM-FRM-001, D2), so a decoded frame contains only envelope fields. An
  * unrecognised `type` is returned as an ordinary `Frame` (D4); the peer, not the codec, ignores it
  * (WSM-FRM-002).
+ *
+ * Throws `ProtocolError` when `type` is missing, when both `payload` and `fragment` are present, or
+ * when an envelope field has a value of the wrong type (WSM-FRM-005).
  */
 export function fromMapping(mapping: Record<string, unknown>): Frame {
   if (!('type' in mapping)) {
@@ -130,10 +133,47 @@ export function fromMapping(mapping: Record<string, unknown>): Frame {
 
   const frame: Record<string, unknown> = {};
   FIELD_NAMES.forEach((name) => {
-    if (name in mapping) frame[name] = mapping[name];
+    if (!(name in mapping)) return;
+    const value = mapping[name];
+    if (name !== 'payload' && !validField(name, value)) {
+      const kind = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+      throw new ProtocolError(`envelope field '${name}' has an invalid value of type ${kind} (WSM-FRM-005)`);
+    }
+    frame[name] = value;
   });
   if (!('payload' in frame)) frame.payload = ABSENT;
   return frame as unknown as Frame;
+}
+
+/**
+ * Whether `value` has the type envelope field `name` requires (WSM-FRM-005). `null` is accepted for
+ * every field whose default is `null`.
+ */
+function validField(name: Exclude<FieldName, 'payload'>, value: unknown): boolean {
+  switch (name) {
+    case 'type':
+      return typeof value === 'string';
+    case 'more':
+    case 'end':
+      return typeof value === 'boolean';
+    default:
+      break;
+  }
+  if (value === null) return true;
+  switch (name) {
+    case 'stream':
+    case 'last_stream':
+      return Number.isInteger(value) && (value as number) >= 0;
+    case 'code':
+      return Number.isInteger(value);
+    case 'fragment':
+      return typeof value === 'string' || value instanceof ArrayBuffer;
+    case 'headers':
+    case 'trailers':
+      return typeof value === 'object' && !Array.isArray(value) && !(value instanceof ArrayBuffer);
+    default:
+      return typeof value === 'string';
+  }
 }
 
 /** Structural equality over the twelve envelope fields, with defaults normalised first (D3). */

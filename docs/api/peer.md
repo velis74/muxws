@@ -1884,6 +1884,11 @@ None — `serve()` takes no arguments.
 is marked closed, every live stream fails with `ConnectionLost`, the `on_close` handlers are called,
 and `serve()` returns.
 
+An exception raised inside the read loop is logged and does not propagate: the peer sends
+`goaway(INTERNAL_ERROR)` and the frames already queued, for at most 10 seconds, is marked closed with
+code 1011, closes the socket with 1011, and `serve()` returns. From the moment `goaway` is queued,
+`open()` raises `ConnectionGoingAway`.
+
 ### Raises
 
 - `asyncio.CancelledError` — the task running it was cancelled. Cancelling that task is how the read
@@ -1944,9 +1949,11 @@ None — it takes no arguments.
 
 ### Raises
 
-Rejects with the error that ended the read loop, after marking the peer closed (code 1011), so
-`isOpen` is already false when the promise rejects. The Python `serve()` returns in the same
-situation. A socket closure resolves the promise and does not reject it.
+Rejects with the error that ended the read loop, after sending `goaway(INTERNAL_ERROR)` and the frames
+already queued (for at most 10 seconds), marking the peer closed (code 1011) and closing the socket
+with 1011, so `isOpen` is already false when the promise rejects. From the moment `goaway` is queued,
+`open()` throws `ConnectionGoingAway`. The Python `serve()` returns in the same situation. A socket closure resolves the
+promise and does not reject it.
 
 ### Example
 

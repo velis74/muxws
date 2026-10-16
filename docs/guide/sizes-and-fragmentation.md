@@ -97,6 +97,9 @@ The sequence:
   carrying `more: false`, even when that fragment carries no payload bytes.
 - The receiver concatenates the `fragment` values and passes the result to the codec when the last
   fragment arrives. The payload is decoded only then.
+- The fragments of one payload are all text or all bytes. A sequence that mixes the two, or a
+  concatenated payload the codec cannot decode, resets that stream with `PROTOCOL_ERROR`; the
+  connection and its other streams are not affected.
 
 Two rules allow frames of different streams to interleave:
 

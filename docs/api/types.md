@@ -362,8 +362,23 @@ A `Frame`.
 
 ### Raises
 
-`ProtocolError` when the mapping has no `type` key, and `ProtocolError` when it carries both
-`payload` and `fragment`; a frame carries one or the other.
+`ProtocolError` when the mapping has no `type` key, when it carries both `payload` and `fragment` (a
+frame carries one or the other), or when an envelope field has a value of the wrong type:
+
+| Field | Accepted values |
+|---|---|
+| `type` | a string |
+| `stream`, `last_stream` | a non-negative integer, or `null` |
+| `code` | an integer, or `null` |
+| `fragment` | a string or bytes (`ArrayBuffer`), or `null` |
+| `more`, `end` | a boolean |
+| `headers`, `trailers` | a mapping with string keys (a plain object), or `null` |
+| `reason`, `nonce` | a string, or `null` |
+
+`payload` accepts any value. In Python an integral float in an integer field (`1.0`) is returned as
+`int`; a JavaScript decoder does not distinguish `1.0` from `1`. A codec decoding a message through
+this function raises the same `ProtocolError`, which the peer treats as a message it cannot decode
+(WSM-FRM-005).
 
 ### Example
 

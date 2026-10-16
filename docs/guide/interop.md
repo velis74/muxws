@@ -50,7 +50,9 @@ contains both. A decoder must distinguish them (the reference implementations us
 sentinel), whether or not the application uses the difference.
 
 **`payload` and `fragment` must never both appear on one frame.** A frame carrying both is a
-connection-level protocol error.
+connection-level protocol error. So is an envelope field whose value has the wrong type, such as a
+string `stream` or a non-boolean `end`; the accepted types are listed under
+[`from_mapping`](/api/types#from-mapping-frommapping).
 
 Two kinds of information are never sent:
 

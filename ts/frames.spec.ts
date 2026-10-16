@@ -119,6 +119,33 @@ describe('the envelope', () => {
     expect(() => fromMapping({ type: 'data', stream: 1, payload: 1, fragment: 'x' })).toThrow(ProtocolError);
   });
 
+  it.each([
+    ['type', 5],
+    ['stream', '1'],
+    ['stream', true],
+    ['stream', -1],
+    ['stream', 1.5],
+    ['last_stream', '1'],
+    ['code', '3'],
+    ['fragment', 5],
+    ['more', 1],
+    ['end', 'yes'],
+    ['end', null],
+    ['headers', 'x'],
+    ['trailers', ['x']],
+    ['reason', 5],
+    ['nonce', 5],
+  ])('rejects envelope field %s with a value of the wrong type (%j) - WSM-FRM-005', (field, value) => {
+    expect(() => fromMapping({ type: 'data', stream: 1, [field]: value })).toThrow(new RegExp(`'${field}'`));
+  });
+
+  it('accepts null for an optional field and an ArrayBuffer fragment', () => {
+    const frame = fromMapping({ type: 'reset', stream: 3, code: 1, reason: null, headers: null });
+    expect(framesEqual(frame, { type: 'reset', stream: 3, code: 1 })).toBe(true);
+    const bytes = new Uint8Array([1]).buffer;
+    expect(fromMapping({ type: 'data', stream: 1, fragment: bytes }).fragment).toBe(bytes);
+  });
+
   it('distinguishes an absent payload from an explicit null - D1', () => {
     expect('payload' in toMapping({ type: 'data', stream: 1 })).toBe(false);
     expect(toMapping({ type: 'data', stream: 1, payload: null }).payload).toBeNull();

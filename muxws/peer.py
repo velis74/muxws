@@ -46,6 +46,9 @@ _CONNECTION_COUNTER = itertools.count()
 #: closes the socket. Equal to `close()`'s default drain.
 _FAILURE_DRAIN = 10.0
 
+#: The longest close reason a WebSocket close frame carries (RFC 6455 5.5: 125 bytes less the code).
+_MAX_CLOSE_REASON_BYTES = 123
+
 StreamHandler = Callable[[Any, Stream], Any]
 ErrorSerializer = Callable[[BaseException], Any]
 #: `(headers, payload)`. Mutates `headers` in place; the return value is ignored (WSM-API-027).
@@ -391,7 +394,7 @@ class Peer:
             try:
                 frame = await self._writer.next_frame()
             except LaneEncodingError as failure:
-                self._fail_lane(failure)
+                await self._fail_lane(failure)
                 continue
             if frame is None:
                 return
@@ -420,16 +423,19 @@ class Peer:
                 # stream only. If the exception ended this task, nothing would drain the queue while
                 # the peer still reported itself open.
                 logger.exception("muxws conn=%s could not send a %s frame", self.id, frame.type)
-                self._fail_unsendable(frame, exc)
+                await self._fail_unsendable(frame, exc)
 
-    def _fail_lane(self, failure: LaneEncodingError) -> None:
-        """One lane's frame could not be encoded. Fail its stream; keep the connection working."""
+    async def _fail_lane(self, failure: LaneEncodingError) -> None:
+        """One lane's frame could not be encoded. Fail its stream; keep the connection working.
+
+        With no live stream on the lane, the peer is marked dead and the socket is closed with 1011.
+        """
         logger.exception(
             "muxws conn=%s could not encode a frame on stream %s", self.id, failure.lane, exc_info=failure.cause
         )
         stream = self._streams.get(failure.lane)
         if stream is None:
-            self._die(ConnectionClosed(str(failure), code=1011))
+            await self._die_and_close(ConnectionClosed(str(failure), code=1011, reason=str(failure)))
             return
         self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.INTERNAL_ERROR), reason=str(failure.cause)))
         stream._fail(
@@ -437,11 +443,15 @@ class Peer:
             notify_remote=False,
         )
 
-    def _fail_unsendable(self, frame: Frame, exc: BaseException) -> None:
-        """One frame could not be encoded. Fail its stream and keep the connection working."""
+    async def _fail_unsendable(self, frame: Frame, exc: BaseException) -> None:
+        """One frame could not be encoded or sent. Fail its stream and keep the connection working.
+
+        With no live stream for the frame, the peer is marked dead and the socket is closed with 1011.
+        """
         stream = self._streams.get(frame.stream) if frame.stream is not None else None
         if stream is None:
-            self._die(ConnectionClosed(f"could not encode a {frame.type} frame: {exc}", code=1011))
+            reason = f"could not encode a {frame.type} frame: {exc}"
+            await self._die_and_close(ConnectionClosed(reason, code=1011, reason=reason))
             return
         self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.INTERNAL_ERROR), reason=str(exc)))
         stream._fail(
@@ -489,14 +499,20 @@ class Peer:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
-                    # The peer is marked dead here. A read loop that ended while `is_open` stayed
-                    # true would leave every pending await hanging, `on_close` never called, and
-                    # `open()` enqueuing frames that nothing reads.
+                    # The peer is marked dead and the socket closed here. A read loop that ended while
+                    # `is_open` stayed true would leave every pending await hanging, `on_close` never
+                    # called, and `open()` enqueuing frames that nothing reads; a socket left open
+                    # would leave the remote waiting on a peer that reads nothing.
                     logger.exception("muxws conn=%s read loop failed on a %s frame", self.id, frame.type)
-                    self._die(ConnectionClosed(f"read loop failed: {exc}", code=1011, reason=str(exc)))
+                    await self._fail_internal(f"read loop failed: {exc}", str(exc))
                     return
                 if not keep_going:
                     return
+        except Exception as exc:  # noqa: BLE001
+            # An exception outside `_dispatch` (a socket adapter or codec raising something other than
+            # `ConnectionClosed` or `ProtocolError`) ends the connection the same way.
+            logger.exception("muxws conn=%s read loop failed", self.id)
+            await self._fail_internal(f"read loop failed: {exc}", str(exc))
         finally:
             await self._stop_writer()
 
@@ -719,7 +735,7 @@ class Peer:
             # A fragmented `open` is subject to the same payload cap as a fragmented `data`.
             if not await self._within_payload_cap(stream, frame):
                 return True
-            payload = stream._assembler.feed(frame, self._codec)
+            payload = await self._reassemble(stream, frame)
             if payload is ABSENT:
                 return True
             stream._opening = False
@@ -734,7 +750,7 @@ class Peer:
         """A later fragment of an opening payload: not a second open (WSM-STM-031)."""
         if not await self._within_payload_cap(stream, frame):
             return True
-        payload = stream._assembler.feed(frame, self._codec)
+        payload = await self._reassemble(stream, frame)
         if payload is ABSENT:
             return True
         stream._opening = False
@@ -898,7 +914,7 @@ class Peer:
         if frame.fragment is not None:
             if not await self._within_payload_cap(stream, frame):
                 return True
-            payload = stream._assembler.feed(frame, self._codec)
+            payload = await self._reassemble(stream, frame)
             if payload is ABSENT:
                 return True
             stream._accept_payload(payload)
@@ -956,6 +972,19 @@ class Peer:
         )
         return False
 
+    async def _reassemble(self, stream: Stream, frame: Frame) -> Any:
+        """Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
+
+        Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset
+        this stream with PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the
+        peers still agree about every other stream and the connection stays open (WSM-STM-020/024).
+        """
+        try:
+            return stream._assembler.feed(frame, self._codec)
+        except ProtocolError as exc:
+            await self._reset_stream(stream, ResetCode.PROTOCOL_ERROR, f"undecodable reassembled payload: {exc}")
+            return ABSENT
+
     async def _reset_stream(self, stream: Stream, code: ResetCode, reason: str) -> None:
         self._enqueue(Frame("reset", stream=stream.id, code=int(code), reason=reason))
         stream._fail(exception_for_reset(code, reason, stream_id=stream.id), notify_remote=False)
@@ -978,8 +1007,32 @@ class Peer:
             )
         )
         await self._drain_outbound(asyncio.get_running_loop().time() + _FAILURE_DRAIN)
-        await self._close_socket(1002, reason)
+        await self._close_socket(1002, _close_frame_reason(reason))
         self._die(ConnectionClosed(reason, code=1002, reason=reason, was_clean=False))
+
+    async def _fail_internal(self, message: str, reason: str) -> None:
+        """A failure inside this peer: goaway(INTERNAL_ERROR), then mark the peer dead and close the socket (1011)."""
+        if self._is_open:
+            # Marked as sent before the drain, so no stream is opened while the queued frames are sent
+            # (WSM-CON-021).
+            self._goaway.sent = True
+            self._goaway.sent_code = int(ResetCode.INTERNAL_ERROR)
+            self._enqueue(
+                Frame(
+                    "goaway", code=int(ResetCode.INTERNAL_ERROR), reason=reason, last_stream=self._highest_remote_open
+                )
+            )
+            await self._drain_outbound(asyncio.get_running_loop().time() + _FAILURE_DRAIN)
+        await self._die_and_close(ConnectionClosed(message, code=1011, reason=reason))
+
+    async def _die_and_close(self, cause: ConnectionClosed) -> None:
+        """Mark the peer dead with `cause`, then close the socket with 1011.
+
+        The peer is marked dead first, so `on_close` reports `cause` and not the closure the read loop
+        observes. The close reason is fixed and short: a WebSocket close reason is limited to 123 bytes.
+        """
+        self._die(cause)
+        await self._close_socket_locally(1011, "internal error")
 
     async def _drain_outbound(self, deadline: float) -> None:
         """Wait until the write loop has sent every queued frame, the write loop has ended, or `deadline` passes.
@@ -1126,6 +1179,15 @@ class Peer:
     def __repr__(self) -> str:
         role = "dialer" if self._is_dialer else "acceptor"
         return f"<Peer {self.id} {role} streams={len(self._streams)}>"
+
+
+def _close_frame_reason(reason: str) -> str:
+    """`reason` cut to the 123 UTF-8 bytes a WebSocket close frame carries, at a character boundary.
+
+    The `websockets` adapter raises on a longer reason and leaves the socket open. The `goaway` frame
+    and `on_close` carry the full text.
+    """
+    return reason.encode("utf-8", "replace")[:_MAX_CLOSE_REASON_BYTES].decode("utf-8", "ignore")
 
 
 def _intercepted_headers(
