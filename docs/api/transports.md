@@ -266,7 +266,8 @@ export class MemorySocket implements SocketAdapter {
 ### Raises
 
 `receive()` raises `ConnectionClosed` (code 1006) when the socket is closed or dropped while it is
-waiting or already drained. `send_text` / `send_bytes` raise `ConnectionClosed` (code 1006) on a
+waiting or already drained, on every call after the close; messages queued before the close are
+returned first. `send_text` / `send_bytes` raise `ConnectionClosed` (code 1006) on a
 closed socket. `close`, `drop` and `inject` raise nothing.
 
 ### Example
@@ -845,7 +846,9 @@ case-insensitive, `ws+unix:/run/api.sock:/ws` and `ws+unix:relative.sock:/ws` ar
 authority (which precedes the path and is not part of the split) becomes the `Host` header. The query
 is re-attached before the split, so it belongs to the request target when there is a colon and to the
 file name when there is not: `ws+unix:///run/api.sock?tenant=42` opens a file named
-`/run/api.sock?tenant=42`.
+`/run/api.sock?tenant=42`. The path is used as `urlsplit` returns it, without percent-decoding:
+`ws+unix:///tmp/my dir/a.sock` opens `/tmp/my dir/a.sock`, and `ws+unix:///tmp/a%20b.sock` opens a
+file named `a%20b.sock`. `muxws/node` derives the same path from the same URL.
 
 ### Signature
 

@@ -53,3 +53,19 @@ async def test_close_is_idempotent():
     await left.close()
     await left.close()
     assert left.is_closed
+
+
+async def test_every_receive_after_close_raises_connection_closed():
+    """Both ends raise `ConnectionClosed` on every `receive()` after a close, not only on the first.
+
+    Messages queued before the close are still returned first.
+    """
+    left, right = memory_pair()
+    await left.send_text("before")
+    await left.close()
+
+    assert await right.receive() == "before"
+    for side in (left, right):
+        for _ in range(3):
+            with pytest.raises(ConnectionClosed):
+                await asyncio.wait_for(side.receive(), timeout=1)

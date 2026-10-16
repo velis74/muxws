@@ -160,9 +160,8 @@ function unixTarget(url: string): UnixTarget | null {
   if (parsed.protocol !== UNIX_SCHEME) return null;
 
   // The query belongs to the request target, so it is appended before the split:
-  // `ws+unix:///p.sock:/r?a=1` opens `/p.sock` and requests `/r?a=1`. `ws` splits the same
-  // `pathname + search`, and Python's `urlsplit` produces the same string.
-  const whole = parsed.pathname + parsed.search;
+  // `ws+unix:///p.sock:/r?a=1` opens `/p.sock` and requests `/r?a=1`.
+  const whole = rawPathAndQuery(url);
   const colon = whole.indexOf(':');
   const socketPath = colon === -1 ? whole : whole.slice(0, colon);
   const route = colon === -1 ? '' : whole.slice(colon + 1);
@@ -191,6 +190,33 @@ function unixTarget(url: string): UnixTarget | null {
 
   const authority = parsed.host === '' ? DEFAULT_AUTHORITY : parsed.host;
   return { socketPath, uri: `ws://${authority}${route === '' ? '/' : route}` };
+}
+
+/**
+ * The path and query of a `ws+unix:` url as they are written in it, joined by `?` when the query is
+ * not empty: the string Python's `urlsplit` returns as `path + "?" + query`.
+ *
+ * `URL.pathname` and `URL.search` are percent-encoded and have dot segments removed, so
+ * `ws+unix:///tmp/my dir/a.sock` would name `/tmp/my%20dir/a.sock`. This function applies only the
+ * preprocessing of `urlsplit`: leading C0 controls and spaces are removed, and so are tabs and
+ * newlines anywhere. Trailing C0 controls and spaces are kept, as `urlsplit` keeps them, although
+ * `new URL()` removes them. A space, a non-ASCII character and a `%XX` sequence are kept as written.
+ * The caller has already parsed `url` with `new URL()`, so the scheme is present.
+ */
+function rawPathAndQuery(url: string): string {
+  // eslint-disable-next-line no-control-regex
+  let rest = url.replace(/^[\u0000-\u0020]+/, '').replace(/[\t\n\r]/g, '');
+  rest = rest.slice(rest.indexOf(':') + 1);
+  const hash = rest.indexOf('#');
+  if (hash !== -1) rest = rest.slice(0, hash);
+  if (rest.startsWith('//')) {
+    const end = rest.slice(2).search(/[/?]/);
+    rest = end === -1 ? '' : rest.slice(2 + end);
+  }
+  const question = rest.indexOf('?');
+  if (question === -1) return rest;
+  const query = rest.slice(question + 1);
+  return query === '' ? rest.slice(0, question) : rest;
 }
 
 /**
@@ -328,7 +354,7 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
  * point has one for a different reason (see `UnixSocketsUnsupportedError` in `ts/index.ts`).
  *
  * Before a socket is opened, three checks run in this order (WSM-ERR-016): the `ws+unix:` grammar
- * (`unixTarget`, which uses only `new URL()`, so an invalid `ws+unix:` url raises `UnixUrlError` even
+ * (`unixTarget`, which does not use `ws`, so an invalid `ws+unix:` url raises `UnixUrlError` even
  * when `ws` is missing); the dependency (`requireWs`), because `ws` parses all other urls; and the
  * address, reported as a `WsUrlError`. All three precede the refusal handling below, which detects a
  * 400 in `ws`'s error message; otherwise a url containing a status number could be reported as a

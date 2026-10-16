@@ -22,7 +22,7 @@
  * is not skipped: it opens no socket.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -248,6 +248,51 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
         await peer.close();
       }
       expect(acceptor.seen().url, `the target for ${route}`).toBe(expected);
+    }
+  });
+
+  it('opens the socket path as written in the url, without percent-encoding or decoding it', async () => {
+    // Counterpart of the rows `the-socket-path-is-not-percent-encoded` and
+    // `the-socket-path-is-not-percent-decoded` in `muxws/transports/unix_test.py`. A space and a
+    // non-ASCII character name the directory as written, and `%20` in a file name is three characters.
+    const root = mkdtempSync(join(tmpdir(), 'mx-'));
+    const spaced = join(root, 'my dir ä');
+    mkdirSync(spaced);
+    const acceptors = [await startUnixAcceptor(join(spaced, 's')), await startUnixAcceptor(join(root, 'a%20b'))];
+    try {
+      for (const target of acceptors) {
+        const peer = await connect(`ws+unix://${target.path}:/r`);
+        try {
+          expect(await peer.request({ hi: target.path })).toEqual({ echo: { hi: target.path } });
+        } finally {
+          await peer.close();
+        }
+        expect(target.handshakes(), `the acceptor at ${target.path}`).toBe(1);
+        expect(target.seen().url).toBe('/r');
+      }
+    } finally {
+      for (const target of acceptors) await target.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a trailing space of the url in the socket path, where new URL() would remove it', async () => {
+    // Counterpart of the row `a-trailing-space-belongs-to-the-socket-path` in
+    // `muxws/transports/unix_test.py`: `urlsplit` removes leading C0 controls and spaces only.
+    const root = mkdtempSync(join(tmpdir(), 'mx-'));
+    const target = await startUnixAcceptor(join(root, 'tail '));
+    try {
+      const peer = await connect(`ws+unix://${target.path}`);
+      try {
+        expect(await peer.request({ hi: 3 })).toEqual({ echo: { hi: 3 } });
+      } finally {
+        await peer.close();
+      }
+      expect(target.handshakes()).toBe(1);
+      expect(target.seen().url).toBe('/');
+    } finally {
+      await target.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

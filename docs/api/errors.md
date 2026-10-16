@@ -218,7 +218,7 @@ export class ConnectionClosed extends MuxwsError {
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `message` | `str` / `string \| undefined` | `""` / `undefined` | The exception text. Python falls back to `reason`, then to `"connection closed"`, when it is empty. TypeScript's fallback chain is `message ?? reason ?? 'connection closed'` and `reason` already defaults to `''`, so an omitted message yields an **empty** `error.message` there — pass the text you want. |
+| `message` | `str` / `string \| undefined` | `""` / `undefined` | The exception text. When it is empty or omitted, both ports fall back to `reason`, then to `"connection closed"`. |
 | `code` | `int` / `number` | `1006` | The WebSocket close code. `1006` is "abnormal closure", the code the platform reports when no close frame was exchanged. Keyword-only in Python; a field of the options object in TypeScript. |
 | `reason` | `str` / `string` | `""` | The close frame's reason text, verbatim. |
 | `was_clean` / `wasClean` | `bool` / `boolean` | `False` / `false` | Whether a close handshake completed. |
@@ -246,8 +246,7 @@ import { ConnectionClosed } from 'muxws';
 
 const closed = new ConnectionClosed('server going down', { code: 1001, reason: 'server going down', wasClean: true });
 console.log(closed.code, closed.wasClean, '|', closed.message);
-// Omitting the message leaves it empty in TypeScript; Python's twin says "connection closed".
-console.log(new ConnectionClosed().code, '|', JSON.stringify(new ConnectionClosed().message));
+console.log(new ConnectionClosed().code, '|', new ConnectionClosed().message);
 ```
 
 ## `ConnectionGoingAway`

@@ -292,6 +292,10 @@ the *filename* when no colon precedes it. An authority between the `//` and the 
 the `Host` header; without an authority, the header is `localhost`. The scheme is case-insensitive,
 and a single slash (`ws+unix:/run/muxws/api.sock:/ws`) parses the same way as two.
 
+The socket path is taken from the URL as written: it is neither percent-encoded nor percent-decoded.
+`ws+unix:///tmp/my dir/api.sock` opens `/tmp/my dir/api.sock`, and `ws+unix:///tmp/a%20b.sock` opens
+a file whose name contains the three characters `%20`. Both ports apply this rule.
+
 There is no `wss+unix://`. A socket file cannot be reached from another machine and has no host name
 for certificate verification, so it is protected by its directory's permissions, not by TLS. Dialling
 `wss+unix:` raises `UnixUrlError`; it is not downgraded to plaintext.

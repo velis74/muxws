@@ -347,8 +347,8 @@ async def test_the_export_payload_fragments() -> None:
         assert len(fragments) > 1, "a megabyte arrived in one frame; nothing was fragmented"
         assert total > 1_000_000, f"the export was only {total} bytes; it is meant to be about a megabyte"
         # No fragment exceeds the limit. The demo passes no `max_frame_bytes`, so the default applies.
-        for frame, length in fragments:
-            assert length <= MAX_FRAME_BYTES, f"fragment {frame.fragment is not None} of {length} bytes exceeds the cap"
+        for index, (_frame, length) in enumerate(fragments):
+            assert length <= MAX_FRAME_BYTES, f"fragment {index} of {length} bytes exceeds the cap"
         # `more: true` on every fragment except the last.
         assert [frame.more for frame, _length in fragments] == [True] * (len(fragments) - 1) + [False]
 

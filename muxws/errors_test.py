@@ -265,6 +265,13 @@ def test_connection_closed_carries_the_socket_close_details():
     assert (err.code, err.reason, err.was_clean) == (1001, "going away", True)
 
 
+def test_connection_closed_message_falls_back_to_reason_then_default():
+    """An empty message is replaced by `reason`, and an empty reason by "connection closed"."""
+    assert str(ConnectionClosed()) == "connection closed"
+    assert str(ConnectionClosed(reason="going away")) == "going away"
+    assert str(ConnectionClosed("bye", reason="going away")) == "bye"
+
+
 def test_nothing_in_the_error_hierarchy_carries_a_status_code():
     """WSM-ERR-007: muxws maps exceptions to no status code. Reset codes are not status codes.
 

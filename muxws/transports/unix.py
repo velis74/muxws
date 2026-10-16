@@ -109,8 +109,8 @@ def parse_unix_url(url: str) -> UnixTarget | None:
         )
 
     # `ws` splits `pathname + search`, so the query is appended before the split; otherwise
-    # `ws+unix:///p.sock:/r?a=1` would lose `?a=1`. `urlsplit` separates them, and WHATWG `new URL()`
-    # parses these URLs the same way.
+    # `ws+unix:///p.sock:/r?a=1` would lose `?a=1`. `urlsplit` separates them and does not
+    # percent-decode either; `ts/node.ts` reads the same path and query from the URL as written.
     target = parts.path + (f"?{parts.query}" if parts.query else "")
     path, _, route = target.partition(":")
 
