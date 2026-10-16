@@ -489,9 +489,9 @@ fixture is a silently passing suite.
    the two numbers must agree - `test_both_runners_collect_the_same_number_of_fixtures` reads the
    TypeScript declaration out of the file to prove they still do, because two independent constants
    drift silently. A fixture that stopped being collected would otherwise be a suite that passes by
-   testing nothing. A **third** number lives outside both runners: `fixtures:` in the
-   `cross-language.yml` matrix, which pins how many fixtures each live leg must exercise (one fewer
-   under `json`, which cannot carry the bytes fixture). The cross-language conductor reads
+   testing nothing. A **third** number lives outside both runners: the last argument of each
+   `corpus` call in `cross-language.yml`, which pins how many fixtures each live leg must exercise
+   (one fewer under `json`, which cannot carry the bytes fixture). The cross-language conductor reads
    `EXPECTED_SEQUENCE_FIXTURES` rather than restating it, so this is the only count a fixture author
    has to remember separately - and it is deliberately outside the driver, because a driver that
    counted its own fixtures could report three of them as thirteen.

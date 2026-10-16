@@ -1,60 +1,28 @@
 name: Cross-language
 
-# The live Python<->TypeScript matrix (WSM-TST-004/005, WSM-CDC-007). `ci.yml` runs each language
-# against itself; this file is the only place the two ports ever speak to one another over a real
-# socket, in both role assignments, for every codec that ships.
+# The live Python<->TypeScript checks (WSM-TST-004/005, WSM-CDC-007), and the documentation examples
+# that need both languages. `ci.yml` runs each language against itself; this file is the only place
+# the two ports speak to one another over a real socket, in both role assignments, for every codec
+# that ships.
+#
+# One job, because every step needs the same two toolchains and the same two installs, and the
+# steps themselves take seconds. Each check is its own step and runs even when an earlier one failed,
+# so one run reports every failing pair.
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
-  # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and the interop scenario carries
-  # non-ASCII payloads, so the runner's locale is load-bearing rather than incidental.
+  # muxws counts every size limit in UTF-8 bytes (WSM-FRG-002) and the interop scenario and the
+  # examples carry non-ASCII payloads, so the runner's locale is load-bearing rather than incidental.
   LANG: C.UTF-8
 
 jobs:
-  # {Python acceptor, TS dialer} x {json, msgpack} and {TS acceptor, Python dialer} x {json,
-  # msgpack} - four jobs, because a codec that ships without a live cross-language pair MUST NOT
-  # ship (WSM-CDC-007), and a scenario run in one role assignment proves only that one side's
-  # parity, ids and close semantics agree with themselves (WSM-TST-004).
-  scenario:
-    name: cross-language (${{ matrix.acceptor }}-acceptor, ${{ matrix.dialer }}-dialer, ${{ matrix.codec }})
+  cross-language:
+    name: cross-language
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        # `fixtures` is how many of `conformance/sequences/` that leg must exercise: the whole corpus
-        # under msgpack, and one fewer under json, because `bytes-payload-under-binary-codec` is a
-        # payload type JSON does not have (WSM-CDC-008). It is pinned **here** rather than computed
-        # by the conductor for the same reason `codec` is: a driver that counts its own fixtures is a
-        # driver that can report three of them as thirteen, and this number arrives from somewhere
-        # that bug cannot reach. Adding a sequence fixture means raising it alongside
-        # EXPECTED_SEQUENCE_FIXTURES in both conformance runners.
-        include:
-          - acceptor: python
-            dialer: ts
-            codec: json
-            fixtures: 13
-          - acceptor: ts
-            dialer: python
-            codec: json
-            fixtures: 13
-          - acceptor: python
-            dialer: ts
-            codec: msgpack
-            fixtures: 14
-          - acceptor: ts
-            dialer: python
-            codec: msgpack
-            fixtures: 14
-    env:
-      # One codec name, spelled the way each language reads it (WSM-CDC-010). Both are exported for
-      # both processes: the Python half reads MUXWS_CODEC, and the TypeScript half reads
-      # VITE_MUXWS_CODEC - which Vite substitutes at build time and which does not exist under node,
-      # so `interop/runner.ts` reads it from the environment itself.
-      MUXWS_CODEC: ${{ matrix.codec }}
-      VITE_MUXWS_CODEC: ${{ matrix.codec }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -67,71 +35,105 @@ jobs:
       - run: pip install -e .[dev]
       # `npm install`, not `npm ci`: package-lock.json is deliberately not committed, so that CI
       # resolves dependencies afresh and tests against current upstream rather than a frozen tree.
-      - run: npm install
-      # `@msgpack/msgpack` is an *optional* peer dependency (WSM-PKG-003), so npm would not install
-      # it for a consumer. It is also a devDependency, so `npm install` above has already pulled it
-      # in here and this step is a no-op belt to that braces - kept for the day the devDependency
-      # goes, and explicitly **not** evidence that the json jobs never reach msgpack. That evidence
-      # is `ts/packaging.spec.ts`, which bundles `ts/index.ts` and greps the output, and which
-      # carries its own controls proving the grep would have found the import had there been one.
-      - if: matrix.codec == 'msgpack'
-        run: npm install --no-save @msgpack/msgpack
-      # The codec is passed a second time, as an argument, and not because the runners read it there:
-      # they read the environment. It is the one copy that does not come from the two variables under
-      # test, so a job whose `MUXWS_CODEC` never reached a process fails here instead of running
-      # `json` under a msgpack job's name and reporting a cross-language pair that does not exist
-      # (WSM-CDC-007).
-      - name: WSM-TST-004
+      # `@msgpack/msgpack` is an *optional* peer dependency (WSM-PKG-003) and a devDependency, so
+      # this install pulls it in; the second command keeps it present if the devDependency goes.
+      # Evidence that the json legs never reach msgpack is `ts/packaging.spec.ts`, which bundles
+      # `ts/index.ts` and greps the output.
+      - id: install
         run: |
-          MUXWS_VENV=$(dirname $(which python)) \
-            interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} main '${{ matrix.codec }}'
-      # The same scenario, over a socket file instead of a TCP port. It is a separate step rather
-      # than a second matrix axis because the thing at risk is not the protocol - not one frame or
-      # close code differs - but the `ws+unix:` URL grammar, where each port has its own parser and
-      # neither language's own suite can see the other's. The acceptors report the HTTP request
-      # target they were handed and the driver compares it against the route it put in the URL,
-      # query string included, so a dialer that dropped the target or built it from the pathname
-      # alone fails here and passes everything else. Not added to the reconnect job or the corpus
-      # step: the reasons are in `interop/drive.sh`'s header, and both are about a SIGKILLed acceptor
-      # being unable to unlink its own socket file rather than about coverage.
-      - name: WSM-TST-004 (over a unix domain socket)
-        run: |
-          MUXWS_VENV=$(dirname $(which python)) \
-            interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} unix '${{ matrix.codec }}'
-      # WSM-CDC-007 asks for more than a live pair: the pair must run the **sequence corpus**. The
-      # step above runs one hand-written scenario, which proves the two ports interoperate on that
-      # script and says nothing about the fixtures the two in-process runners replay - and
-      # those runners have a peer at each end of one process, so each proves only that its own port
-      # agrees with itself. This step is where a Python peer and a TypeScript peer replay the corpus
-      # to each other over a real socket, which is the sentence the rule actually contains.
-      - name: WSM-CDC-007 (the sequence corpus, cross-language)
-        run: |
-          MUXWS_VENV=$(dirname $(which python)) \
-            interop/drive.sh ${{ matrix.acceptor }} ${{ matrix.dialer }} corpus \
-            '${{ matrix.codec }}' '${{ matrix.fixtures }}'
+          npm install
+          npm install --no-save @msgpack/msgpack
 
-  # WSM-TST-005, and the one job that owns a process rather than a socket: the acceptor is SIGKILLed
-  # with streams open and a second one is started on the same port. Both role assignments run here
-  # rather than in two jobs, because the rule is one scenario and the interesting half of it - "the
-  # replayed hello the OTHER language's acceptor accepts" - has two directions.
-  reconnect:
-    name: cross-language-reconnect
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      MUXWS_CODEC: json
-      VITE_MUXWS_CODEC: json
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-      - run: pip install -e .[dev]
-      - run: npm install
-      - name: WSM-TST-005 (python acceptor, ts dialer)
+      # WSM-TST-004 and WSM-CDC-007: {Python acceptor, TS dialer} and {TS acceptor, Python dialer},
+      # each under json and msgpack. A scenario run in one role assignment proves only that one
+      # side's parity, ids and close semantics agree with themselves, and a codec that ships without
+      # a live cross-language pair MUST NOT ship.
+      #
+      # Each leg runs three scenarios through `interop/drive.sh`:
+      #   main    the hand-written scenario over TCP.
+      #   unix    the same scenario over a socket file. The protocol is identical; what is at risk is
+      #           the `ws+unix:` URL grammar, which each port parses with its own code. The acceptors
+      #           report the request target they were handed and the driver compares it with the
+      #           route it put in the URL, query string included.
+      #   corpus  the sequence corpus, replayed by a Python peer and a TypeScript peer to each other.
+      #           The in-process runners have a peer of one language at each end and prove only that
+      #           their own port agrees with itself.
+      #
+      # The codec is exported in both spellings (WSM-CDC-010): the Python half reads MUXWS_CODEC and
+      # the TypeScript half reads VITE_MUXWS_CODEC, which Vite substitutes at build time and which
+      # does not exist under node, so `interop/runner.ts` reads it from the environment itself. It is
+      # also passed to the driver as an argument, the one copy that does not come from the variables
+      # under test, so a step whose environment never reached a process fails instead of running json
+      # under a msgpack name.
+      #
+      # The last argument of `corpus` is how many fixtures the leg must exercise: the whole corpus
+      # under msgpack and one fewer under json, which cannot carry `bytes-payload-under-binary-codec`
+      # (WSM-CDC-008). It is pinned here rather than counted by the conductor, because a conductor
+      # that counted its own fixtures could report three of them as thirteen. Adding a sequence
+      # fixture means raising these two numbers alongside EXPECTED_SEQUENCE_FIXTURES in both
+      # conformance runners.
+      - name: python acceptor, ts dialer, json
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          MUXWS_CODEC: json
+          VITE_MUXWS_CODEC: json
+        run: |
+          export MUXWS_VENV=$(dirname $(which python))
+          interop/drive.sh python ts main json
+          interop/drive.sh python ts unix json
+          interop/drive.sh python ts corpus json 13
+      - name: ts acceptor, python dialer, json
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          MUXWS_CODEC: json
+          VITE_MUXWS_CODEC: json
+        run: |
+          export MUXWS_VENV=$(dirname $(which python))
+          interop/drive.sh ts python main json
+          interop/drive.sh ts python unix json
+          interop/drive.sh ts python corpus json 13
+      - name: python acceptor, ts dialer, msgpack
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          MUXWS_CODEC: msgpack
+          VITE_MUXWS_CODEC: msgpack
+        run: |
+          export MUXWS_VENV=$(dirname $(which python))
+          interop/drive.sh python ts main msgpack
+          interop/drive.sh python ts unix msgpack
+          interop/drive.sh python ts corpus msgpack 14
+      - name: ts acceptor, python dialer, msgpack
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          MUXWS_CODEC: msgpack
+          VITE_MUXWS_CODEC: msgpack
+        run: |
+          export MUXWS_VENV=$(dirname $(which python))
+          interop/drive.sh ts python main msgpack
+          interop/drive.sh ts python unix msgpack
+          interop/drive.sh ts python corpus msgpack 14
+
+      # WSM-TST-005: the acceptor is SIGKILLed with streams open and a second one is started on the
+      # same port, in both role assignments, because "the replayed hello the OTHER language's
+      # acceptor accepts" has two directions. Not run over a socket file: a SIGKILLed acceptor cannot
+      # unlink its own socket file (see `interop/drive.sh`).
+      - name: reconnect, python acceptor, ts dialer
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          MUXWS_CODEC: json
+          VITE_MUXWS_CODEC: json
         run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts reconnect json
-      - name: WSM-TST-005 (ts acceptor, python dialer)
+      - name: reconnect, ts acceptor, python dialer
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          MUXWS_CODEC: json
+          VITE_MUXWS_CODEC: json
         run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python reconnect json
+
+      # Every TypeScript `### Example` block on an API page, plus the quick-start clients dialling the
+      # Python acceptor and their stdout compared with the block printed in the guide.
+      # `examples.spec.ts` starts the acceptor with MUXWS_PYTHON; without it the probe falls back to
+      # `python3`, and a failed probe turns the two client tests into skips rather than failures.
+      - name: typescript examples
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: MUXWS_PYTHON="$(which python)" npx vitest run docs/examples/examples.spec.ts

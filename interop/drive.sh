@@ -26,18 +26,18 @@
 # peer's address) are both worse than not making the claim.
 #
 # The codec is whatever MUXWS_CODEC / VITE_MUXWS_CODEC say; this script passes the environment
-# through untouched, so one driver serves every CI job. The optional fourth argument is the
+# through untouched, so one driver serves every CI step. The optional fourth argument is the
 # codec the *caller* believes it configured, and it exists because that pass-through is exactly what
 # makes a misconfiguration undetectable: misspell both variable names and every process falls back
 # to `json`, the msgpack jobs run green, and CI reports that a codec has a live cross-language pair
 # (WSM-CDC-007) when it has nothing of the kind. Checking against the environment cannot catch that -
 # the check would read the same misspelt variables - so the expectation has to arrive from somewhere
-# the mistake cannot reach, which for CI is the job matrix.
+# the mistake cannot reach, which for CI is the workflow step that calls this script.
 #
 # The optional fifth argument is the same idea one level up, and only the `corpus` scenario reads it:
 # how many fixtures the caller expects that run to have exercised. The conductor counts its own
 # fixtures and asserts its own bookkeeping, but a driver that counted itself is a driver that can
-# report three fixtures as thirteen; the number pinned here comes from the job matrix instead, which
+# report three fixtures as thirteen; the number pinned here comes from the workflow step instead, which
 # is somewhere the conductor cannot reach.
 set -euo pipefail
 cd "$(dirname "$0")/.."
