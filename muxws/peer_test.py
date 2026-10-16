@@ -1555,6 +1555,46 @@ async def test_a_connection_level_error_closes_the_socket_with_a_reason_that_fit
         await asyncio.gather(serving, return_exceptions=True)
 
 
+async def test_close_sends_a_close_frame_reason_cut_to_123_bytes():
+    """`close()` cuts its reason for the WebSocket close frame; the `goaway` and `on_close` carry it whole.
+
+    The socket raises on a longer reason, as the `websockets` adapter does.
+    """
+    closed_with: list[tuple[int, str]] = []
+
+    class CloseFrameLimit:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            if len(reason.encode("utf-8")) > 123:
+                raise ValueError("control frame too long")
+            closed_with.append((code, reason))
+            await self.inner.close(code, reason)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+    _, inner = memory_pair()
+    codec = JsonCodec()
+    peer = Peer(CloseFrameLimit(inner), codec=codec, is_dialer=True)  # type: ignore[arg-type]
+    closes: list[Any] = []
+    peer.on_close(closes.append)
+    serving = asyncio.create_task(peer.serve())
+    reason = "é" * 100
+    try:
+        await asyncio.wait_for(peer.close(reason=reason, drain=1.0), 2.0)
+
+        goaways = [frame for frame in map(codec.decode, inner.sent) if frame.type == "goaway"]
+        assert [frame.reason for frame in goaways] == [reason]
+        assert closed_with == [(1000, "é" * 61)]
+        assert [(close.code, close.reason) for close in closes] == [(1000, reason)]
+        assert inner.is_closed
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
 def test_a_close_frame_reason_is_cut_at_a_character_boundary():
     """A reason over 123 UTF-8 bytes is cut to at most 123 bytes without splitting a character."""
     from muxws.peer import _close_frame_reason
@@ -1749,6 +1789,27 @@ async def test_nothing_more_is_sent_on_a_stream_after_a_later_queued_frame_fails
             await stream
         assert info.value.code is ResetCode.INTERNAL_ERROR
         assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
+async def test_an_open_that_fails_to_encode_fails_its_stream_and_sends_nothing(make_pair):
+    """An `open` the codec cannot encode is not sent, and neither is a `reset` for its id: the remote
+    has not seen the id, and a `reset` above its high-water mark would end the connection (WSM-STM-003)."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_reply_now)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"blob": b"\x00\xff"})
+        await pair.settle()
+
+        assert [frame for frame in pair.sent_by("dialer") if frame.stream == stream.id] == []
+        with pytest.raises(StreamReset) as info:
+            await stream
+        assert info.value.code is ResetCode.INTERNAL_ERROR
+        assert pair.dialer.is_open
+        assert pair.acceptor.is_open
+        assert await pair.dialer.request({"q": 2}) == {"ok": True}
     finally:
         await pair.stop()
 

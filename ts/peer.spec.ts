@@ -1754,6 +1754,38 @@ describe('hostile frames and failing hooks', () => {
     expect(inner.isClosed).toBe(true);
   });
 
+  it('cuts the close frame reason that close() sends to 123 UTF-8 bytes', async () => {
+    // The socket throws on a longer reason, as `ws` does; the `goaway` and `onClose` carry it whole.
+    const [, inner] = memoryPair();
+    const closedWith: [number, string][] = [];
+    const socket: SocketAdapter = {
+      sendText: (text: string) => inner.sendText(text),
+      sendBytes: (bytes: ArrayBuffer) => inner.sendBytes(bytes),
+      receive: async () => inner.receive(),
+      close: (code = 1000, reason = '') => {
+        if (new TextEncoder().encode(reason).length > 123)
+          throw new Error('The message must not be greater than 123 bytes');
+        closedWith.push([code, reason]);
+        inner.close(code, reason);
+      },
+    };
+    const peer = new Peer(socket, { codec: new JsonCodec(), isDialer: true });
+    const closes: CloseReason[] = [];
+    peer.onClose((reason) => closes.push(reason));
+    const serving = peer.serve();
+    void serving.catch(() => undefined);
+    const reason = 'é'.repeat(100);
+
+    await peer.close({ reason, drainMs: 1000 });
+
+    const goaways = inner.sent.map((message) => WIRE.decode(message)).filter((frame) => frame.type === 'goaway');
+    expect(goaways.map((frame) => frame.reason)).toEqual([reason]);
+    expect(closedWith).toEqual([[1000, 'é'.repeat(61)]]);
+    expect(closes.map((close) => [close.code, close.reason])).toEqual([[1000, reason]]);
+    expect(inner.isClosed).toBe(true);
+    await serving.catch(() => undefined);
+  });
+
   it('cuts a close frame reason to 123 UTF-8 bytes at a character boundary', () => {
     expect(closeFrameReason('short')).toBe('short');
     expect(closeFrameReason('a'.repeat(200))).toBe('a'.repeat(123));
@@ -1880,6 +1912,30 @@ describe('hostile frames and failing hooks', () => {
 
     // The writer is still running: a later request still completes.
     expect(await pair.dialer.request({ q: 2 })).toEqual({ ok: true });
+  });
+
+  it('sends neither an open that fails to encode nor a reset for its id', async () => {
+    // The remote has not seen the id, and a `reset` above its high-water mark would end the connection
+    // (WSM-STM-003).
+    const pair = makePair();
+    pair.acceptor.onStream(replyNow);
+    pair.start();
+    const level = logger.level;
+    logger.level = 'silent';
+    try {
+      const stream = pair.dialer.open({ blob: new Uint8Array([0, 255]).buffer });
+      await pair.settle();
+
+      expect(pair.sentBy('dialer').filter((frame) => frame.stream === stream.id)).toEqual([]);
+      const error = await rejection(stream);
+      expect((error as StreamReset).code).toBe(ResetCode.INTERNAL_ERROR);
+      expect(pair.dialer.isOpen).toBe(true);
+      expect(pair.acceptor.isOpen).toBe(true);
+      expect(await pair.dialer.request({ q: 2 })).toEqual({ ok: true });
+    } finally {
+      logger.level = level;
+      await pair.stop();
+    }
   });
 
   it('sends nothing more on a stream after a later queued frame fails to encode', async () => {

@@ -1735,7 +1735,7 @@ async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None =
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code carried by the `goaway` frame. Positional, unlike most muxws options. |
-| `reason` | `str \| None` | `None` | Free text on the `goaway` and on the WebSocket close frame. |
+| `reason` | `str \| None` | `None` | Free text on the `goaway` and on the WebSocket close frame. The close frame carries at most 123 UTF-8 bytes of it, cut at a character boundary; the `goaway` and `on_close` carry the full text. |
 | `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish and queued frames be sent before the socket is closed regardless. The socket is closed at the deadline even if the remote keeps a stream open or frames are still queued. Streams still live at the deadline fail locally with `ConnectionLost`. |
 
 ### Return
@@ -1835,7 +1835,7 @@ export interface CloseOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code on the `goaway` frame. |
-| `reason` | `string` | `null` | Free text on the `goaway` and the WebSocket close frame. |
+| `reason` | `string` | `null` | Free text on the `goaway` and the WebSocket close frame. The close frame carries at most 123 UTF-8 bytes of it, cut at a character boundary; the `goaway` and `onClose` carry the full text. |
 | `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish and queued frames be sent before closing regardless. The Python equivalent is `drain=10.0` seconds. |
 
 ### Return

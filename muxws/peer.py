@@ -443,7 +443,9 @@ class Peer:
     async def _fail_lane(self, failure: LaneEncodingError) -> None:
         """One lane's frame could not be encoded. Fail its stream; keep the connection working.
 
-        With no live stream on the lane, the peer is marked dead and the socket is closed with 1011.
+        With no live stream on the lane, the peer is marked dead and the socket is closed with 1011. An
+        `open` of which nothing was sent fails its stream without a `reset`: the remote has not seen the
+        id (WSM-STM-003).
         """
         logger.exception(
             "muxws conn=%s could not encode a frame on stream %s", self.id, failure.lane, exc_info=failure.cause
@@ -452,7 +454,10 @@ class Peer:
         if stream is None:
             await self._die_and_close(ConnectionClosed(str(failure), code=1011, reason=str(failure)))
             return
-        self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.INTERNAL_ERROR), reason=str(failure.cause)))
+        if not failure.unsent_open:
+            self._enqueue(
+                Frame("reset", stream=stream.id, code=int(ResetCode.INTERNAL_ERROR), reason=str(failure.cause))
+            )
         stream._fail(
             exception_for_reset(ResetCode.INTERNAL_ERROR, str(failure.cause), stream_id=stream.id),
             notify_remote=False,
@@ -639,6 +644,9 @@ class Peer:
         The drain waits for live streams to end and for the write loop to send every queued frame,
         including every remaining fragment of a fragmented payload; one deadline bounds both. An
         exception from the socket adapter's `close()` is logged, and the peer is marked closed.
+
+        The WebSocket close frame carries `reason` cut to 123 UTF-8 bytes at a character boundary; the
+        `goaway` frame and `on_close` carry the full text.
         """
         # The reconnect helper is stopped before the `_is_open` check. Between two sockets `_is_open`
         # is false while the helper waits in its backoff; returning early there would leave the
@@ -650,7 +658,7 @@ class Peer:
             return
         self._send_goaway(code, reason)
         await self._drain(drain)
-        await self._close_socket(1000, reason or "")
+        await self._close_socket(1000, _close_frame_reason(reason or ""))
         self._die(ConnectionClosed(reason or "closed", code=1000, reason=reason or "", was_clean=True))
 
     def _send_goaway(self, code: ResetCode, reason: str | None) -> None:

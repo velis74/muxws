@@ -33,12 +33,17 @@ class LaneEncodingError(Exception):
     Fragmentation encodes inside the writer, so a codec that refuses a payload (for example bytes
     under JSON) raises here. The exception carries the lane, so the write loop can fail that stream
     and keep the connection open instead of ending the write loop.
+
+    `unsent_open` is true when the frame that failed is an `open` of which nothing has been sent. The
+    remote has not seen the stream id, so a `reset` for it would be above the remote's high-water
+    mark, a connection-level error (WSM-STM-003).
     """
 
-    def __init__(self, lane: int, cause: BaseException) -> None:
+    def __init__(self, lane: int, cause: BaseException, *, unsent_open: bool = False) -> None:
         super().__init__(f"could not encode a frame on lane {lane}: {cause}")
         self.lane = lane
         self.cause = cause
+        self.unsent_open = unsent_open
 
 
 class StreamQueue:
@@ -48,7 +53,7 @@ class StreamQueue:
     (WSM-FRG-017). The choice between streams is made by `Writer`'s rotation.
     """
 
-    __slots__ = ("stream_id", "_waiting", "_prepared", "_fragments")
+    __slots__ = ("stream_id", "_waiting", "_prepared", "_fragments", "failed_unsent_open")
 
     def __init__(self, stream_id: int) -> None:
         self.stream_id = stream_id
@@ -57,6 +62,8 @@ class StreamQueue:
         self._prepared: Frame | None = None
         #: The lazy remainder of the payload in flight, if this stream is mid-fragmentation.
         self._fragments: Iterator[Frame] | None = None
+        #: Set when the last `prepare` raised while slicing the first fragment of an `open`.
+        self.failed_unsent_open = False
 
     def __len__(self) -> int:
         """How many frames are queued but unsent. Never more than one **prepared** (WSM-FRG-018)."""
@@ -80,6 +87,7 @@ class StreamQueue:
         Called after the previous fragment has reached the socket. Slicing further ahead would fix the
         order of frames before the writer chooses it (WSM-FRG-018).
         """
+        self.failed_unsent_open = False
         if self._prepared is not None:
             return
 
@@ -91,8 +99,13 @@ class StreamQueue:
 
         if not self._waiting:
             return
-        self._fragments = iter_fragments(self._waiting.popleft(), cap, codec)
-        self._prepared = next(self._fragments, None)
+        frame = self._waiting.popleft()
+        self._fragments = iter_fragments(frame, cap, codec)
+        try:
+            self._prepared = next(self._fragments, None)
+        except Exception:
+            self.failed_unsent_open = frame.type == "open"
+            raise
 
     def take(self) -> Frame | None:
         """Hand over the prepared fragment. The next one is not sliced until `prepare` is called."""
@@ -206,9 +219,10 @@ class Writer:
         except LaneEncodingError:
             raise
         except Exception as exc:  # noqa: BLE001
+            unsent_open = queue.failed_unsent_open
             queue.discard()
             self._retire(lane)
-            raise LaneEncodingError(lane, exc) from exc
+            raise LaneEncodingError(lane, exc, unsent_open=unsent_open) from exc
 
     def _retire(self, lane: int) -> None:
         """Remove a lane with no work left. No state is kept per closed stream (WSM-STM-001)."""

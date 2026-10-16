@@ -36,11 +36,19 @@ export class LaneEncodingError extends Error {
   /** The codec's original error, which the peer reports to the affected stream. */
   readonly cause: unknown;
 
-  constructor(lane: number, cause: unknown) {
+  /**
+   * True when the frame that failed is an `open` of which nothing has been sent. The remote has not
+   * seen the stream id, so a `reset` for it would be above the remote's high-water mark, a
+   * connection-level error (WSM-STM-003).
+   */
+  readonly unsentOpen: boolean;
+
+  constructor(lane: number, cause: unknown, options: { unsentOpen?: boolean } = {}) {
     super(`could not encode a frame on lane ${lane}: ${describeCause(cause)}`);
     this.name = 'LaneEncodingError';
     this.lane = lane;
     this.cause = cause;
+    this.unsentOpen = options.unsentOpen ?? false;
   }
 }
 
@@ -97,6 +105,9 @@ export class StreamQueue {
   /** The lazy remainder of the payload in flight, if this stream is mid-fragmentation. */
   private fragments: Iterator<Frame> | null = null;
 
+  /** Set when the last `prepare` threw while slicing the first fragment of an `open`. */
+  failedUnsentOpen = false;
+
   constructor(streamId: number) {
     this.streamId = streamId;
   }
@@ -126,6 +137,7 @@ export class StreamQueue {
    * ahead would violate WSM-FRG-018 (at most one unsent fragment per stream).
    */
   prepare(cap: number, codec: Codec): void {
+    this.failedUnsentOpen = false;
     if (this.prepared !== null) return;
 
     if (this.fragments !== null) {
@@ -140,7 +152,13 @@ export class StreamQueue {
     const next = this.waiting.shift();
     if (next === undefined) return;
     this.fragments = iterFragments(next, cap, codec);
-    const started = this.fragments.next();
+    let started: IteratorResult<Frame>;
+    try {
+      started = this.fragments.next();
+    } catch (failure) {
+      this.failedUnsentOpen = next.type === 'open';
+      throw failure;
+    }
     this.prepared = started.done === true ? null : started.value;
   }
 
@@ -293,9 +311,10 @@ export class Writer {
       queue.prepare(this.cap, this.codec);
     } catch (failure) {
       if (failure instanceof LaneEncodingError) throw failure;
+      const unsentOpen = queue.failedUnsentOpen;
       queue.discard();
       this.retire(lane);
-      throw new LaneEncodingError(lane, failure);
+      throw new LaneEncodingError(lane, failure, { unsentOpen });
     }
   }
 

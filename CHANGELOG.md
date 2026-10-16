@@ -83,9 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection with 1011.
 - A reassembled payload the codec cannot decode, or fragments of one payload that mix text and binary values, reset
   only that stream with `PROTOCOL_ERROR`; the connection stays open (Python and TypeScript).
-- The WebSocket close that ends a connection-level protocol error carries at most 123 UTF-8 bytes of reason, cut at
-  a character boundary. A longer reason made `ws`, browser `WebSocket` and `websockets` reject the close and leave
-  the socket open. The `goaway` frame and the close report still carry the full reason.
+- The WebSocket close sent by `Peer.close()` or at the end of a connection-level protocol error carries at most 123
+  UTF-8 bytes of reason, cut at a character boundary. A longer reason made `ws`, browser `WebSocket` and
+  `websockets` reject the close and leave the socket open. The `goaway` frame and the close report still carry the
+  full reason.
 - Resetting or cancelling a stream drops the stream's queued frames that have not been sent, including the
   remaining fragments of a payload that is partly sent; the `reset` ends the fragment sequence on the receiver. A
   `reset` received from the remote drops this peer's queued frames for that stream in the same way. An `open` of
@@ -93,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A frame that fails to encode when the writer advances past the previous frame on its stream resets only that
   stream, with the codec's error as the reason, and drops the frames queued behind it, instead of sending them
   after the stream has failed (Python and TypeScript).
+- An `open` whose payload the codec cannot encode fails its stream with `INTERNAL_ERROR` and sends nothing for the
+  id. A `reset` for that id was sent before, and the remote, which had not seen the id, ended the connection
+  (WSM-STM-003) (Python and TypeScript).
 - `connect()` checks `max_frame_bytes` / `maxFrameBytes` and copies the hello before dialing, so an unusable frame
   cap or an uncopyable hello raises without opening a socket; any other failure after the dial and before the hello
   closes the dialled socket (Python and TypeScript).

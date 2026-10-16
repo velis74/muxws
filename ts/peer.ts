@@ -906,7 +906,9 @@ export class Peer {
   /**
    * A frame on one lane could not be encoded. Fail its stream; the connection continues.
    *
-   * With no live stream on the lane, the peer is marked dead and the socket is closed with 1011.
+   * With no live stream on the lane, the peer is marked dead and the socket is closed with 1011. An
+   * `open` of which nothing was sent fails its stream without a `reset`: the remote has not seen the
+   * id (WSM-STM-003).
    */
   private async failLane(failure: LaneEncodingError): Promise<void> {
     const detail = errorMessage(failure.cause);
@@ -916,7 +918,8 @@ export class Peer {
       await this.dieAndClose(new ConnectionClosed(String(failure), { code: 1011, reason: String(failure) }));
       return;
     }
-    this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
+    if (!failure.unsentOpen)
+      this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
     stream.fail(exceptionForReset(ResetCode.INTERNAL_ERROR, detail, { streamId: stream.id }));
   }
 
@@ -1144,6 +1147,9 @@ export class Peer {
    * The drain waits for live streams to end and for the write loop to send every queued frame,
    * including every remaining fragment of a fragmented payload; one deadline bounds both. An error
    * from the socket adapter's `close()` is logged, and the peer is marked closed.
+   *
+   * The WebSocket close frame carries `reason` cut to 123 UTF-8 bytes at a character boundary; the
+   * `goaway` frame and `onClose` carry the full text.
    */
   async close(options: CloseOptions = {}): Promise<void> {
     const { code = ResetCode.NO_ERROR, reason = null, drainMs = DEFAULT_DRAIN_MS } = options;
@@ -1156,7 +1162,7 @@ export class Peer {
     this.sendGoaway(code, reason);
     await this.drain(drainMs);
     try {
-      await this.socket.close(1000, reason ?? '');
+      await this.socket.close(1000, closeFrameReason(reason ?? ''));
     } catch (error) {
       // A socket whose close fails is already closed; the peer is still marked dead below.
       logger.warn(`muxws conn=${this.id} closing the socket failed`, error);
