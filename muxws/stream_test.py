@@ -498,6 +498,92 @@ async def test_cancel_is_immediate_and_discards_in_flight(make_pair):
         await pair.stop()
 
 
+def _frames_of_stream(frames: list[Frame], stream_id: int) -> list[Frame]:
+    return [frame for frame in frames if frame.stream == stream_id]
+
+
+async def test_cancel_drops_the_queued_remainder_of_a_fragmented_send(make_pair):
+    """WSM-ERR-012/WSM-FRM-014: after cancel() no queued fragment of the stream is sent; the reset ends the sequence.
+
+    The last `data` fragment before the reset carries `more: true`, and the receiver closes the stream
+    with CANCELLED and keeps the connection.
+    """
+    pair = make_pair(max_frame_bytes=256)
+    remote: list[Stream] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        remote.append(stream)
+        await stream.closed.wait()
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await pair.settle()
+        await stream.send({"body": "x" * 100_000})
+        await pair.settle(5)
+        before = len([f for f in _frames_of_stream(pair.sent_by("dialer"), stream.id) if f.type == "data"])
+        await stream.cancel("user navigated away")
+        await pair.settle(2000)
+
+        mine = _frames_of_stream(pair.sent_by("dialer"), stream.id)
+        assert mine[-1].type == "reset"
+        assert mine[-1].code == ResetCode.CANCELLED
+        sent = [frame for frame in mine if frame.type == "data"]
+        assert before > 0, "the payload must have started fragmenting before the cancel"
+        assert len(sent) <= before + 1, f"{len(sent) - before} fragments were sent after cancel()"
+        assert sent[-1].more is True
+        assert remote
+        assert isinstance(remote[0]._close_cause, StreamReset)
+        assert remote[0]._close_cause.code == ResetCode.CANCELLED
+        assert pair.acceptor.is_open
+        assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
+async def test_cancel_before_the_open_is_sent_still_sends_the_open(make_pair):
+    """WSM-STM-003: the reset follows the `open`, so it never names an id above the remote's high-water mark."""
+    pair = make_pair()
+    pair.acceptor.on_stream(lambda _payload, stream: stream.closed.wait())
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await stream.send({"n": 2})
+        await stream.cancel()
+        await pair.settle()
+
+        assert [frame.type for frame in _frames_of_stream(pair.sent_by("dialer"), stream.id)] == ["open", "reset"]
+        assert pair.acceptor.is_open
+        assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
+async def test_a_received_reset_drops_the_queued_frames_of_its_stream(make_pair):
+    """WSM-FRM-014: after a reset from the remote, no queued fragment of that stream is sent."""
+    pair = make_pair(max_frame_bytes=256)
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.cancel("not interested")
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        await stream.send({"body": "x" * 100_000})
+        await pair.settle(2000)
+
+        assert stream.state is StreamState.CLOSED
+        sent = [frame for frame in _frames_of_stream(pair.sent_by("dialer"), stream.id) if frame.type == "data"]
+        assert len(sent) < 30, f"{len(sent)} fragments were sent after the remote reset the stream"
+        assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
 async def test_remote_cancel_cancels_the_handler_task(make_pair):
     """WSM-ERR-013: the handler observes CancelledError at its next await."""
     pair = make_pair()

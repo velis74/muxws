@@ -100,12 +100,9 @@ export class PeerRegistry {
     this.entries.set(peer, entries);
     if (this.hooked.has(peer)) return;
     this.hooked.add(peer);
-    peer.onClose(() => {
-      // Clears the hook marker as well as the entries, so a `Peer` that is reused across a reconnect
-      // (WSM-RCN-032) and registered again gets a new close hook.
-      this.hooked.delete(peer);
-      this.deregister(peer);
-    });
+    // `Peer` calls its close handlers on every connection loss and keeps them across a reconnect
+    // (WSM-RCN-032, WSM-RCN-040), so the handler stays installed and deregisters the peer on each loss.
+    peer.onClose(() => this.deregister(peer));
   }
 
   /** Forget `peer` entirely. Idempotent. */

@@ -50,7 +50,9 @@ contains both. A decoder must distinguish them (the reference implementations us
 sentinel), whether or not the application uses the difference.
 
 **`payload` and `fragment` must never both appear on one frame.** A frame carrying both is a
-connection-level protocol error.
+connection-level protocol error. So is an envelope field whose value has the wrong type, such as a
+string `stream` or a non-boolean `end`; the accepted types are listed under
+[`from_mapping`](/api/types#from-mapping-frommapping).
 
 Two kinds of information are never sent:
 
@@ -79,7 +81,8 @@ handshake with HTTP 400, before a socket exists. Peers of different generations 
 
 **Additive revisions need no announcement.** A receiver must ignore what it does not recognise:
 
-- **Unknown frame types** are ignored and logged, and are never an error. The connection continues.
+- **Unknown frame types** are ignored and are never an error. The connection continues. Each type is
+  logged once per peer, at info level, for at most 32 distinct types.
 - **Unknown envelope fields** are ignored. A decoder must *drop* them rather than preserve them; if it
   preserved them, `decode(encode(frame)) == frame` would also pass for frames carrying unknown fields.
 

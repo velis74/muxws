@@ -80,6 +80,43 @@ def test_missing_type_and_payload_with_fragment_raise():
         from_mapping({"type": "data", "stream": 1, "payload": 1, "fragment": "x"})
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", 5),
+        ("stream", "1"),
+        ("stream", True),
+        ("stream", -1),
+        ("stream", 1.5),
+        ("last_stream", "1"),
+        ("code", "3"),
+        ("fragment", 5),
+        ("more", 1),
+        ("end", "yes"),
+        ("end", None),
+        ("headers", "x"),
+        ("headers", {1: "x"}),
+        ("trailers", ["x"]),
+        ("reason", 5),
+        ("nonce", 5),
+    ],
+)
+def test_an_envelope_field_of_the_wrong_type_raises(field: str, value: Any):
+    """WSM-FRM-005: a field whose value has the wrong type is a message the codec refuses to decode."""
+    mapping: dict[str, Any] = {"type": "data", "stream": 1, field: value}
+    with pytest.raises(ProtocolError, match=field):
+        from_mapping(mapping)
+
+
+def test_null_optional_fields_and_integral_floats_are_accepted():
+    """`null` decodes to the field default, and an integral float in an integer field decodes as `int`."""
+    frame = from_mapping({"type": "reset", "stream": 3.0, "code": 1.0, "reason": None, "headers": None})
+    assert frame == Frame("reset", stream=3, code=1)
+    assert type(frame.stream) is int
+    assert type(frame.code) is int
+    assert from_mapping({"type": "data", "stream": 1, "fragment": b"\x01"}).fragment == b"\x01"
+
+
 def test_absent_payload_is_not_null(codec: JsonCodec):
     """D1: ABSENT omits the key entirely; None emits an explicit null."""
     assert "payload" not in to_mapping(Frame("data", stream=1))

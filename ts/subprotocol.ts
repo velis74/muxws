@@ -84,6 +84,19 @@ function describe(offered: readonly string[], entry: string | null): string {
 }
 
 /**
+ * Log the error line for an open socket whose negotiated subprotocol is not `wanted`, which is then
+ * closed with `closeCode` (WSM-CDC-028/029). The line names both environment variables. It goes
+ * through `logger`, so `logger.level` controls it. Mirrors `websockets_.verify_negotiated`.
+ */
+export function logNegotiatedMismatch(negotiated: string, wanted: string, closeCode: number): void {
+  logger.error(
+    `muxws negotiated subprotocol is '${negotiated}', expected '${wanted}'; closing with ${closeCode}. ` +
+      'Both ends must be configured for the same codec: VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on ' +
+      'the server (WSM-CDC-028/029).',
+  );
+}
+
+/**
  * The error a dialer composes **for itself** when its handshake is refused (WSM-CDC-024).
  *
  * A browser cannot read a rejection body, so the diagnostic is composed on the dialer side. It names

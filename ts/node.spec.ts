@@ -17,7 +17,7 @@ import { vi } from 'vitest';
 import { WebSocketServer } from 'ws';
 
 import { type Codec, JsonCodec } from './codec';
-import { CodecMismatch, MuxwsError, TransportUrlError } from './errors';
+import { CodecMismatch, MuxwsError, ProtocolError, TransportUrlError } from './errors';
 // The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` does not.
 import './index';
 import { WsUrlError, accept, connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
@@ -467,6 +467,109 @@ describe('accept() and serve() register the interceptor arrays they are given - 
     } finally {
       await Promise.all(dialers.map((dialer) => dialer.close({ drainMs: 50 })));
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe('a codec mismatch on an open socket is logged on both sides - WSM-CDC-028/029', () => {
+  /** The error line for a socket that negotiated `negotiated` where `muxws.v1.json` was expected. */
+  const mismatchLine = (negotiated: string): string =>
+    `muxws negotiated subprotocol is '${negotiated}', expected 'muxws.v1.json'; closing with 1008. ` +
+    'Both ends must be configured for the same codec: VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on the ' +
+    'server (WSM-CDC-028/029).';
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('logs one error line when accept() finds a socket that negotiated no muxws subprotocol', async () => {
+    const lines: unknown[] = [];
+    vi.spyOn(console, 'error').mockImplementation((line: unknown) => {
+      lines.push(line);
+    });
+    const negotiatedNothing = {
+      protocol: '',
+      close: () => undefined,
+    } as unknown as Parameters<typeof accept>[0];
+
+    await expect(accept(negotiatedNothing)).rejects.toBeInstanceOf(CodecMismatch);
+    expect(lines).toEqual([mismatchLine('')]);
+  });
+
+  it('logs one error line when the dialer closes a socket that negotiated another subprotocol', async () => {
+    const lines: unknown[] = [];
+    vi.spyOn(console, 'error').mockImplementation((line: unknown) => {
+      lines.push(line);
+    });
+    const rogue = new WebSocketServer({ port: 0, handleProtocols: () => 'bearer.abc123' });
+    await new Promise<void>((resolve) => rogue.once('listening', resolve));
+    const url = `ws://127.0.0.1:${(rogue.address() as AddressInfo).port}`;
+    try {
+      await expect(connect(url, { subprotocols: ['bearer.abc123'] })).rejects.toBeInstanceOf(CodecMismatch);
+      expect(lines).toEqual([mismatchLine('bearer.abc123')]);
+    } finally {
+      await new Promise<void>((resolve) => rogue.close(() => resolve()));
+    }
+  });
+});
+
+describe('connect() leaves no dialled socket open when it rejects - WSM-RCN-006', () => {
+  interface Counted {
+    url: string;
+    handshakes: () => number;
+    closed: Promise<void>;
+    close: () => Promise<void>;
+  }
+
+  /** A `ws` acceptor that counts completed handshakes; `closed` resolves when its first connection closes. */
+  async function counted(): Promise<Counted> {
+    let handshakes = 0;
+    let markClosed: () => void = () => undefined;
+    const closed = new Promise<void>((resolve) => {
+      markClosed = resolve;
+    });
+    const server = refuseMismatchedUpgrade(new WebSocketServer({ port: 0, handleProtocols }));
+    server.on('connection', (socket) => {
+      handshakes += 1;
+      socket.on('close', () => markClosed());
+    });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    return {
+      url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      handshakes: () => handshakes,
+      closed,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  it('rejects a frame cap that cannot hold a frame before dialing - WSM-FRG-034', async () => {
+    const acceptor = await counted();
+    try {
+      await expect(connect(acceptor.url, { maxFrameBytes: 8 })).rejects.toBeInstanceOf(ProtocolError);
+      expect(acceptor.handshakes()).toBe(0);
+    } finally {
+      await acceptor.close();
+    }
+  });
+
+  it('rejects a hello structuredClone cannot copy before dialing - WSM-RCN-027', async () => {
+    const acceptor = await counted();
+    try {
+      await expect(connect(acceptor.url, { hello: { pending: () => undefined } })).rejects.toThrow();
+      expect(acceptor.handshakes()).toBe(0);
+    } finally {
+      await acceptor.close();
+    }
+  });
+
+  it('closes the dialled socket when building the peer fails after the dial', async () => {
+    const acceptor = await counted();
+    try {
+      await expect(connect(acceptor.url, { openInterceptors: {} as never })).rejects.toBeInstanceOf(TypeError);
+      expect(acceptor.handshakes()).toBe(1);
+      await acceptor.closed;
+    } finally {
+      await acceptor.close();
     }
   });
 });

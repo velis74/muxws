@@ -25,7 +25,7 @@ export async function connect(url: string, options: ConnectOptions = {}): Promis
   // The reconnect driver calls this closure for every attempt; each attempt offers the same
   // subprotocol to the same url as the first (WSM-RCN-020).
   const dial: Dial = async () => BrowserSocket.connect(url, codec.name, { subprotocols: options.subprotocols });
-  return dialAndEstablish(await dial(), dial, options, codec);
+  return dialAndEstablish(dial, options, codec);
 }
 
 /**

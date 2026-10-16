@@ -97,6 +97,9 @@ The sequence:
   carrying `more: false`, even when that fragment carries no payload bytes.
 - The receiver concatenates the `fragment` values and passes the result to the codec when the last
   fragment arrives. The payload is decoded only then.
+- The fragments of one payload are all text or all bytes. A sequence that mixes the two, or a
+  concatenated payload the codec cannot decode, resets that stream with `PROTOCOL_ERROR`; the
+  connection and its other streams are not affected.
 
 Two rules allow frames of different streams to interleave:
 
@@ -118,8 +121,12 @@ Reset code `7`. Two checks produce it:
 **A single encoded message over the frame limit.** The receiver measures the *whole encoded message*
 read from the socket, not the `fragment` field inside it. If a stream frame exceeds the limit, that
 stream is reset with `PAYLOAD_TOO_LARGE`; if a connection-level frame exceeds it, the connection fails,
-because there is no stream to reset. A conforming muxws sender fragments at the same constant and does
-not trigger this check.
+because there is no stream to reset. An over-size `open` for a new id has its id checked like any
+other `open` (WSM-SID-005) and counts as the remote's highest open before the reset goes out, so a
+later `data` or `reset` on that id is ignored. An over-size `data` or `reset` for an id that is not
+live is not reset: at or below the high-water mark it is ignored (WSM-STM-002), above it the
+connection fails (WSM-STM-003). A conforming muxws sender fragments at the same constant and does not
+trigger this check.
 
 **A reassembled payload over `max_payload_bytes`.** This is the receiver's memory limit, and it is
 checked **as fragments arrive**: for each fragment, the accumulated byte count plus the incoming
@@ -131,8 +138,9 @@ Each side observes:
 - **The receiver**: the stream is reset locally; a handler awaiting or iterating it receives a
   `StreamReset` with `ResetCode.PAYLOAD_TOO_LARGE`. The rest of the connection is not affected.
 - **The sender**: a `reset` frame arrives for that stream, and the pending `send`/`await`/`async for`
-  raises `StreamReset` with the same code and the receiver's reason text. The connection stays open.
-  The same payload fails the same way on retry; reduce it or split it in the application.
+  raises `StreamReset` with the same code and the receiver's reason text. The fragments of the payload
+  that are not yet sent when the `reset` arrives are dropped. The connection stays open. The same
+  payload fails the same way on retry; reduce it or split it in the application.
 
 ## `max_payload_bytes` belongs to the receiver
 

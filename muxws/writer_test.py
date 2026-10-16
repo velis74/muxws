@@ -11,7 +11,7 @@ import pytest
 from muxws.codecs.json_ import JsonCodec
 from muxws.fragment import encoded_length, split_frame
 from muxws.frames import Frame
-from muxws.writer import CONNECTION_LANE, StreamQueue, Writer
+from muxws.writer import CONNECTION_LANE, LaneEncodingError, StreamQueue, Writer
 
 
 @pytest.fixture
@@ -150,12 +150,57 @@ async def test_discarding_one_stream_leaves_the_others_alone(writer: Writer):
     assert set(order) == {3}
 
 
+async def test_discard_drops_the_remainder_of_a_started_payload(writer: Writer):
+    """WSM-FRM-014: discarding a stream mid-fragmentation drops its unsent fragments and later frames."""
+    writer.enqueue(Frame("data", stream=1, payload=_big()))
+    writer.enqueue(Frame("data", stream=1, payload={"n": 2}, end=True))
+    first = writer._rotate()
+    assert first is not None
+    assert first.more is True
+    writer.advance(1)
+
+    writer.discard(1)
+    writer.enqueue(Frame("reset", stream=1, code=1))
+    writer.advance(1)
+    assert [frame.type for frame in await _drain(writer)] == ["reset"]
+
+
+async def test_discard_keeps_an_open_none_of_which_was_sent(writer: Writer):
+    """WSM-STM-003: an unsent `open` stays queued, so a reset that follows names an id the remote knows."""
+    writer.enqueue(Frame("open", stream=1, payload={"q": 1}))
+    writer.enqueue(Frame("data", stream=1, payload=_big()))
+
+    writer.discard(1)
+    writer.enqueue(Frame("reset", stream=1, code=1))
+    assert [frame.type for frame in await _drain(writer)] == ["open", "reset"]
+
+
 async def test_a_spent_lane_is_retired(writer: Writer):
     """WSM-STM-001: nothing is retained per closed stream, including an empty queue."""
     writer.enqueue(Frame("data", stream=1, payload={"n": 1}))
     await _drain(writer)
     assert writer.depth_of(1) == 0
     assert 1 not in writer._queues
+
+
+async def test_advance_discards_a_lane_whose_next_frame_fails_to_encode(writer: Writer):
+    """`advance` raises `LaneEncodingError` for that lane, drops its queued frames and retires it."""
+    writer.enqueue(Frame("data", stream=1, payload={"n": 1}))
+    # Bytes are not a payload type under JSON; the codec refuses them.
+    writer.enqueue(Frame("data", stream=1, payload={"blob": b"\x00\xff"}))
+    writer.enqueue(Frame("data", stream=1, payload={"n": 3}))
+    writer.enqueue(Frame("data", stream=5, payload={"n": 5}))
+
+    first = writer._rotate()
+    assert first is not None
+    assert first.stream == 1
+    with pytest.raises(LaneEncodingError) as info:
+        writer.advance(1)
+
+    assert info.value.lane == 1
+    assert writer.depth_of(1) == 0
+    assert 1 not in writer._queues
+    assert [frame.stream for frame in await _drain(writer)] == [5]
 
 
 async def test_next_frame_waits_and_wakes(writer: Writer):

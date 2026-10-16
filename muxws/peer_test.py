@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 import logging
 import re
 import warnings
@@ -17,7 +18,15 @@ import pytest
 import muxws
 
 from muxws.codecs.json_ import JsonCodec
-from muxws.errors import ConnectionLost, ProtocolError, RemoteError, ResetCode, StreamReset, StreamTimeout
+from muxws.errors import (
+    ConnectionGoingAway,
+    ConnectionLost,
+    ProtocolError,
+    RemoteError,
+    ResetCode,
+    StreamReset,
+    StreamTimeout,
+)
 from muxws.frames import ABSENT, Frame
 from muxws.peer import default_error_serializer, Peer
 from muxws.stream import Stream
@@ -346,6 +355,46 @@ async def test_unknown_frame_type_is_ignored(make_pair, caplog):
         # WSM-OBS-001 requires every frame log line to use the one named logger.
         assert lines[0].name == "muxws.frames"
         assert lines[0].levelno == logging.INFO
+    finally:
+        await pair.stop()
+
+
+async def test_each_unknown_frame_type_is_logged_once(make_pair, caplog):
+    """WSM-FRM-002: an unknown frame type that arrives repeatedly produces one log line per type."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        with caplog.at_level(logging.INFO, logger="muxws.frames"):
+            for frame_type in ("widget", "widget", "gadget", "widget", "gadget"):
+                pair.acceptor_socket.inject(json.dumps({"type": frame_type, "stream": 1}))
+            await pair.settle()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert len([message for message in messages if "'widget'" in message]) == 1, messages
+        assert len([message for message in messages if "'gadget'" in message]) == 1, messages
+        assert pair.acceptor.is_open
+    finally:
+        await pair.stop()
+
+
+@pytest.mark.parametrize("frame_type", ["5", "[1]", '{"a":1}', '{"toString":1}', "null"])
+async def test_a_non_string_frame_type_fails_the_connection_with_frame_logging_on(make_pair, caplog, frame_type):
+    """WSM-FRM-005: a `type` that is not a string is a malformed envelope, not an unknown frame type.
+
+    With frame logging at DEBUG level the read loop sends goaway(PROTOCOL_ERROR) and closes the socket.
+    """
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        with caplog.at_level(logging.DEBUG, logger="muxws.frames"):
+            pair.acceptor_socket.inject(f'{{"type":{frame_type},"stream":1}}')
+            await pair.settle()
+        goaways = pair.frames_of_type("acceptor", "goaway")
+        assert [frame.code for frame in goaways] == [int(ResetCode.PROTOCOL_ERROR)]
+        assert pair.acceptor.is_open is False
+        assert pair.acceptor_socket.is_closed
     finally:
         await pair.stop()
 
@@ -1161,7 +1210,216 @@ async def test_a_read_loop_failure_closes_the_peer(make_pair):
 
         assert pair.dialer.is_open is False
         assert len(closes) == 1
+        assert closes[0].code == 1011
         assert stream.closed.is_set()
+        assert pair.dialer_socket.is_closed, "a peer that reports itself closed has closed its socket"
+        assert [frame.code for frame in pair.frames_of_type("dialer", "goaway")] == [int(ResetCode.INTERNAL_ERROR)]
+    finally:
+        await pair.stop()
+
+
+async def test_an_exception_outside_dispatch_closes_the_peer_and_the_socket(make_pair):
+    """An exception the read loop raises outside `_dispatch` marks the peer closed (1011) and closes its socket."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    closes: list[Any] = []
+    pair.dialer.on_close(closes.append)
+
+    def exploding(*_args: Any) -> None:
+        raise RuntimeError("simulated bug outside dispatch")
+
+    pair.dialer._report_frame = exploding  # type: ignore[method-assign]
+    pair.start()
+    try:
+        pair.dialer_socket.inject('{"type":"ping","nonce":"n"}')
+        await pair.settle()
+
+        assert pair.dialer.is_open is False
+        assert [reason.code for reason in closes] == [1011]
+        assert pair.dialer_socket.is_closed
+    finally:
+        await pair.stop()
+
+
+# --------------------------------------------------------------------------- shutdown
+
+
+class _WrappedSocket:
+    """Delegates to a `MemorySocket`. With `suspend`, every send waits 1 ms before it reaches the wire."""
+
+    def __init__(self, inner: Any, *, suspend: bool = False, failing_close: bool = False) -> None:
+        self._inner = inner
+        self._suspend = suspend
+        self._failing_close = failing_close
+
+    async def send_text(self, text: str) -> None:
+        if self._suspend:
+            await asyncio.sleep(0.001)
+        await self._inner.send_text(text)
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self._suspend:
+            await asyncio.sleep(0.001)
+        await self._inner.send_bytes(data)
+
+    async def receive(self) -> str | bytes:
+        return await self._inner.receive()
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._inner.close(code, reason)
+        if self._failing_close:
+            raise RuntimeError("the adapter failed to close")
+
+
+#: (send suspends, reply size): a socket whose send suspends, and a reply of more than 1000 fragments.
+_DRAIN_CASES = [pytest.param(True, 4_000, id="suspending-send"), pytest.param(False, 200_000, id="many-fragments")]
+
+
+def _assert_reply_and_goaway_sent(frames: list[Frame]) -> None:
+    pieces = [frame for frame in frames if frame.type == "data"]
+    assert len(pieces) > 1, "the reply must have been fragmented"
+    assert pieces[-1].more is not True, "the last fragment of the reply must be on the wire"
+    assert pieces[-1].end is True
+    assert [frame for frame in frames if frame.type == "goaway"], "goaway must be on the wire"
+
+
+@pytest.mark.parametrize(("suspend", "size"), _DRAIN_CASES)
+async def test_close_sends_every_queued_fragment_before_closing_the_socket(make_pair, suspend: bool, size: int):
+    """WSM-CON-025/WSM-FRG-017: `close()` closes the socket only after every queued fragment and `goaway` are sent."""
+    pair = make_pair(max_frame_bytes=200)
+    pair.acceptor._socket = _WrappedSocket(pair.acceptor_socket, suspend=suspend)  # type: ignore[assignment]
+    blob = {"blob": "x" * size}
+    replied = asyncio.Event()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.reply(blob)
+        replied.set()
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1}, end=True)
+        await asyncio.wait_for(replied.wait(), 5)
+        await asyncio.wait_for(pair.acceptor.close(drain=5), 10)
+
+        _assert_reply_and_goaway_sent(pair.sent_by("acceptor"))
+        assert await asyncio.wait_for(stream.result(), 5) == blob
+    finally:
+        await pair.stop()
+
+
+@pytest.mark.parametrize(("suspend", "size"), _DRAIN_CASES)
+async def test_a_connection_failure_sends_every_queued_fragment_and_its_goaway(make_pair, suspend: bool, size: int):
+    """ILL-C: the socket closes only after `goaway(PROTOCOL_ERROR)` and every fragment queued before it are sent."""
+    pair = make_pair(max_frame_bytes=200)
+    pair.acceptor._socket = _WrappedSocket(pair.acceptor_socket, suspend=suspend)  # type: ignore[assignment]
+    replied = asyncio.Event()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.reply({"blob": "x" * size})
+        replied.set()
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        pair.dialer.open({"q": 1}, end=True)
+        await asyncio.wait_for(replied.wait(), 5)
+        pair.acceptor_socket.inject('{"type":"open","code":0}')
+        for _ in range(2000):
+            if not pair.acceptor.is_open:
+                break
+            await asyncio.sleep(0.001)
+
+        assert pair.acceptor.is_open is False
+        frames = pair.sent_by("acceptor")
+        _assert_reply_and_goaway_sent(frames)
+        assert [frame.code for frame in frames if frame.type == "goaway"] == [int(ResetCode.PROTOCOL_ERROR)]
+    finally:
+        await pair.stop()
+
+
+async def test_a_connection_failure_refuses_local_opens_while_it_drains(make_pair):
+    """WSM-CON-021/ILL-C: once `goaway(PROTOCOL_ERROR)` is queued, `open()` raises `ConnectionGoingAway`."""
+    pair = make_pair(max_frame_bytes=200)
+    pair.acceptor._socket = _WrappedSocket(pair.acceptor_socket, suspend=True)  # type: ignore[assignment]
+    replied = asyncio.Event()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.reply({"blob": "x" * 40_000})
+        replied.set()
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        pair.dialer.open({"q": 1}, end=True)
+        await asyncio.wait_for(replied.wait(), 5)
+        pair.acceptor_socket.inject('{"type":"open","code":0}')
+        for _ in range(2000):
+            if any(frame.type == "goaway" for frame in pair.sent_by("acceptor")):
+                break
+            await asyncio.sleep(0.001)
+
+        assert pair.acceptor.is_open is True, "the drain must still be sending the reply"
+        with pytest.raises(ConnectionGoingAway):
+            pair.acceptor.open({"q": 2})
+    finally:
+        await pair.stop()
+
+
+async def test_a_read_loop_failure_refuses_local_opens_while_it_drains(make_pair):
+    """WSM-CON-021: once `goaway(INTERNAL_ERROR)` is queued, `open()` raises `ConnectionGoingAway`."""
+    pair = make_pair(max_frame_bytes=200)
+    pair.acceptor._socket = _WrappedSocket(pair.acceptor_socket, suspend=True)  # type: ignore[assignment]
+    replied = asyncio.Event()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = payload
+        await stream.reply({"blob": "x" * 40_000})
+        replied.set()
+
+    async def exploding(_frame: Frame) -> bool:
+        raise RuntimeError("simulated bug in dispatch")
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        pair.dialer.open({"q": 1}, end=True)
+        await asyncio.wait_for(replied.wait(), 5)
+        pair.acceptor._dispatch = exploding  # type: ignore[method-assign]
+        pair.acceptor_socket.inject('{"type":"ping","nonce":"n"}')
+        for _ in range(2000):
+            if any(frame.type == "goaway" for frame in pair.sent_by("acceptor")):
+                break
+            await asyncio.sleep(0.001)
+
+        assert pair.acceptor.is_open is True, "the drain must still be sending the reply"
+        with pytest.raises(ConnectionGoingAway):
+            pair.acceptor.open({"q": 2})
+    finally:
+        await pair.stop()
+
+
+async def test_close_marks_the_peer_dead_when_the_adapter_close_raises(make_pair, caplog):
+    """WSM-CON-025/WSM-STM-014: an exception from the adapter's `close()` is logged; the peer still dies."""
+    pair = make_pair()
+    pair.acceptor._socket = _WrappedSocket(pair.acceptor_socket, failing_close=True)  # type: ignore[assignment]
+    pair.acceptor.on_stream(_hold)
+    closes: list[Any] = []
+    pair.acceptor.on_close(closes.append)
+    pair.start()
+    try:
+        stream = pair.acceptor.open({"q": 1})
+        await pair.settle()
+        with caplog.at_level(logging.WARNING, logger="muxws"):
+            await pair.acceptor.close(drain=0.01)
+
+        assert pair.acceptor.is_open is False
+        assert stream.closed.is_set()
+        assert [reason.code for reason in closes] == [1000]
+        assert any("closing the socket failed" in record.getMessage() for record in caplog.records)
     finally:
         await pair.stop()
 
@@ -1222,6 +1480,265 @@ async def test_a_duplicate_open_is_still_a_connection_error_mid_reassembly(make_
         await pair.stop()
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"type":"open","stream":"x"}',
+        '{"type":"open","stream":-1}',
+        '{"type":"open","stream":1,"headers":"x"}',
+        '{"type":"open","stream":1,"fragment":5}',
+        '{"type":"open","stream":1,"end":"yes"}',
+        '{"type":"data","stream":true}',
+        '{"type":"ping","nonce":5}',
+        '{"type":5}',
+    ],
+)
+async def test_an_envelope_field_of_the_wrong_type_fails_the_connection(make_pair, message: str):
+    """WSM-FRM-005/WSM-STM-023: a wrong-typed envelope field sends goaway(PROTOCOL_ERROR) and closes the socket."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        pair.acceptor_socket.inject(message)
+        await pair.settle()
+
+        goaways = pair.frames_of_type("acceptor", "goaway")
+        assert [frame.code for frame in goaways] == [int(ResetCode.PROTOCOL_ERROR)]
+        assert pair.acceptor.is_open is False
+        assert pair.acceptor_socket.is_closed
+    finally:
+        await pair.stop()
+
+
+async def test_a_connection_level_error_closes_the_socket_with_a_reason_that_fits_a_close_frame():
+    """WSM-STM-023: the 1002 close carries at most 123 UTF-8 bytes of reason, so the socket closes.
+
+    The socket raises on a longer reason, as the `websockets` adapter does. A text message on a msgpack
+    connection produces a longer reason; the `goaway` and `on_close` carry it whole.
+    """
+    from muxws.codecs.msgpack_ import MsgpackCodec
+
+    class CloseFrameLimit:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.closed_with: list[tuple[int, str]] = []
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            if len(reason.encode("utf-8")) > 123:
+                raise ValueError("control frame too long")
+            self.closed_with.append((code, reason))
+            await self.inner.close(code, reason)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+    _, inner = memory_pair()
+    socket = CloseFrameLimit(inner)
+    codec = MsgpackCodec()
+    peer = Peer(socket, codec=codec, is_dialer=False)  # type: ignore[arg-type]
+    closes: list[Any] = []
+    peer.on_close(closes.append)
+    serving = asyncio.create_task(peer.serve())
+    try:
+        inner.inject('{"type":"ping","nonce":"n"}')
+        await asyncio.wait_for(serving, 2.0)
+
+        goaways = [frame for frame in map(codec.decode, inner.sent) if frame.type == "goaway"]
+        assert [frame.code for frame in goaways] == [int(ResetCode.PROTOCOL_ERROR)]
+        assert len(goaways[0].reason.encode("utf-8")) > 123
+        assert [code for code, _ in socket.closed_with] == [1002]
+        assert goaways[0].reason.startswith(socket.closed_with[0][1])
+        assert [(reason.code, reason.reason) for reason in closes] == [(1002, goaways[0].reason)]
+        assert inner.is_closed
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
+async def test_close_sends_a_close_frame_reason_cut_to_123_bytes():
+    """`close()` cuts its reason for the WebSocket close frame; the `goaway` and `on_close` carry it whole.
+
+    The socket raises on a longer reason, as the `websockets` adapter does.
+    """
+    closed_with: list[tuple[int, str]] = []
+
+    class CloseFrameLimit:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            if len(reason.encode("utf-8")) > 123:
+                raise ValueError("control frame too long")
+            closed_with.append((code, reason))
+            await self.inner.close(code, reason)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+    _, inner = memory_pair()
+    codec = JsonCodec()
+    peer = Peer(CloseFrameLimit(inner), codec=codec, is_dialer=True)  # type: ignore[arg-type]
+    closes: list[Any] = []
+    peer.on_close(closes.append)
+    serving = asyncio.create_task(peer.serve())
+    reason = "é" * 100
+    try:
+        await asyncio.wait_for(peer.close(reason=reason, drain=1.0), 2.0)
+
+        goaways = [frame for frame in map(codec.decode, inner.sent) if frame.type == "goaway"]
+        assert [frame.reason for frame in goaways] == [reason]
+        assert closed_with == [(1000, "é" * 61)]
+        assert [(close.code, close.reason) for close in closes] == [(1000, reason)]
+        assert inner.is_closed
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
+def test_a_close_frame_reason_is_cut_at_a_character_boundary():
+    """A reason over 123 UTF-8 bytes is cut to at most 123 bytes without splitting a character."""
+    from muxws.peer import _close_frame_reason
+
+    assert _close_frame_reason("short") == "short"
+    assert _close_frame_reason("a" * 200) == "a" * 123
+    assert _close_frame_reason("a" + "é" * 100) == "a" + "é" * 61
+    assert _close_frame_reason("aa" + "é" * 100) == "aa" + "é" * 60
+
+
+async def test_an_undecodable_reassembled_payload_resets_only_that_stream():
+    """WSM-STM-020/024: a reassembled payload the codec cannot decode resets that stream with PROTOCOL_ERROR.
+
+    No handler runs for the stream, and the connection stays open.
+    """
+    _, socket = memory_pair()
+    codec = JsonCodec()
+    peer = Peer(socket, codec=codec, is_dialer=False)
+    handled: list[Any] = []
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        handled.append(payload)
+        await stream.closed.wait()
+
+    peer.on_stream(handler)
+    serving = asyncio.create_task(peer.serve())
+    try:
+        socket.inject(codec.encode(Frame("open", stream=1, fragment='{"a":', more=True)))
+        socket.inject(codec.encode(Frame("open", stream=1, fragment="]")))
+        for _ in range(12):
+            await asyncio.sleep(0)
+
+        sent = [codec.decode(message) for message in socket.sent]
+        assert [(frame.type, frame.stream, frame.code) for frame in sent] == [
+            ("reset", 1, int(ResetCode.PROTOCOL_ERROR))
+        ]
+        assert handled == []
+        assert peer.is_open
+        assert peer.streams == {}
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
+async def test_mixed_text_and_binary_fragments_reset_only_that_stream():
+    """WSM-STM-020/024: one payload's fragments that mix text and binary values reset that stream.
+
+    The stream is reset with PROTOCOL_ERROR, the connection stays open, and other streams are unaffected.
+    """
+    from muxws.codecs.msgpack_ import MsgpackCodec
+
+    left, right = memory_pair()
+    codec = MsgpackCodec()
+    dialer = Peer(left, codec=codec, is_dialer=True)
+    acceptor = Peer(right, codec=codec, is_dialer=False)
+    acceptor.on_stream(_hold)
+    tasks = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+    try:
+        stream = dialer.open({"q": 1})
+        other = dialer.open({"q": 2})
+        for _ in range(12):
+            await asyncio.sleep(0)
+        left.inject(codec.encode(Frame("data", stream=stream.id, fragment="\x81", more=True)))
+        left.inject(codec.encode(Frame("data", stream=stream.id, fragment=b"\xa1a\x01")))
+        for _ in range(12):
+            await asyncio.sleep(0)
+
+        sent = [codec.decode(message) for message in left.sent]
+        resets = [frame for frame in sent if frame.type == "reset" and frame.stream == stream.id]
+        assert [frame.code for frame in resets] == [int(ResetCode.PROTOCOL_ERROR)]
+        with pytest.raises(StreamReset):
+            await stream
+        assert dialer.is_open
+        assert not other.closed.is_set()
+    finally:
+        await left.drop()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_an_unencodable_frame_for_a_removed_stream_closes_the_socket(make_pair):
+    """A frame that cannot be encoded and has no live stream closes the socket and reports code 1011.
+
+    The error serializer returns a payload the codec cannot encode; the stream is already removed when
+    the writer encodes its reset.
+    """
+    pair = make_pair(error_serializer=lambda _exc: {"blob": object()})
+    closes: list[Any] = []
+    pair.acceptor.on_close(closes.append)
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        _ = (payload, stream)
+        raise ValueError("handler said no")
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        pair.dialer.open({"q": 1})
+        await pair.settle()
+
+        assert pair.acceptor.is_open is False
+        assert [reason.code for reason in closes] == [1011]
+        assert pair.acceptor_socket.is_closed
+    finally:
+        await pair.stop()
+
+
+async def test_an_unsendable_connection_level_frame_closes_the_socket(make_pair):
+    """A connection-level frame whose send raises closes the socket with 1011 and marks the peer closed."""
+
+    class FailingPings:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.closed_with: int | None = None
+
+        async def send_text(self, text: str) -> None:
+            if '"ping"' in text:
+                raise RuntimeError("the transport refused this message")
+            await self.inner.send_text(text)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed_with = code
+            await self.inner.close(code, reason)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+    pair = make_pair()
+    socket = FailingPings(pair.dialer_socket)
+    pair.dialer._socket = socket  # type: ignore[assignment]
+    pair.start()
+    try:
+        with pytest.raises(muxws.ConnectionClosed):
+            await pair.dialer.ping(timeout=1.0)
+        await pair.settle()
+
+        assert pair.dialer.is_open is False
+        assert socket.closed_with == 1011
+        assert pair.dialer_socket.is_closed
+    finally:
+        await pair.stop()
+
+
 async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connection(make_pair):
     """A frame the codec cannot encode fails its own stream and leaves the writer task running.
 
@@ -1244,6 +1761,54 @@ async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connect
         assert info.value.code is ResetCode.INTERNAL_ERROR
 
         # The writer is still alive: a later request still completes.
+        assert await pair.dialer.request({"q": 2}) == {"ok": True}
+    finally:
+        await pair.stop()
+
+
+async def test_nothing_more_is_sent_on_a_stream_after_a_later_queued_frame_fails_to_encode(make_pair):
+    """A frame that fails to encode when the writer advances past the previous frame on its lane
+    resets the stream, and the frames queued behind it on that lane are not sent."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"q": 1})
+        # Queued behind the `open`, so the writer slices it when it advances after sending the `open`.
+        await stream.send({"blob": b"\x00\xff"})
+        await stream.send({"n": 3})
+        await pair.settle()
+
+        sent = [frame for frame in pair.sent_by("dialer") if frame.stream == stream.id]
+        assert [frame.type for frame in sent] == ["open", "reset"]
+        # The reset carries the codec's own error, as when the rotation fails to encode a frame.
+        with pytest.raises(Exception) as refused:  # noqa: PT011 - the codec's error type is not part of the contract
+            JsonCodec().encode(Frame("data", stream=stream.id, payload={"blob": b"\x00\xff"}))
+        assert sent[1].reason == str(refused.value)
+        with pytest.raises(StreamReset) as info:
+            await stream
+        assert info.value.code is ResetCode.INTERNAL_ERROR
+        assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
+async def test_an_open_that_fails_to_encode_fails_its_stream_and_sends_nothing(make_pair):
+    """An `open` the codec cannot encode is not sent, and neither is a `reset` for its id: the remote
+    has not seen the id, and a `reset` above its high-water mark would end the connection (WSM-STM-003)."""
+    pair = make_pair()
+    pair.acceptor.on_stream(_reply_now)
+    pair.start()
+    try:
+        stream = pair.dialer.open({"blob": b"\x00\xff"})
+        await pair.settle()
+
+        assert [frame for frame in pair.sent_by("dialer") if frame.stream == stream.id] == []
+        with pytest.raises(StreamReset) as info:
+            await stream
+        assert info.value.code is ResetCode.INTERNAL_ERROR
+        assert pair.dialer.is_open
+        assert pair.acceptor.is_open
         assert await pair.dialer.request({"q": 2}) == {"ok": True}
     finally:
         await pair.stop()

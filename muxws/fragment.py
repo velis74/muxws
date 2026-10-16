@@ -280,9 +280,16 @@ class Assembler:
         self._bytes = 0
 
     def feed(self, frame: Frame, codec: Codec) -> Any:
-        """Absorb one fragment frame; return `ABSENT` while more are expected, else the payload."""
+        """Absorb one fragment frame; return `ABSENT` while more are expected, else the payload.
+
+        Raises `ProtocolError` when the fragments mix text and binary values, or when the codec cannot
+        decode the joined payload. The partial buffer is dropped in both cases.
+        """
         if frame.fragment is None:
             raise ProtocolError("Assembler.feed was given a frame carrying no fragment")
+        if self._parts and isinstance(frame.fragment, bytes) != isinstance(self._parts[0], bytes):
+            self.reset()
+            raise ProtocolError("the fragments of one payload mix text and binary values")
         self._parts.append(frame.fragment)
         self._bytes += encoded_length(frame.fragment)
         if frame.more:

@@ -54,7 +54,8 @@ export class ConnectionClosed extends MuxwsError {
 
   constructor(message?: string, options: { code?: number; reason?: string; wasClean?: boolean } = {}) {
     const { code = 1006, reason = '', wasClean = false } = options;
-    super(message ?? reason ?? 'connection closed');
+    // An empty string falls through as well as `undefined`, as in Python's `message or reason or ...`.
+    super(message || reason || 'connection closed');
     this.name = 'ConnectionClosed';
     this.code = code;
     this.reason = reason;

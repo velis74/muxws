@@ -863,7 +863,8 @@ not part of this tree.
 
 - **WSM-FRM-001** A receiver MUST ignore unknown envelope fields.
 - **WSM-FRM-002** A receiver MUST ignore unknown *frame types*, logging once, and MUST NOT treat them
-  as any kind of error. Test: `peer_test.py::test_unknown_frame_type_is_ignored`.
+  as any kind of error. Tests: `peer_test.py::test_unknown_frame_type_is_ignored`,
+  `::test_each_unknown_frame_type_is_logged_once`.
 - **WSM-FRM-003** *Retired.* It required a peer not to send an extension frame type unless the remote
   had advertised that extension in `settings.extensions`. There is no `settings` frame and no
   extension advertisement (WSM-CON-031); a v1 peer sends only the six frame types of §2.3, and a frame
@@ -1515,15 +1516,15 @@ must read a YAML file under `.github/`.
 
 ### One-port citations
 
-A citation found by grep may be in only one port. **Twenty-three rules are cited in one language
-only** — sixteen in Python, seven in TypeScript.
+A citation found by grep may be in only one port. **Twenty-two rules are cited in one language
+only** — fifteen in Python, seven in TypeScript.
 
 *One-port by nature — no gap.* `WSM-API-017`, `WSM-PKG-002` are Python-language rules;
 `WSM-API-015`, `WSM-API-020`, `WSM-API-022`, `WSM-CDC-015` are TypeScript-specific. `WSM-STM-022` is
 retired and owes nothing.
 
 *Citation gap only — an equivalent test exists in the other port and does not name the rule.*
-`WSM-API-012`, `WSM-FRG-011`, `WSM-SID-008`, `WSM-STM-010`, `WSM-STM-023`, `WSM-TST-001`
+`WSM-API-012`, `WSM-FRG-011`, `WSM-SID-008`, `WSM-STM-010`, `WSM-TST-001`
 (Python-cited; equivalents in `ts/peer.spec.ts`, `ts/stream.spec.ts`, `ts/frames.spec.ts`);
 `WSM-API-002`, `WSM-API-023`, `WSM-AUT-001` (TypeScript-cited; equivalents in `stream_test.py` and,
 for `WSM-AUT-001`, in `peer_test.py::test_per_stream_headers_arrive_unchanged_and_change_nothing`).

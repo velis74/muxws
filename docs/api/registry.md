@@ -97,7 +97,9 @@ Python (unhashable), an object, an array, `null` or `undefined` in TypeScript (o
 would be keyed by identity). The peer is not findable by that key.
 
 Removal on close is automatic. The close hook is installed the first time a peer is registered and
-not on later calls, so re-registering a peer on every write adds no further close handlers.
+not on later calls, so re-registering a peer on every write adds no further close handlers. The hook
+stays installed across a reconnect and removes the peer on every socket loss; a peer registered again
+on its next connection keeps the one hook.
 
 ### Signature
 

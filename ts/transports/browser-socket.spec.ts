@@ -203,6 +203,13 @@ describe('the browser socket', () => {
       await expect(pending).rejects.toBeInstanceOf(CodecMismatch);
       expect(mock.closeCalls).toEqual([[POLICY_VIOLATION, 'muxws subprotocol mismatch']]);
       expect(POLICY_VIOLATION).toBe(1008);
+      expect(spy.mock.calls).toEqual([
+        [
+          "muxws negotiated subprotocol is 'muxws.v1.msgpack', expected 'muxws.v1.json'; closing with 1008. " +
+            'Both ends must be configured for the same codec: VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on ' +
+            'the server (WSM-CDC-028/029).',
+        ],
+      ]);
     } finally {
       spy.mockRestore();
     }

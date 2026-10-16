@@ -42,6 +42,10 @@ class MemorySocket:
             await self._outbox.put(message)
 
     async def receive(self) -> str | bytes:
+        # A closed, drained inbox raises on every call. Each close puts a single `None` in the inbox,
+        # so without this check a second `receive()` after close would wait forever.
+        if self._closed and self._inbox.empty():
+            raise ConnectionClosed("socket closed while receiving", code=1006)
         message = await self._inbox.get()
         if message is None:
             raise ConnectionClosed("socket closed while receiving", code=1006)

@@ -362,6 +362,16 @@ def test_assembler_rejects_a_frame_with_no_fragment(codec: JsonCodec):
         Assembler().feed(Frame("data", stream=1, payload={"a": 1}), codec)
 
 
+def test_assembler_rejects_fragments_that_mix_text_and_binary(codec: JsonCodec):
+    """The fragments of one payload are all text or all binary; a mix raises and drops the partial buffer."""
+    assembler = Assembler()
+    assembler.feed(Frame("data", stream=1, fragment="\x81", more=True), codec)
+    with pytest.raises(ProtocolError, match="mix text and binary"):
+        assembler.feed(Frame("data", stream=1, fragment=b"\xa1a\x01"), codec)
+    assert not assembler.in_progress
+    assert assembler.byte_length == 0
+
+
 def test_fitting_frame_is_returned_untouched(codec: JsonCodec):
     frame = Frame("data", stream=1, payload={"a": 1})
     assert split_frame(frame, MAX_FRAME_BYTES, codec) == [frame]

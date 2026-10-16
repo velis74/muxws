@@ -1142,7 +1142,7 @@ onError(handler: (error: unknown, stream: Stream | null) => void): void;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `(error: unknown, stream: Stream \| null) => void` | required | Called with the failure and the stream it belongs to. Handlers run in registration order with **no per-handler isolation**, unlike `onClose`, `onReconnect` and `onFrame`: an exception from one stops the rest. The stream close path that reported the failure catches that exception, so the connection stays open; the remaining handlers are not called. |
+| `handler` | `(error: unknown, stream: Stream \| null) => void` | required | Called with the failure and the stream it belongs to. Handlers run in registration order and are isolated, as for `onClose`, `onReconnect` and `onFrame`: one that throws is logged and the rest still run. |
 
 ### Return
 
@@ -1717,8 +1717,9 @@ await dialer.close({ drainMs: 100 });
 
 ## `peer.close()` (Python)
 
-Close the connection in order: send `goaway`, wait up to the drain deadline for live streams to end,
-then close the socket.
+Close the connection in order: send `goaway`, wait up to the drain deadline for live streams to end
+and for every queued frame to be sent, then close the socket. Queued frames include every remaining
+fragment of a fragmented payload.
 
 On a dialer it first stops the reconnect helper, **before** the `is_open` check, so a `close()` called
 while the helper waits out a backoff delay prevents the next dial.
@@ -1734,8 +1735,8 @@ async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None =
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code carried by the `goaway` frame. Positional, unlike most muxws options. |
-| `reason` | `str \| None` | `None` | Free text on the `goaway` and on the WebSocket close frame. |
-| `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish before the socket is closed regardless. The socket is closed at the deadline even if the remote keeps a stream open. Streams still live at the deadline fail locally with `ConnectionLost`. |
+| `reason` | `str \| None` | `None` | Free text on the `goaway` and on the WebSocket close frame. The close frame carries at most 123 UTF-8 bytes of it, cut at a character boundary; the `goaway` and `on_close` carry the full text. |
+| `drain` | `float` — seconds | `10.0` | How long, in seconds, to let live streams finish and queued frames be sent before the socket is closed regardless. The socket is closed at the deadline even if the remote keeps a stream open or frames are still queued. Streams still live at the deadline fail locally with `ConnectionLost`. |
 
 ### Return
 
@@ -1743,8 +1744,8 @@ async def close(self, code: ResetCode = ResetCode.NO_ERROR, reason: str | None =
 
 ### Raises
 
-Raises: nothing of its own. An exception raised by the socket adapter's `close()` propagates; the
-TypeScript `close()` catches and logs it instead.
+Raises: nothing. An exception from the socket adapter's `close()` is logged as a warning, and the peer
+is still marked closed.
 
 ### Example
 
@@ -1834,8 +1835,8 @@ export interface CloseOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `code` | `ResetCode` | `ResetCode.NO_ERROR` | The code on the `goaway` frame. |
-| `reason` | `string` | `null` | Free text on the `goaway` and the WebSocket close frame. |
-| `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish before closing regardless. The Python equivalent is `drain=10.0` seconds. |
+| `reason` | `string` | `null` | Free text on the `goaway` and the WebSocket close frame. The close frame carries at most 123 UTF-8 bytes of it, cut at a character boundary; the `goaway` and `onClose` carry the full text. |
+| `drainMs` | `number` — milliseconds | `DEFAULT_DRAIN_MS` (10000) | How long, in milliseconds, to let live streams finish and queued frames be sent before closing regardless. The Python equivalent is `drain=10.0` seconds. |
 
 ### Return
 
@@ -1883,11 +1884,18 @@ None — `serve()` takes no arguments.
 is marked closed, every live stream fails with `ConnectionLost`, the `on_close` handlers are called,
 and `serve()` returns.
 
+An exception raised inside the read loop is logged and does not propagate: the peer sends
+`goaway(INTERNAL_ERROR)` and the frames already queued, for at most 10 seconds, is marked closed with
+code 1011, closes the socket with 1011, and `serve()` returns. From the moment `goaway` is queued,
+`open()` raises `ConnectionGoingAway`.
+
 ### Raises
 
 - `asyncio.CancelledError` — the task running it was cancelled. Cancelling that task is how the read
   loop of a directly constructed peer is stopped.
-- Whatever the socket adapter's `close()` raises while failing the connection on a protocol error.
+
+An exception from the socket adapter's `close()` while failing the connection is logged as a warning
+and does not propagate.
 
 ### Example
 
@@ -1943,9 +1951,15 @@ None — it takes no arguments.
 
 ### Raises
 
-Rejects with the error that ended the read loop, after marking the peer closed (code 1011), so
-`isOpen` is already false when the promise rejects. The Python `serve()` returns in the same
-situation. A socket closure resolves the promise and does not reject it.
+On an error raised in the read loop, the peer sends `goaway(INTERNAL_ERROR)` and the
+frames already queued (for at most 10 seconds), is marked closed (code 1011) and closes the socket with
+1011. From the moment `goaway` is queued, `open()` throws `ConnectionGoingAway`.
+
+When the error comes from frame dispatch (an interceptor, for example), the promise then resolves. When
+it comes from outside dispatch (a socket adapter's `receive()` throwing something other than
+`ConnectionClosed`, or a codec's `decode()` throwing something other than `ProtocolError`), the promise
+rejects with that error, and `isOpen` is already false. The Python `serve()` returns in both cases. A
+socket closure resolves the promise and does not reject it.
 
 ### Example
 

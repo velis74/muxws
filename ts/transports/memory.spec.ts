@@ -76,6 +76,20 @@ describe('the in-memory pair', () => {
     expect(left.sent).toEqual([]);
   });
 
+  it('rejects every receive after a close, not only the first', async () => {
+    const [left, right] = memoryPair();
+    left.sendText('before');
+    left.close();
+
+    // Messages queued before the close are still returned first.
+    expect(await right.receive()).toBe('before');
+    for (const side of [left, right]) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await expect(side.receive()).rejects.toBeInstanceOf(ConnectionClosed);
+      }
+    }
+  });
+
   it('closes idempotently', () => {
     const [left] = memoryPair();
     left.close();

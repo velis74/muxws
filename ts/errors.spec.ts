@@ -214,6 +214,15 @@ describe('the connection and codec errors', () => {
     const closed = new ConnectionClosed('bye', { code: 1001, reason: 'going away', wasClean: true });
     expect([closed.code, closed.reason, closed.wasClean]).toEqual([1001, 'going away', true]);
     expect(new ConnectionClosed().code).toBe(1006);
+  });
+
+  it('falls back to the reason, then to "connection closed", for an empty message', () => {
+    // The same chain as `test_connection_closed_message_falls_back_to_reason_then_default`.
+    expect(new ConnectionClosed().message).toBe('connection closed');
+    expect(new ConnectionClosed('').message).toBe('connection closed');
+    expect(new ConnectionClosed(undefined, { reason: 'going away' }).message).toBe('going away');
+    expect(new ConnectionClosed('', { reason: 'going away' }).message).toBe('going away');
+    expect(new ConnectionClosed('bye', { reason: 'going away' }).message).toBe('bye');
 
     const codec = new CodecError('bad', { configured: 'msgpack', available: ['json'] });
     expect(codec.configured).toBe('msgpack');

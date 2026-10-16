@@ -27,7 +27,7 @@ import {
   type StreamHandler,
 } from './peer';
 import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
-import { mismatchError, offer, PREFIX, select } from './subprotocol';
+import { logNegotiatedMismatch, mismatchError, offer, PREFIX, select } from './subprotocol';
 import { WsSocket } from './transports/ws-socket';
 
 /**
@@ -35,6 +35,9 @@ import { WsSocket } from './transports/ws-socket';
  * this module treats as a refused muxws handshake on the dialer side.
  */
 const REFUSED = 400;
+
+/** The WebSocket policy-violation close code, sent for a codec mismatch on an open socket (WSM-CDC-028). */
+const POLICY_VIOLATION = 1008;
 
 /** The scheme `unixTarget` parses, as `new URL()` normalises it: lowercase, colon included. */
 const UNIX_SCHEME = 'ws+unix:';
@@ -157,9 +160,8 @@ function unixTarget(url: string): UnixTarget | null {
   if (parsed.protocol !== UNIX_SCHEME) return null;
 
   // The query belongs to the request target, so it is appended before the split:
-  // `ws+unix:///p.sock:/r?a=1` opens `/p.sock` and requests `/r?a=1`. `ws` splits the same
-  // `pathname + search`, and Python's `urlsplit` produces the same string.
-  const whole = parsed.pathname + parsed.search;
+  // `ws+unix:///p.sock:/r?a=1` opens `/p.sock` and requests `/r?a=1`.
+  const whole = rawPathAndQuery(url);
   const colon = whole.indexOf(':');
   const socketPath = colon === -1 ? whole : whole.slice(0, colon);
   const route = colon === -1 ? '' : whole.slice(colon + 1);
@@ -188,6 +190,33 @@ function unixTarget(url: string): UnixTarget | null {
 
   const authority = parsed.host === '' ? DEFAULT_AUTHORITY : parsed.host;
   return { socketPath, uri: `ws://${authority}${route === '' ? '/' : route}` };
+}
+
+/**
+ * The path and query of a `ws+unix:` url as they are written in it, joined by `?` when the query is
+ * not empty: the string Python's `urlsplit` returns as `path + "?" + query`.
+ *
+ * `URL.pathname` and `URL.search` are percent-encoded and have dot segments removed, so
+ * `ws+unix:///tmp/my dir/a.sock` would name `/tmp/my%20dir/a.sock`. This function applies only the
+ * preprocessing of `urlsplit`: leading C0 controls and spaces are removed, and so are tabs and
+ * newlines anywhere. Trailing C0 controls and spaces are kept, as `urlsplit` keeps them, although
+ * `new URL()` removes them. A space, a non-ASCII character and a `%XX` sequence are kept as written.
+ * The caller has already parsed `url` with `new URL()`, so the scheme is present.
+ */
+function rawPathAndQuery(url: string): string {
+  // eslint-disable-next-line no-control-regex
+  let rest = url.replace(/^[\u0000-\u0020]+/, '').replace(/[\t\n\r]/g, '');
+  rest = rest.slice(rest.indexOf(':') + 1);
+  const hash = rest.indexOf('#');
+  if (hash !== -1) rest = rest.slice(0, hash);
+  if (rest.startsWith('//')) {
+    const end = rest.slice(2).search(/[/?]/);
+    rest = end === -1 ? '' : rest.slice(2 + end);
+  }
+  const question = rest.indexOf('?');
+  if (question === -1) return rest;
+  const query = rest.slice(question + 1);
+  return query === '' ? rest.slice(0, question) : rest;
 }
 
 /**
@@ -294,7 +323,7 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
   // Resolved before any socket is opened (WSM-CDC-016), as in the browser entry point.
   const codec: Codec = options.codec ?? getCodec(settings.codec);
   const dial: Dial = async () => dialWs(url, codec.name, options);
-  return dialAndEstablish(await dial(), dial, options, codec);
+  return dialAndEstablish(dial, options, codec);
 }
 
 /**
@@ -325,7 +354,7 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
  * point has one for a different reason (see `UnixSocketsUnsupportedError` in `ts/index.ts`).
  *
  * Before a socket is opened, three checks run in this order (WSM-ERR-016): the `ws+unix:` grammar
- * (`unixTarget`, which uses only `new URL()`, so an invalid `ws+unix:` url raises `UnixUrlError` even
+ * (`unixTarget`, which does not use `ws`, so an invalid `ws+unix:` url raises `UnixUrlError` even
  * when `ws` is missing); the dependency (`requireWs`), because `ws` parses all other urls; and the
  * address, reported as a `WsUrlError`. All three precede the refusal handling below, which detects a
  * 400 in `ws`'s error message; otherwise a url containing a status number could be reported as a
@@ -417,7 +446,8 @@ async function dialWs(url: string, codecName: string, options: NodeConnectOption
   if (socket.protocol !== wanted) {
     // The handshake completed with a different subprotocol or none: close with the
     // policy-violation code and throw `CodecMismatch` (WSM-CDC-028).
-    adapter.close(1008, 'muxws subprotocol mismatch');
+    logNegotiatedMismatch(socket.protocol, wanted, POLICY_VIOLATION);
+    adapter.close(POLICY_VIOLATION, 'muxws subprotocol mismatch');
     throw mismatchError(codecName);
   }
   return adapter;
@@ -483,15 +513,18 @@ export function refuseMismatchedUpgrade(server: WebSocketServer): WebSocketServe
  * Wrap an accepted `ws` connection in a peer.
  *
  * `ws` passes the connection after the handshake, so the subprotocol is verified on the open socket;
- * on a mismatch the socket is closed with the policy-violation code and `CodecMismatch` is thrown
+ * on a mismatch one error line naming the negotiated and the expected subprotocol is logged
+ * (WSM-CDC-029), the socket is closed with the policy-violation code and `CodecMismatch` is thrown
  * (WSM-CDC-028).
  */
 export async function accept(socket: NodeWebSocket, options: AcceptOptions = {}): Promise<Peer> {
   const codec = options.codec ?? getCodec(settings.codec);
   const negotiated = socket.protocol;
+  const wanted = `${PREFIX}${codec.name}`;
 
-  if (negotiated !== `${PREFIX}${codec.name}`) {
-    socket.close(1008, 'codec mismatch');
+  if (negotiated !== wanted) {
+    logNegotiatedMismatch(negotiated, wanted, POLICY_VIOLATION);
+    socket.close(POLICY_VIOLATION, 'codec mismatch');
     throw mismatchError(codec.name);
   }
 
@@ -513,7 +546,8 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
  *
  * On `CodecMismatch` it resolves instead of rejecting, as `muxws.serve()` does in Python. A server
  * with `refuseMismatchedUpgrade` has already answered such an upgrade with HTTP 400 (WSM-CDC-022), and
- * `handleProtocols` has logged both codec names (WSM-CDC-029). A rejection from a `ws` connection
+ * `handleProtocols` has logged both codec names (WSM-CDC-029); on a server with neither hook,
+ * `accept()` has logged the negotiated and the expected subprotocol. A rejection from a `ws` connection
  * handler would be an unhandled rejection, which terminates a Node process by default.
  */
 export async function serve(socket: NodeWebSocket, options: AcceptOptions & { handler: StreamHandler }): Promise<void> {

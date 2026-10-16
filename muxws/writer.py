@@ -33,12 +33,17 @@ class LaneEncodingError(Exception):
     Fragmentation encodes inside the writer, so a codec that refuses a payload (for example bytes
     under JSON) raises here. The exception carries the lane, so the write loop can fail that stream
     and keep the connection open instead of ending the write loop.
+
+    `unsent_open` is true when the frame that failed is an `open` of which nothing has been sent. The
+    remote has not seen the stream id, so a `reset` for it would be above the remote's high-water
+    mark, a connection-level error (WSM-STM-003).
     """
 
-    def __init__(self, lane: int, cause: BaseException) -> None:
+    def __init__(self, lane: int, cause: BaseException, *, unsent_open: bool = False) -> None:
         super().__init__(f"could not encode a frame on lane {lane}: {cause}")
         self.lane = lane
         self.cause = cause
+        self.unsent_open = unsent_open
 
 
 class StreamQueue:
@@ -48,7 +53,7 @@ class StreamQueue:
     (WSM-FRG-017). The choice between streams is made by `Writer`'s rotation.
     """
 
-    __slots__ = ("stream_id", "_waiting", "_prepared", "_fragments")
+    __slots__ = ("stream_id", "_waiting", "_prepared", "_fragments", "failed_unsent_open")
 
     def __init__(self, stream_id: int) -> None:
         self.stream_id = stream_id
@@ -57,6 +62,8 @@ class StreamQueue:
         self._prepared: Frame | None = None
         #: The lazy remainder of the payload in flight, if this stream is mid-fragmentation.
         self._fragments: Iterator[Frame] | None = None
+        #: Set when the last `prepare` raised while slicing the first fragment of an `open`.
+        self.failed_unsent_open = False
 
     def __len__(self) -> int:
         """How many frames are queued but unsent. Never more than one **prepared** (WSM-FRG-018)."""
@@ -80,6 +87,7 @@ class StreamQueue:
         Called after the previous fragment has reached the socket. Slicing further ahead would fix the
         order of frames before the writer chooses it (WSM-FRG-018).
         """
+        self.failed_unsent_open = False
         if self._prepared is not None:
             return
 
@@ -91,8 +99,13 @@ class StreamQueue:
 
         if not self._waiting:
             return
-        self._fragments = iter_fragments(self._waiting.popleft(), cap, codec)
-        self._prepared = next(self._fragments, None)
+        frame = self._waiting.popleft()
+        self._fragments = iter_fragments(frame, cap, codec)
+        try:
+            self._prepared = next(self._fragments, None)
+        except Exception:
+            self.failed_unsent_open = frame.type == "open"
+            raise
 
     def take(self) -> Frame | None:
         """Hand over the prepared fragment. The next one is not sliced until `prepare` is called."""
@@ -103,6 +116,15 @@ class StreamQueue:
         self._waiting.clear()
         self._prepared = None
         self._fragments = None
+
+    def discard_except_unsent_open(self) -> None:
+        """Drop every unsent frame except an `open` of which no fragment has been sliced."""
+        unsent_open = None
+        if self._prepared is None and self._fragments is None and self._waiting and self._waiting[0].type == "open":
+            unsent_open = self._waiting.popleft()
+        self.discard()
+        if unsent_open is not None:
+            self._waiting.append(unsent_open)
 
 
 class Writer:
@@ -116,6 +138,9 @@ class Writer:
         #: index into a list, so removing a lane does not shift which lane is asked next.
         self._order: deque[int] = deque()
         self._wake = asyncio.Event()
+        #: Set while the write loop has sent every frame handed to `enqueue`; cleared by `enqueue`.
+        self._idle = asyncio.Event()
+        self._idle.set()
         self._stopped = False
 
     def __len__(self) -> int:
@@ -142,6 +167,7 @@ class Writer:
             self._queues[lane] = queue
             self._order.append(lane)
         queue.put(frame)
+        self._idle.clear()
         self._wake.set()
 
     async def next_frame(self) -> Frame | None:
@@ -157,6 +183,9 @@ class Writer:
                 return frame
             self._wake.clear()
             if not any(queue.has_work for queue in self._queues.values()):
+                # The caller asks for the next frame only after the previous one reached the socket,
+                # so no work here means every enqueued frame has been sent.
+                self._idle.set()
                 await self._wake.wait()
             if self._stopped:
                 return None
@@ -174,14 +203,7 @@ class Writer:
             if queue is None:
                 continue
 
-            try:
-                queue.prepare(self._cap, self._codec)
-            except LaneEncodingError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                queue.discard()
-                self._retire(lane)
-                raise LaneEncodingError(lane, exc) from exc
+            self._prepare(lane, queue)
             frame = queue.take()
             if frame is not None:
                 return frame
@@ -189,6 +211,18 @@ class Writer:
             if not queue.has_work:
                 self._retire(lane)
         return None
+
+    def _prepare(self, lane: int, queue: StreamQueue) -> None:
+        """Slice the lane's next fragment; a codec error discards the lane and raises `LaneEncodingError`."""
+        try:
+            queue.prepare(self._cap, self._codec)
+        except LaneEncodingError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            unsent_open = queue.failed_unsent_open
+            queue.discard()
+            self._retire(lane)
+            raise LaneEncodingError(lane, exc, unsent_open=unsent_open) from exc
 
     def _retire(self, lane: int) -> None:
         """Remove a lane with no work left. No state is kept per closed stream (WSM-STM-001)."""
@@ -200,27 +234,44 @@ class Writer:
         except ValueError:
             pass
 
+    async def wait_idle(self) -> None:
+        """Return once every enqueued frame, including every fragment of a fragmented one, has been sent.
+
+        Also returns after `stop()` and `discard_all()`, which leave nothing to send.
+        """
+        await self._idle.wait()
+
     def advance(self, stream_id: int) -> None:
-        """Slice that stream's next fragment, now that its previous one has reached the socket."""
-        queue = self._queues.get(stream_id if stream_id else CONNECTION_LANE)
+        """Slice that stream's next fragment, now that its previous one has reached the socket.
+
+        A codec error discards the lane and raises `LaneEncodingError`, as in the rotation.
+        """
+        lane = stream_id if stream_id else CONNECTION_LANE
+        queue = self._queues.get(lane)
         if queue is not None:
-            queue.prepare(self._cap, self._codec)
+            self._prepare(lane, queue)
             if queue.has_work:
                 self._wake.set()
 
     def discard(self, stream_id: int) -> None:
-        """Drop one stream's queued frames and its lane."""
-        queue = self._queues.pop(stream_id, None)
-        if queue is not None:
-            queue.discard()
-            try:
-                self._order.remove(stream_id)
-            except ValueError:
-                pass
+        """Drop one stream's queued frames, for a reset of that stream (WSM-FRM-014).
+
+        The remainder of a payload whose fragmentation has started is dropped; the `reset` that follows
+        ends the fragment sequence on the receiver. An `open` of which no fragment has been sliced is
+        kept: a `reset` for an id above the remote's high-water mark is a connection-level error
+        (WSM-STM-003).
+        """
+        queue = self._queues.get(stream_id)
+        if queue is None:
+            return
+        queue.discard_except_unsent_open()
+        if not queue.has_work:
+            self._retire(stream_id)
 
     def stop(self) -> None:
         """Stop the writer. Every later `next_frame` call returns None."""
         self._stopped = True
+        self._idle.set()
         self._wake.set()
 
     def discard_all(self) -> None:
@@ -230,4 +281,5 @@ class Writer:
             queue.discard()
         self._queues.clear()
         self._order.clear()
+        self._idle.set()
         self._wake.set()

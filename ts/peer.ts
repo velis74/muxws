@@ -131,6 +131,12 @@ export const DEFAULT_PING_TIMEOUT_MS = 5000;
 /** `peer.close()`'s default drain window in milliseconds; Python: `drain=10.0` (WSM-CON-024). */
 export const DEFAULT_DRAIN_MS = 10_000;
 
+/**
+ * Milliseconds a connection-level protocol error waits for queued frames, `goaway` among them,
+ * before it closes the socket. Equal to `close()`'s default drain; Python: `_FAILURE_DRAIN`.
+ */
+const FAILURE_DRAIN_MS = DEFAULT_DRAIN_MS;
+
 /** WSM-ERR-006's default. A public-facing deployment should replace it with a redacting one. */
 export function defaultErrorSerializer(error: unknown): unknown {
   if (error instanceof Error) return { type: error.name, message: error.message };
@@ -170,6 +176,25 @@ const yieldToOtherTasks: () => Promise<void> = (() => {
   return () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 })();
 
+/** The longest close reason a WebSocket close frame carries (RFC 6455 5.5: 125 bytes less the code). */
+const MAX_CLOSE_REASON_BYTES = 123;
+
+/**
+ * @internal `reason` cut to the 123 UTF-8 bytes a WebSocket close frame carries, at a character boundary.
+ *
+ * `ws` throws on a longer reason, and a browser `WebSocket` throws a `SyntaxError`; either leaves the
+ * socket open. The `goaway` frame and `onClose` carry the full text.
+ */
+export function closeFrameReason(reason: string): string {
+  const bytes = new TextEncoder().encode(reason);
+  let end = Math.min(bytes.length, MAX_CLOSE_REASON_BYTES);
+  // Back off over UTF-8 continuation bytes (10xxxxxx) so no character is split.
+  if (end < bytes.length) {
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  }
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
 /** Python's `str(exc)`. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -187,6 +212,13 @@ function payloadOf(frame: Frame): unknown {
 function hasFragment(frame: Frame): boolean {
   return frame.fragment !== null && frame.fragment !== undefined;
 }
+
+/**
+ * How many distinct unknown frame types a peer logs (WSM-FRM-002). Each is logged once; the bound
+ * keeps a remote that sends a new type in every frame from growing the set of logged types without
+ * limit.
+ */
+const MAX_LOGGED_UNKNOWN_TYPES = 32;
 
 const OPEN_OPTION_KEYS: ReadonlySet<string> = new Set(['payload', 'headers', 'end']);
 const REQUEST_OPTION_KEYS: ReadonlySet<string> = new Set(['payload', 'headers', 'end', 'timeoutMs']);
@@ -225,13 +257,13 @@ function resolveCall(first: unknown, second: RequestOptions | undefined, keys: R
 }
 
 /**
- * WSM-FRG-034: a cap too small to hold an envelope plus one unit raises `ProtocolError` at
- * construction.
+ * @internal WSM-FRG-034: a cap too small to hold an envelope plus one unit raises `ProtocolError` at
+ * construction. `dialAndEstablish` also calls it before the first dial.
  *
  * The cap is a protocol constant (WSM-FRG-004); a smaller value is passed only through the test-only
  * constructor option of WSM-FRG-005, which the conformance runner uses.
  */
-function checkedFrameCap(cap: number, codec: Codec): number {
+export function checkedFrameCap(cap: number, codec: Codec): number {
   if (cap === MAX_FRAME_BYTES) return cap;
   const probe: Frame = { type: 'data', stream: 1, payload: { a: 'aaaaaaaa' } };
   try {
@@ -244,13 +276,6 @@ function checkedFrameCap(cap: number, codec: Codec): number {
     );
   }
   return cap;
-}
-
-/** One turn of the event loop; the equivalent of `await asyncio.sleep(0)`. */
-function yieldToEventLoop(): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, 0);
-  });
 }
 
 /**
@@ -394,6 +419,9 @@ export class Peer {
 
   private ignoredLateFrames = 0;
 
+  /** The rendered unknown frame types already logged (WSM-FRM-002). */
+  private readonly loggedUnknownTypes = new Set<string>();
+
   private handler: StreamHandler | null = null;
 
   private readonly closeHandlers: ((reason: CloseReason) => void)[] = [];
@@ -431,15 +459,6 @@ export class Peer {
   private writer: Writer;
 
   private writerTask: Promise<void> | null = null;
-
-  /**
-   * Frames passed to `enqueue` and not yet sent or failed. `drainOutbound` waits for it to reach 0.
-   *
-   * The writer's queues do not include a frame that `nextFrame()` has returned but the write loop
-   * has not yet sent, so the writer's depth alone would let `drainOutbound` return before `goaway`
-   * was sent.
-   */
-  private pendingFrames = 0;
 
   private writerStopped = false;
 
@@ -672,9 +691,7 @@ export class Peer {
       );
       return;
     }
-    this.errorHandlers.forEach((handler) => {
-      handler(error, stream);
-    });
+    this.fanOut('onError', this.errorHandlers, error, stream);
   }
 
   // ------------------------------------------------------------------ opening
@@ -835,8 +852,13 @@ export class Peer {
 
   /** @internal Called by `Stream` and `Peer`. Synchronous, so `open()` does not suspend mid-allocation. */
   enqueue(frame: Frame): void {
-    this.pendingFrames += 1;
     this.writer.enqueue(frame);
+  }
+
+  /** @internal Enqueue a stream's `reset` in place of its queued frames (WSM-FRM-014, `Writer.discard`). */
+  enqueueReset(streamId: number, code: ResetCode, reason: string | null): void {
+    this.writer.discard(streamId);
+    this.enqueue({ type: 'reset', stream: streamId, code, reason });
   }
 
   private async runWriter(): Promise<void> {
@@ -848,8 +870,7 @@ export class Peer {
         if (error instanceof LaneEncodingError) {
           // A codec error inside the writer fails only that lane's stream; the write loop and the
           // connection continue.
-          this.pendingFrames = Math.max(0, this.pendingFrames - 1);
-          this.failLane(error);
+          await this.failLane(error);
           continue;
         }
         throw error;
@@ -871,33 +892,48 @@ export class Peer {
       } catch (error) {
         // The socket is closed; the read loop in `serve()` marks the peer as dead.
         if (error instanceof ConnectionClosed) return;
+        if (error instanceof LaneEncodingError) {
+          // `advance` could not encode the lane's next frame; `frame` itself was sent.
+          await this.failLane(error);
+          continue;
+        }
         logger.error(`muxws conn=${this.id} could not send a ${frame.type} frame`, error);
-        this.failUnsendable(frame, error);
-      } finally {
-        this.pendingFrames -= 1;
+        await this.failUnsendable(frame, error);
       }
     }
   }
 
-  /** A frame on one lane could not be encoded. Fail its stream; the connection continues. */
-  private failLane(failure: LaneEncodingError): void {
+  /**
+   * A frame on one lane could not be encoded. Fail its stream; the connection continues.
+   *
+   * With no live stream on the lane, the peer is marked dead and the socket is closed with 1011. An
+   * `open` of which nothing was sent fails its stream without a `reset`: the remote has not seen the
+   * id (WSM-STM-003).
+   */
+  private async failLane(failure: LaneEncodingError): Promise<void> {
     const detail = errorMessage(failure.cause);
+    logger.error(`muxws conn=${this.id} could not encode a frame on stream ${failure.lane}`, failure.cause);
     const stream = this.liveStreams.get(failure.lane);
     if (stream === undefined) {
-      this.die(new ConnectionClosed(String(failure), { code: 1011 }));
+      await this.dieAndClose(new ConnectionClosed(String(failure), { code: 1011, reason: String(failure) }));
       return;
     }
-    logger.error(`muxws conn=${this.id} could not encode a frame on stream ${failure.lane}`, failure.cause);
-    this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
+    if (!failure.unsentOpen)
+      this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
     stream.fail(exceptionForReset(ResetCode.INTERNAL_ERROR, detail, { streamId: stream.id }));
   }
 
-  /** A frame could not be encoded or sent. Fail its stream; the connection continues. */
-  private failUnsendable(frame: Frame, error: unknown): void {
+  /**
+   * A frame could not be encoded or sent. Fail its stream; the connection continues.
+   *
+   * With no live stream for the frame, the peer is marked dead and the socket is closed with 1011.
+   */
+  private async failUnsendable(frame: Frame, error: unknown): Promise<void> {
     const detail = errorMessage(error);
     const stream = frame.stream === null || frame.stream === undefined ? undefined : this.liveStreams.get(frame.stream);
     if (stream === undefined) {
-      this.die(new ConnectionClosed(`could not encode a ${frame.type} frame: ${detail}`, { code: 1011 }));
+      const reason = `could not encode a ${frame.type} frame: ${detail}`;
+      await this.dieAndClose(new ConnectionClosed(reason, { code: 1011, reason }));
       return;
     }
     this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.INTERNAL_ERROR, reason: detail });
@@ -929,10 +965,12 @@ export class Peer {
     try {
       await this.readLoop();
     } catch (error) {
-      // `readLoop` is not expected to throw. If it does, the peer is marked dead before `serve()`
-      // rejects with the error, so `isOpen` does not stay true after the read loop has stopped.
+      // `readLoop` is not expected to throw. If it does, the peer is marked dead and the socket closed
+      // before `serve()` rejects with the error, so `isOpen` does not stay true after the read loop has
+      // stopped, and `isOpen` is not false while the socket stays open.
+      logger.error(`muxws conn=${this.id} read loop failed`, error);
       const detail = errorMessage(error);
-      this.die(new ConnectionClosed(`read loop failed: ${detail}`, { code: 1011, reason: detail }));
+      await this.failInternal(`read loop failed: ${detail}`, detail);
       throw error;
     } finally {
       await this.stopWriter();
@@ -968,11 +1006,12 @@ export class Peer {
       try {
         keepGoing = await this.dispatch(frame);
       } catch (error) {
-        // An exception from `dispatch` closes the connection. Otherwise pending awaits would never
-        // settle, `onClose` would not fire, and `open()` would keep succeeding on a stopped read loop.
+        // An exception from `dispatch` closes the connection and the socket. Otherwise pending awaits
+        // would never settle, `onClose` would not fire, `open()` would keep succeeding on a stopped
+        // read loop, and an open socket would leave the remote waiting on a peer that reads nothing.
         logger.error(`muxws conn=${this.id} read loop failed on a ${frame.type} frame`, error);
         const detail = errorMessage(error);
-        this.die(new ConnectionClosed(`read loop failed: ${detail}`, { code: 1011, reason: detail }));
+        await this.failInternal(`read loop failed: ${detail}`, detail);
         return;
       }
       if (!keepGoing) return;
@@ -996,6 +1035,16 @@ export class Peer {
     }
 
     const stream = this.liveStreams.get(frame.stream);
+    const continuesOpen = stream !== undefined && stream.opening && hasFragment(frame);
+    if (frame.type === 'open' && !continuesOpen) {
+      // The id of an over-cap `open` is validated and counts toward the high-water mark, so a later
+      // `data` or `reset` on it is ignored (WSM-STM-002) and is not above the mark (WSM-STM-003).
+      if (!(await this.admitRemoteOpen(frame.stream))) return false;
+    } else if (stream === undefined && (frame.type === 'data' || frame.type === 'reset')) {
+      // No live stream to reset: the id is classified by the high-water mark (WSM-STM-002/003).
+      await this.onStreamFrame(frame);
+      return false;
+    }
     if (stream !== undefined) {
       this.resetStream(
         stream,
@@ -1031,8 +1080,12 @@ export class Peer {
       return true;
     }
     if (frame.type === 'goaway') return this.onGoaway(frame);
-    // WSM-FRM-002: an unknown type is ignored and logged at info level; it is not an error.
-    logger.info(`muxws conn=${this.id} ignoring unknown frame type '${frame.type}' (WSM-FRM-002)`);
+    // WSM-FRM-002: an unknown type is ignored and logged once, at info level; it is not an error.
+    const shown = `'${frame.type}'`;
+    if (!this.loggedUnknownTypes.has(shown) && this.loggedUnknownTypes.size < MAX_LOGGED_UNKNOWN_TYPES) {
+      this.loggedUnknownTypes.add(shown);
+      logger.info(`muxws conn=${this.id} ignoring unknown frame type ${shown} (WSM-FRM-002)`);
+    }
     return true;
   }
 
@@ -1088,19 +1141,28 @@ export class Peer {
 
   // ------------------------------------------------------------------ shutdown
 
-  /** Send `goaway`, drain, then close the socket (WSM-CON-025). */
+  /**
+   * Send `goaway`, drain for up to `drainMs`, then close the socket (WSM-CON-025).
+   *
+   * The drain waits for live streams to end and for the write loop to send every queued frame,
+   * including every remaining fragment of a fragmented payload; one deadline bounds both. An error
+   * from the socket adapter's `close()` is logged, and the peer is marked closed.
+   *
+   * The WebSocket close frame carries `reason` cut to 123 UTF-8 bytes at a character boundary; the
+   * `goaway` frame and `onClose` carry the full text.
+   */
   async close(options: CloseOptions = {}): Promise<void> {
     const { code = ResetCode.NO_ERROR, reason = null, drainMs = DEFAULT_DRAIN_MS } = options;
     // Before the `open_` check: after `close()` the helper never dials again (WSM-RCN-040/044),
     // including when the peer is between sockets and the helper is waiting for the next dial.
     // `willRetry` must be false before `die()` builds the `CloseReason` below.
     this.willRetry = false;
-    void this.connectionLoop?.stop();
+    await this.connectionLoop?.stop();
     if (!this.open_) return;
     this.sendGoaway(code, reason);
     await this.drain(drainMs);
     try {
-      await this.socket.close(1000, reason ?? '');
+      await this.socket.close(1000, closeFrameReason(reason ?? ''));
     } catch (error) {
       // A socket whose close fails is already closed; the peer is still marked dead below.
       logger.warn(`muxws conn=${this.id} closing the socket failed`, error);
@@ -1140,25 +1202,27 @@ export class Peer {
   }
 
   /**
-   * Wait until every live stream has closed or `timeoutMs` has elapsed, whichever is first
-   * (WSM-CON-024), then wait for queued frames to be sent.
+   * Wait until every live stream has closed and every queued frame is sent, or `timeoutMs` has
+   * elapsed, whichever is first (WSM-CON-024).
    *
-   * Without the deadline a remote that keeps a stream open would prevent the close. Streams still
-   * live at the deadline fail with `ConnectionLost` when `die()` runs; nothing is sent for them.
+   * Without the deadline a remote that keeps a stream open, or a socket that does not accept the
+   * queued frames, would prevent the close. Streams still live at the deadline fail with
+   * `ConnectionLost` when `die()` runs; nothing is sent for them.
    */
   private async drain(timeoutMs: number): Promise<void> {
+    const deadline = monotonicNowMs() + timeoutMs;
     if (this.liveStreams.size > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<void>((resolve) => {
+      const expired = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
       });
       try {
-        await Promise.race([this.allStreamsClosed(), deadline]);
+        await Promise.race([this.allStreamsClosed(), expired]);
       } finally {
         clearTimeout(timer);
       }
     }
-    await this.drainOutbound();
+    await this.drainOutbound(deadline);
   }
 
   /**
@@ -1189,20 +1253,7 @@ export class Peer {
       return this.continueOpen(existing, frame);
     }
 
-    const remoteParity = this.dialer ? 0 : 1;
-    if (streamId % 2 !== remoteParity) {
-      await this.failConnection(`open on stream ${streamId}: wrong parity for the remote (WSM-SID-005)`);
-      return false;
-    }
-    if (streamId <= this.highestRemoteOpen) {
-      await this.failConnection(
-        `open on stream ${streamId} is not greater than the remote's highest previous open ` +
-          `${this.highestRemoteOpen} (WSM-SID-005)`,
-      );
-      return false;
-    }
-
-    this.highestRemoteOpen = streamId;
+    if (!(await this.admitRemoteOpen(streamId))) return false;
 
     if (this.remoteStreamCount() >= this.maxConcurrentStreams) {
       // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). There
@@ -1226,7 +1277,7 @@ export class Peer {
       stream.opening = true;
       // The payload cap applies to a fragmented `open` as to fragmented `data` (WSM-FRG-032).
       if (!this.withinPayloadCap(stream, frame)) return true;
-      const payload = stream.assembler.feed(frame, this.codec);
+      const payload = this.reassemble(stream, frame);
       if (isAbsent(payload)) return true;
       stream.opening = false;
       stream.payload = payload;
@@ -1239,10 +1290,31 @@ export class Peer {
     return true;
   }
 
+  /**
+   * Validate the id of an `open` that does not continue a live opening (WSM-SID-005), and record it as
+   * the remote's highest open. Returns false after failing the connection.
+   */
+  private async admitRemoteOpen(streamId: number): Promise<boolean> {
+    const remoteParity = this.dialer ? 0 : 1;
+    if (streamId % 2 !== remoteParity) {
+      await this.failConnection(`open on stream ${streamId}: wrong parity for the remote (WSM-SID-005)`);
+      return false;
+    }
+    if (streamId <= this.highestRemoteOpen) {
+      await this.failConnection(
+        `open on stream ${streamId} is not greater than the remote's highest previous open ` +
+          `${this.highestRemoteOpen} (WSM-SID-005)`,
+      );
+      return false;
+    }
+    this.highestRemoteOpen = streamId;
+    return true;
+  }
+
   /** Handle a later fragment of an opening payload; it is not a second open (WSM-STM-031). */
   private continueOpen(stream: Stream, frame: Frame): boolean {
     if (!this.withinPayloadCap(stream, frame)) return true;
-    const payload = stream.assembler.feed(frame, this.codec);
+    const payload = this.reassemble(stream, frame);
     if (isAbsent(payload)) return true;
     stream.opening = false;
     stream.payload = payload;
@@ -1370,6 +1442,8 @@ export class Peer {
     }
 
     if (frame.type === 'reset') {
+      // The stream is closed in both directions; its queued frames are not sent (WSM-FRM-014).
+      this.writer.discard(streamId);
       const payload = payloadOf(frame);
       stream.fail(
         this.resetException(frame.code ?? 0, frame.reason ?? null, streamId, isAbsent(payload) ? null : payload),
@@ -1432,7 +1506,7 @@ export class Peer {
 
     if (hasFragment(frame)) {
       if (!this.withinPayloadCap(stream, frame)) return true;
-      const payload = stream.assembler.feed(frame, this.codec);
+      const payload = this.reassemble(stream, frame);
       if (isAbsent(payload)) return true;
       stream.acceptPayload(payload);
     } else {
@@ -1490,8 +1564,25 @@ export class Peer {
     return false;
   }
 
+  /**
+   * Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
+   *
+   * Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset this stream with
+   * PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the peers still agree about every other
+   * stream and the connection stays open (WSM-STM-020/024).
+   */
+  private reassemble(stream: Stream, frame: Frame): unknown {
+    try {
+      return stream.assembler.feed(frame, this.codec);
+    } catch (error) {
+      if (!(error instanceof ProtocolError)) throw error;
+      this.resetStream(stream, ResetCode.PROTOCOL_ERROR, `undecodable reassembled payload: ${errorMessage(error)}`);
+      return ABSENT;
+    }
+  }
+
   private resetStream(stream: Stream, code: ResetCode, reason: string): void {
-    this.enqueue({ type: 'reset', stream: stream.id, code, reason });
+    this.enqueueReset(stream.id, code, reason);
     stream.fail(exceptionForReset(code, reason, { streamId: stream.id }));
   }
 
@@ -1500,15 +1591,19 @@ export class Peer {
   /** Connection-level protocol error: send goaway(PROTOCOL_ERROR), close the socket, then fail every live stream. */
   private async failConnection(reason: string): Promise<void> {
     logger.warn(`muxws conn=${this.id} connection-level protocol error: ${reason}`);
+    // Marked as sent before the drain, so no stream is opened while the queued frames are sent
+    // (WSM-CON-021).
+    this.goaway.sent = true;
+    this.goaway.sentCode = ResetCode.PROTOCOL_ERROR;
     this.enqueue({
       type: 'goaway',
       code: ResetCode.PROTOCOL_ERROR,
       reason,
       last_stream: this.highestRemoteOpen,
     });
-    await this.drainOutbound();
+    await this.drainOutbound(monotonicNowMs() + FAILURE_DRAIN_MS);
     try {
-      await this.socket.close(1002, reason);
+      await this.socket.close(1002, closeFrameReason(reason));
     } catch (error) {
       // A socket whose close fails is already closed; the peer is still marked dead below.
       logger.warn(`muxws conn=${this.id} closing the socket failed`, error);
@@ -1516,12 +1611,56 @@ export class Peer {
     this.die(new ConnectionClosed(reason, { code: 1002, reason, wasClean: false }));
   }
 
-  /** Wait, for at most 100 event-loop turns, until queued frames (including `goaway`) are sent. */
-  private async drainOutbound(): Promise<void> {
-    for (let turn = 0; turn < 100; turn += 1) {
-      if (this.pendingFrames === 0) return;
-      if (this.writerTask === null || this.writerStopped) return;
-      await yieldToEventLoop();
+  /** A failure inside this peer: goaway(INTERNAL_ERROR), then mark the peer dead and close the socket (1011). */
+  private async failInternal(message: string, reason: string): Promise<void> {
+    if (this.open_) {
+      // Marked as sent before the drain, so no stream is opened while the queued frames are sent
+      // (WSM-CON-021).
+      this.goaway.sent = true;
+      this.goaway.sentCode = ResetCode.INTERNAL_ERROR;
+      this.enqueue({ type: 'goaway', code: ResetCode.INTERNAL_ERROR, reason, last_stream: this.highestRemoteOpen });
+      await this.drainOutbound(monotonicNowMs() + FAILURE_DRAIN_MS);
+    }
+    await this.dieAndClose(new ConnectionClosed(message, { code: 1011, reason }));
+  }
+
+  /**
+   * Mark the peer dead with `cause`, then close the socket with 1011.
+   *
+   * The peer is marked dead first, so `onClose` reports `cause` and not the closure the read loop
+   * observes. The close reason is fixed and short: a WebSocket close reason is limited to 123 bytes.
+   */
+  private async dieAndClose(cause: ConnectionClosed): Promise<void> {
+    this.die(cause);
+    await this.closeSocketLocally(1011, 'internal error');
+  }
+
+  /**
+   * Wait until the write loop has sent every queued frame, the write loop has ended, or `deadline`
+   * (a `monotonicNowMs()` value) passes.
+   *
+   * Every remaining fragment of a fragmented payload counts as queued, including while the write
+   * loop awaits the socket's send.
+   */
+  private async drainOutbound(deadline: number): Promise<void> {
+    if (this.writerStopped) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(0, deadline - monotonicNowMs()));
+    });
+    const waited = [this.writer.waitIdle(), expired];
+    if (this.writerTask !== null) {
+      waited.push(
+        this.writerTask.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+    }
+    try {
+      await Promise.race(waited);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -1623,13 +1762,12 @@ export class Peer {
     this.finalCloseReported = false;
     this.goaway = new GoawayState();
     this.writer = new Writer(this.codec, { maxFrameBytes: this.maxFrameBytes });
-    // `writerTask` corresponds to Python's `_writer_task = None`; `writerStopped` and `pendingFrames`
-    // have no Python counterpart, because Python cancels the task. A `writerTask` still pointing at
-    // the previous socket's loop, or `writerStopped` still true, would make `serve()` on the new
-    // socket send nothing.
+    // `writerTask` corresponds to Python's `_writer_task = None`; `writerStopped` has no Python
+    // counterpart, because Python cancels the task. A `writerTask` still pointing at the previous
+    // socket's loop, or `writerStopped` still true, would make `serve()` on the new socket send
+    // nothing.
     this.writerTask = null;
     this.writerStopped = false;
-    this.pendingFrames = 0;
     this.exhaustionShutdown = null;
     this.open_ = true;
     this.death = null;

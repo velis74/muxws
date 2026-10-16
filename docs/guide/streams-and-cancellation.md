@@ -296,6 +296,9 @@ await stream.cancel('user navigated away');
 When `cancel()` returns:
 
 - the stream is `closed` on this side, and the peer has removed it;
+- frames of the stream that are queued and not yet sent are dropped, including the rest of a
+  payload that is partly sent; the `reset` ends that fragment sequence on the receiver. An `open`
+  not yet sent at all is sent before the `reset`;
 - frames still in transit from the remote are discarded: a frame for a closed id at or below the
   high-water mark is ignored without an error;
 - `send()`, `await` and iteration on the stream raise `StreamReset` with the `CANCELLED` code;

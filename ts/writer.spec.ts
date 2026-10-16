@@ -12,7 +12,7 @@ import { encodedLength, splitFrame } from './fragment';
 import type { Frame } from './frames';
 import { Peer } from './peer';
 import { memoryPair } from './transports/memory';
-import { CONNECTION_LANE, StreamQueue, Writer } from './writer';
+import { CONNECTION_LANE, LaneEncodingError, StreamQueue, Writer } from './writer';
 
 const codec = new JsonCodec();
 
@@ -178,6 +178,30 @@ describe('the writer', () => {
     expect(new Set(order)).toEqual(new Set([3]));
   });
 
+  it('drops the remainder of a started payload when a stream is discarded - WSM-FRM-014', () => {
+    const writer = makeWriter();
+    writer.enqueue({ type: 'data', stream: 1, payload: big() });
+    writer.enqueue({ type: 'data', stream: 1, payload: { n: 2 }, end: true });
+    const first = internals(writer).rotate();
+    expect(first?.more).toBe(true);
+    writer.advance(1);
+
+    writer.discard(1);
+    writer.enqueue({ type: 'reset', stream: 1, code: 1 });
+    writer.advance(1);
+    expect(drain(writer).map((frame) => frame.type)).toEqual(['reset']);
+  });
+
+  it('keeps an open none of which was sent when a stream is discarded - WSM-STM-003', () => {
+    const writer = makeWriter();
+    writer.enqueue({ type: 'open', stream: 1, payload: { q: 1 } });
+    writer.enqueue({ type: 'data', stream: 1, payload: big() });
+
+    writer.discard(1);
+    writer.enqueue({ type: 'reset', stream: 1, code: 1 });
+    expect(drain(writer).map((frame) => frame.type)).toEqual(['open', 'reset']);
+  });
+
   it('retires a spent lane - WSM-STM-001', () => {
     const writer = makeWriter();
     writer.enqueue({ type: 'data', stream: 1, payload: { n: 1 } });
@@ -185,6 +209,30 @@ describe('the writer', () => {
 
     expect(writer.depthOf(1)).toBe(0);
     expect(internals(writer).queues.has(1)).toBe(false);
+  });
+
+  it('discards a lane whose next frame fails to encode when advancing, and throws LaneEncodingError', () => {
+    const writer = makeWriter();
+    writer.enqueue({ type: 'data', stream: 1, payload: { n: 1 } });
+    // Bytes are not a payload type under JSON; the codec refuses them.
+    writer.enqueue({ type: 'data', stream: 1, payload: { blob: new Uint8Array([0, 255]).buffer } });
+    writer.enqueue({ type: 'data', stream: 1, payload: { n: 3 } });
+    writer.enqueue({ type: 'data', stream: 5, payload: { n: 5 } });
+
+    const first = internals(writer).rotate();
+    expect(first?.stream).toBe(1);
+    let thrown: unknown = null;
+    try {
+      writer.advance(1);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(LaneEncodingError);
+    expect((thrown as LaneEncodingError).lane).toBe(1);
+    expect(writer.depthOf(1)).toBe(0);
+    expect(internals(writer).queues.has(1)).toBe(false);
+    expect(drain(writer).map((frame) => frame.stream)).toEqual([5]);
   });
 
   it('waits when there is nothing to send, and wakes on the next enqueue', async () => {

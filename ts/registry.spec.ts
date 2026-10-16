@@ -365,6 +365,22 @@ describe('the registry lifetime', () => {
     expect(registry.indexSize).toBe(1);
   });
 
+  it('keeps one close handler on a peer re-registered after each reconnect - WSM-REG-001/016/RCN-032', () => {
+    // Each socket loss deregisters the peer; the handler stays installed for the next loss.
+    const peer = makePair().dialer;
+    const hooked = vi.spyOn(peer, 'onClose');
+
+    for (let generation = 0; generation < 20; generation += 1) {
+      peer.tags.session = `s${generation}`;
+      registry.register(peer);
+      expect(registry.peersFor({ session: `s${generation}` })).toEqual([peer]);
+      peer.notifyClose({ code: 1006, reason: '', wasClean: false, willRetry: true });
+      expect(registry.peersFor({ session: `s${generation}` }), 'every socket loss deregisters the peer').toEqual([]);
+    }
+
+    expect(hooked, 'one hook per peer, however often it reconnects and is re-registered').toHaveBeenCalledTimes(1);
+  });
+
   it('deregisters idempotently', () => {
     const peer = makePair().dialer;
     peer.tags.session = 'abc';

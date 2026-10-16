@@ -100,6 +100,9 @@ def from_mapping(mapping: Mapping[str, Any]) -> Frame:
     Unknown keys are dropped rather than preserved (WSM-FRM-001, D2) - a decoder that round-tripped
     them would make `decode(encode(frame)) == frame` pass on garbage. An unrecognised `type` survives
     as an ordinary `Frame` (D4); it is the peer, not the codec, that ignores it (WSM-FRM-002).
+
+    Raises `ProtocolError` when `type` is missing, when both `payload` and `fragment` are present, or
+    when an envelope field has a value of the wrong type (WSM-FRM-005).
     """
     if "type" not in mapping:
         raise ProtocolError("frame is missing the required 'type' field (WSM-FRM-005)")
@@ -107,6 +110,39 @@ def from_mapping(mapping: Mapping[str, Any]) -> Frame:
         raise ProtocolError("frame carries both 'payload' and 'fragment' (WSM-FRM-004)")
 
     known = {key: value for key, value in mapping.items() if key in _FIELD_NAMES}
+    for name, value in known.items():
+        if name != "payload":
+            known[name] = _checked_field(name, value)
     if "payload" not in known:
         known["payload"] = ABSENT
     return Frame(**known)
+
+
+def _checked_field(name: str, value: Any) -> Any:
+    """Return `value` for envelope field `name`, or raise `ProtocolError` when its type is wrong (WSM-FRM-005).
+
+    `null` is accepted for every field whose default is `None`. Integer fields accept an integral
+    float and return it as `int`, because a JavaScript decoder does not distinguish `1.0` from `1`.
+    """
+    if name == "type":
+        if isinstance(value, str):
+            return value
+    elif name in ("more", "end"):
+        if isinstance(value, bool):
+            return value
+    elif value is None:
+        return None
+    elif name in ("stream", "last_stream", "code"):
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if isinstance(value, int) and not isinstance(value, bool) and (name == "code" or value >= 0):
+            return value
+    elif name == "fragment":
+        if isinstance(value, (str, bytes)):
+            return value
+    elif name in ("headers", "trailers"):
+        if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+            return value
+    elif isinstance(value, str):  # reason, nonce
+        return value
+    raise ProtocolError(f"envelope field {name!r} has an invalid value of type {type(value).__name__} (WSM-FRM-005)")

@@ -75,10 +75,10 @@ hello to wait for), but its read loop is not running: call `peer.on_stream(...)`
 - `CodecNotRegistered` — the configured codec name was never registered. Raised before the socket is
   touched.
 - `CodecMismatch` — the dialer's offer does not carry `muxws.v1.<this codec>`. For a Starlette socket
-  the ASGI 400 has been sent when this is raised. For a `websockets` connection nothing is sent and
-  the socket is not closed: the check runs on an already-open socket, and the caller closes it. An
-  acceptor that installs `select_subprotocol` refuses the mismatch at the handshake, and `accept()`
-  does not raise this for it.
+  the ASGI 400 has been sent when this is raised. For a `websockets` connection the check runs on an
+  already-open socket: the mismatch is logged under the `muxws.codec` logger and the socket is closed
+  with 1008 before the raise. An acceptor that installs `select_subprotocol` refuses the mismatch at
+  the handshake, and `accept()` does not raise this for it.
 - `ProtocolError` — the Starlette socket had already been accepted by the application (muxws performs
   the upgrade itself), or the object is neither a `SocketAdapter` nor a socket muxws knows how to
   upgrade, or `max_frame_bytes` is too small to hold an envelope plus one unit of payload.
@@ -148,7 +148,7 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 Two exceptions are caught, and `serve()` returns `None` instead:
 
 - `CodecMismatch` — no peer exists. For a Starlette socket the 400 has been sent. For a `websockets`
-  connection nothing is sent and the socket is not closed; the application closes it.
+  connection the socket has been closed with 1008.
 - `ConnectionClosed` — the socket closed, which is the normal end of `serve()`.
 
 ### Example
@@ -268,8 +268,9 @@ asyncio.run(main())
 ## `accept()` (TypeScript, `muxws/node`)
 
 Wrap an accepted `ws` connection in a peer. `ws` passes the connection after the handshake has
-completed, so the subprotocol is verified on the open socket, and the socket is closed with 1008 if it
-does not match.
+completed, so the subprotocol is verified on the open socket. If it does not match, one error line
+naming the negotiated and the expected subprotocol and the `MUXWS_CODEC` and `VITE_MUXWS_CODEC`
+environment variables is logged through `logger`, and the socket is closed with 1008.
 
 It takes only a `ws` `WebSocket`: it reads `socket.protocol` and wraps the argument in a `WsSocket`.
 Python's `accept()` also takes any `SocketAdapter`; in TypeScript, a custom adapter is used with

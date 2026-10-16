@@ -36,11 +36,19 @@ export class LaneEncodingError extends Error {
   /** The codec's original error, which the peer reports to the affected stream. */
   readonly cause: unknown;
 
-  constructor(lane: number, cause: unknown) {
+  /**
+   * True when the frame that failed is an `open` of which nothing has been sent. The remote has not
+   * seen the stream id, so a `reset` for it would be above the remote's high-water mark, a
+   * connection-level error (WSM-STM-003).
+   */
+  readonly unsentOpen: boolean;
+
+  constructor(lane: number, cause: unknown, options: { unsentOpen?: boolean } = {}) {
     super(`could not encode a frame on lane ${lane}: ${describeCause(cause)}`);
     this.name = 'LaneEncodingError';
     this.lane = lane;
     this.cause = cause;
+    this.unsentOpen = options.unsentOpen ?? false;
   }
 }
 
@@ -97,6 +105,9 @@ export class StreamQueue {
   /** The lazy remainder of the payload in flight, if this stream is mid-fragmentation. */
   private fragments: Iterator<Frame> | null = null;
 
+  /** Set when the last `prepare` threw while slicing the first fragment of an `open`. */
+  failedUnsentOpen = false;
+
   constructor(streamId: number) {
     this.streamId = streamId;
   }
@@ -126,6 +137,7 @@ export class StreamQueue {
    * ahead would violate WSM-FRG-018 (at most one unsent fragment per stream).
    */
   prepare(cap: number, codec: Codec): void {
+    this.failedUnsentOpen = false;
     if (this.prepared !== null) return;
 
     if (this.fragments !== null) {
@@ -140,7 +152,13 @@ export class StreamQueue {
     const next = this.waiting.shift();
     if (next === undefined) return;
     this.fragments = iterFragments(next, cap, codec);
-    const started = this.fragments.next();
+    let started: IteratorResult<Frame>;
+    try {
+      started = this.fragments.next();
+    } catch (failure) {
+      this.failedUnsentOpen = next.type === 'open';
+      throw failure;
+    }
     this.prepared = started.done === true ? null : started.value;
   }
 
@@ -155,6 +173,16 @@ export class StreamQueue {
     this.waiting = [];
     this.prepared = null;
     this.fragments = null;
+  }
+
+  /** Drop every unsent frame except an `open` of which no fragment has been sliced. */
+  discardExceptUnsentOpen(): void {
+    const unsentOpen =
+      this.prepared === null && this.fragments === null && this.waiting[0]?.type === 'open'
+        ? (this.waiting.shift() as Frame)
+        : null;
+    this.discard();
+    if (unsentOpen !== null) this.waiting.push(unsentOpen);
   }
 }
 
@@ -174,11 +202,15 @@ export class Writer {
 
   private readonly wake = new Gate();
 
+  /** Set while the write loop has sent every frame passed to `enqueue`; cleared by `enqueue`. */
+  private readonly idle = new Gate();
+
   private stopped = false;
 
   constructor(codec: Codec, options: { maxFrameBytes?: number } = {}) {
     this.codec = codec;
     this.cap = options.maxFrameBytes ?? MAX_FRAME_BYTES;
+    this.idle.set();
   }
 
   /** Every unsent frame across every lane. */
@@ -208,6 +240,7 @@ export class Writer {
       this.order.push(lane);
     }
     queue.put(frame);
+    this.idle.clear();
     this.wake.set();
   }
 
@@ -222,9 +255,23 @@ export class Writer {
       const frame = this.rotate();
       if (frame !== null) return frame;
       this.wake.clear();
-      if (![...this.queues.values()].some((queue) => queue.hasWork)) await this.wake.wait();
+      if (![...this.queues.values()].some((queue) => queue.hasWork)) {
+        // The caller asks for the next frame only after the previous one was passed to the socket,
+        // so no work here means every enqueued frame has been sent.
+        this.idle.set();
+        await this.wake.wait();
+      }
       if (this.stopped) return null;
     }
+  }
+
+  /**
+   * Resolves once every enqueued frame, including every fragment of a fragmented one, has been sent.
+   *
+   * Also resolves after `stop()` and `discardAll()`, which leave nothing to send.
+   */
+  waitIdle(): Promise<void> {
+    return this.idle.wait();
   }
 
   /**
@@ -251,19 +298,24 @@ export class Writer {
 
   /** Ask one lane for its next frame; a codec error discards the lane and throws `LaneEncodingError`. */
   private turnOne(lane: number, queue: StreamQueue): Frame | null {
-    try {
-      queue.prepare(this.cap, this.codec);
-    } catch (failure) {
-      if (failure instanceof LaneEncodingError) throw failure;
-      queue.discard();
-      this.retire(lane);
-      throw new LaneEncodingError(lane, failure);
-    }
-
+    this.prepareLane(lane, queue);
     const frame = queue.take();
     if (frame !== null) return frame;
     if (!queue.hasWork) this.retire(lane);
     return null;
+  }
+
+  /** Slice the lane's next fragment; a codec error discards the lane and throws `LaneEncodingError`. */
+  private prepareLane(lane: number, queue: StreamQueue): void {
+    try {
+      queue.prepare(this.cap, this.codec);
+    } catch (failure) {
+      if (failure instanceof LaneEncodingError) throw failure;
+      const unsentOpen = queue.failedUnsentOpen;
+      queue.discard();
+      this.retire(lane);
+      throw new LaneEncodingError(lane, failure, { unsentOpen });
+    }
   }
 
   /** Remove an empty stream lane. No state is retained per closed stream (WSM-STM-001). */
@@ -274,27 +326,38 @@ export class Writer {
     if (at >= 0) this.order.splice(at, 1);
   }
 
-  /** Slice the stream's next fragment after its previous one has been passed to the socket. */
+  /**
+   * Slice the stream's next fragment after its previous one has been passed to the socket.
+   *
+   * A codec error discards the lane and throws `LaneEncodingError`, as in the rotation.
+   */
   advance(streamId: number | null | undefined): void {
-    const queue = this.queues.get(streamId ?? CONNECTION_LANE);
+    const lane = streamId ?? CONNECTION_LANE;
+    const queue = this.queues.get(lane);
     if (queue === undefined) return;
-    queue.prepare(this.cap, this.codec);
+    this.prepareLane(lane, queue);
     if (queue.hasWork) this.wake.set();
   }
 
-  /** Drop all queued frames of one stream. Called when the stream is reset. */
+  /**
+   * Drop one stream's queued frames, for a reset of that stream (WSM-FRM-014).
+   *
+   * The remainder of a payload whose fragmentation has started is dropped; the `reset` that follows
+   * ends the fragment sequence on the receiver. An `open` of which no fragment has been sliced is
+   * kept: a `reset` for an id above the remote's high-water mark is a connection-level error
+   * (WSM-STM-003).
+   */
   discard(streamId: number): void {
     const queue = this.queues.get(streamId);
     if (queue === undefined) return;
-    this.queues.delete(streamId);
-    queue.discard();
-    const at = this.order.indexOf(streamId);
-    if (at >= 0) this.order.splice(at, 1);
+    queue.discardExceptUnsentOpen();
+    if (!queue.hasWork) this.retire(streamId);
   }
 
   /** Stop the writer. Every subsequent and pending `nextFrame` resolves `null`. */
   stop(): void {
     this.stopped = true;
+    this.idle.set();
     this.wake.set();
   }
 
@@ -305,6 +368,7 @@ export class Writer {
     });
     this.queues.clear();
     this.order.length = 0;
+    this.idle.set();
     this.wake.set();
   }
 }

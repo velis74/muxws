@@ -10,8 +10,7 @@
  */
 
 import { CodecMismatch, ConnectionClosed, ProtocolError, TransportUnsupportedError } from '../errors';
-import { logger } from '../observability';
-import { PREFIX, mismatchError, offer } from '../subprotocol';
+import { PREFIX, logNegotiatedMismatch, mismatchError, offer } from '../subprotocol';
 
 import type { SocketAdapter } from './index';
 
@@ -136,13 +135,9 @@ export class BrowserSocket implements SocketAdapter {
 
     const wanted = `${PREFIX}${codecName}`;
     if (adapter.socket.protocol !== wanted) {
-      // The same line `websockets_.verify_negotiated` logs to `muxws.transport`. It is logged in
-      // addition to the thrown error, so it is visible even if the caller discards the error, and it
-      // goes through `logger` so `logger.level` controls it.
-      logger.error(
-        `muxws negotiated subprotocol is '${adapter.socket.protocol}', expected '${wanted}'; ` +
-          `closing with ${POLICY_VIOLATION}`,
-      );
+      // The same line `websockets_.verify_negotiated` logs to `muxws.codec`. It is logged in
+      // addition to the thrown error, so it is visible even if the caller discards the error.
+      logNegotiatedMismatch(adapter.socket.protocol, wanted, POLICY_VIOLATION);
       await adapter.close(POLICY_VIOLATION, 'muxws subprotocol mismatch');
       throw mismatchError(codecName);
     }

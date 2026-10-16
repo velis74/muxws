@@ -24,12 +24,13 @@ class Pair {
   readonly acceptorSocket: MemorySocket;
   private tasks: Promise<void>[] = [];
 
-  constructor(options: { errorSerializer?: (error: unknown) => unknown } = {}) {
+  constructor(options: { errorSerializer?: (error: unknown) => unknown; maxFrameBytes?: number } = {}) {
     const [left, right] = memoryPair();
     this.dialerSocket = left;
     this.acceptorSocket = right;
-    this.dialer = new Peer(left, { codec, isDialer: true, errorSerializer: options.errorSerializer });
-    this.acceptor = new Peer(right, { codec, isDialer: false, errorSerializer: options.errorSerializer });
+    const { errorSerializer, maxFrameBytes } = options;
+    this.dialer = new Peer(left, { codec, isDialer: true, errorSerializer, maxFrameBytes });
+    this.acceptor = new Peer(right, { codec, isDialer: false, errorSerializer, maxFrameBytes });
   }
 
   start(): void {
@@ -449,6 +450,32 @@ describe('reset stream nobody consumed', () => {
       await pair.stop();
     }
   });
+
+  it('calls every error handler when one throws - WSM-API-016', async () => {
+    const pair = new Pair();
+    const reported: unknown[] = [];
+    pair.dialer.onError(() => {
+      throw new Error('a broken error handler');
+    });
+    pair.dialer.onError((error) => reported.push(error));
+    pair.acceptor.onStream(hold);
+    pair.start();
+    const level = logger.level;
+    logger.level = 'silent';
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      await pair.settle();
+      pair.inject('dialer', { type: 'reset', stream: stream.id, code: ResetCode.APPLICATION_ERROR, reason: 'no' });
+      await pair.settle();
+
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toBeInstanceOf(RemoteError);
+      expect(pair.dialer.isOpen).toBe(true);
+    } finally {
+      logger.level = level;
+      await pair.stop();
+    }
+  });
 });
 
 describe('closed and signal', () => {
@@ -588,6 +615,76 @@ describe('cancellation', () => {
 
       pair.inject('dialer', { type: 'data', stream: stream.id, payload: { late: true } });
       await pair.settle();
+      expect(pair.dialer.isOpen).toBe(true);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('sends no queued fragment after cancel, and the reset ends the sequence - WSM-ERR-012/WSM-FRM-014', async () => {
+    const pair = new Pair({ maxFrameBytes: 256 });
+    const remote: Stream[] = [];
+    pair.acceptor.onStream(capture(remote));
+    pair.start();
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      await pair.settle();
+      await stream.send({ body: 'x'.repeat(30_000) });
+      await pair.settle(3);
+      const dataOf = (frames: Frame[]): Frame[] =>
+        frames.filter((frame) => frame.stream === stream.id && frame.type === 'data');
+      const before = dataOf(pair.sentBy('dialer')).length;
+      await stream.cancel('user navigated away');
+      await pair.settle(300);
+
+      const mine = pair.sentBy('dialer').filter((frame) => frame.stream === stream.id);
+      expect(mine[mine.length - 1]).toMatchObject({ type: 'reset', code: ResetCode.CANCELLED });
+      const sent = dataOf(mine);
+      expect(before).toBeGreaterThan(0);
+      expect(sent.length).toBeLessThanOrEqual(before + 1);
+      expect(sent[sent.length - 1].more).toBe(true);
+      expect(remote).toHaveLength(1);
+      await expect(remote[0].send({ n: 1 })).rejects.toMatchObject({ code: ResetCode.CANCELLED });
+      expect(pair.acceptor.isOpen).toBe(true);
+      expect(pair.dialer.isOpen).toBe(true);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('sends the open before the reset when cancel comes first - WSM-STM-003', async () => {
+    const pair = new Pair();
+    pair.acceptor.onStream(hold);
+    pair.start();
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      await stream.send({ n: 2 });
+      await stream.cancel();
+      await pair.settle();
+
+      const mine = pair.sentBy('dialer').filter((frame) => frame.stream === stream.id);
+      expect(mine.map((frame) => frame.type)).toEqual(['open', 'reset']);
+      expect(pair.acceptor.isOpen).toBe(true);
+      expect(pair.dialer.isOpen).toBe(true);
+    } finally {
+      await pair.stop();
+    }
+  });
+
+  it('sends no queued fragment of a stream the remote reset - WSM-FRM-014', async () => {
+    const pair = new Pair({ maxFrameBytes: 256 });
+    pair.acceptor.onStream(async (_p, stream) => {
+      await stream.cancel('not interested');
+    });
+    pair.start();
+    try {
+      const stream = pair.dialer.open({ q: 1 });
+      await stream.send({ body: 'x'.repeat(30_000) });
+      await pair.settle(300);
+
+      expect(stream.state).toBe(StreamState.CLOSED);
+      const sent = pair.sentBy('dialer').filter((frame) => frame.stream === stream.id && frame.type === 'data');
+      expect(sent.length).toBeLessThan(30);
       expect(pair.dialer.isOpen).toBe(true);
     } finally {
       await pair.stop();

@@ -26,6 +26,9 @@ from muxws.transports.unix import parse_unix_url, UnixSocketsUnsupportedError, U
         ("ws+unix:/run/muxws/api.sock:/ws", "/run/muxws/api.sock", "ws://localhost/ws"),
         ("WS+UNIX:///run/muxws/api.sock:/ws", "/run/muxws/api.sock", "ws://localhost/ws"),
         ("ws+unix:///run/muxws/api.sock:/ws:v2", "/run/muxws/api.sock", "ws://localhost/ws:v2"),
+        ("ws+unix:///run/my dir ä/api.sock:/ws", "/run/my dir ä/api.sock", "ws://localhost/ws"),
+        ("ws+unix:///run/a%20b.sock:/ws", "/run/a%20b.sock", "ws://localhost/ws"),
+        ("ws+unix:///run/a.sock ", "/run/a.sock ", "ws://localhost/"),
     ],
     ids=[
         "path-and-target",
@@ -36,6 +39,9 @@ from muxws.transports.unix import parse_unix_url, UnixSocketsUnsupportedError, U
         "no-authority-at-all",
         "the-scheme-is-case-insensitive",
         "only-the-first-colon-splits",
+        "the-socket-path-is-not-percent-encoded",
+        "the-socket-path-is-not-percent-decoded",
+        "a-trailing-space-belongs-to-the-socket-path",
     ],
 )
 def test_the_grammar_splits_a_socket_path_from_a_request_target(url: str, path: str, uri: str):
@@ -52,6 +58,11 @@ def test_the_grammar_splits_a_socket_path_from_a_request_target(url: str, path: 
     colon and keeps `parts[1]`, reading `/ws:v2` as `/ws`, so `ts/node.ts` performs the split before
     `ws` sees the URL. The TypeScript counterpart is `splits on the first colon only` in
     `ts/unix.spec.ts`, which asserts the target a real acceptor receives.
+
+    The socket path is the URL's path as written: a space and a non-ASCII character are not encoded,
+    and `%20` is not decoded. A trailing space is part of the path; `urlsplit` removes leading spaces
+    only. The TypeScript counterparts are `opens the socket path as written in the url` and `keeps a
+    trailing space of the url in the socket path` in `ts/unix.spec.ts`.
     """
     target = parse_unix_url(url)
 

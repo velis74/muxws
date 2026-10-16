@@ -313,11 +313,20 @@ export class Assembler {
     this.bytes = 0;
   }
 
-  /** Add one fragment frame; return `ABSENT` while more are expected, else the decoded payload. */
+  /**
+   * Add one fragment frame; return `ABSENT` while more are expected, else the decoded payload.
+   *
+   * Throws `ProtocolError` when the fragments mix text and binary values, or when the codec cannot
+   * decode the joined payload. The partial buffer is dropped in both cases.
+   */
   feed(frame: Frame, codec: Codec): unknown {
     const { fragment } = frame;
     if (fragment === null || fragment === undefined) {
       throw new ProtocolError('Assembler.feed was given a frame carrying no fragment');
+    }
+    if (this.parts.length > 0 && typeof fragment !== typeof this.parts[0]) {
+      this.reset();
+      throw new ProtocolError('the fragments of one payload mix text and binary values');
     }
     this.parts.push(fragment);
     this.bytes += encodedLength(fragment);

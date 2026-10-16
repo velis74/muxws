@@ -151,6 +151,32 @@ async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
         await pair.stop()
 
 
+async def test_cancelled_ping_leaves_no_pending_entry(make_pair):
+    """A ping whose caller is cancelled removes its nonce from the pending pings and the start times."""
+    pair = make_pair()
+    pair.start()
+    try:
+        original = pair.dialer._dispatch
+
+        async def swallow_pongs(frame: Frame) -> bool:
+            return True if frame.type == "pong" else await original(frame)
+
+        pair.dialer._dispatch = swallow_pongs  # type: ignore[method-assign]
+        pinging = asyncio.create_task(pair.dialer.ping(timeout=5.0))
+        await pair.settle()
+        assert len(pair.dialer._pings) == 1
+
+        pinging.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pinging
+
+        assert len(pair.dialer._pings) == 0, "a cancelled ping must not stay pending"
+        assert pair.dialer._ping_started == {}, "a cancelled ping must not keep its start time"
+        assert pair.dialer.is_open
+    finally:
+        await pair.stop()
+
+
 async def test_unknown_pong_nonce_is_ignored(make_pair):
     """A pong for a ping whose deadline has expired is ignored."""
     pair = make_pair()
