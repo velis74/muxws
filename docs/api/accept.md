@@ -20,6 +20,11 @@ Behaviour common to every function on this page:
   configured for receives HTTP 400 wherever the transport supports it, instead of a completed
   handshake followed by a close. `select_subprotocol` (Python, `websockets`), `accept()` (Python,
   Starlette) and `refuseMismatchedUpgrade` (TypeScript, `ws`) send that 400.
+- **The `Origin` header is checked only when asked for.** Without `allowed_origins` (Python) /
+  `allowedOrigins` (TypeScript), `accept()` reads no request header. With it, a refused origin is
+  answered before any frame: HTTP 403 for a Starlette socket, close code 1008 for a `websockets` or
+  `ws` connection, whose handshake has already completed. `accept()` raises `OriginRefused`, and
+  `serve()` returns.
 
 An acceptor on a Unix domain socket uses the same functions. In Python it is
 `websockets.asyncio.server.unix_serve(handler, path, select_subprotocol=muxws.select_subprotocol)`;
@@ -47,6 +52,7 @@ async def accept(
     open_interceptors: Sequence[OpenInterceptor] = (),
     reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
     incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
+    allowed_origins: Iterable[str] | Callable[[str | None], bool] | None = None,
 ) -> Peer:
 ```
 
@@ -63,6 +69,7 @@ async def accept(
 | `open_interceptors` | `Sequence[OpenInterceptor]` | `()` | Registered in order with [`peer.intercept_open()`](./peer.md#peer-intercept-open-python) on the peer this returns. |
 | `reply_headers_interceptors` | `Sequence[ReplyHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python). |
 | `incoming_headers_interceptors` | `Sequence[IncomingHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_incoming_headers()`](./peer.md#peer-intercept-incoming-headers-python). |
+| `allowed_origins` | `Iterable[str] \| Callable[[str \| None], bool] \| None` | `None` | The `Origin` check, run before the subprotocol check. `None` checks nothing. An iterable lists the exact origins allowed, `scheme://host[:port]` with scheme `http` or `https`; origins compare with scheme and host lower-cased, the default port (80, 443) filled in and one trailing `/` ignored. A request without `Origin`, with more than one, or with a value that is not such an origin (`null` included) is refused. A callable is called with the single `Origin` value, or `None` when there is none, and allows the request when it returns a truthy value; a request with more than one `Origin` is refused without calling it. Requires a Starlette `WebSocket`, a `websockets` connection or a `WebsocketsSocket`, whose request headers `accept()` reads. |
 
 ### Return
 
@@ -79,9 +86,16 @@ hello to wait for), but its read loop is not running: call `peer.on_stream(...)`
   already-open socket: the mismatch is logged under the `muxws.codec` logger and the socket is closed
   with 1008 before the raise. An acceptor that installs `select_subprotocol` refuses the mismatch at
   the handshake, and `accept()` does not raise this for it.
+- `OriginRefused` — `allowed_origins` refused the request's `Origin`. A Starlette socket has been
+  answered with HTTP 403 and never upgraded; a `websockets` connection has been closed with 1008. One
+  line naming the origin is logged at INFO under the `muxws.origin` logger.
 - `ProtocolError` — the Starlette socket had already been accepted by the application (muxws performs
   the upgrade itself), or the object is neither a `SocketAdapter` nor a socket muxws knows how to
-  upgrade, or `max_frame_bytes` is too small to hold an envelope plus one unit of payload.
+  upgrade, or `max_frame_bytes` is too small to hold an envelope plus one unit of payload, or
+  `allowed_origins` is given for a socket that exposes no request headers (a `SocketAdapter` such as
+  `MemorySocket` is closed with 1008 first).
+- `TypeError` — `allowed_origins` is a single `str`.
+- `ValueError` — an `allowed_origins` entry is not an origin. Raised before the socket is touched.
 
 ### Example
 
@@ -132,7 +146,7 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 |---|---|---|---|
 | `socket` | `SocketAdapter \| Any` | required | The same three kinds `accept()` takes. |
 | `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async, called once per incoming stream. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`. |
-| `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`, `open_interceptors`, `reply_headers_interceptors`, `incoming_headers_interceptors`. Interceptors for the peer `serve()` builds can be registered only here. An unknown name raises `TypeError` from `accept()`. |
+| `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`, `open_interceptors`, `reply_headers_interceptors`, `incoming_headers_interceptors`, `allowed_origins`. Interceptors for the peer `serve()` builds can be registered only here. An unknown name raises `TypeError` from `accept()`. |
 
 ### Return
 
@@ -142,12 +156,16 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 
 - `CodecNotRegistered` — the configured codec name was never registered.
 - `ProtocolError` — the socket is not one muxws can adapt, was already accepted, or `max_frame_bytes`
-  is too small to hold an envelope plus one unit of payload.
-- `TypeError` — an unknown keyword in `**peer_options`.
+  is too small to hold an envelope plus one unit of payload, or `allowed_origins` is given for a
+  socket that exposes no request headers.
+- `TypeError` — an unknown keyword in `**peer_options`, or `allowed_origins` is a single `str`.
+- `ValueError` — an `allowed_origins` entry is not an origin.
 
-Two exceptions are caught, and `serve()` returns `None` instead:
+Three exceptions are caught, and `serve()` returns `None` instead:
 
 - `CodecMismatch` — no peer exists. For a Starlette socket the 400 has been sent. For a `websockets`
+  connection the socket has been closed with 1008.
+- `OriginRefused` — no peer exists. For a Starlette socket the 403 has been sent. For a `websockets`
   connection the socket has been closed with 1008.
 - `ConnectionClosed` — the socket closed, which is the normal end of `serve()`.
 
@@ -272,6 +290,9 @@ completed, so the subprotocol is verified on the open socket. If it does not mat
 naming the negotiated and the expected subprotocol and the `MUXWS_CODEC` and `VITE_MUXWS_CODEC`
 environment variables is logged through `logger`, and the socket is closed with 1008.
 
+With `allowedOrigins`, the `Origin` header of `options.request`, the `IncomingMessage` that `ws` emits
+with the connection, is checked first; a refused origin closes the socket with 1008.
+
 It takes only a `ws` `WebSocket`: it reads `socket.protocol` and wraps the argument in a `WsSocket`.
 Python's `accept()` also takes any `SocketAdapter`; in TypeScript, a custom adapter is used with
 `new Peer(adapter, { codec, isDialer: false })`.
@@ -289,7 +310,7 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `socket` | `WebSocket` (from `ws`) | required | The connection `WebSocketServer` emitted. Its `protocol` must be `muxws.v1.<codec>`. |
-| `options` | `AcceptOptions` | `{}` | The local limits, the error serializer, the codec override and the interceptors. See [`AcceptOptions`](#acceptoptions-typescript). |
+| `options` | `AcceptOptions` | `{}` | The local limits, the error serializer, the codec override, the interceptors and the `Origin` check. See [`AcceptOptions`](#acceptoptions-typescript). |
 
 ### Return
 
@@ -305,7 +326,12 @@ Rejects with:
   `muxws/node` must import `muxws` or call `registerCodec` during bootstrap.
 - `CodecMismatch` — the negotiated subprotocol is not `muxws.v1.<codec>`. The socket is closed with
   1008 before the promise rejects.
-- `ProtocolError` — `maxFrameBytes` is too small to hold an envelope plus one indivisible unit.
+- `OriginRefused` — `allowedOrigins` refused the request's `Origin`. The socket is closed with 1008
+  before the promise rejects.
+- `ProtocolError` — `maxFrameBytes` is too small to hold an envelope plus one indivisible unit, or
+  `allowedOrigins` is given without `request`; in the second case the socket is closed with 1008 first.
+- `TypeError` — `allowedOrigins` is a single string, or one of its entries is not an origin. Thrown
+  before the socket is touched.
 
 ### Example
 
@@ -317,8 +343,13 @@ import { WebSocketServer } from 'ws';
 registerCodec('json', new JsonCodec());
 
 const server = refuseMismatchedUpgrade(new WebSocketServer({ port: 0, handleProtocols }));
-server.on('connection', (socket) => {
-  void accept(socket, { maxConcurrentStreams: 8, maxPayloadBytes: 1_048_576 }).then((peer) => {
+// A dialer that is not a browser sends no Origin; the function allows it, and a browser page only from
+// the listed origin.
+const allowedOrigins = (origin: string | undefined): boolean =>
+  origin === undefined || origin === 'https://app.example.com';
+server.on('connection', (socket, request) => {
+  const options = { maxConcurrentStreams: 8, maxPayloadBytes: 1_048_576, allowedOrigins, request };
+  void accept(socket, options).then((peer) => {
     peer.onStream(async (payload: unknown, stream: Stream) => {
       await stream.reply({ seen: payload });
     });
@@ -350,19 +381,20 @@ export async function serve(socket: NodeWebSocket, options: AcceptOptions & { ha
 |---|---|---|---|
 | `socket` | `WebSocket` (from `ws`) | required | The connection `WebSocketServer` emitted. |
 | `options.handler` | `StreamHandler` | required | `(payload, stream)`, called once per incoming stream. Returning without ending the stream ends it implicitly; throwing resets it with `APPLICATION_ERROR`. |
-| `options` (rest) | `AcceptOptions` | `{}` | `maxPayloadBytes`, `maxConcurrentStreams`, `errorSerializer`, `codec`, `maxFrameBytes`, `openInterceptors`, `replyHeadersInterceptors`, `incomingHeadersInterceptors`, passed through to `accept()`. |
+| `options` (rest) | `AcceptOptions` | `{}` | `maxPayloadBytes`, `maxConcurrentStreams`, `errorSerializer`, `codec`, `maxFrameBytes`, `openInterceptors`, `replyHeadersInterceptors`, `incomingHeadersInterceptors`, `allowedOrigins`, `request`, passed through to `accept()`. |
 
 ### Return
 
-`Promise<void>` — resolves when the socket closes. It also resolves on a `CodecMismatch`, as Python's
-`serve()` returns. `accept()` has already closed the socket with 1008 at that point; a rejection inside
-a `ws` connection handler would be an unhandled rejection, which terminates the Node process.
+`Promise<void>` — resolves when the socket closes. It also resolves on a `CodecMismatch` or an
+`OriginRefused`, as Python's `serve()` returns. `accept()` has already closed the socket with 1008 at
+that point; a rejection inside a `ws` connection handler would be an unhandled rejection, which
+terminates the Node process.
 
 ### Raises
 
-Rejects with everything `accept()` rejects with **except** `CodecMismatch`: `CodecNotRegistered`,
-`ProtocolError`, plus whatever `peer.serve()` rejects with. When the read loop fails, the peer is
-closed first and `serve()` then rejects with the same error.
+Rejects with everything `accept()` rejects with **except** `CodecMismatch` and `OriginRefused`:
+`CodecNotRegistered`, `ProtocolError`, `TypeError`, plus whatever `peer.serve()` rejects with. When
+the read loop fails, the peer is closed first and `serve()` then rejects with the same error.
 
 ### Example
 
@@ -416,6 +448,10 @@ export interface AcceptOptions {
   replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
   /** Registered on the peer, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
   incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
+  /** Exact origins, or a function of the `Origin` header value, that may open the endpoint. Requires `request`. */
+  allowedOrigins?: Iterable<string> | ((origin: string | undefined) => boolean);
+  /** The upgrade request `ws` passed with the connection; read for its `Origin` header. */
+  request?: IncomingMessage;
 }
 ```
 
@@ -431,6 +467,8 @@ export interface AcceptOptions {
 | `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) on the peer `accept()` returns or `serve()` builds. |
 | `replyHeadersInterceptors` | `readonly ReplyHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript). |
 | `incomingHeadersInterceptors` | `readonly IncomingHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptIncomingHeaders()`](./peer.md#peer-interceptincomingheaders-typescript). |
+| `allowedOrigins` | `Iterable<string> \| ((origin: string \| undefined) => boolean)` | `undefined` | The `Origin` check, run before the subprotocol check, with the same rules as Python's `allowed_origins`. `undefined` checks nothing. An iterable lists the exact origins allowed (`scheme://host[:port]`, scheme `http` or `https`; scheme and host compare case-insensitively, the default port is filled in, one trailing `/` is ignored), and a request without `Origin`, with more than one, or with a value that is not an origin (`null` included) is refused. A function is called with the single `Origin` value, or `undefined` when there is none; a request with more than one `Origin` is refused without calling it. |
+| `request` | `IncomingMessage` (from `node:http`) | `undefined` | The upgrade request, the second argument of the `ws` `connection` event. Read only for its `Origin` header, and required when `allowedOrigins` is set. |
 
 ### Return
 

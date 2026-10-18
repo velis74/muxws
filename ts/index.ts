@@ -67,6 +67,7 @@ export {
   ConnectionGoingAway,
   ConnectionLost,
   MuxwsError,
+  OriginRefused,
   ProtocolError,
   RemoteError,
   ResetCode,

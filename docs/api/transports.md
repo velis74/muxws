@@ -20,7 +20,8 @@ The library ships five adapters:
 | `WsSocket` | TypeScript | either | `muxws/node` |
 
 No adapter performs authentication. Authenticate at the HTTP upgrade, before `accept()`, with a
-cookie, an `Authorization` header or a bearer entry in the subprotocol list. Do not authenticate in
+cookie, an `Authorization` header or a bearer entry in the subprotocol list. `accept()`'s
+`allowed_origins` / `allowedOrigins` checks the handshake's `Origin` header. Do not authenticate in
 the reconnect hello or in a stream's `headers`: both arrive after the socket is open.
 
 ## `SocketAdapter`

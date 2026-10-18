@@ -56,6 +56,19 @@ class StarletteSocket:
             await self._websocket.close(code=code, reason=reason)
 
 
+def is_unaccepted(websocket: Any) -> bool:
+    """True while the application has neither accepted nor closed `websocket`."""
+    from starlette.websockets import WebSocketState
+
+    return websocket.client_state is WebSocketState.CONNECTING
+
+
+async def deny(websocket: Any, status: int) -> None:
+    """Answer the upgrade with the ASGI denial response `status` and an empty body instead of accepting."""
+    await websocket.send({"type": "websocket.http.response.start", "status": status, "headers": []})
+    await websocket.send({"type": "websocket.http.response.body", "body": b""})
+
+
 async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     """Accept the upgrade, or **deny** it with HTTP 400 (WSM-CDC-022/026).
 
@@ -66,9 +79,7 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     raised. `websocket.close()` before accept would answer 403; WSM-CDC-022 requires a 400 with no
     subprotocol selected.
     """
-    from starlette.websockets import WebSocketState
-
-    if websocket.client_state is not WebSocketState.CONNECTING:
+    if not is_unaccepted(websocket):
         raise ProtocolError(
             "the websocket was already accepted; muxws.accept() performs the upgrade itself because "
             "it is the only party that knows which subprotocol to select (WSM-CDC-026)"
@@ -77,8 +88,7 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     offered = list(websocket.scope.get("subprotocols") or [])
     selected = select(offered, configured)
     if selected is None:
-        await websocket.send({"type": "websocket.http.response.start", "status": 400, "headers": []})
-        await websocket.send({"type": "websocket.http.response.body", "body": b""})
+        await deny(websocket, 400)
         # CodecMismatch, the same class the dialer raises for this failure (WSM-CDC-024/029).
         # `serve()` returns quietly on it, because the 400 has already been sent.
 

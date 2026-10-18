@@ -137,3 +137,113 @@ def test_a_disconnect_ends_serve_without_raising():
             socket.send_text(json.dumps({"type": "open", "stream": 1, "payload": {}, "end": True}))
             socket.receive_text()
     # Leaving the context manager closes the socket; the app must shut down cleanly.
+
+
+def _origin_app(allowed_origins: Any, accepted: list[bool]) -> Starlette:
+    async def endpoint(websocket: WebSocket) -> None:
+        await muxws.serve(websocket, handler=_echo, allowed_origins=allowed_origins)
+        accepted.append(True)
+
+    return Starlette(routes=[WebSocketRoute("/ws", endpoint)])
+
+
+def _request(client: TestClient, headers: dict[str, str]) -> Any:
+    return client.websocket_connect("/ws", subprotocols=["muxws.v1.json"], headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("allowed", "headers"),
+    [
+        (None, {}),
+        (None, {"origin": "https://evil.test"}),
+        (["https://app.example.com"], {"origin": "https://app.example.com"}),
+        (["https://app.example.com"], {"origin": "HTTPS://APP.example.com:443"}),
+        (lambda origin: origin is None, {}),
+    ],
+    ids=["default-no-origin", "default-any-origin", "listed", "listed-normalised", "callable-no-origin"],
+)
+def test_an_allowed_origin_is_upgraded(allowed: Any, headers: dict[str, str]):
+    accepted: list[bool] = []
+    with TestClient(_origin_app(allowed, accepted)) as client:
+        with _request(client, headers) as socket:
+            assert socket.accepted_subprotocol == "muxws.v1.json"
+            socket.send_text(json.dumps({"type": "open", "stream": 1, "payload": {"n": 1}, "end": True}))
+            assert json.loads(socket.receive_text())["payload"] == {"echo": {"n": 1}}
+
+
+@pytest.mark.parametrize(
+    ("allowed", "headers"),
+    [
+        (["https://app.example.com"], {"origin": "https://evil.test"}),
+        (["https://app.example.com"], {"origin": "http://app.example.com"}),
+        (["https://app.example.com"], {}),
+        (["https://app.example.com"], {"origin": "null"}),
+        (lambda origin: origin == "https://app.example.com", {"origin": "https://evil.test"}),
+    ],
+    ids=["other-host", "other-scheme", "missing", "null", "callable-false"],
+)
+def test_a_refused_origin_is_answered_with_http_403(allowed: Any, headers: dict[str, str], caplog):
+    from starlette.testclient import WebSocketDenialResponse
+
+    accepted: list[bool] = []
+    with TestClient(_origin_app(allowed, accepted)) as client, caplog.at_level(logging.INFO, logger="muxws.origin"):
+        with pytest.raises(WebSocketDenialResponse) as info:
+            with _request(client, headers):
+                pass
+
+    assert info.value.status_code == 403
+    assert accepted == [True], "serve() returns quietly after the refusal"
+    assert "refused a muxws handshake" in caplog.text
+
+
+def test_accept_raises_origin_refused_with_the_header_value():
+    from starlette.testclient import WebSocketDenialResponse
+
+    raised: list[BaseException] = []
+
+    async def endpoint(websocket: WebSocket) -> None:
+        try:
+            await muxws.accept(websocket, allowed_origins=["https://app.example.com"])
+        except muxws.OriginRefused as exc:
+            raised.append(exc)
+
+    with TestClient(Starlette(routes=[WebSocketRoute("/ws", endpoint)])) as client:
+        with pytest.raises(WebSocketDenialResponse):
+            with _request(client, {"origin": "https://evil.test"}):
+                pass
+
+    assert len(raised) == 1
+    assert isinstance(raised[0], muxws.OriginRefused)
+    assert raised[0].origin == "https://evil.test"
+
+
+def test_an_invalid_allowed_origins_entry_raises_before_the_upgrade():
+    raised: list[BaseException] = []
+
+    async def endpoint(websocket: WebSocket) -> None:
+        try:
+            await muxws.accept(websocket, allowed_origins=["app.example.com"])
+        except ValueError as exc:
+            raised.append(exc)
+            await websocket.close(code=1011)
+
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(Starlette(routes=[WebSocketRoute("/ws", endpoint)])) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with _request(client, {"origin": "https://app.example.com"}):
+                pass
+
+    assert len(raised) == 1
+    assert "not an origin" in str(raised[0])
+
+
+def test_the_origin_check_leaves_an_already_accepted_socket_to_the_protocol_error():
+    async def endpoint(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await muxws.serve(websocket, handler=_echo, allowed_origins=["https://app.example.com"])
+
+    with TestClient(Starlette(routes=[WebSocketRoute("/ws", endpoint)])) as client:
+        with pytest.raises(ProtocolError, match="already accepted"):
+            with _request(client, {"origin": "https://evil.test"}) as socket:
+                socket.receive_text()

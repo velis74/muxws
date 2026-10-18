@@ -15,6 +15,7 @@ from muxws.errors import (
     ConnectionLost,
     exception_for_reset,
     MuxwsError,
+    OriginRefused,
     ProtocolError,
     RemoteError,
     ResetCode,
@@ -71,9 +72,14 @@ def test_hierarchy():
         StreamAlreadyConsumed,
         StreamClosed,
         CodecError,
+        OriginRefused,
         StreamReset,
     ):
         assert issubclass(cls, MuxwsError)
+
+    # A refused origin is neither a stream failure nor a protocol violation.
+    assert not issubclass(OriginRefused, StreamReset)
+    assert not issubclass(OriginRefused, ProtocolError)
 
 
 def test_the_two_transport_bases_carry_their_builtin_as_well_as_muxwserror():
@@ -298,3 +304,8 @@ def test_nothing_in_the_error_hierarchy_carries_a_status_code():
 
     http_statuses = {400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504}
     assert http_statuses.isdisjoint({code.value for code in ResetCode})
+
+
+def test_origin_refused_carries_the_origin():
+    assert OriginRefused("refused", origin="https://evil.test").origin == "https://evil.test"
+    assert OriginRefused("refused").origin is None

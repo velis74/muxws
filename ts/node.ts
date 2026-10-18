@@ -16,7 +16,8 @@ import type { ClientOptions, WebSocket as NodeWebSocket, WebSocketServer } from 
 
 import { type Codec, getCodec } from './codec';
 import { settings } from './conf';
-import { CodecMismatch, TransportUnsupportedError, TransportUrlError } from './errors';
+import { CodecMismatch, OriginRefused, ProtocolError, TransportUnsupportedError, TransportUrlError } from './errors';
+import { compilePolicy } from './origin';
 import {
   type ErrorSerializer,
   type IncomingHeadersInterceptor,
@@ -465,6 +466,10 @@ export interface AcceptOptions {
   replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
   /** Registered on the peer, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
   incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
+  /** Exact origins, or a function of the `Origin` header value, that may open the endpoint. Requires `request`. */
+  allowedOrigins?: Iterable<string> | ((origin: string | undefined) => boolean);
+  /** The upgrade request `ws` passed with the connection; read for its `Origin` header. */
+  request?: IncomingMessage;
 }
 
 /**
@@ -516,9 +521,30 @@ export function refuseMismatchedUpgrade(server: WebSocketServer): WebSocketServe
  * on a mismatch one error line naming the negotiated and the expected subprotocol is logged
  * (WSM-CDC-029), the socket is closed with the policy-violation code and `CodecMismatch` is thrown
  * (WSM-CDC-028).
+ *
+ * With `allowedOrigins`, the `Origin` header of `request` is checked first; a refused origin closes
+ * the socket with the policy-violation code and throws `OriginRefused`.
  */
 export async function accept(socket: NodeWebSocket, options: AcceptOptions = {}): Promise<Peer> {
   const codec = options.codec ?? getCodec(settings.codec);
+  const check = compilePolicy(options.allowedOrigins);
+  if (check !== null) {
+    if (options.request === undefined) {
+      // The check cannot run, and the socket is not used unchecked.
+      socket.close(POLICY_VIOLATION, 'origin unknown');
+      throw new ProtocolError(
+        'allowedOrigins needs the upgrade request: pass the `request` ws emitted with the connection',
+      );
+    }
+    const values = options.request.headersDistinct.origin ?? [];
+    if (!check(values)) {
+      const origin = values.length > 0 ? values.join(', ') : undefined;
+      socket.close(POLICY_VIOLATION, 'origin not allowed');
+      throw new OriginRefused(`origin ${JSON.stringify(origin ?? null)} is not allowed to open this endpoint`, {
+        origin,
+      });
+    }
+  }
   const negotiated = socket.protocol;
   const wanted = `${PREFIX}${codec.name}`;
 
@@ -544,8 +570,9 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
 /**
  * Accept, register `handler`, and run the read loop until the socket closes.
  *
- * On `CodecMismatch` it resolves instead of rejecting, as `muxws.serve()` does in Python. A server
- * with `refuseMismatchedUpgrade` has already answered such an upgrade with HTTP 400 (WSM-CDC-022), and
+ * On `CodecMismatch` and `OriginRefused` it resolves instead of rejecting, as `muxws.serve()` does in
+ * Python. `accept()` has closed a refused origin's socket with 1008. A server with
+ * `refuseMismatchedUpgrade` has already answered such an upgrade with HTTP 400 (WSM-CDC-022), and
  * `handleProtocols` has logged both codec names (WSM-CDC-029); on a server with neither hook,
  * `accept()` has logged the negotiated and the expected subprotocol. A rejection from a `ws` connection
  * handler would be an unhandled rejection, which terminates a Node process by default.
@@ -556,7 +583,7 @@ export async function serve(socket: NodeWebSocket, options: AcceptOptions & { ha
   try {
     peer = await accept(socket, rest);
   } catch (error) {
-    if (error instanceof CodecMismatch) return;
+    if (error instanceof CodecMismatch || error instanceof OriginRefused) return;
     throw error;
   }
   peer.onStream(handler);

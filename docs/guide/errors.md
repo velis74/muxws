@@ -19,6 +19,7 @@ MuxwsError                     everything below is one of these
 ├── CodecError                 configuration failure, not a stream failure
 │   ├── CodecNotRegistered     the configured codec name was never registered
 │   └── CodecMismatch          the two ends disagree; the handshake was rejected
+├── OriginRefused              accept() refused the handshake's Origin header
 ├── TransportUrlError          this transport cannot open that address — retype the URL
 ├── TransportUnsupportedError  this runtime has no such transport — change where you run
 └── StreamReset                a stream ended early — carries code, reason, stream_id
@@ -212,6 +213,11 @@ an untrusted remote. See [Observability](/guide/observability#what-does-leave-th
   back to JSON.
 - **`CodecMismatch`** means the two ends are configured for different codecs and the handshake was
   rejected. A retry fails the same way. Fix the configuration on one end.
+
+`OriginRefused` is raised only by an acceptor's `accept()` given `allowed_origins` / `allowedOrigins`,
+when the handshake's `Origin` header is not allowed. The socket has been refused when it is raised, and
+`serve()` returns instead of raising it. See
+[Where authentication belongs](/guide/transports#where-authentication-belongs).
 
 `StreamAlreadyConsumed` is always a caller bug, never a race: a `Stream` has exactly one consumer, the
 first use claims it, and a second use (awaiting a stream that is being iterated, or iterating it

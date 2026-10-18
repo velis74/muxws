@@ -17,6 +17,7 @@ from muxws.errors import (
     ConnectionGoingAway,
     ConnectionLost,
     MuxwsError,
+    OriginRefused,
     ProtocolError,
     RemoteError,
     ResetCode,
@@ -45,7 +46,7 @@ from muxws.registry import PeerRegistry
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # The library registers JSON itself (WSM-CDC-004); the codec module must not (WSM-CDC-014).
 register_codec("json", JsonCodec())
@@ -69,6 +70,7 @@ __all__ = [
     "MAX_FRAME_BYTES",
     "MuxwsError",
     "OpenInterceptor",
+    "OriginRefused",
     "Peer",
     "PeerRegistry",
     "ProtocolError",

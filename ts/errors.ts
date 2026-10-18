@@ -121,6 +121,23 @@ export class CodecMismatch extends CodecError {
   }
 }
 
+/**
+ * The handshake's `Origin` is not allowed by `accept(socket, { allowedOrigins })`; the socket was
+ * refused.
+ *
+ * `origin` is the request's `Origin` header value, several values joined with `', '`, or `undefined`
+ * when the request carried none.
+ */
+export class OriginRefused extends MuxwsError {
+  readonly origin: string | undefined;
+
+  constructor(message: string, options: { origin?: string } = {}) {
+    super(message);
+    this.name = 'OriginRefused';
+    this.origin = options.origin;
+  }
+}
+
 /** A stream ended early. Carries the reset code, its reason and the stream id. */
 export class StreamReset extends MuxwsError {
   readonly code: ResetCode;
