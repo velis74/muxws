@@ -953,3 +953,100 @@ def test_this_transport_module_still_imports_with_its_dependency_blocked(websock
     spec.loader.exec_module(module)
 
     assert issubclass(module.WebsocketsNotInstalledError, TransportUnsupportedError)
+
+
+async def _origin_acceptor(allowed_origins: Any, *, wrap: bool) -> tuple[Any, list[BaseException | None]]:
+    """A `websockets` acceptor whose handler calls `accept(allowed_origins=...)`; records each outcome."""
+    outcomes: list[BaseException | None] = []
+
+    async def handle(connection: Any) -> None:
+        socket = WebsocketsSocket(connection) if wrap else connection
+        try:
+            peer = await muxws.accept(socket, codec=muxws.get_codec("json"), allowed_origins=allowed_origins)
+        except MuxwsError as exc:
+            outcomes.append(exc)
+            return
+        outcomes.append(None)
+        peer.on_stream(_echo)
+        try:
+            await peer.serve()
+        except muxws.ConnectionClosed:
+            pass
+
+    service = await websockets.serve(handle, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol)
+    return service, outcomes
+
+
+@pytest.mark.parametrize("wrap", [False, True], ids=["connection", "websockets-socket"])
+@pytest.mark.parametrize(
+    ("allowed", "origin"),
+    [
+        (None, None),
+        (None, "https://evil.test"),
+        (["https://app.example.com"], "https://app.example.com"),
+        (["https://app.example.com"], "https://APP.example.com:443"),
+        (lambda origin: origin is None, None),
+    ],
+    ids=["default-no-origin", "default-any-origin", "listed", "listed-normalised", "callable-no-origin"],
+)
+async def test_an_allowed_origin_gets_a_serving_peer(allowed: Any, origin: str | None, wrap: bool):
+    service, outcomes = await _origin_acceptor(allowed, wrap=wrap)
+    async with service:
+        url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        async with websockets.connect(url, subprotocols=["muxws.v1.json"], origin=origin) as client:
+            await client.send('{"type": "open", "stream": 1, "payload": {"n": 1}, "end": true}')
+            reply = await asyncio.wait_for(client.recv(), timeout=5)
+    assert '"echo"' in reply
+    assert outcomes == [None]
+
+
+@pytest.mark.parametrize("wrap", [False, True], ids=["connection", "websockets-socket"])
+@pytest.mark.parametrize(
+    ("allowed", "origin"),
+    [
+        (["https://app.example.com"], "https://evil.test"),
+        (["https://app.example.com"], "http://app.example.com"),
+        (["https://app.example.com"], None),
+        (["https://app.example.com"], "null"),
+        (lambda origin: origin == "https://app.example.com", "https://evil.test"),
+    ],
+    ids=["other-host", "other-scheme", "missing", "null", "callable-false"],
+)
+async def test_a_refused_origin_is_closed_with_1008(allowed: Any, origin: str | None, wrap: bool):
+    service, outcomes = await _origin_acceptor(allowed, wrap=wrap)
+    async with service:
+        url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        async with websockets.connect(url, subprotocols=["muxws.v1.json"], origin=origin) as client:
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as info:
+                await asyncio.wait_for(client.recv(), timeout=5)
+    assert info.value.rcvd is not None
+    assert info.value.rcvd.code == 1008
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], muxws.OriginRefused)
+    assert outcomes[0].origin == origin
+
+
+async def test_serve_returns_quietly_on_a_refused_origin():
+    returned: list[bool] = []
+
+    async def handle(connection: Any) -> None:
+        await muxws.serve(connection, handler=_echo, codec=muxws.get_codec("json"), allowed_origins=[])
+        returned.append(True)
+
+    async with websockets.serve(handle, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol) as service:
+        url = f"ws://127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        async with websockets.connect(url, subprotocols=["muxws.v1.json"], origin="https://a.test") as client:
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await asyncio.wait_for(client.recv(), timeout=5)
+            await asyncio.sleep(0)
+    assert returned == [True]
+
+
+async def test_allowed_origins_on_an_adapter_without_request_headers_is_a_protocol_error():
+    from muxws.transports.memory import memory_pair
+
+    _, acceptor_socket = memory_pair()
+    with pytest.raises(muxws.ProtocolError, match="exposes none"):
+        await muxws.accept(acceptor_socket, codec=muxws.get_codec("json"), allowed_origins=["https://a.test"])
+    with pytest.raises(muxws.ConnectionClosed):
+        await acceptor_socket.receive()

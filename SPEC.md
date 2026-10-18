@@ -634,6 +634,7 @@ MuxwsError
 ├── CodecError                 # configuration; carries .configured and .available
 │   ├── CodecNotRegistered     # configured name never registered — raised at startup
 │   └── CodecMismatch          # acceptor's codec differs; the handshake was rejected
+├── OriginRefused              # accept() refused the handshake's Origin; carries .origin
 ├── TransportUrlError          # base: this transport cannot open that address (also a ValueError)
 ├── TransportUnsupportedError  # base: this runtime has no such transport (also a RuntimeError)
 └── StreamReset                # carries .code (ResetCode), .reason, .stream_id

@@ -23,6 +23,7 @@ MuxwsError                          from muxws / 'muxws' — the whole tree is c
 ├── CodecError
 │   ├── CodecNotRegistered
 │   └── CodecMismatch
+├── OriginRefused
 ├── TransportUrlError               this transport cannot open that address; py: also a ValueError
 │   ├── UnixUrlError                py: muxws.transports.unix   ts: 'muxws/node'
 │   ├── WebsocketUrlError           py: muxws.transports.websockets_
@@ -1484,6 +1485,60 @@ function redactingErrorSerializer(error: unknown): unknown {
 }
 
 console.log(redactingErrorSerializer(new Error('SELECT * FROM accounts WHERE id = 7')));
+```
+
+## `OriginRefused`
+
+The handshake's `Origin` header is not allowed by `accept()`'s `allowed_origins` (Python) /
+`allowedOrigins` (TypeScript). `accept()` raises it after refusing the socket: a Starlette socket is
+answered with HTTP 403, a `websockets` or `ws` connection is closed with 1008. `serve()` catches it and
+returns. It is not a `StreamReset` and not a `ProtocolError`.
+
+### Signature
+
+```python
+class OriginRefused(MuxwsError):
+    def __init__(self, message: str, *, origin: str | None = None) -> None: ...
+```
+
+```ts
+export class OriginRefused extends MuxwsError {
+  readonly origin: string | undefined;
+  constructor(message: string, options: { origin?: string } = {});
+}
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `message` | `str` / `string` | required | The exception text. The library's own message quotes the refused origin. |
+| `origin` | `str \| None` / `string \| undefined` | `None` / `undefined` | The request's `Origin` header value, several values joined with `", "`, or none when the request carried no `Origin`. Stored as the `origin` attribute. |
+
+### Return
+
+A new exception instance.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws import OriginRefused
+
+failure = OriginRefused("origin 'https://evil.test' is not allowed to open this endpoint", origin="https://evil.test")
+print(type(failure).__name__, "|", failure.origin)
+```
+
+```ts
+import { OriginRefused } from 'muxws';
+
+const failure = new OriginRefused('origin "https://evil.test" is not allowed to open this endpoint', {
+  origin: 'https://evil.test',
+});
+console.log(failure.name, '|', failure.origin);
 ```
 
 ## `TransportUrlError`

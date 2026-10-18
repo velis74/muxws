@@ -7,6 +7,18 @@ below.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-10-18
+
+### Added
+
+- `accept()` checks the handshake's `Origin` header when given `allowed_origins` (Python) /
+  `allowedOrigins` (TypeScript): an iterable of exact origins (scheme and host compared case-insensitively,
+  default ports filled in) or a function of the header value. With a list, a request without `Origin` is
+  refused. A refused Starlette socket is answered with HTTP 403; a `websockets` or `ws` connection is closed
+  with 1008. `accept()` raises the new `OriginRefused`, and `serve()` returns. The default checks nothing.
+- TypeScript: `AcceptOptions.request`, the upgrade request `ws` emits with the connection, from which
+  `accept()` reads `Origin`.
+
 ## [0.4.1] - 2026-10-16
 
 ### Fixed
@@ -165,6 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: the Python package `muxws` and the npm package `muxws`, speaking the `muxws.v1` wire with the
   `json` and `msgpack` codecs.
 
+[0.4.2]: https://github.com/velis74/muxws/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/velis74/muxws/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/velis74/muxws/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/velis74/muxws/compare/v0.3.0...v0.3.1

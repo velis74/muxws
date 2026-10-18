@@ -6,6 +6,7 @@ import {
   ConnectionGoingAway,
   ConnectionLost,
   MuxwsError,
+  OriginRefused,
   ProtocolError,
   RemoteError,
   ResetCode,
@@ -32,6 +33,13 @@ describe('the exception hierarchy', () => {
     expect(new CodecError('x')).not.toBeInstanceOf(StreamReset);
     expect(new CodecNotRegistered('x')).toBeInstanceOf(CodecError);
     expect(new CodecMismatch('x')).toBeInstanceOf(CodecError);
+
+    // A refused origin is neither a stream failure nor a protocol violation.
+    expect(new OriginRefused('x')).toBeInstanceOf(MuxwsError);
+    expect(new OriginRefused('x')).not.toBeInstanceOf(StreamReset);
+    expect(new OriginRefused('x')).not.toBeInstanceOf(ProtocolError);
+    expect(new OriginRefused('x', { origin: 'https://evil.test' }).origin).toBe('https://evil.test');
+    expect(new OriginRefused('x').origin).toBeUndefined();
 
     [new RemoteError(), new StreamTimeout(), new StreamRefused(), new ConnectionLost()].forEach((error) => {
       expect(error).toBeInstanceOf(StreamReset);
@@ -93,6 +101,7 @@ describe('the exception hierarchy', () => {
       [new CodecError('x'), 'CodecError'],
       [new CodecNotRegistered('x'), 'CodecNotRegistered'],
       [new CodecMismatch('x'), 'CodecMismatch'],
+      [new OriginRefused('x'), 'OriginRefused'],
       [new StreamReset(), 'StreamReset'],
       [new RemoteError(), 'RemoteError'],
       [new StreamTimeout(), 'StreamTimeout'],

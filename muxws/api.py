@@ -6,13 +6,16 @@ The codec is resolved before any socket is opened (WSM-CDC-016), so a misconfigu
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+import logging
+
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import Any
 
 from muxws.codecs import Codec, get_codec
 from muxws.conf import settings
-from muxws.errors import CodecMismatch, ConnectionClosed, ProtocolError
+from muxws.errors import CodecMismatch, ConnectionClosed, OriginRefused, ProtocolError
 from muxws.fragment import MAX_FRAME_BYTES
+from muxws.origin import compile_policy, origin_values, OriginCheck
 from muxws.peer import (
     _checked_frame_cap,
     ErrorSerializer,
@@ -27,6 +30,11 @@ from muxws.subprotocol import mismatch_error, offer, PREFIX
 from muxws.transports import SocketAdapter
 from muxws.transports.unix import parse_unix_url
 from muxws.transports.websockets_ import verify_dialable_url
+
+#: The WebSocket close code for a policy violation, sent to a refused origin.
+POLICY_VIOLATION = 1008
+
+origin_logger = logging.getLogger("muxws.origin")
 
 
 def resolve_codec(override: Codec | None = None) -> Codec:
@@ -237,6 +245,7 @@ async def accept(
     open_interceptors: Sequence[OpenInterceptor] = (),
     reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
     incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
+    allowed_origins: Iterable[str] | Callable[[str | None], bool] | None = None,
 ) -> Peer:
     """Accept an inbound connection and return a peer that is not yet serving.
 
@@ -244,8 +253,16 @@ async def accept(
     (WSM-CDC-026). A `websockets` connection has its negotiated subprotocol checked. Any other
     `SocketAdapter` is used as it is. The three interceptor sequences are registered on the peer in
     order (WSM-API-026).
+
+    `allowed_origins` checks the handshake's `Origin` header before the subprotocol (see
+    `muxws.origin.compile_policy`). A refused Starlette socket is answered with HTTP 403 instead of
+    the upgrade; a refused `websockets` connection, already open, is closed with 1008. Both raise
+    `OriginRefused`.
     """
     resolved = resolve_codec(codec)
+    check = compile_policy(allowed_origins)
+    if check is not None:
+        await _check_origin(socket, check)
     adapter = await _adapt(socket, resolved.name)
     peer = Peer(
         adapter,
@@ -258,6 +275,40 @@ async def accept(
     )
     _register_interceptors(peer, open_interceptors, reply_headers_interceptors, incoming_headers_interceptors)
     return peer
+
+
+async def _check_origin(socket: Any, check: OriginCheck) -> None:
+    """Raise `OriginRefused` after refusing `socket` when `check` rejects its `Origin` header.
+
+    A Starlette socket the application has already accepted is left to `_adapt`, which raises
+    `ProtocolError` for it. A socket that exposes no request headers is closed with 1008 and raises
+    `ProtocolError`: the check cannot run, and the socket is not accepted unchecked.
+    """
+    if _is_starlette_websocket(socket):
+        from muxws.transports.starlette import is_unaccepted
+
+        if not is_unaccepted(socket):
+            return
+    values = origin_values(socket)
+    if values is None:
+        if isinstance(socket, SocketAdapter):
+            await socket.close(code=POLICY_VIOLATION, reason="origin unknown")
+        raise ProtocolError(
+            f"allowed_origins needs the handshake's request headers, and {type(socket).__name__} exposes none; "
+            f"check the origin before wrapping the socket in an adapter"
+        )
+    if check(values):
+        return
+    origin = ", ".join(values) if values else None
+    origin_logger.info("refused a muxws handshake from origin %r; closing with %d", origin, POLICY_VIOLATION)
+    if _is_starlette_websocket(socket):
+        from muxws.transports.starlette import deny
+
+        # The ASGI denial response, as for a codec mismatch: the upgrade never completes.
+        await deny(socket, 403)
+    else:
+        await socket.close(code=POLICY_VIOLATION, reason="origin not allowed")
+    raise OriginRefused(f"origin {origin!r} is not allowed to open this endpoint", origin=origin)
 
 
 def _register_interceptors(
@@ -327,6 +378,10 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
     """
     try:
         peer = await accept(socket, **peer_options)
+    except OriginRefused:
+        # There is no peer. A Starlette socket has been answered with HTTP 403, a `websockets`
+        # connection closed with 1008.
+        return
     except CodecMismatch:
         # There is no peer, and the function returns without raising. For a Starlette socket the 400
         # has been sent and `select` logged the refusal (WSM-CDC-022/029); for a `websockets`

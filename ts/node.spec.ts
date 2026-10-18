@@ -14,10 +14,10 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 import { vi } from 'vitest';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 
 import { type Codec, JsonCodec } from './codec';
-import { CodecMismatch, MuxwsError, ProtocolError, TransportUrlError } from './errors';
+import { CodecMismatch, MuxwsError, OriginRefused, ProtocolError, TransportUrlError } from './errors';
 // The browser entry point registers the JSON codec (WSM-CDC-004); `ts/node.ts` does not.
 import './index';
 import { WsUrlError, accept, connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
@@ -571,5 +571,119 @@ describe('connect() leaves no dialled socket open when it rejects - WSM-RCN-006'
     } finally {
       await acceptor.close();
     }
+  });
+});
+
+describe('accept() checks the Origin header with allowedOrigins', () => {
+  interface OriginAcceptor {
+    url: string;
+    outcomes: (Error | null)[];
+    close: () => Promise<void>;
+  }
+
+  async function startOriginAcceptor(
+    options: Parameters<typeof accept>[1],
+    passRequest = true,
+  ): Promise<OriginAcceptor> {
+    const outcomes: (Error | null)[] = [];
+    const server = refuseMismatchedUpgrade(new WebSocketServer({ port: 0, handleProtocols }));
+    server.on('connection', (socket, request) => {
+      accept(socket, { ...options, request: passRequest ? request : undefined })
+        .then(
+          (peer) => {
+            outcomes.push(null);
+            peer.onStream((payload, stream) => stream.reply({ echo: payload }));
+            return peer.serve();
+          },
+          (error: Error) => {
+            outcomes.push(error);
+          },
+        )
+        .catch(() => undefined);
+    });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    return {
+      url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      outcomes,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  /** Dial with `origin` (none when undefined); resolve the close code, or 'open' after a reply. */
+  async function dial(url: string, origin: string | undefined): Promise<number | 'open'> {
+    const client = new WebSocket(url, ['muxws.v1.json'], origin === undefined ? {} : { origin });
+    return new Promise((resolve, reject) => {
+      client.once('open', () => {
+        client.send(JSON.stringify({ type: 'open', stream: 1, payload: { n: 1 }, end: true }));
+      });
+      client.once('message', () => {
+        client.close();
+        resolve('open');
+      });
+      client.once('close', (code) => resolve(code));
+      client.once('error', reject);
+    });
+  }
+
+  it.each([
+    ['default, no Origin', undefined, undefined],
+    ['default, any Origin', undefined, 'https://evil.test'],
+    ['listed', ['https://app.example.com'], 'https://app.example.com'],
+    ['listed, normalised', ['https://app.example.com'], 'HTTPS://APP.example.com:443'],
+    ['function, no Origin', (origin: string | undefined) => origin === undefined, undefined],
+  ] as const)('serves an allowed origin: %s', async (_name, allowedOrigins, origin) => {
+    const acceptor = await startOriginAcceptor({ allowedOrigins });
+    try {
+      expect(await dial(acceptor.url, origin)).toBe('open');
+      expect(acceptor.outcomes).toEqual([null]);
+    } finally {
+      await acceptor.close();
+    }
+  });
+
+  it.each([
+    ['another host', ['https://app.example.com'], 'https://evil.test'],
+    ['another scheme', ['https://app.example.com'], 'http://app.example.com'],
+    ['no Origin', ['https://app.example.com'], undefined],
+    ['Origin: null', ['https://app.example.com'], 'null'],
+    ['function says no', (origin: string | undefined) => origin === 'https://app.example.com', 'https://evil.test'],
+  ] as const)('closes a refused origin with 1008: %s', async (_name, allowedOrigins, origin) => {
+    const acceptor = await startOriginAcceptor({ allowedOrigins });
+    try {
+      expect(await dial(acceptor.url, origin)).toBe(1008);
+      expect(acceptor.outcomes).toHaveLength(1);
+      const [refused] = acceptor.outcomes;
+      expect(refused).toBeInstanceOf(OriginRefused);
+      expect(refused).toBeInstanceOf(MuxwsError);
+      expect((refused as OriginRefused).origin).toBe(origin);
+    } finally {
+      await acceptor.close();
+    }
+  });
+
+  it('closes with 1008 and throws ProtocolError when the request is missing', async () => {
+    const acceptor = await startOriginAcceptor({ allowedOrigins: ['https://app.example.com'] }, false);
+    try {
+      expect(await dial(acceptor.url, 'https://app.example.com')).toBe(1008);
+      expect(acceptor.outcomes[0]).toBeInstanceOf(ProtocolError);
+    } finally {
+      await acceptor.close();
+    }
+  });
+
+  it('lets serve() return quietly on a refused origin', async () => {
+    let closedWith: [number, string] | null = null;
+    const socket = {
+      protocol: 'muxws.v1.json',
+      close: (code: number, reason: string) => {
+        closedWith = [code, reason];
+      },
+    } as unknown as Parameters<typeof serve>[0];
+    const request = { headersDistinct: { origin: ['https://evil.test'] } } as unknown as http.IncomingMessage;
+
+    await expect(
+      serve(socket, { handler: () => undefined, allowedOrigins: ['https://app.example.com'], request }),
+    ).resolves.toBeUndefined();
+    expect(closedWith).toEqual([1008, 'origin not allowed']);
   });
 });

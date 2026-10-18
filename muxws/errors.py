@@ -76,6 +76,18 @@ class CodecMismatch(CodecError):
     """The acceptor's codec differs from ours; the WebSocket handshake was rejected."""
 
 
+class OriginRefused(MuxwsError):
+    """The handshake's `Origin` is not allowed by `accept(allowed_origins=...)`; the socket was refused.
+
+    `origin` is the request's `Origin` header value, several values joined with `", "`, or None when
+    the request carried none.
+    """
+
+    def __init__(self, message: str, *, origin: str | None = None) -> None:
+        super().__init__(message)
+        self.origin = origin
+
+
 class TransportUrlError(MuxwsError, ValueError):
     """A transport was given an address it cannot open (WSM-ERR-016). Never raised directly.
 

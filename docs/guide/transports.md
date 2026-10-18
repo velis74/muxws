@@ -515,6 +515,34 @@ async def muxws_endpoint(websocket: WebSocket) -> None:
     await peer.serve()
 ```
 
+**Check `Origin` when the credential is a cookie.** A browser sends the site's cookies with a
+WebSocket handshake whatever page opened it, and the WebSocket protocol has no CSRF protection of its
+own, so a page on another site can open an authenticated socket. The `Origin` header names the page's
+origin. `accept()` checks it when given `allowed_origins` (Python) or `allowedOrigins` (TypeScript):
+a list of exact origins, or a function of the header value for any other rule. With a list, a request
+without `Origin` is refused; a dialer that is not a browser sends none, so an endpoint that serves
+such dialers as well passes a function.
+
+```python
+# fragment
+@app.websocket("/ws")
+async def muxws_endpoint(websocket: WebSocket) -> None:
+    # Refused origins get HTTP 403; serve() returns without raising.
+    await serve(websocket, handler=on_stream, allowed_origins=["https://app.example.com"])
+```
+
+```ts
+// fragment
+server.on('connection', (socket, request) => {
+  // `ws` hands the upgrade request to the connection event; accept() reads its Origin header.
+  void serve(socket, { handler: onStream, allowedOrigins: ['https://app.example.com'], request });
+});
+```
+
+A Starlette socket with a refused origin is answered with HTTP 403. A `websockets` or `ws` connection
+has completed its handshake when `accept()` runs, and is closed with 1008. `accept()` raises
+`OriginRefused` in both cases. See [`accept()`](/api/accept#accept-python).
+
 **Not in the hello.** The hello is an ordinary stream: it arrives after the socket is open and the
 acceptor has allocated resources for it, it is sent unchanged on every reconnection for the life of
 the process (so the credential cannot be rotated), and it is passed as an application payload to every
