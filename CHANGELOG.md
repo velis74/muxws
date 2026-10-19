@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when present.
 - `parse_origin` (Python) and `parseOrigin` (TypeScript) are public, exported from the package root.
 
+### Fixed
+
+- TypeScript: the type declarations resolve under every `moduleResolution`. `exports` carries a `types` condition
+  per entry point and format (`.d.ts` for `import`, `.d.cts` for `require`), relative imports in the declarations
+  name their file as `node16` / `nodenext` require, and `typesVersions` maps `muxws/node` and `muxws/msgpack` for
+  `node10`. Previously only `bundler` resolution found the types.
+
 ## [0.4.2] - 2026-10-18
 
 ### Added

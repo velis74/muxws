@@ -13,16 +13,44 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "require": "./dist/index.cjs",
-      "import": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./node": {
-      "require": "./dist/node.cjs",
-      "import": "./dist/node.js"
+      "import": {
+        "types": "./dist/node.d.ts",
+        "default": "./dist/node.js"
+      },
+      "require": {
+        "types": "./dist/node.d.cts",
+        "default": "./dist/node.cjs"
+      }
     },
     "./msgpack": {
-      "require": "./dist/msgpack.cjs",
-      "import": "./dist/msgpack.js"
+      "import": {
+        "types": "./dist/msgpack.d.ts",
+        "default": "./dist/msgpack.js"
+      },
+      "require": {
+        "types": "./dist/msgpack.d.cts",
+        "default": "./dist/msgpack.cjs"
+      }
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "node": [
+        "./dist/node.d.ts"
+      ],
+      "msgpack": [
+        "./dist/msgpack.d.ts"
+      ]
     }
   },
   "workspaces": [
@@ -38,6 +66,7 @@
     "docs:build": "npm run docs:build -w docs",
     "docs:preview": "npm run docs:preview -w docs",
     "docs:check": "node docs/check-docs.mjs",
+    "types:check": "node scripts/check-package-types.mjs",
     "demo:dev": "npm run dev -w demo-frontend",
     "demo:backend:node": "tsx demo/backend_node/main.ts"
   },

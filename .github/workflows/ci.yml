@@ -51,6 +51,8 @@ jobs:
       - run: npm run lint:ci
       - run: npm test
       - run: npm run build
+      # The packed declarations, type-checked by a consumer under bundler, node16, nodenext and node10.
+      - run: npm run types:check
       # The documentation site: `check-docs.mjs` checks that every exported symbol has an entry with
       # all five sections, that every duration has a unit, that no link or anchor is dead and that a
       # page links SPEC.md. The build then fails on a dead internal link. The examples on the API
