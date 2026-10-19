@@ -802,6 +802,9 @@ Raises: nothing.
 A peer reports at most one close with `will_retry=False`. A peer that exhausted `max_attempts` does
 not report its last socket loss a second time.
 
+A handler registered on a peer that [`is_closed`](#peer-is-closed-python) is called before `on_close`
+returns, with the `will_retry=False` close the peer reported.
+
 ### Example
 
 ```python
@@ -857,6 +860,9 @@ onClose(handler: (reason: CloseReason) => void): void;
 ### Raises
 
 Raises: nothing.
+
+A peer reports at most one close with `willRetry: false`. A handler registered on a peer that
+[`isClosed`](#peer-isclosed-typescript) is called before `onClose` returns, with that close.
 
 ### Example
 
@@ -1717,7 +1723,10 @@ and for every queued frame to be sent, then close the socket. Queued frames incl
 fragment of a fragmented payload.
 
 On a dialer it first stops the reconnect helper, **before** the `is_open` check, so a `close()` called
-while the helper waits out a backoff delay prevents the next dial.
+while the helper waits out a backoff delay prevents the next dial. Between two sockets there is no
+socket to close; `close()` then reports the `will_retry=False` close itself (code 1000, `was_clean`
+true, `reason` as given), because the last socket loss reported `will_retry=True`. After `close()`
+returns, [`is_closed`](#peer-is-closed-python) is true.
 
 ### Signature
 
@@ -1788,7 +1797,9 @@ async close(options: CloseOptions = {}): Promise<void>;
 
 ### Return
 
-`Promise<void>`. A second close is a no-op, apart from stopping the reconnect helper.
+`Promise<void>`. A second close is a no-op, apart from stopping the reconnect helper. A close between
+two sockets reports the `willRetry: false` close itself, as described for
+[Python](#peer-close-python); `isClosed` is true when the promise resolves.
 
 ### Raises
 
@@ -2352,6 +2363,114 @@ console.log('after construction:', dialer.isOpen);
 await acceptorSocket.drop();
 await new Promise<void>((resolve) => setTimeout(resolve, 50));
 console.log('after the socket dies:', dialer.isOpen);
+```
+
+## `peer.is_closed` (Python)
+
+Whether the peer has ended for good: true once it has reported its `will_retry=False` close, and
+false before it.
+
+| State | `is_open` | `is_closed` |
+|---|---|---|
+| Connection established | true | false |
+| Dialer between sockets, or in the hello window, with the helper still dialling | false | false |
+| After `close()`, after `max_attempts` is exhausted, after an acceptor's socket loss | false | true |
+
+`is_closed` never returns to false. An `on_close` handler registered once it is true is called at
+once with the close the peer reported.
+
+### Signature
+
+```python
+@property
+def is_closed(self) -> bool:
+```
+
+### Parameters
+
+None — read-only property.
+
+### Return
+
+`bool` — true when the peer carries no further traffic and its reconnect helper, if any, dials no more.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import CloseReason, Peer
+from muxws.codecs.json_ import JsonCodec
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    dialer_socket, acceptor_socket = memory_pair()
+    dialer = Peer(dialer_socket, codec=JsonCodec(), is_dialer=True)
+    acceptor = Peer(acceptor_socket, codec=JsonCodec(), is_dialer=False)
+
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+    print("while open:", acceptor.is_closed)
+
+    await dialer_socket.drop()
+    await asyncio.sleep(0.1)
+    print("after the socket dies:", acceptor.is_closed)
+
+    def late(reason: CloseReason) -> None:
+        print("registered after the end, called at once; will_retry", reason.will_retry)
+
+    acceptor.on_close(late)
+
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `peer.isClosed` (TypeScript)
+
+### Signature
+
+```ts
+get isClosed(): boolean;
+```
+
+### Parameters
+
+None — getter.
+
+### Return
+
+`boolean` — true once the peer has reported its `willRetry: false` close, as described for the
+Python property.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import { JsonCodec, memoryPair, Peer } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+void dialer.serve();
+void acceptor.serve();
+console.log('while open:', acceptor.isClosed);
+
+await dialerSocket.drop();
+await new Promise<void>((resolve) => setTimeout(resolve, 50));
+console.log('after the socket dies:', acceptor.isClosed);
+acceptor.onClose((reason) => console.log('called at once; willRetry', reason.willRetry));
 ```
 
 ## `peer.is_dialer` (Python)

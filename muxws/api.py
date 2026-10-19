@@ -15,7 +15,7 @@ from muxws.codecs import Codec, get_codec
 from muxws.conf import settings
 from muxws.errors import CodecMismatch, ConnectionClosed, OriginRefused, ProtocolError
 from muxws.fragment import MAX_FRAME_BYTES
-from muxws.origin import compile_policy, origin_values, OriginCheck
+from muxws.origin import compile_policy, OriginCheck, request_headers, SameOrigin
 from muxws.peer import (
     _checked_frame_cap,
     ErrorSerializer,
@@ -245,7 +245,7 @@ async def accept(
     open_interceptors: Sequence[OpenInterceptor] = (),
     reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
     incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
-    allowed_origins: Iterable[str] | Callable[[str | None], bool] | None = None,
+    allowed_origins: Iterable[str] | SameOrigin | Callable[[str | None], bool] | None = None,
 ) -> Peer:
     """Accept an inbound connection and return a peer that is not yet serving.
 
@@ -289,16 +289,17 @@ async def _check_origin(socket: Any, check: OriginCheck) -> None:
 
         if not is_unaccepted(socket):
             return
-    values = origin_values(socket)
-    if values is None:
+    headers = request_headers(socket)
+    if headers is None:
         if isinstance(socket, SocketAdapter):
             await socket.close(code=POLICY_VIOLATION, reason="origin unknown")
         raise ProtocolError(
             f"allowed_origins needs the handshake's request headers, and {type(socket).__name__} exposes none; "
             f"check the origin before wrapping the socket in an adapter"
         )
-    if check(values):
+    if check(headers):
         return
+    values = headers("origin")
     origin = ", ".join(values) if values else None
     origin_logger.info("refused a muxws handshake from origin %r; closing with %d", origin, POLICY_VIOLATION)
     if _is_starlette_websocket(socket):

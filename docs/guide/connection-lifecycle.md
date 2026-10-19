@@ -212,9 +212,13 @@ def closed(reason):
 reconnect helper, when the helper has stopped retrying, and after `close()`. A peer reports
 `will_retry=False` at most once, so teardown code guarded by it in an `on_close` handler runs once.
 
+`peer.is_closed` / `peer.isClosed` is true from that `will_retry=False` close on. Code that receives a
+peer which may already have ended reads it, or registers `on_close`: a handler registered on a closed
+peer is called before the registration returns, with the close the peer reported.
+
 ## See also
 
 [`connect`](/api/connect) &middot; [`accept`, `serve`, `select_subprotocol`](/api/accept) &middot;
-[`Peer.ping`, `Peer.close`, `Peer.on_close`, `Peer.is_open`](/api/peer) &middot;
+[`Peer.ping`, `Peer.close`, `Peer.on_close`, `Peer.is_open`, `Peer.is_closed`](/api/peer) &middot;
 [`CloseReason`, `MAX_FRAME_BYTES`](/api/types) &middot;
 [`ConnectionGoingAway`, `ConnectionClosed`, `ConnectionLost`, `StreamRefused`, `CodecMismatch`](/api/errors)

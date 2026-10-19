@@ -121,8 +121,9 @@ class Peer:
         #: it is false when `max_attempts` is exhausted or after `close()`. The helper decides whether
         #: to dial with `should_retry`, not with this field.
         self._will_retry = False
-        #: Set by the first `will_retry=False` close; a second one is suppressed (WSM-RCN-044).
-        self._final_close_reported = False
+        #: The first `will_retry=False` close; a second one is suppressed (WSM-RCN-044). `is_closed`
+        #: reads it, and `on_close` hands it to a handler registered after it (WSM-RCN-047).
+        self._final_close: CloseReason | None = None
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
         #: Keyed by one token per registration: a function registered twice is two registrations, and
         #: each unregister function removes only its own. `_adopt_socket` does not clear them; they
@@ -169,6 +170,15 @@ class Peer:
         return self._is_open and self._established
 
     @property
+    def is_closed(self) -> bool:
+        """True once the peer has reported its `will_retry=False` close: it carries no further traffic (WSM-RCN-046).
+
+        False while the peer is open and while a dialer's reconnect helper is between sockets. True
+        after `close()`, after `max_attempts` is exhausted, and after an acceptor's socket loss.
+        """
+        return self._final_close is not None
+
+    @property
     def _has_a_socket(self) -> bool:
         """Whether a socket is attached, so a frame put on the writer now can reach the wire.
 
@@ -213,8 +223,13 @@ class Peer:
         dial again, and false when the attempt cap is spent or `close()` was called. Returns the
         handler, so it works as a decorator. An exception raised by a handler is logged and the
         remaining handlers still run.
+
+        On a peer that `is_closed`, the handler is called before `on_close` returns, with the
+        `will_retry=False` close already reported (WSM-RCN-047).
         """
         self._close_handlers.append(handler)
+        if self._final_close is not None:
+            self._call_close_handler(handler, self._final_close)
         return handler
 
     def on_reconnect(self, handler: Callable[[int, Any], None]) -> Callable[[int, Any], None]:
@@ -655,6 +670,10 @@ class Peer:
         if self._connection_loop is not None:
             await self._connection_loop.stop()
         if not self._is_open:
+            # Between two sockets the last loss reported `will_retry=True`; this is the close that
+            # tells the application no reconnection follows (WSM-RCN-040/046). On a peer already
+            # closed, `_notify_close` suppresses it.
+            self._notify_close(CloseReason(code=1000, reason=reason or "", was_clean=True, will_retry=False))
             return
         self._send_goaway(code, reason)
         await self._drain(drain)
@@ -1139,21 +1158,24 @@ class Peer:
         call `on_close` once with `will_retry` false (WSM-RCN-044). Callers: `_die` for every socket
         loss, and the reconnect helper when it gives up.
 
-        At most one `will_retry=False` close is reported per connection; a second one is suppressed.
+        At most one `will_retry=False` close is reported per peer; a second one is suppressed.
         When the attempt cap is spent by failed hellos, the last socket loss already reported
         `will_retry=False`, and the helper's report is suppressed (WSM-RCN-044).
         """
         if not reason.will_retry:
-            if self._final_close_reported:
+            if self._final_close is not None:
                 return
-            self._final_close_reported = True
-        # An exception from a handler is logged; the remaining handlers still run, and on the
-        # reconnect helper's path the supervisor keeps running.
-        for handler in self._close_handlers:
-            try:
-                handler(reason)
-            except Exception:  # noqa: BLE001 - a raising handler does not stop the remaining handlers
-                logger.exception("muxws conn=%s an on_close handler raised", self.id)
+            self._final_close = reason
+        for handler in list(self._close_handlers):
+            self._call_close_handler(handler, reason)
+
+    def _call_close_handler(self, handler: Callable[[Any], None], reason: CloseReason) -> None:
+        """Call one `on_close` handler. An exception is logged; the remaining handlers still run, and on
+        the reconnect helper's path the supervisor keeps running."""
+        try:
+            handler(reason)
+        except Exception:  # noqa: BLE001 - a raising handler does not stop the remaining handlers
+            logger.exception("muxws conn=%s an on_close handler raised", self.id)
 
     def _adopt_socket(self, socket: SocketAdapter) -> None:
         """Take a freshly established socket, for a `Peer` that survived a reconnect.
@@ -1172,10 +1194,6 @@ class Peer:
         self._next_id = 1 if self._is_dialer else 2
         self._highest_local_open = 0
         self._highest_remote_open = 0
-        # WSM-RCN-044's "at most one" applies per connection, not per `Peer` object; without this
-        # reset, a `Peer` given a new socket after a `will_retry=False` close would not report its
-        # next loss.
-        self._final_close_reported = False
         self._goaway = GoawayState()
         self._writer = Writer(self._codec, max_frame_bytes=self._max_frame_bytes)
         self._writer_task = None

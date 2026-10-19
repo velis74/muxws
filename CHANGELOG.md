@@ -7,6 +7,33 @@ below.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-10-19
+
+### Added
+
+- `SameOrigin` (Python and TypeScript), an `allowed_origins` / `allowedOrigins` policy that allows an `Origin`
+  with the host and port of the handshake's `Host` header, plus the origins listed in `also`. With
+  `trust_forwarded_host` / `trustForwardedHost`, the first entry of `X-Forwarded-Host` takes the place of `Host`
+  when present.
+- `parse_origin` (Python) and `parseOrigin` (TypeScript) are public, exported from the package root.
+- `Peer.is_closed` (Python) / `Peer.isClosed` (TypeScript): true once the peer has reported its
+  `will_retry: false` close, false while it is open and while a dialer's reconnect helper is between sockets
+  (WSM-RCN-046).
+- An `on_close` / `onClose` handler registered on a closed peer is called before the registration returns, with
+  the `will_retry: false` close the peer reported (WSM-RCN-047).
+
+### Fixed
+
+- `close()` called while a dialer's reconnect helper is between sockets reports the `will_retry: false` close
+  (code 1000), in both ports. It stopped the helper but reported nothing, so `on_close` never told the
+  application that no reconnection follows.
+- A peer reports at most one `will_retry: false` close for its lifetime, as WSM-RCN-040 states; adopting a new
+  socket no longer re-arms the report.
+- TypeScript: the type declarations resolve under every `moduleResolution`. `exports` carries a `types` condition
+  per entry point and format (`.d.ts` for `import`, `.d.cts` for `require`), relative imports in the declarations
+  name their file as `node16` / `nodenext` require, and `typesVersions` maps `muxws/node` and `muxws/msgpack` for
+  `node10`. Previously only `bundler` resolution found the types.
+
 ## [0.4.2] - 2026-10-18
 
 ### Added
@@ -177,6 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: the Python package `muxws` and the npm package `muxws`, speaking the `muxws.v1` wire with the
   `json` and `msgpack` codecs.
 
+[0.4.3]: https://github.com/velis74/muxws/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/velis74/muxws/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/velis74/muxws/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/velis74/muxws/compare/v0.3.1...v0.4.0

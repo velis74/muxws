@@ -89,6 +89,7 @@ export { Assembler, MAX_FRAME_BYTES, encodedLength, splitFrame } from './fragmen
 // replaces Python's standard-library logging, and setting its level enables frame logging
 // (WSM-OBS-001).
 export { type CloseReason, type FrameDirection, type LogLevel, logger } from './observability';
+export { SameOrigin, type SameOriginOptions, parseOrigin } from './origin';
 export {
   type CloseOptions,
   DEFAULT_DRAIN_MS,

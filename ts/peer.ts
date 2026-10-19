@@ -474,13 +474,14 @@ export class Peer {
   established = true;
 
   /**
-   * Whether a `willRetry: false` close has already been reported (WSM-RCN-044).
+   * The first `willRetry: false` close, or `null` before it (WSM-RCN-044).
    *
-   * At most one is reported per connection. When the attempt cap is reached through hello failures,
-   * the last loss already carries `willRetry: false`, and the helper's own give-up call to
-   * `notifyClose` is then suppressed.
+   * At most one is reported per peer. When the attempt cap is reached through hello failures, the
+   * last loss already carries `willRetry: false`, and the helper's own give-up call to `notifyClose`
+   * is then suppressed. `isClosed` reads it, and `onClose` hands it to a handler registered after it
+   * (WSM-RCN-047).
    */
-  private finalCloseReported = false;
+  private finalClose: CloseReason | null = null;
 
   private death: ConnectionClosed | null = null;
 
@@ -531,6 +532,17 @@ export class Peer {
    */
   get isOpen(): boolean {
     return this.open_ && this.established;
+  }
+
+  /**
+   * True once the peer has reported its `willRetry: false` close: it carries no further traffic
+   * (WSM-RCN-046).
+   *
+   * False while the peer is open and while a dialer's reconnect helper is between sockets. True after
+   * `close()`, after `maxAttempts` is exhausted, and after an acceptor's socket loss.
+   */
+  get isClosed(): boolean {
+    return this.finalClose !== null;
   }
 
   /**
@@ -585,8 +597,17 @@ export class Peer {
     this.handler = handler;
   }
 
+  /**
+   * Register a handler called on every socket loss, not only the last one (WSM-RCN-040).
+   *
+   * `willRetry` is true when the reconnect helper will dial again, and false when the attempt cap is
+   * spent or `close()` was called. An error thrown by a handler is logged and the remaining handlers
+   * still run. On a peer that `isClosed`, the handler is called before `onClose` returns, with the
+   * `willRetry: false` close already reported (WSM-RCN-047).
+   */
   onClose(handler: (reason: CloseReason) => void): void {
     this.closeHandlers.push(handler);
+    if (this.finalClose !== null) this.fanOut('onClose', [handler], this.finalClose);
   }
 
   /**
@@ -1158,7 +1179,13 @@ export class Peer {
     // `willRetry` must be false before `die()` builds the `CloseReason` below.
     this.willRetry = false;
     await this.connectionLoop?.stop();
-    if (!this.open_) return;
+    if (!this.open_) {
+      // Between two sockets the last loss reported `willRetry: true`; this is the close that tells the
+      // application no reconnection follows (WSM-RCN-040/046). On a peer already closed, `notifyClose`
+      // suppresses it.
+      this.notifyClose({ code: 1000, reason: reason ?? '', wasClean: true, willRetry: false });
+      return;
+    }
     this.sendGoaway(code, reason);
     await this.drain(drainMs);
     try {
@@ -1728,14 +1755,14 @@ export class Peer {
    * dial again (WSM-RCN-044).
    */
   notifyClose(reason: CloseReason): void {
-    // At most one `willRetry: false` close per connection (`adoptSocket` resets the flag). When the
-    // attempt cap is reached through failed hellos, the last loss already reported `willRetry: false`,
-    // and the helper's give-up is suppressed (WSM-RCN-040/044). The first report is kept.
+    // At most one `willRetry: false` close per peer. When the attempt cap is reached through failed
+    // hellos, the last loss already reported `willRetry: false`, and the helper's give-up is
+    // suppressed (WSM-RCN-040/044). The first report is kept.
     if (!reason.willRetry) {
-      if (this.finalCloseReported) return;
-      this.finalCloseReported = true;
+      if (this.finalClose !== null) return;
+      this.finalClose = reason;
     }
-    this.fanOut('onClose', this.closeHandlers, reason);
+    this.fanOut('onClose', [...this.closeHandlers], reason);
   }
 
   /**
@@ -1756,9 +1783,6 @@ export class Peer {
     this.nextId = this.dialer ? 1 : 2;
     this.highestLocalOpen = 0;
     this.highestRemoteOpen = 0;
-    // WSM-RCN-044's "at most one" applies per connection, not per `Peer` object. Without this reset,
-    // a `Peer` given a new socket after a `willRetry: false` close would not report its next loss.
-    this.finalCloseReported = false;
     this.goaway = new GoawayState();
     this.writer = new Writer(this.codec, { maxFrameBytes: this.maxFrameBytes });
     // `writerTask` corresponds to Python's `_writer_task = None`; `writerStopped` has no Python

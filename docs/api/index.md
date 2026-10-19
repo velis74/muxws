@@ -28,7 +28,7 @@ newer, the first release whose top-level `connect` is `websockets.asyncio.client
 | Page | What it covers |
 |---|---|
 | [connect](/api/connect) | Dialling a peer, in Python, in the browser and under Node, with every connection option. |
-| [accept](/api/accept) | The acceptor side: `accept`, `serve`, and the subprotocol hooks that refuse a codec you do not speak. |
+| [accept](/api/accept) | The acceptor side: `accept`, `serve`, the `Origin` policies, and the subprotocol hooks that refuse a codec you do not speak. |
 | [Peer](/api/peer) | The object both ends hold: opening streams, the handler and lifecycle callbacks, header interceptors, `ping`, `close`, `serve`. |
 | [Stream](/api/stream) | One call: sending, ending, replying, awaiting, iterating, cancelling and resetting. |
 | [Reconnect](/api/reconnect) | The dialer-only helper: backoff, the hello, and the three functions that compute its schedule. |

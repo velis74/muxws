@@ -1151,6 +1151,7 @@ describe('the reconnect driver', () => {
     expect(closes.map((reason) => reason.willRetry)).toEqual([true, false]);
     expect(server.dials - dialsBefore, 'exactly maxAttempts dials, then no further dial').toBe(2);
     expect(peer.willRetry).toBe(false);
+    expect(peer.isClosed, 'an exhausted helper leaves the peer closed').toBe(true);
     await loop.stop();
   });
 
@@ -1458,6 +1459,39 @@ describe('the reconnect driver', () => {
     // short wait.
     await settle(250);
     expect(server.dials, 'a close in the gap never dials again either').toBe(dials);
+  });
+
+  it('reports the final close on a deliberate close in the gap between sockets - WSM-RCN-040/046', async () => {
+    // The socket loss reported `willRetry: true`. Without a report from `close()`, the application receives no close
+    // that says no reconnection follows.
+    const server = new FakeServer();
+    const peer = dialerOver(await server.dial());
+    const closes: CloseReason[] = [];
+    peer.onClose((reason) => closes.push(reason));
+    const loop = new ConnectionLoop(peer, server.dial, {
+      options: new Reconnect({ initialDelayMs: 20, jitter: 0 }),
+      hello: new Hello(),
+      draw: () => 0,
+      pingIntervalMs: 0,
+    });
+    cleanups.push(() => void loop.stop());
+    peer.connectionLoop = loop;
+    await loop.establish();
+    loop.start();
+
+    server.refusals = 200;
+    server.drop();
+    await until(() => server.dials >= 3, 3000, 'a few refused dials');
+    expect(peer.isOpen).toBe(false);
+    expect(peer.isClosed, 'between sockets the helper still dials').toBe(false);
+
+    await peer.close({ reason: 'bye' });
+
+    expect(closes.map((reason) => reason.willRetry)).toEqual([true, false]);
+    expect(closes[1]).toEqual({ code: 1000, reason: 'bye', wasClean: true, willRetry: false });
+    expect(peer.isClosed).toBe(true);
+    await peer.close();
+    expect(closes, 'a second close() reports nothing').toHaveLength(2);
   });
 
   it("has connect()'s onStream listening before the first hello goes out - WSM-STM-033", async () => {

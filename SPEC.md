@@ -1097,6 +1097,17 @@ delay = delay * (1 + uniform(-jitter, +jitter))
 - **WSM-RCN-045** `CloseReason` MUST carry exactly four fields, the same four in every language:
   `code` (the WebSocket close code), `reason` (its text), `was_clean` (whether the close was orderly)
   and `will_retry` (WSM-RCN-040). It MUST be one type per language, used for every socket loss.
+- **WSM-RCN-046** `peer.is_closed` / `peer.isClosed` MUST be `true` from the moment the peer reports
+  its `will_retry: false` close and `false` before it, so it stays `false` while a dialer's helper is
+  between sockets. A `close()` called between sockets MUST report that close itself — code 1000,
+  `was_clean` true, `reason` the text passed to `close()` — because the last socket loss reported
+  `will_retry: true`.
+  Test: `reconnect_test.py::test_a_deliberate_close_between_sockets_reports_the_final_close`.
+- **WSM-RCN-047** An `on_close` handler registered on a peer that is already closed (WSM-RCN-046)
+  MUST be called before the registration returns, with the `will_retry: false` close that peer
+  reported. A handler that raises MUST be logged, as during a socket loss, and MUST NOT raise out of
+  the registration.
+  Test: `socket_death_test.py::test_on_close_registered_after_the_final_close_is_called_at_once`.
 
 ### 5.13 `WSM-REG-` — `tags` and `PeerRegistry`
 
