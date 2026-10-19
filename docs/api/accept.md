@@ -21,7 +21,8 @@ Behaviour common to every function on this page:
   handshake followed by a close. `select_subprotocol` (Python, `websockets`), `accept()` (Python,
   Starlette) and `refuseMismatchedUpgrade` (TypeScript, `ws`) send that 400.
 - **The `Origin` header is checked only when asked for.** Without `allowed_origins` (Python) /
-  `allowedOrigins` (TypeScript), `accept()` reads no request header. With it, a refused origin is
+  `allowedOrigins` (TypeScript), `accept()` reads no request header. With it, `accept()` reads
+  `Origin`, and under [`SameOrigin`](#sameorigin) also `Host` and `X-Forwarded-Host`. A refused origin is
   answered before any frame: HTTP 403 for a Starlette socket, close code 1008 for a `websockets` or
   `ws` connection, whose handshake has already completed. `accept()` raises `OriginRefused`, and
   `serve()` returns.
@@ -52,7 +53,7 @@ async def accept(
     open_interceptors: Sequence[OpenInterceptor] = (),
     reply_headers_interceptors: Sequence[ReplyHeadersInterceptor] = (),
     incoming_headers_interceptors: Sequence[IncomingHeadersInterceptor] = (),
-    allowed_origins: Iterable[str] | Callable[[str | None], bool] | None = None,
+    allowed_origins: Iterable[str] | SameOrigin | Callable[[str | None], bool] | None = None,
 ) -> Peer:
 ```
 
@@ -69,7 +70,7 @@ async def accept(
 | `open_interceptors` | `Sequence[OpenInterceptor]` | `()` | Registered in order with [`peer.intercept_open()`](./peer.md#peer-intercept-open-python) on the peer this returns. |
 | `reply_headers_interceptors` | `Sequence[ReplyHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_reply_headers()`](./peer.md#peer-intercept-reply-headers-python). |
 | `incoming_headers_interceptors` | `Sequence[IncomingHeadersInterceptor]` | `()` | Registered in order with [`peer.intercept_incoming_headers()`](./peer.md#peer-intercept-incoming-headers-python). |
-| `allowed_origins` | `Iterable[str] \| Callable[[str \| None], bool] \| None` | `None` | The `Origin` check, run before the subprotocol check. `None` checks nothing. An iterable lists the exact origins allowed, `scheme://host[:port]` with scheme `http` or `https`; origins compare with scheme and host lower-cased, the default port (80, 443) filled in and one trailing `/` ignored. A request without `Origin`, with more than one, or with a value that is not such an origin (`null` included) is refused. A callable is called with the single `Origin` value, or `None` when there is none, and allows the request when it returns a truthy value; a request with more than one `Origin` is refused without calling it. Requires a Starlette `WebSocket`, a `websockets` connection or a `WebsocketsSocket`, whose request headers `accept()` reads. |
+| `allowed_origins` | `Iterable[str] \| SameOrigin \| Callable[[str \| None], bool] \| None` | `None` | The `Origin` check, run before the subprotocol check. `None` checks nothing. An iterable lists the exact origins allowed, `scheme://host[:port]` with scheme `http` or `https`; origins compare as [`parse_origin`](#parse-origin-parseorigin) parses them. A request without `Origin`, with more than one, or with a value that is not such an origin (`null` included) is refused. A [`SameOrigin`](#sameorigin) allows an `Origin` with the host and port of the request's `Host` header. A callable is called with the single `Origin` value, or `None` when there is none, and allows the request when it returns a truthy value; a request with more than one `Origin` is refused without calling it. Requires a Starlette `WebSocket`, a `websockets` connection or a `WebsocketsSocket`, whose request headers `accept()` reads. |
 
 ### Return
 
@@ -290,8 +291,9 @@ completed, so the subprotocol is verified on the open socket. If it does not mat
 naming the negotiated and the expected subprotocol and the `MUXWS_CODEC` and `VITE_MUXWS_CODEC`
 environment variables is logged through `logger`, and the socket is closed with 1008.
 
-With `allowedOrigins`, the `Origin` header of `options.request`, the `IncomingMessage` that `ws` emits
-with the connection, is checked first; a refused origin closes the socket with 1008.
+With `allowedOrigins`, the headers of `options.request`, the `IncomingMessage` that `ws` emits with
+the connection, are checked first: `Origin`, and under [`SameOrigin`](#sameorigin) also `Host` and
+`X-Forwarded-Host`. A refused origin closes the socket with 1008.
 
 It takes only a `ws` `WebSocket`: it reads `socket.protocol` and wraps the argument in a `WsSocket`.
 Python's `accept()` also takes any `SocketAdapter`; in TypeScript, a custom adapter is used with
@@ -448,9 +450,9 @@ export interface AcceptOptions {
   replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
   /** Registered on the peer, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
   incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
-  /** Exact origins, or a function of the `Origin` header value, that may open the endpoint. Requires `request`. */
-  allowedOrigins?: Iterable<string> | ((origin: string | undefined) => boolean);
-  /** The upgrade request `ws` passed with the connection; read for its `Origin` header. */
+  /** Exact origins, `SameOrigin`, or a function of the `Origin` header value. Requires `request`. */
+  allowedOrigins?: Iterable<string> | SameOrigin | ((origin: string | undefined) => boolean);
+  /** The upgrade request `ws` passed with the connection; read for its `Origin` and host headers. */
   request?: IncomingMessage;
 }
 ```
@@ -467,8 +469,8 @@ export interface AcceptOptions {
 | `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) on the peer `accept()` returns or `serve()` builds. |
 | `replyHeadersInterceptors` | `readonly ReplyHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript). |
 | `incomingHeadersInterceptors` | `readonly IncomingHeadersInterceptor[]` | `[]` | Registered in order with [`peer.interceptIncomingHeaders()`](./peer.md#peer-interceptincomingheaders-typescript). |
-| `allowedOrigins` | `Iterable<string> \| ((origin: string \| undefined) => boolean)` | `undefined` | The `Origin` check, run before the subprotocol check, with the same rules as Python's `allowed_origins`. `undefined` checks nothing. An iterable lists the exact origins allowed (`scheme://host[:port]`, scheme `http` or `https`; scheme and host compare case-insensitively, the default port is filled in, one trailing `/` is ignored), and a request without `Origin`, with more than one, or with a value that is not an origin (`null` included) is refused. A function is called with the single `Origin` value, or `undefined` when there is none; a request with more than one `Origin` is refused without calling it. |
-| `request` | `IncomingMessage` (from `node:http`) | `undefined` | The upgrade request, the second argument of the `ws` `connection` event. Read only for its `Origin` header, and required when `allowedOrigins` is set. |
+| `allowedOrigins` | `Iterable<string> \| SameOrigin \| ((origin: string \| undefined) => boolean)` | `undefined` | The `Origin` check, run before the subprotocol check, with the same rules as Python's `allowed_origins`. `undefined` checks nothing. An iterable lists the exact origins allowed (`scheme://host[:port]`, scheme `http` or `https`, compared as [`parseOrigin`](#parse-origin-parseorigin) parses them), and a request without `Origin`, with more than one, or with a value that is not an origin (`null` included) is refused. A [`SameOrigin`](#sameorigin) allows an `Origin` with the host and port of the request's `Host` header. A function is called with the single `Origin` value, or `undefined` when there is none; a request with more than one `Origin` is refused without calling it. |
+| `request` | `IncomingMessage` (from `node:http`) | `undefined` | The upgrade request, the second argument of the `ws` `connection` event. Read only for its `Origin`, `Host` and `X-Forwarded-Host` headers, and required when `allowedOrigins` is set. |
 
 ### Return
 
@@ -638,6 +640,204 @@ import { select, settings } from 'muxws';
 console.log(select(['muxws.v1.json', 'bearer.token.abc'], 'json'));
 console.log(select(['muxws.v2.json'], 'json'));
 console.log(select([], settings.codec));
+```
+
+## `SameOrigin`
+
+The `allowed_origins` / `allowedOrigins` policy that allows a page served by the host the handshake is
+addressed to. It is the policy for an endpoint whose pages and WebSocket share a host, where the list
+of exact origins would repeat every hostname the deployment answers to.
+
+- **The comparison.** A request is allowed when its single `Origin` has the host and port of the
+  request's single `Host` header. A `Host` without a port stands for the default port of the
+  origin's scheme (80, 443). Hosts compare case-insensitively.
+- **The scheme is not compared.** `Host` carries no scheme, and behind a proxy that terminates TLS the
+  handshake reaching the acceptor is plain `ws`. `Host: app.example.com` is matched by both
+  `http://app.example.com` and `https://app.example.com`; `Host: app.example.com:8443` only by an
+  origin with port 8443.
+- **`also`** lists origins allowed in addition, such as a development server on another port. They
+  are parsed with `parse_origin` / `parseOrigin` when the policy is constructed, and an origin in
+  `also` is allowed whatever the `Host` header says.
+- **`trust_forwarded_host` / `trustForwardedHost`** compares with the first comma-separated entry of
+  `X-Forwarded-Host` instead of `Host` when the request carries that header; a request without it is
+  compared with `Host`. A browser cannot set `Host` or `X-Forwarded-Host` on a WebSocket handshake,
+  so either one names the host the page addressed. Without it, a proxy that rewrites `Host` to the
+  upstream's name (nginx's default `proxy_set_header Host $proxy_host`) makes every browser request
+  fail the comparison.
+- **Refused:** a request without `Origin`, with more than one, with a value that is not an origin
+  (`null` included), or with no single parsable `Host` (or `X-Forwarded-Host` entry), unless its
+  origin is in `also`. A dialer that is not a browser sends no `Origin` and is refused; an endpoint
+  that also serves such dialers uses a function policy instead.
+
+### Signature
+
+```python
+class SameOrigin:
+    def __init__(self, *, also: Iterable[str] = (), trust_forwarded_host: bool = False) -> None: ...
+```
+
+```ts
+export class SameOrigin {
+  constructor(options: SameOriginOptions = {});
+}
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `also` | `Iterable[str]` / `Iterable<string>` | `()` / `[]` | Origins allowed in addition to the request's own host, `scheme://host[:port]` with scheme `http` or `https`. Read once, at construction. |
+| `trust_forwarded_host` / `trustForwardedHost` | `bool` / `boolean` | `False` / `false` | Compare with the first entry of `X-Forwarded-Host`, when the request has that header, instead of `Host`. |
+
+In TypeScript both are fields of [`SameOriginOptions`](#sameoriginoptions-typescript).
+
+### Return
+
+A policy object for `allowed_origins` / `allowedOrigins`. One instance serves any number of
+`accept()` calls.
+
+### Raises
+
+- `TypeError` — `also` is a single string. In TypeScript also for an `also` entry that is not an origin.
+- `ValueError` (Python) — an `also` entry is not an origin.
+
+Both are raised by the constructor, before any socket exists.
+
+### Example
+
+```python
+from fastapi import FastAPI, WebSocket
+
+from muxws import SameOrigin, serve, Stream
+
+app = FastAPI()
+# Behind nginx with `proxy_set_header X-Forwarded-Host $host`; the Vite dev server runs on 5173.
+same_origin = SameOrigin(also=["http://localhost:5173"], trust_forwarded_host=True)
+
+
+async def handler(payload: object, stream: Stream) -> None:
+    await stream.reply({"seen": payload})
+
+
+@app.websocket("/ws")
+async def ws(websocket: WebSocket) -> None:
+    await serve(websocket, handler=handler, allowed_origins=same_origin)
+```
+
+```ts
+import { SameOrigin, type Stream } from 'muxws';
+import { handleProtocols, refuseMismatchedUpgrade, serve } from 'muxws/node';
+import { WebSocketServer } from 'ws';
+
+const allowedOrigins = new SameOrigin({ also: ['http://localhost:5173'], trustForwardedHost: true });
+const server = refuseMismatchedUpgrade(new WebSocketServer({ port: 8080, handleProtocols }));
+server.on('connection', (socket, request) => {
+  void serve(socket, {
+    allowedOrigins,
+    request,
+    handler: async (payload: unknown, stream: Stream) => {
+      await stream.reply({ seen: payload });
+    },
+  });
+});
+```
+
+## `SameOriginOptions` (TypeScript)
+
+The options of the TypeScript `SameOrigin` constructor. Every field is optional.
+
+### Signature
+
+```ts
+export interface SameOriginOptions {
+  /** Origins allowed in addition to the request's own host. */
+  also?: Iterable<string>;
+  /** Compare with the first entry of `X-Forwarded-Host`, when the request has one, instead of `Host`. */
+  trustForwardedHost?: boolean;
+}
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `also` | `Iterable<string>` | `[]` | Origins allowed in addition to the request's own host. See [`SameOrigin`](#sameorigin). |
+| `trustForwardedHost` | `boolean` | `false` | Compare with the first entry of `X-Forwarded-Host`, when the request has one, instead of `Host`. |
+
+### Return
+
+None — `SameOriginOptions` is an interface, not a call.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import { SameOrigin, type SameOriginOptions } from 'muxws';
+
+const options: SameOriginOptions = { also: ['http://localhost:5173'] };
+console.log(new SameOrigin(options));
+```
+
+## `parse_origin` / `parseOrigin`
+
+Parse a serialized origin into the triple the `Origin` policies compare. The list policy and
+`SameOrigin` compare origins in this form; a function policy that compares origins itself uses it to
+apply the same normalisation.
+
+An origin is `scheme://host[:port]` with the scheme `http` or `https`. Surrounding whitespace and one
+trailing `/` are ignored, scheme and host are lower-cased, and a missing port is the scheme's default
+(80, 443). An IPv6 host keeps its brackets.
+
+### Signature
+
+```python
+def parse_origin(value: str) -> tuple[str, str, int] | None:
+```
+
+```ts
+export function parseOrigin(value: string): [string, string, number] | null;
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `value` | `str` / `string` | required | An `Origin` header value or an origin from configuration. |
+
+### Return
+
+`(scheme, host, port)` / `[scheme, host, port]`, or `None` / `null` when `value` is not an origin: a
+path, a query, a fragment, userinfo, an empty or non-numeric port, a port above 65535, another scheme
+and `null` all return `None` / `null`.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws import parse_origin
+
+print(parse_origin("HTTPS://App.example.com/"))  # ('https', 'app.example.com', 443)
+print(parse_origin("http://[::1]:8000"))  # ('http', '[::1]', 8000)
+print(parse_origin("null"))  # None
+
+partners = {parse_origin(o) for o in ["https://a.example.com", "https://b.example.com:8443"]}
+
+
+def allowed_origins(origin: str | None) -> bool:
+    return origin is None or parse_origin(origin) in partners
+```
+
+```ts
+import { parseOrigin } from 'muxws';
+
+console.log(parseOrigin('HTTPS://App.example.com/')); // ['https', 'app.example.com', 443]
+console.log(parseOrigin('null')); // null
 ```
 
 ## See also

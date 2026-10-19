@@ -517,9 +517,10 @@ async def muxws_endpoint(websocket: WebSocket) -> None:
 WebSocket handshake whatever page opened it, and the WebSocket protocol has no CSRF protection of its
 own, so a page on another site can open an authenticated socket. The `Origin` header names the page's
 origin. `accept()` checks it when given `allowed_origins` (Python) or `allowedOrigins` (TypeScript):
-a list of exact origins, or a function of the header value for any other rule. With a list, a request
-without `Origin` is refused; a dialer that is not a browser sends none, so an endpoint that serves
-such dialers as well passes a function.
+a list of exact origins, `SameOrigin` for pages served by the host the handshake is addressed to, or a
+function of the header value for any other rule. With a list or `SameOrigin`, a request without
+`Origin` is refused; a dialer that is not a browser sends none, so an endpoint that serves such
+dialers as well passes a function.
 
 ```python
 # fragment
@@ -536,6 +537,11 @@ server.on('connection', (socket, request) => {
   void serve(socket, { handler: onStream, allowedOrigins: ['https://app.example.com'], request });
 });
 ```
+
+`SameOrigin()` compares `Origin` with the request's `Host` header. Behind a proxy that rewrites `Host`,
+`SameOrigin(trust_forwarded_host=True)` / `new SameOrigin({ trustForwardedHost: true })` compares with
+`X-Forwarded-Host`, which the proxy sets to the host the browser addressed. Its `also` argument lists
+further origins, such as a development server on another port. See [`SameOrigin`](/api/accept#sameorigin).
 
 A Starlette socket with a refused origin is answered with HTTP 403. A `websockets` or `ws` connection
 has completed its handshake when `accept()` runs, and is closed with 1008. `accept()` raises

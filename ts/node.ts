@@ -17,7 +17,7 @@ import type { ClientOptions, WebSocket as NodeWebSocket, WebSocketServer } from 
 import { type Codec, getCodec } from './codec';
 import { settings } from './conf';
 import { CodecMismatch, OriginRefused, ProtocolError, TransportUnsupportedError, TransportUrlError } from './errors';
-import { compilePolicy } from './origin';
+import { type SameOrigin, compilePolicy } from './origin';
 import {
   type ErrorSerializer,
   type IncomingHeadersInterceptor,
@@ -466,9 +466,9 @@ export interface AcceptOptions {
   replyHeadersInterceptors?: readonly ReplyHeadersInterceptor[];
   /** Registered on the peer, in order, as `peer.interceptIncomingHeaders()` would (WSM-API-026). */
   incomingHeadersInterceptors?: readonly IncomingHeadersInterceptor[];
-  /** Exact origins, or a function of the `Origin` header value, that may open the endpoint. Requires `request`. */
-  allowedOrigins?: Iterable<string> | ((origin: string | undefined) => boolean);
-  /** The upgrade request `ws` passed with the connection; read for its `Origin` header. */
+  /** Exact origins, `SameOrigin`, or a function of the `Origin` header value. Requires `request`. */
+  allowedOrigins?: Iterable<string> | SameOrigin | ((origin: string | undefined) => boolean);
+  /** The upgrade request `ws` passed with the connection; read for its `Origin` and host headers. */
   request?: IncomingMessage;
 }
 
@@ -536,8 +536,9 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
         'allowedOrigins needs the upgrade request: pass the `request` ws emitted with the connection',
       );
     }
-    const values = options.request.headersDistinct.origin ?? [];
-    if (!check(values)) {
+    const distinct = options.request.headersDistinct;
+    if (!check((name) => distinct[name] ?? [])) {
+      const values = distinct.origin ?? [];
       const origin = values.length > 0 ? values.join(', ') : undefined;
       socket.close(POLICY_VIOLATION, 'origin not allowed');
       throw new OriginRefused(`origin ${JSON.stringify(origin ?? null)} is not allowed to open this endpoint`, {

@@ -32,6 +32,7 @@ from muxws.errors import (
 from muxws.fragment import Assembler, encoded_length, MAX_FRAME_BYTES, split_frame
 from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
 from muxws.observability import CloseReason
+from muxws.origin import parse_origin, SameOrigin
 from muxws.peer import (
     default_error_serializer,
     ErrorSerializer,
@@ -46,7 +47,7 @@ from muxws.registry import PeerRegistry
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 # The library registers JSON itself (WSM-CDC-004); the codec module must not (WSM-CDC-014).
 register_codec("json", JsonCodec())
@@ -78,6 +79,7 @@ __all__ = [
     "RemoteError",
     "ReplyHeadersInterceptor",
     "ResetCode",
+    "SameOrigin",
     "Settings",
     "SocketAdapter",
     "Stream",
@@ -98,6 +100,7 @@ __all__ = [
     "encoded_length",
     "from_mapping",
     "get_codec",
+    "parse_origin",
     "register_codec",
     "registered_codecs",
     "resolve_codec",

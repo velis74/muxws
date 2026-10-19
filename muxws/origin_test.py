@@ -1,10 +1,23 @@
-"""`parse_origin` and `compile_policy`, the `Origin` check behind `accept(allowed_origins=...)`."""
+"""`parse_origin`, `SameOrigin` and `compile_policy`, the `Origin` check behind `accept(allowed_origins=...)`."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import pytest
 
-from muxws.origin import compile_policy, parse_origin
+from muxws.origin import compile_policy, HeaderValues, parse_origin, SameOrigin
+
+
+def origins(*values: str) -> HeaderValues:
+    """A request whose only headers are `values` as its `Origin` header lines."""
+    return headers(("origin", value) for value in values)
+
+
+def headers(pairs: Iterable[tuple[str, str]]) -> HeaderValues:
+    """A request with the header lines `pairs`, looked up by lower-case name."""
+    lines = list(pairs)
+    return lambda name: [value for header, value in lines if header == name]
 
 
 @pytest.mark.parametrize(
@@ -60,24 +73,24 @@ def test_no_policy_compiles_to_no_check():
 def test_a_listed_origin_is_allowed_after_normalisation():
     check = compile_policy(["https://App.example.com", "http://localhost:5173/"])
     assert check is not None
-    assert check(["https://app.example.com:443"])
-    assert check(["http://LOCALHOST:5173"])
-    assert not check(["http://app.example.com"])
-    assert not check(["https://evil.example.com"])
+    assert check(origins("https://app.example.com:443"))
+    assert check(origins("http://LOCALHOST:5173"))
+    assert not check(origins("http://app.example.com"))
+    assert not check(origins("https://evil.example.com"))
 
 
 def test_a_list_refuses_a_missing_a_repeated_and_an_unparsable_origin():
     check = compile_policy(["https://app.example.com"])
     assert check is not None
-    assert not check([])
-    assert not check(["https://app.example.com", "https://app.example.com"])
-    assert not check(["null"])
+    assert not check(origins())
+    assert not check(origins("https://app.example.com", "https://app.example.com"))
+    assert not check(origins("null"))
 
 
 def test_an_empty_list_refuses_everything():
     check = compile_policy([])
     assert check is not None
-    assert not check(["https://app.example.com"])
+    assert not check(origins("https://app.example.com"))
 
 
 def test_a_callable_receives_the_raw_value_or_none():
@@ -89,16 +102,16 @@ def test_a_callable_receives_the_raw_value_or_none():
 
     check = compile_policy(decide)
     assert check is not None
-    assert check([])
-    assert check(["https://a.example.com"])
-    assert not check(["https://evil.test"])
+    assert check(origins())
+    assert check(origins("https://a.example.com"))
+    assert not check(origins("https://evil.test"))
     assert seen == [None, "https://a.example.com", "https://evil.test"]
 
 
 def test_a_callable_is_not_called_for_a_repeated_origin():
     check = compile_policy(lambda _origin: True)
     assert check is not None
-    assert not check(["https://a.example.com", "https://b.example.com"])
+    assert not check(origins("https://a.example.com", "https://b.example.com"))
 
 
 def test_a_single_string_is_a_type_error():
@@ -110,3 +123,106 @@ def test_a_single_string_is_a_type_error():
 def test_an_entry_that_is_not_an_origin_is_a_value_error(entry: object):
     with pytest.raises(ValueError, match="not an origin"):
         compile_policy([entry])  # type: ignore[list-item]
+
+
+def same_origin(policy: SameOrigin, *lines: tuple[str, str]) -> bool:
+    check = compile_policy(policy)
+    assert check is not None
+    return check(headers(lines))
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        ("https://app.example.com", "app.example.com"),
+        ("http://app.example.com", "app.example.com"),
+        ("https://APP.example.com", "app.EXAMPLE.com"),
+        ("https://app.example.com", "app.example.com:443"),
+        ("http://app.example.com", "app.example.com:80"),
+        ("http://localhost:5173", "localhost:5173"),
+        ("http://[::1]:8000", "[::1]:8000"),
+    ],
+)
+def test_same_origin_allows_the_host_and_port_of_the_host_header(origin: str, host: str):
+    assert same_origin(SameOrigin(), ("origin", origin), ("host", host))
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        ("https://evil.test", "app.example.com"),
+        ("https://app.example.com", "app.example.com:8443"),
+        ("https://app.example.com:8443", "app.example.com"),
+        ("http://app.example.com", "app.example.com:443"),
+        ("https://sub.app.example.com", "app.example.com"),
+        ("null", "app.example.com"),
+    ],
+)
+def test_same_origin_refuses_another_host_or_port(origin: str, host: str):
+    assert not same_origin(SameOrigin(), ("origin", origin), ("host", host))
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [("host", "app.example.com")],
+        [("origin", "https://app.example.com"), ("origin", "https://app.example.com"), ("host", "app.example.com")],
+        [("origin", "https://app.example.com")],
+        [("origin", "https://app.example.com"), ("host", "app.example.com"), ("host", "app.example.com")],
+        [("origin", "https://app.example.com"), ("host", "app.example.com/path")],
+        [("origin", "https://app.example.com"), ("host", "")],
+    ],
+    ids=["no-origin", "repeated-origin", "no-host", "repeated-host", "invalid-host", "empty-host"],
+)
+def test_same_origin_refuses_a_missing_or_repeated_header(lines: list[tuple[str, str]]):
+    assert not same_origin(SameOrigin(), *lines)
+
+
+def test_same_origin_ignores_x_forwarded_host_unless_trusted():
+    lines = [("origin", "https://app.example.com"), ("host", "backend:8000"), ("x-forwarded-host", "app.example.com")]
+    assert not same_origin(SameOrigin(), *lines)
+    assert same_origin(SameOrigin(trust_forwarded_host=True), *lines)
+
+
+def test_a_trusted_x_forwarded_host_replaces_host():
+    policy = SameOrigin(trust_forwarded_host=True)
+    origin = ("origin", "https://app.example.com")
+    assert not same_origin(policy, origin, ("host", "app.example.com"), ("x-forwarded-host", "other.example.com"))
+    assert same_origin(policy, origin, ("host", "backend"), ("x-forwarded-host", "app.example.com, proxy.internal"))
+    assert same_origin(
+        policy, origin, ("host", "backend"), ("x-forwarded-host", "app.example.com"), ("x-forwarded-host", "b")
+    )
+    assert not same_origin(policy, origin, ("host", "backend"), ("x-forwarded-host", ", app.example.com"))
+
+
+def test_a_trusted_x_forwarded_host_falls_back_to_host_when_absent():
+    policy = SameOrigin(trust_forwarded_host=True)
+    assert same_origin(policy, ("origin", "http://localhost:8000"), ("host", "localhost:8000"))
+
+
+def test_same_origin_also_allows_the_listed_origins():
+    policy = SameOrigin(also=["http://localhost:5173"])
+    assert same_origin(policy, ("origin", "http://LOCALHOST:5173/"), ("host", "localhost:8000"))
+    assert same_origin(policy, ("origin", "http://localhost:5173"))
+    assert same_origin(policy, ("origin", "http://localhost:8000"), ("host", "localhost:8000"))
+    assert not same_origin(policy, ("origin", "http://localhost:3000"), ("host", "localhost:8000"))
+
+
+def test_same_origin_reads_also_once():
+    policy = SameOrigin(also=(origin for origin in ["https://a.test"]))
+    assert same_origin(policy, ("origin", "https://a.test"))
+    assert same_origin(policy, ("origin", "https://a.test"))
+
+
+def test_same_origin_validates_also_on_construction():
+    with pytest.raises(TypeError, match="not a single string"):
+        SameOrigin(also="https://app.example.com")
+    with pytest.raises(ValueError, match="in also is not an origin"):
+        SameOrigin(also=["app.example.com"])
+
+
+def test_parse_origin_is_exported_from_the_package():
+    import muxws
+
+    assert muxws.parse_origin is parse_origin
+    assert muxws.SameOrigin is SameOrigin

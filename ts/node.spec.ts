@@ -22,6 +22,7 @@ import { CodecMismatch, MuxwsError, OriginRefused, ProtocolError, TransportUrlEr
 import './index';
 import { WsUrlError, accept, connect, handleProtocols, refuseMismatchedUpgrade, serve } from './node';
 import { logger } from './observability';
+import { SameOrigin } from './origin';
 import type { Peer } from './peer';
 
 // --------------------------------------------------------------------------- the harness
@@ -656,6 +657,19 @@ describe('accept() checks the Origin header with allowedOrigins', () => {
       expect(refused).toBeInstanceOf(OriginRefused);
       expect(refused).toBeInstanceOf(MuxwsError);
       expect((refused as OriginRefused).origin).toBe(origin);
+    } finally {
+      await acceptor.close();
+    }
+  });
+
+  it('compares Origin with the Host header under SameOrigin', async () => {
+    const acceptor = await startOriginAcceptor({ allowedOrigins: new SameOrigin() });
+    try {
+      const own = acceptor.url.replace('ws://', 'http://');
+      expect(await dial(acceptor.url, own)).toBe('open');
+      expect(await dial(acceptor.url, 'http://evil.test')).toBe(1008);
+      expect(acceptor.outcomes[0]).toBeNull();
+      expect(acceptor.outcomes[1]).toBeInstanceOf(OriginRefused);
     } finally {
       await acceptor.close();
     }

@@ -1026,6 +1026,27 @@ async def test_a_refused_origin_is_closed_with_1008(allowed: Any, origin: str | 
     assert outcomes[0].origin == origin
 
 
+@pytest.mark.parametrize("wrap", [False, True], ids=["connection", "websockets-socket"])
+async def test_same_origin_compares_origin_with_the_host_header(wrap: bool):
+    service, outcomes = await _origin_acceptor(muxws.SameOrigin(), wrap=wrap)
+    async with service:
+        address = f"127.0.0.1:{service.sockets[0].getsockname()[1]}"
+        async with websockets.connect(
+            f"ws://{address}", subprotocols=["muxws.v1.json"], origin=f"http://{address}"
+        ) as client:
+            await client.send('{"type": "open", "stream": 1, "payload": {"n": 1}, "end": true}')
+            assert '"echo"' in await asyncio.wait_for(client.recv(), timeout=5)
+        async with websockets.connect(
+            f"ws://{address}", subprotocols=["muxws.v1.json"], origin="http://evil.test"
+        ) as client:
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as info:
+                await asyncio.wait_for(client.recv(), timeout=5)
+    assert info.value.rcvd is not None
+    assert info.value.rcvd.code == 1008
+    assert outcomes[0] is None
+    assert isinstance(outcomes[1], muxws.OriginRefused)
+
+
 async def test_serve_returns_without_raising_on_a_refused_origin():
     returned: list[bool] = []
 

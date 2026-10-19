@@ -159,8 +159,21 @@ def _request(client: TestClient, headers: dict[str, str]) -> Any:
         (["https://app.example.com"], {"origin": "https://app.example.com"}),
         (["https://app.example.com"], {"origin": "HTTPS://APP.example.com:443"}),
         (lambda origin: origin is None, {}),
+        (muxws.SameOrigin(), {"origin": "http://testserver"}),
+        (
+            muxws.SameOrigin(trust_forwarded_host=True),
+            {"origin": "https://app.example.com", "x-forwarded-host": "app.example.com"},
+        ),
     ],
-    ids=["default-no-origin", "default-any-origin", "listed", "listed-normalised", "callable-no-origin"],
+    ids=[
+        "default-no-origin",
+        "default-any-origin",
+        "listed",
+        "listed-normalised",
+        "callable-no-origin",
+        "same-origin",
+        "same-origin-forwarded",
+    ],
 )
 def test_an_allowed_origin_is_upgraded(allowed: Any, headers: dict[str, str]):
     accepted: list[bool] = []
@@ -179,8 +192,10 @@ def test_an_allowed_origin_is_upgraded(allowed: Any, headers: dict[str, str]):
         (["https://app.example.com"], {}),
         (["https://app.example.com"], {"origin": "null"}),
         (lambda origin: origin == "https://app.example.com", {"origin": "https://evil.test"}),
+        (muxws.SameOrigin(), {"origin": "https://evil.test"}),
+        (muxws.SameOrigin(), {"origin": "https://app.example.com", "x-forwarded-host": "app.example.com"}),
     ],
-    ids=["other-host", "other-scheme", "missing", "null", "callable-false"],
+    ids=["other-host", "other-scheme", "missing", "null", "callable-false", "same-origin", "untrusted-forwarded"],
 )
 def test_a_refused_origin_is_answered_with_http_403(allowed: Any, headers: dict[str, str], caplog):
     from starlette.testclient import WebSocketDenialResponse

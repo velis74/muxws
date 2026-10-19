@@ -16,11 +16,11 @@ from typing import Any
 #: The default port of each scheme a serialized origin may carry.
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
-#: The `allowed_origins` argument: exact origins, or a function of the `Origin` header value.
-OriginPolicy = Iterable[str] | Callable[[str | None], bool]
+#: Every value of one request header, looked up by lower-case name, in order.
+HeaderValues = Callable[[str], Sequence[str]]
 
-#: A compiled policy: the `Origin` header values of one request in, the decision out.
-OriginCheck = Callable[[Sequence[str]], bool]
+#: A compiled policy: the request headers of one handshake in, the decision out.
+OriginCheck = Callable[[HeaderValues], bool]
 
 
 def parse_origin(value: str) -> tuple[str, str, int] | None:
@@ -38,6 +38,18 @@ def parse_origin(value: str) -> tuple[str, str, int] | None:
     scheme = scheme.lower()
     if not separator or scheme not in DEFAULT_PORTS:
         return None
+    parsed = _parse_authority(authority)
+    if parsed is None:
+        return None
+    host, port = parsed
+    return scheme, host, DEFAULT_PORTS[scheme] if port is None else port
+
+
+def _parse_authority(authority: str) -> tuple[str, int | None] | None:
+    """`(host, port)` of `host[:port]`, host lower-cased and port None when absent; None when invalid.
+
+    The form of the authority in an origin and of a `Host` header value.
+    """
     if not authority or any(char in authority for char in "/?#@") or any(char.isspace() for char in authority):
         return None
 
@@ -58,19 +70,98 @@ def parse_origin(value: str) -> tuple[str, str, int] | None:
             return None
 
     if port_text is None:
-        port = DEFAULT_PORTS[scheme]
-    else:
-        if not port_text or not (port_text.isascii() and port_text.isdigit()):
+        return host.lower(), None
+    if not port_text or not (port_text.isascii() and port_text.isdigit()):
+        return None
+    port = int(port_text)
+    if port > 65535:
+        return None
+    return host.lower(), port
+
+
+def _parse_origins(origins: Iterable[str], argument: str) -> set[tuple[str, str, int]]:
+    """Every entry of `origins` under `parse_origin`; `TypeError` for a `str`, `ValueError` for a non-origin."""
+    if isinstance(origins, (str, bytes)):
+        raise TypeError(f"{argument} is an iterable of origins, not a single string")
+    parsed_origins = set()
+    for entry in origins:
+        parsed = parse_origin(entry) if isinstance(entry, str) else None
+        if parsed is None:
+            raise ValueError(f"{entry!r} in {argument} is not an origin: scheme://host[:port]")
+        parsed_origins.add(parsed)
+    return parsed_origins
+
+
+def _single_origin(headers: HeaderValues) -> tuple[str, str, int] | None:
+    """The request's `Origin` under `parse_origin`, or None when it is missing, repeated or not an origin."""
+    values = headers("origin")
+    if len(values) != 1:
+        return None
+    return parse_origin(values[0])
+
+
+class SameOrigin:
+    """The `allowed_origins` policy that allows a page served by the host the handshake is addressed to.
+
+    A request is allowed when its single `Origin` has the host and port of the request's single `Host`
+    header, or is one of the origins in `also`. A `Host` without a port stands for the default port
+    of the origin's scheme. The scheme is not compared: `Host` carries none, and behind a proxy that
+    terminates TLS the handshake reaching the acceptor is plain `ws`.
+
+    With `trust_forwarded_host`, the first entry of `X-Forwarded-Host` takes the place of `Host` when
+    the request has that header; a request without it is compared with `Host`. A browser cannot set
+    either header on a WebSocket handshake, so either one names the host the page addressed. Without
+    `trust_forwarded_host`, a proxy that rewrites `Host` to the upstream's name makes every browser
+    request fail the comparison.
+
+    A request without `Origin`, with more than one, with a value that is not an origin (`null`
+    included), or with no single parsable `Host` (or `X-Forwarded-Host` entry) is refused unless its
+    origin is in `also`.
+
+    Raises `TypeError` when `also` is a single `str` and `ValueError` for an `also` entry that is not
+    an origin.
+    """
+
+    def __init__(self, *, also: Iterable[str] = (), trust_forwarded_host: bool = False) -> None:
+        self._also = frozenset(_parse_origins(also, "also"))
+        self._trust_forwarded_host = trust_forwarded_host
+
+    def __repr__(self) -> str:
+        also = sorted(f"{scheme}://{host}:{port}" for scheme, host, port in self._also)
+        return f"SameOrigin(also={also!r}, trust_forwarded_host={self._trust_forwarded_host!r})"
+
+    def _request_host(self, headers: HeaderValues) -> tuple[str, int | None] | None:
+        if self._trust_forwarded_host:
+            forwarded = headers("x-forwarded-host")
+            if forwarded:
+                return _parse_authority(",".join(forwarded).split(",")[0].strip())
+        hosts = headers("host")
+        if len(hosts) != 1:
             return None
-        port = int(port_text)
-        if port > 65535:
-            return None
-    return scheme, host.lower(), port
+        return _parse_authority(hosts[0].strip())
+
+    def _allows(self, headers: HeaderValues) -> bool:
+        origin = _single_origin(headers)
+        if origin is None:
+            return False
+        if origin in self._also:
+            return True
+        request_host = self._request_host(headers)
+        if request_host is None:
+            return False
+        scheme, host, port = origin
+        request_name, request_port = request_host
+        return request_name == host and (DEFAULT_PORTS[scheme] if request_port is None else request_port) == port
+
+
+#: The `allowed_origins` argument: exact origins, `SameOrigin`, or a function of the `Origin` header value.
+OriginPolicy = Iterable[str] | SameOrigin | Callable[[str | None], bool]
 
 
 def compile_policy(allowed_origins: OriginPolicy | None) -> OriginCheck | None:
     """The check `accept()` runs for `allowed_origins`, or None when there is nothing to check.
 
+    - A `SameOrigin` compares `Origin` with the request's host; see `SameOrigin`.
     - A callable is called with the request's single `Origin` value, or with None when the request
       has none; its truthiness is the decision. A request with more than one `Origin` header is
       refused without calling it.
@@ -83,10 +174,13 @@ def compile_policy(allowed_origins: OriginPolicy | None) -> OriginCheck | None:
     """
     if allowed_origins is None:
         return None
+    if isinstance(allowed_origins, SameOrigin):
+        return allowed_origins._allows
     if callable(allowed_origins):
         decide = allowed_origins
 
-        def check_callable(values: Sequence[str]) -> bool:
+        def check_callable(headers: HeaderValues) -> bool:
+            values = headers("origin")
             if len(values) > 1:
                 return False
             return bool(decide(values[0] if values else None))
@@ -95,23 +189,17 @@ def compile_policy(allowed_origins: OriginPolicy | None) -> OriginCheck | None:
 
     if isinstance(allowed_origins, (str, bytes)):
         raise TypeError("allowed_origins is an iterable of origins or a callable, not a single string")
-    allowed = set()
-    for entry in allowed_origins:
-        parsed = parse_origin(entry) if isinstance(entry, str) else None
-        if parsed is None:
-            raise ValueError(f"{entry!r} in allowed_origins is not an origin: scheme://host[:port]")
-        allowed.add(parsed)
+    allowed = _parse_origins(allowed_origins, "allowed_origins")
 
-    def check_list(values: Sequence[str]) -> bool:
-        if len(values) != 1:
-            return False
-        return parse_origin(values[0]) in allowed
+    def check_list(headers: HeaderValues) -> bool:
+        origin = _single_origin(headers)
+        return origin is not None and origin in allowed
 
     return check_list
 
 
-def origin_values(socket: Any) -> list[str] | None:
-    """Every `Origin` header value of the handshake request behind `socket`, in order.
+def request_headers(socket: Any) -> HeaderValues | None:
+    """The handshake request headers behind `socket`, as a lookup of every value of one header.
 
     Reads a Starlette `WebSocket`, a `websockets` server connection (`request.headers` in the asyncio
     implementation, `request_headers` in the legacy one), and a `WebsocketsSocket` wrapping either.
@@ -123,10 +211,21 @@ def origin_values(socket: Any) -> list[str] | None:
         socket = socket._connection
     scope = getattr(socket, "scope", None)
     if isinstance(scope, dict) and "headers" in scope:
-        return [value.decode("latin-1") for name, value in scope["headers"] if name.lower() == b"origin"]
+        raw = scope["headers"]
+
+        def scope_values(name: str) -> list[str]:
+            key = name.encode("latin-1")
+            return [value.decode("latin-1") for header, value in raw if header.lower() == key]
+
+        return scope_values
     headers = getattr(getattr(socket, "request", None), "headers", None)
     if headers is None:
         headers = getattr(socket, "request_headers", None)
     if headers is None or not hasattr(headers, "get_all"):
         return None
-    return list(headers.get_all("Origin"))
+    found = headers
+
+    def header_values(name: str) -> list[str]:
+        return list(found.get_all(name))
+
+    return header_values
