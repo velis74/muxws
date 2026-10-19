@@ -2552,31 +2552,47 @@ describe('the frame logger', () => {
   });
 });
 
-describe('WSM-RCN-044 is per connection, not per Peer object', () => {
-  it('lets a new socket report its own final close', async () => {
-    // The latch that prevents one loss being reported twice is reset per connection. A `Peer` given a fresh socket
-    // is a new connection, and its next loss has not been reported yet; without the reset it is reported to no one.
+describe('the final close - WSM-RCN-046/047', () => {
+  it('reports isClosed once the willRetry false close is reported', async () => {
+    const pair = makePair();
+    const closes: CloseReason[] = [];
+    pair.acceptor.onClose((reason) => closes.push(reason));
+    pair.start();
+    expect(pair.acceptor.isClosed).toBe(false);
+
+    internals(pair.acceptor).die(new ConnectionClosed('the socket died', { code: 1006 }));
+
+    expect(closes.map((reason) => reason.willRetry)).toEqual([false]);
+    expect(pair.acceptor.isClosed).toBe(true);
+    expect(pair.acceptor.isOpen).toBe(false);
+    await pair.stop();
+  });
+
+  it('calls an onClose handler registered after the final close at once', async () => {
     const [dialerSide] = memoryPair();
     const peer = new Peer(dialerSide, { codec: new JsonCodec(), isDialer: true });
-    const closes: CloseReason[] = [];
-    peer.onClose((reason) => closes.push(reason));
+    internals(peer).die(new ConnectionClosed('the socket died', { code: 1006 }));
+    expect(peer.isClosed).toBe(true);
 
-    internals(peer).willRetry = false;
-    internals(peer).die(new ConnectionClosed('the first socket died', { code: 1006 }));
-    expect(
-      closes.map((reason) => reason.willRetry),
-      'the first loss reports, once',
-    ).toEqual([false]);
+    const late: CloseReason[] = [];
+    peer.onClose((reason) => late.push(reason));
+    expect(late).toHaveLength(1);
+    expect(late[0].willRetry).toBe(false);
 
-    const [replacement] = memoryPair();
-    internals(peer).adoptSocket(replacement);
-    internals(peer).willRetry = false;
-    internals(peer).die(new ConnectionClosed('the second socket died too', { code: 1006 }));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect(() =>
+        peer.onClose(() => {
+          throw new Error('handler failure');
+        }),
+      ).not.toThrow();
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
 
-    expect(
-      closes.map((reason) => reason.willRetry),
-      "the second connection's loss was swallowed by a latch left over from the first",
-    ).toEqual([false, false]);
+    peer.notifyClose({ code: 1000, reason: '', wasClean: true, willRetry: false });
+    expect(late, 'a second final close is suppressed').toHaveLength(1);
   });
 });
 

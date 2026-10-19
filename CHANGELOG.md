@@ -16,9 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `trust_forwarded_host` / `trustForwardedHost`, the first entry of `X-Forwarded-Host` takes the place of `Host`
   when present.
 - `parse_origin` (Python) and `parseOrigin` (TypeScript) are public, exported from the package root.
+- `Peer.is_closed` (Python) / `Peer.isClosed` (TypeScript): true once the peer has reported its
+  `will_retry: false` close, false while it is open and while a dialer's reconnect helper is between sockets
+  (WSM-RCN-046).
+- An `on_close` / `onClose` handler registered on a closed peer is called before the registration returns, with
+  the `will_retry: false` close the peer reported (WSM-RCN-047).
 
 ### Fixed
 
+- `close()` called while a dialer's reconnect helper is between sockets reports the `will_retry: false` close
+  (code 1000), in both ports. It stopped the helper but reported nothing, so `on_close` never told the
+  application that no reconnection follows.
+- A peer reports at most one `will_retry: false` close for its lifetime, as WSM-RCN-040 states; adopting a new
+  socket no longer re-arms the report.
 - TypeScript: the type declarations resolve under every `moduleResolution`. `exports` carries a `types` condition
   per entry point and format (`.d.ts` for `import`, `.d.cts` for `require`), relative imports in the declarations
   name their file as `node16` / `nodenext` require, and `typesVersions` maps `muxws/node` and `muxws/msgpack` for

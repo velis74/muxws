@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from typing import Any
 
 import pytest
 
-from muxws.errors import ConnectionClosed, ConnectionLost, ResetCode
+from muxws.errors import ConnectionLost, ResetCode
 from muxws.lifecycle import MAX_STREAM_ID
 from muxws.observability import CloseReason
 from muxws.stream import Stream
@@ -294,26 +295,42 @@ async def _hold(payload: Any, stream: Stream) -> None:
     await stream.closed.wait()
 
 
-async def test_a_new_socket_may_report_its_own_final_close(make_pair):
-    """WSM-RCN-044 is per connection, not per `Peer` object.
-
-    The flag that prevents reporting one loss twice is reset with each connection. A `Peer` given a
-    new socket after a `will_retry=False` close has a new connection, and its next loss is reported;
-    if the flag were not reset, that loss would not be reported.
-    """
+async def test_a_peer_is_closed_once_its_final_close_is_reported(make_pair):
+    """WSM-RCN-046: `is_closed` is false while the socket lives and true after the `will_retry=False` close."""
     pair = make_pair()
     closes: list[CloseReason] = []
-    pair.dialer.on_close(closes.append)
+    pair.acceptor.on_close(closes.append)
     pair.start()
+    assert pair.acceptor.is_closed is False
 
-    pair.dialer._will_retry = False
     await pair.dialer_socket.drop()
     await pair.settle()
-    assert [reason.will_retry for reason in closes] == [False], "the first loss reports, once"
 
-    replacement, _ = memory_pair()
-    pair.dialer._adopt_socket(replacement)
-    pair.dialer._will_retry = False
-    pair.dialer._die(ConnectionClosed("the second socket died too", code=1006))
+    assert [reason.will_retry for reason in closes] == [False]
+    assert pair.acceptor.is_closed is True
+    assert pair.acceptor.is_open is False
 
-    assert [reason.will_retry for reason in closes] == [False, False], "the second connection's loss was not reported"
+
+async def test_on_close_registered_after_the_final_close_is_called_at_once(make_pair, caplog):
+    """WSM-RCN-047: a handler registered on a closed peer receives the final close before `on_close` returns."""
+    pair = make_pair()
+    pair.start()
+    await pair.dialer_socket.drop()
+    await pair.settle()
+    assert pair.acceptor.is_closed is True
+
+    late: list[CloseReason] = []
+    record = late.append
+    assert pair.acceptor.on_close(record) is record, "still usable as a decorator"
+    assert len(late) == 1
+    assert late[0].will_retry is False
+
+    def raising(_reason: CloseReason) -> None:
+        raise RuntimeError("handler failure")
+
+    with caplog.at_level(logging.ERROR, logger="muxws"):
+        pair.acceptor.on_close(raising)
+    assert "an on_close handler raised" in caplog.text, "a raising late handler is logged, not propagated"
+
+    pair.acceptor._notify_close(CloseReason(code=1000, reason="", was_clean=True, will_retry=False))
+    assert len(late) == 1, "a second final close is suppressed, and the late handler is not called again"

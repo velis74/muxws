@@ -252,7 +252,8 @@ close informs the application that no reconnection will follow.
 At most one `will_retry=False` close is fired per peer, so a teardown handler guarded by it runs once.
 
 `peer.close()` also stops the helper. It marks the peer as closing before any other step, so a close
-called while the helper waits in its backoff prevents the next dial. A close called while a dial or a
+called while the helper waits in its backoff prevents the next dial, and reports the `will_retry=False`
+close the last socket loss did not. A close called while a dial or a
 hello is in progress ends that attempt: a socket the dial returns afterwards is closed without being
 used, a hello acknowledged afterwards does not establish the connection, `is_open` / `isOpen` stays
 false, and `on_reconnect` / `onReconnect` does not fire.
@@ -263,6 +264,6 @@ false, and `on_reconnect` / `onReconnect` does not fire.
 - [`api/connect`](/api/connect) — `hello`, `hello_headers`, `reconnect`, and the three durations
   `hello_timeout`, `ping_interval` and `ping_timeout` (seconds as floats; `helloTimeoutMs`,
   `pingIntervalMs` and `pingTimeoutMs` as milliseconds in TypeScript)
-- [`api/peer`](/api/peer) — `on_reconnect`, `on_close`, `ping`, `close`, `is_open`, `id`
+- [`api/peer`](/api/peer) — `on_reconnect`, `on_close`, `ping`, `close`, `is_open`, `is_closed`, `id`
 - [`api/errors`](/api/errors) — `ConnectionLost`, `StreamTimeout`, `CodecMismatch`
 - [`api/types`](/api/types) — `CloseReason` and its four fields

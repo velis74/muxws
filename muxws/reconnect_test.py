@@ -1343,6 +1343,52 @@ async def test_a_deliberate_close_between_sockets_stops_the_driver(dialable_serv
     assert loop._stopped is True
 
 
+async def test_a_deliberate_close_between_sockets_reports_the_final_close(dialable_server: DialableServer):
+    """WSM-RCN-040/046: `close()` between two sockets reports `will_retry=False` and closes the peer.
+
+    The socket loss reported `will_retry=True`. Without a report from `close()`, the application
+    receives no close that says no reconnection follows.
+    """
+    peer, loop = await dialable_server.driver(options=Reconnect(initial_delay=0.02, jitter=0.0))
+    peer._connection_loop = loop
+    closes: list[CloseReason] = []
+    peer.on_close(closes.append)
+    await loop.establish()
+    loop.start()
+
+    dialable_server.refuse_next(200)
+    await dialable_server.drop()
+    await asyncio.wait_for(_until(lambda: dialable_server.dials >= 3), 5.0)
+    assert peer.is_open is False
+    assert peer.is_closed is False, "between sockets the helper still dials"
+
+    await peer.close(reason="bye")
+
+    assert [close.will_retry for close in closes] == [True, False]
+    assert closes[-1] == CloseReason(code=1000, reason="bye", was_clean=True, will_retry=False)
+    assert peer.is_closed is True
+
+    await peer.close()
+    assert len(closes) == 2, "a second close() reports nothing"
+
+
+async def test_an_exhausted_helper_leaves_the_peer_closed(dialable_server: DialableServer):
+    """WSM-RCN-044/046: `is_closed` turns true when `max_attempts` is exhausted, not before."""
+    given_up = asyncio.Event()
+    peer, loop = await dialable_server.driver(options=Reconnect(initial_delay=0.001, jitter=0.0, max_attempts=2))
+    peer.on_close(lambda reason: given_up.set() if not reason.will_retry else None)
+    await loop.establish()
+    loop.start()
+    try:
+        assert peer.is_closed is False
+        dialable_server.refuse_next(10)
+        await dialable_server.drop()
+        await asyncio.wait_for(given_up.wait(), 5.0)
+        assert peer.is_closed is True
+    finally:
+        await loop.stop()
+
+
 async def test_a_stream_reset_inside_the_hello_window_still_reaches_the_wire(dialable_server: DialableServer):
     """WSM-STM-021 and WSM-RCN-043: a `reset` is sent during the hello window.
 
