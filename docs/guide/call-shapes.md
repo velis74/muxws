@@ -25,14 +25,14 @@ that no more payloads follow and can answer immediately.
 # fragment
 answer = await peer.request({"action": "list"})
 # with a deadline, in seconds:
-answer = await peer.request({"action": "list"}, timeout=5.0)  # 5.0 seconds
+answer = await peer.request({"action": "list"}, timeout=5.0)
 ```
 
 ```typescript
 // fragment
 const answer = await peer.request({ action: 'list' });
 // with a deadline, in milliseconds:
-const answered = await peer.request({ action: 'list' }, { timeoutMs: 5000 }); // 5000 milliseconds
+const answered = await peer.request({ action: 'list' }, { timeoutMs: 5000 });
 ```
 
 On the handler side, `reply()` is `send()` followed by `end()`, which is what a unary handler needs:
@@ -216,7 +216,7 @@ This is the only behavioural difference between the two calls that return one va
 | | Remote sends one payload | Remote sends two |
 |---|---|---|
 | `await peer.request(...)` | returns it | resets the stream with a protocol error and raises `ProtocolError` |
-| `await peer.open(..., end=True)` | returns it | returns the **first**; the second is simply never read |
+| `await peer.open(..., end=True)` | returns it | returns the **first**; the second is never read |
 
 `request()` is a unary call; discarding extra values silently would hide a handler bug, so it
 reports them. `await stream` is defined as "the first payload"; to receive all payloads, iterate the

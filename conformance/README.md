@@ -2,10 +2,8 @@
 
 Everything under this directory is plain JSON, read verbatim by both the Python suite and the
 TypeScript suite. Nothing here is generated at test time and nothing here is language-specific. The
-fixtures define the required behaviour, and both implementations are tested against them. The corpus
-exists so that every rule is tested in both implementations: a rule that only one implementation
-tests can diverge, and a wire disagreement between the implementations shows up only when peers in
-different languages connect, where it looks like data corruption.
+fixtures define the required behaviour, and both implementations are tested against them, so that
+every rule is tested in both implementations.
 
 **This document is the schema.** It specifies the fixture format precisely enough that two
 independently written runners read every file the same way. If a runner needs a field the other does
@@ -52,9 +50,8 @@ file; `vitest` uses `process.cwd()`.
   `max_frame_bytes` key inside a frame. The `muxws.v1.` subprotocol prefix is the only version
   anywhere (WSM-CON-009, WSM-PKG-005). `muxws/conformance_schema_test.py` greps the corpus text for
   these words, so they must not appear in quotes in a `description` or a `reason` string either.
-- **Reset code 5 is retired** (it was `STREAM_LIMIT`, WSM-STM-022) and must never appear. Code 9
-  (`CONNECTION_CLOSED`) is synthesised locally and must never appear on the wire either
-  (WSM-ERR-002).
+- **Every reset code is one this generation defines (§2.4 of `SPEC.md`), and none is 9.** Code 9
+  (`CONNECTION_CLOSED`) is synthesised locally and must never appear on the wire (WSM-ERR-002).
 - **Every duration is milliseconds and its key ends in `_ms`.** The corpus is written once and read
   by a language whose durations are milliseconds and a language whose durations are seconds
   (WSM-CON-012); the runner converts, the fixture does not carry both.
@@ -91,8 +88,7 @@ receiver-side contract rather than a transcription of one language's dataclass:
 - Every other key absent means that field's default (`stream: null`, `more: false`, `end: false`,
   `headers: null`, …).
 - Unknown keys are **dropped**, never preserved (WSM-FRM-001). An unknown key added to a triple is
-  not part of the decoded frame; if decoders preserved unknown keys, `decode(encode(frame)) == frame`
-  would also pass for frames carrying them.
+  not part of the decoded frame.
 - `type` is required. `payload` and `fragment` together is a protocol error (WSM-FRM-004) and cannot
   appear in a triple.
 
@@ -198,7 +194,7 @@ an unrecognised step kind or an unimplemented `call` is a hard failure.
 
 A `requires_codec` naming a codec that **no** pass is configured with is an error, not a skip: the
 fixture would then never run while the report lists it as covered. Both runners test for this by name
-(`test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere`,
+(`test_every_codec_specific_fixture_is_run_by_some_pass`,
 `runs every fixture under some configured codec, skipping none everywhere`), because WSM-CDC-007
 requires every codec that ships to have a peer at each end running this corpus.
 

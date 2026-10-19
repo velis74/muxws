@@ -128,7 +128,7 @@ describe('Settings', () => {
     expect(loadConf(undefined, false).settings.codec).toBe('json');
   });
 
-  it('is the one singleton, constructed at import time and readable ever after', () => {
+  it('is a singleton constructed at import time', () => {
     // Under vitest, `import.meta.env` names no codec.
     expect(settings).toBeInstanceOf(Settings);
     expect(settings.codec).toBe('json');
@@ -205,7 +205,7 @@ describe('the acceptor', () => {
   });
 
   it('lets an explicit codec argument win over settings - WSM-CDC-012', async () => {
-    settings.codec = 'msgpack'; // unregistered: consulting it at all would raise
+    settings.codec = 'msgpack'; // unregistered: reading it raises
     const socket = new FakeWsConnection('muxws.v1.json');
 
     const peer = await accept(asSocket(socket), { codec: json });

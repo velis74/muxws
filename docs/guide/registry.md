@@ -53,8 +53,7 @@ The registry has three main members, plus `deregister`.
 
 ### `register(peer)`
 
-Indexes the peer under **every key its `tags` holds at the time of the call**. The registry indexes
-all keys.
+Indexes the peer under **every key its `tags` holds at the time of the call**.
 
 ```python
 # fragment
@@ -158,24 +157,22 @@ peer and therefore to `peer.tags`.
 
 ## The usage rule
 
-**Look up on keys you do not mutate, and mutate keys you do not look up.**
-
 A write to `peer.tags` does not update the index. A key used for lookup must therefore be set before
 `register` and not changed afterwards, and a key that changes must not be used for lookup.
 
 ```python
 # fragment
-# Look up on these: written once, then never touched again.
+# Keys used for lookup: written before register() and not changed.
 peer.tags["tenant"] = "acme"
 peer.tags["user"] = 42
 registry.register(peer)
 
-# Mutate these freely: nothing ever calls peers_for() on them.
+# Keys that change: never used for lookup.
 peer.tags["last_seen"] = time.time()
 peer.tags["frames"] = peer.tags.get("frames", 0) + 1
 ```
 
-**If you need both on one key, call `register(peer)` after every write to it.**
+**A key that is used for lookup and also changes needs `register(peer)` after every write to it.**
 
 ```python
 # fragment
@@ -194,13 +191,10 @@ keeps the previous value, and the peer is missing from lookups by the new value.
 
 ## One process
 
-`PeerRegistry` is **per process**. It is an in-memory index over the peers whose sockets this process
-holds. muxws ships no cross-process backplane: no Redis adapter, no pub/sub bridge, no sticky-routing
-helper.
-
-Cross-process fan-out depends on deployment choices: the broker, the delivery guarantee, the handling
-of a message published while a client is reconnecting, and whether a client is pinned to one process.
-muxws does not make these choices.
+`PeerRegistry` is **per process**: an in-memory index over the peers whose sockets this process
+holds. Cross-process fan-out depends on deployment choices (the broker, the delivery guarantee, the
+handling of a message published while a client is reconnecting, whether a client is pinned to one
+process), and muxws ships no cross-process backplane.
 
 A multi-process deployment publishes the event on its message bus, has every process subscribe, and in
 each subscriber uses the **local** `PeerRegistry` to find the matching peers that process holds and

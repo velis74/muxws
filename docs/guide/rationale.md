@@ -80,8 +80,7 @@ muxws copies the semantics of HTTP/2 and HTTP/3, not their transport. A WebSocke
 connection, which has these consequences:
 
 - **No independent per-stream loss recovery.** In QUIC, a lost packet stalls only the stream it
-  belonged to. Over TCP, one lost segment stalls *every* muxws stream until it is retransmitted. A
-  framing layer above TCP cannot change this.
+  belonged to. Over TCP, one lost segment stalls *every* muxws stream until it is retransmitted.
 - **No 0-RTT, no connection migration, no per-stream congestion control.** These are QUIC transport
   features, below the layer muxws operates at.
 - **One global message order.** A WebSocket delivers messages in send order across all streams,
@@ -93,23 +92,9 @@ see [Connection lifecycle](./connection-lifecycle.md).
 
 ### Head-of-line blocking
 
-Two different problems are called head-of-line blocking. muxws solves the first and cannot solve the
-second.
-
-**Application-level head-of-line blocking** occurs when several conversations share one channel and a
-large message occupies the send queue: a 1 MB export is sent from its first byte to its last while a
-200-byte progress update waits. **muxws solves this.** Large payloads are fragmented, the frame cap is
-a constant so no stream occupies the queue for longer than one frame, and the writer rotates between
-streams with at most one prepared frame per stream - see
-[Sizes & fragmentation](./sizes-and-fragmentation.md).
-
-**Transport-level head-of-line blocking** is caused by packet loss: one lost TCP segment stalls every
-stream until it is retransmitted. **muxws does not solve this, and no protocol above TCP can.** Only
-the layer that handles packets can see packet loss. When a message reaches muxws, the kernel has
-either already filled the gap or is still holding back all data after it. QUIC solves this problem
-because QUIC is the transport.
-
-[Comparison to HTTP/2 and HTTP/3](./comparison.md) covers the differences in detail.
+muxws removes application-level head-of-line blocking (a large message occupying the send queue) and
+does not affect transport-level head-of-line blocking (a lost TCP segment stalling every stream). See
+[Two kinds of head-of-line blocking](./comparison.md#two-kinds-of-head-of-line-blocking).
 
 ## What muxws does not do
 
@@ -154,7 +139,7 @@ request with the roles swapped: the same correlation (a stream id) and the same 
 # fragment
 # On the acceptor, pushing to a client - the same three calls a client makes.
 await peer.notify({"event": "deploy-finished"})
-answer = await peer.request({"question": "are you still there?"}, timeout=5.0)  # 5.0 seconds
+answer = await peer.request({"question": "are you still there?"}, timeout=5.0)
 async for chunk in peer.open({"stream": "logs"}):
     print(chunk)
 ```

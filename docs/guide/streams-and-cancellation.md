@@ -104,7 +104,7 @@ payload, so the answering peer can send its headers before it has produced any d
 # fragment
 async def handler(payload, stream):
     await stream.send_headers({"content-type": "text/csv", "rows-estimated": 40_000})
-    async for row in rows():           # minutes later, perhaps
+    async for row in rows():
         await stream.send(row)
     await stream.end()
 ```
@@ -394,7 +394,7 @@ const controller = new AbortController();
 const stream = peer.open({ report: 'sales' }, { end: true });
 setTimeout(() => controller.abort(), 100); // 100 milliseconds
 // Aborting sends reset(CANCELLED) and then rejects this await.
-const answer = await stream.result({ signal: controller.signal, timeoutMs: 30_000 }); // 30000 milliseconds
+const answer = await stream.result({ signal: controller.signal, timeoutMs: 30_000 });
 ```
 
 A deadline uses a different code from a cancellation: when `timeout=` in seconds or `timeoutMs` in

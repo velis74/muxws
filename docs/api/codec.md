@@ -15,14 +15,14 @@ frame that carries it.
   no check for installed modules. Looking up an unregistered name raises `CodecNotRegistered`; there
   is no fallback to JSON.
 
-`json` is registered for you, by the package itself. Everything else you register yourself.
+The package registers `json`; the application registers every other codec.
 
 ## `Codec`
 
 The codec interface: a `runtime_checkable` `Protocol` in Python, an `interface` in TypeScript. Any
 object with these six members is a codec; there is no base class.
 
-`binary` is **declared, not inferred**. The peer reads it to choose between the socket's text and
+`binary` is a declared attribute. The peer reads it to choose between the socket's text and
 binary send methods and to determine which inbound message type to expect. The peer does not inspect
 a message's type to choose a decoder, so a text message on a msgpack connection is a protocol
 error.

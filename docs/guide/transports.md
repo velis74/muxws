@@ -2,8 +2,7 @@
 
 The muxws peer does not open sockets. It uses a `SocketAdapter` with four methods (`send_text`,
 `send_bytes`, `receive`, `close`), and the adapters are the **only** transport-specific code in the
-library. The rest of the library, in both languages, uses only those four methods and has no
-WebSocket-specific code.
+library.
 
 Shipped adapters: Starlette/FastAPI and the `websockets` library in Python, the browser's global
 `WebSocket` and the `ws` package in TypeScript, and an in-memory pair in each language for tests.
@@ -177,8 +176,8 @@ import { connect, type Stream } from 'muxws';
 
 const peer = await connect('wss://example.test/ws', {
   hello: { tab: sessionStorage.getItem('tab') },
-  pingIntervalMs: 20_000, // milliseconds
-  pingTimeoutMs: 10_000, // milliseconds
+  pingIntervalMs: 20_000,
+  pingTimeoutMs: 10_000,
   onStream: async (payload: unknown, stream: Stream) => {
     // Streams the server opens (server push) arrive here.
     console.log('pushed', payload);
@@ -189,7 +188,7 @@ const peer = await connect('wss://example.test/ws', {
   },
 });
 
-console.log(await peer.request({ hello: 'world' }, { timeoutMs: 5000 })); // milliseconds
+console.log(await peer.request({ hello: 'world' }, { timeoutMs: 5000 }));
 ```
 
 Needs `npm install muxws` only: the browser entry point has no runtime dependencies, and
@@ -249,8 +248,7 @@ registration is in the entry point a browser loads. A Node acceptor that imports
 **Both hooks are required.** `handleProtocols` only *selects* a value: when it returns `false`, `ws`
 still answers 101, without a `Sec-WebSocket-Protocol` header. `refuseMismatchedUpgrade` wraps the
 server's `shouldHandle`, the hook that can reject an upgrade with a status, so a mismatched codec
-receives HTTP 400. A server that installs only `handleProtocols` completes handshakes that should be
-refused. The wrapper calls the inherited `shouldHandle` first, so a server constructed with `path`
+receives HTTP 400. The wrapper calls the inherited `shouldHandle` first, so a server constructed with `path`
 keeps that check.
 
 Without `refuseMismatchedUpgrade`, the upgrade is answered with 101 instead of 400 and the connection
@@ -413,7 +411,7 @@ import 'muxws';
 import { connect } from 'muxws/node';
 
 const peer = await connect('ws+unix:///tmp/muxws.sock:/ws');
-console.log(await peer.request({ say: 'hello' }, { timeoutMs: 5000 })); // milliseconds
+console.log(await peer.request({ say: 'hello' }, { timeoutMs: 5000 }));
 await peer.close();
 ```
 
@@ -547,14 +545,10 @@ has completed its handshake when `accept()` runs, and is closed with 1008. `acce
 acceptor has allocated resources for it, it is sent unchanged on every reconnection for the life of
 the process (so the credential cannot be rotated), and it is passed as an application payload to every
 frame observer on the connection. The hello identifies a client; it does not authorize the connection.
-See [Reconnect](/guide/reconnect#the-hello).
 
 **Not in per-stream `headers`.** muxws does not interpret them. They carry application metadata, such
-as a trace id, a content type or an idempotency key. Authenticating per stream would re-check a
-credential on every stream of a socket that was authenticated at the upgrade, and muxws provides no
-support for it. muxws also does not route on the opening payload: it has no path matching, no method
-dispatch and no handler table. Each peer has one `on_stream` handler, and the application decides how
-to handle each payload.
+as a trace id, a content type or an idempotency key. muxws does not route on the opening payload
+either; see [What muxws does not do](/guide/rationale#what-muxws-does-not-do).
 
 **When a credential expires during a connection**, close the connection with `goaway`. Streams at or
 below the cut-off finish, no new streams are accepted, and a dialer with a reconnect helper dials again

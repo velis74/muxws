@@ -2,7 +2,7 @@
  * Two socket adapters connected to each other in memory, without a network socket.
  *
  * Mirrors `muxws/transports/memory.py`. Part of the package, not the test tree, because the reconnect
- * tests and the conformance sequence runner use it (D2).
+ * tests and the conformance sequence runner use it.
  */
 
 import { ConnectionClosed } from '../errors';

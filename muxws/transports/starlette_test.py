@@ -104,7 +104,7 @@ def test_refusal_is_http_400_and_is_logged(offered: list[str], caplog):
 
 
 def test_application_accepting_first_is_an_error():
-    """WSM-CDC-026: a silent second accept would hide which subprotocol was actually selected."""
+    """WSM-CDC-026: a silent second accept would hide which subprotocol was selected."""
     with TestClient(_app(accept_first=True)) as client:
         with pytest.raises(ProtocolError, match="already accepted"):
             with client.websocket_connect("/ws", subprotocols=["muxws.v1.json"]) as socket:
@@ -192,7 +192,7 @@ def test_a_refused_origin_is_answered_with_http_403(allowed: Any, headers: dict[
                 pass
 
     assert info.value.status_code == 403
-    assert accepted == [True], "serve() returns quietly after the refusal"
+    assert accepted == [True], "serve() raised after the refusal"
     assert "refused a muxws handshake" in caplog.text
 
 
@@ -238,7 +238,7 @@ def test_an_invalid_allowed_origins_entry_raises_before_the_upgrade():
     assert "not an origin" in str(raised[0])
 
 
-def test_the_origin_check_leaves_an_already_accepted_socket_to_the_protocol_error():
+def test_allowed_origins_on_an_already_accepted_socket_raises_protocol_error():
     async def endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         await muxws.serve(websocket, handler=_echo, allowed_origins=["https://app.example.com"])

@@ -34,7 +34,7 @@ async def test_no_frame_is_required_before_any_other(make_pair):
         await pair.stop()
 
 
-async def test_no_settings_frame_is_ever_emitted(make_pair):
+async def test_no_settings_frame_is_emitted(make_pair):
     """WSM-CON-031: no limit, version or capability appears on the wire in any form."""
     forbidden = {
         "settings",
@@ -131,7 +131,7 @@ async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
     pair.acceptor.on_stream(_reply_now)
     pair.start()
     try:
-        # Swallow every pong on the way back in.
+        # Drop every incoming pong.
         original = pair.dialer._dispatch
 
         async def swallow_pongs(frame: Frame) -> bool:
@@ -144,7 +144,7 @@ async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
         with pytest.raises(ConnectionClosed, match="no pong"):
             await pair.dialer.ping(timeout=0.05)
 
-        assert pair.dialer.is_open, "a lost pong is not a lost connection - that is M5b's job"
+        assert pair.dialer.is_open, "a missing pong does not close the connection"
         pair.dialer._dispatch = original  # type: ignore[method-assign]
         assert await pair.dialer.request({"q": 1}) == {"ok": True}
     finally:
@@ -296,7 +296,7 @@ async def test_after_sending_goaway_incoming_opens_are_refused():
         for _ in range(12):
             await asyncio.sleep(0)
 
-        assert handled == [], "a handler ran after this peer said it was going away"
+        assert handled == [], "a handler ran after this peer sent goaway"
         resets = [codec.decode(m) for m in socket.sent if codec.decode(m).type == "reset"]
         assert resets
         assert resets[-1].code == int(ResetCode.REFUSED), "nothing ran, so the opener may retry elsewhere"
@@ -421,11 +421,7 @@ async def test_close_is_idempotent(make_pair):
 
 
 async def test_id_exhaustion_sends_goaway_drains_and_closes(make_pair):
-    """WSM-SID-007: refuse further opens, send `goaway`, drain, close.
-
-    Besides refusing further opens, the exhausting peer sends `goaway`, lets in-flight streams drain,
-    and then closes the connection.
-    """
+    """WSM-SID-007: refuse further opens, send `goaway`, drain, close."""
     assert MAX_STREAM_ID == 2**31 - 1
 
     pair = make_pair()
@@ -447,10 +443,10 @@ async def test_id_exhaustion_sends_goaway_drains_and_closes(make_pair):
         await pair.settle()
 
         goaway = pair.frames_of_type("dialer", "goaway")
-        assert goaway, "the exhausting peer must say goodbye rather than just refusing"
+        assert goaway, "the peer with exhausted ids did not send goaway"
         assert goaway[-1].code == int(ResetCode.NO_ERROR)
         assert "exhausted" in (goaway[-1].reason or "")
-        assert pair.dialer.is_open is False, "and must then close"
+        assert pair.dialer.is_open is False, "the peer did not close after goaway"
         assert pair.dialer_socket.is_closed
     finally:
         await pair.stop()

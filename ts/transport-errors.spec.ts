@@ -136,7 +136,7 @@ describe('dialling with the ws peer dependency absent - WSM-ERR-016', () => {
     expect(probe.message).not.toContain('npm install ws');
   });
 
-  it('still answers the acceptor hooks, which is why the import is on the dial path only', { timeout: 60_000 }, () => {
+  it('answers the acceptor hooks after a dial failed on a missing ws', { timeout: 60_000 }, () => {
     // Same process, after the failed dial. `handleProtocols` belongs to the acceptor, and an
     // application that only accepts connections may have no `ws` of its own because it receives
     // sockets from another component. Importing `ws` at module scope would make `muxws/node` fail to

@@ -8,7 +8,7 @@
 import { ProtocolError } from './errors';
 
 /**
- * The sentinel distinguishing "no payload" from an explicit `null` (D1).
+ * The sentinel distinguishing "no payload" from an explicit `null`.
  *
  * A unique symbol: no other value compares equal to it, `JSON.stringify` does not serialize it, and
  * it prints as `Symbol(ABSENT)` in assertion output.
@@ -22,7 +22,7 @@ export type Absent = typeof ABSENT;
  */
 export const V1_FRAME_TYPES: ReadonlySet<string> = new Set(['open', 'data', 'reset', 'ping', 'pong', 'goaway']);
 
-/** One logical protocol unit. Readonly, and compared by value with `framesEqual` (D3). */
+/** One logical protocol unit. Readonly, and compared by value with `framesEqual`. */
 export interface Frame {
   readonly type: string;
   readonly stream?: number | null;
@@ -83,7 +83,7 @@ function fieldValue(frame: Frame, name: FieldName): unknown {
  * Render `frame` as an envelope, omitting every field still at its default.
  *
  * `payload` is the one field whose default is not `null`: `ABSENT` omits the key entirely, while
- * `null` emits `"payload": null` (D1).
+ * `null` emits `"payload": null`.
  */
 export function toMapping(frame: Frame): Record<string, unknown> {
   const present: Record<string, unknown> = {};
@@ -116,8 +116,8 @@ export function toMapping(frame: Frame): Record<string, unknown> {
 /**
  * Build a `Frame` from a decoded envelope.
  *
- * Unknown keys are dropped (WSM-FRM-001, D2), so a decoded frame contains only envelope fields. An
- * unrecognised `type` is returned as an ordinary `Frame` (D4); the peer, not the codec, ignores it
+ * Unknown keys are dropped (WSM-FRM-001), so a decoded frame contains only envelope fields. An
+ * unrecognised `type` is returned as an ordinary `Frame`; the peer, not the codec, ignores it
  * (WSM-FRM-002).
  *
  * Throws `ProtocolError` when `type` is missing, when both `payload` and `fragment` are present, or
@@ -176,7 +176,7 @@ function validField(name: Exclude<FieldName, 'payload'>, value: unknown): boolea
   }
 }
 
-/** Structural equality over the twelve envelope fields, with defaults normalised first (D3). */
+/** Structural equality over the twelve envelope fields, with defaults normalised first. */
 export function framesEqual(a: Frame, b: Frame): boolean {
   return FIELD_NAMES.every((name) => deepEqual(fieldValue(a, name), fieldValue(b, name)));
 }

@@ -142,8 +142,7 @@ def test_the_take_invariant_holds_over_generated_strings_offsets_and_budgets():
     """Prefix, within budget, maximal, and empty only when the first codepoint does not fit.
 
     Seeded, so a failing case reproduces on the rerun. The sweep is exhaustive per string: every
-    codepoint boundary as an offset, and every budget from zero to past the end of the string, which
-    covers every edge case.
+    codepoint boundary as an offset, and every budget from zero to past the end of the string.
     """
     rng = random.Random(20260814)  # noqa: S311 - a fixed seed for reproducibility; nothing here is a secret
     pool = "aZ0 -\nčšžđé—ъ中あ\ufeff🛰𝕄🌍😀"
@@ -262,12 +261,12 @@ def test_a_codepoint_wider_than_the_whole_budget_raises_rather_than_looping(code
         split_frame(Frame("data", stream=1, payload="🌍🌍"), 4, codec)
 
 
-def test_generated_unicode_payloads_fragment_and_reassemble_at_hostile_caps(codec: JsonCodec):
+def test_generated_unicode_payloads_fragment_and_reassemble_at_small_caps(codec: JsonCodec):
     """Mixed-width text at small caps: every fragment is whole codepoints and the whole sequence joins.
 
     Seeded, like the invariant sweep, so a failing payload reproduces on the rerun.
     """
-    rng = random.Random(4711)  # noqa: S311 - a fixed seed, so the failing payload survives the rerun
+    rng = random.Random(4711)  # noqa: S311 - a fixed seed, so a failing payload reproduces on the rerun
     pool = 'aZ0 "\\\nčšž—ъ中\ufeff🛰𝕄🌍'
     for _ in range(40):
         payload = {"body": "".join(rng.choice(pool) for _ in range(rng.randrange(200, 900)))}
@@ -416,7 +415,7 @@ def test_fragments_are_contiguous_and_reassemble_in_order(codec: JsonCodec):
 
 @pytest.mark.parametrize("case", CORPUS, ids=[c["name"] for c in CORPUS])
 def test_corpus_payloads_survive_a_small_cap(case: dict[str, Any], codec: JsonCodec):
-    """Every corpus frame that carries a payload fragments and reassembles at a hostile cap."""
+    """Every corpus frame that carries a payload fragments and reassembles at a small cap."""
     envelope = case["frame"]
     if "payload" not in envelope:
         pytest.skip("no payload to fragment")
@@ -528,19 +527,17 @@ def test_the_closing_fragment_may_be_empty(codec: JsonCodec):
     assert codec.decode_payload(rejoined) == frame.payload
 
 
-def test_how_much_encoding_one_megabyte_costs():
+def test_encode_calls_to_split_one_megabyte_stay_under_the_bound():
     """The number of `encode` calls needed to split a megabyte, asserted against an upper bound.
 
     `iter_fragments` encodes the remaining payload on every pass, and the reservation
     `min(512, cap // 2)` is often smaller than what JSON escaping needs, so the binary search in
-    `_largest_fitting_count` runs on nearly every fragment. The cuts are correct and the function is
-    pure, but the encoding work is synchronous and blocks the event loop, which adds the latency
-    WSM-INV-004 limits.
+    `_largest_fitting_count` runs on nearly every fragment. The encoding work is synchronous and
+    blocks the event loop, which adds the latency WSM-INV-004 limits.
 
-    Raising the reservation would change the boundaries: the reservation decides the boundary
-    whenever its first guess fits, and the search runs only when it does not. WSM-FRG-016 requires
-    both ports to cut identically and `conformance/frames/` pins the boundaries, so changing them
-    requires a new generation.
+    The reservation decides the boundary whenever its first guess fits, so it is part of the
+    boundary computation that WSM-FRG-016 requires both ports to share and `conformance/frames/`
+    pins.
 
     The assertion is an upper bound, not the exact count, so unrelated changes do not fail it.
     """
@@ -563,7 +560,7 @@ def test_how_much_encoding_one_megabyte_costs():
     frame = Frame("data", stream=1, payload=payload, end=True)
     fragments = list(iter_fragments(frame, MAX_FRAME_BYTES, codec))
 
-    assert len(fragments) > 8, "the payload must actually fragment for this to measure anything"
+    assert len(fragments) > 8, "the payload was not fragmented"
     per_fragment = calls / len(fragments)
     ratio = encoded_bytes / max(1, len(codec.encode_payload(payload)))
     report = (

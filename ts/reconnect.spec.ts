@@ -219,7 +219,7 @@ describe('connect() is wired to the reconnect driver', () => {
     );
 
     expect(caught, 'connect() must not return a peer that is retrying in the background').toBeInstanceOf(Error);
-    expect(Date.now() - started, 'and it must not back off before saying so').toBeLessThan(2000);
+    expect(Date.now() - started, 'and it must reject without a backoff sleep').toBeLessThan(2000);
   });
 
   it('throws promptly when the first hello is never acknowledged - WSM-RCN-006/026', async () => {
@@ -341,7 +341,7 @@ describe('the backoff schedule', () => {
     expect(schedule).toEqual([250, 500, 1000, 2000, 4000, 8000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
   });
 
-  it('stays at the cap however many attempts failed - WSM-RCN-003', () => {
+  it('stays at the cap for every attempt count above it - WSM-RCN-003', () => {
     const options = new Reconnect();
     [1023, 1024, 10_000].forEach((attempt) => {
       expect(unjitteredDelay(attempt, options)).toBe(30_000);
@@ -367,11 +367,11 @@ describe('the backoff schedule', () => {
     let next = 0;
     const delays = draws.map(() => backoffDelay(0, options, () => draws[next++]));
 
-    expect(new Set(delays).size, 'the delays must actually differ').toBeGreaterThan(190);
+    expect(new Set(delays).size, 'jittered delays must differ').toBeGreaterThan(190);
     expect(Math.min(...delays)).toBeGreaterThanOrEqual(250 * 0.7);
     expect(Math.max(...delays)).toBeLessThanOrEqual(250 * 1.3);
     const spread = Math.max(...delays) - Math.min(...delays);
-    expect(spread, `the window is barely used: ${spread}`).toBeGreaterThan(250 * 0.5);
+    expect(spread, `the delays span too little of the jitter window: ${spread}`).toBeGreaterThan(250 * 0.5);
   });
 
   it('never computes a negative delay', () => {
@@ -441,7 +441,7 @@ describe('the attempt counter', () => {
     }
 
     expect(delays).toEqual([250, 500, 1000, 2000, 4000]);
-    expect(delays, 'a growing delay sequence is the whole assertion').toEqual([...delays].sort((a, b) => a - b));
+    expect(delays, 'the delays must not decrease').toEqual([...delays].sort((a, b) => a - b));
 
     counter.established();
     expect(unjitteredDelay(counter.value, options)).toBe(250);
@@ -590,7 +590,7 @@ describe('the heartbeat', () => {
     failPing(new ConnectionClosed('no pong within 10ms', { code: 1006 }));
     await running;
 
-    expect(closes, 'a stopped heartbeat must not report a death nobody is going to act on').toEqual([]);
+    expect(closes, 'a stopped heartbeat must not declare the peer dead').toEqual([]);
     expect(peer.isOpen).toBe(true);
     expect(dialerSide.isClosed, 'nor close the socket the peer holds now').toBe(false);
   });
@@ -665,7 +665,7 @@ describe('the reconnect driver', () => {
     // A fresh array each read, so a caller cannot modify the driver's own record through the returned value; Python
     // returns `list(self._delays)` for the same reason.
     expect(loop.delays).not.toBe(loop.delays);
-    expect(delays, 'a growing delay sequence is the whole assertion').toEqual([...delays].sort((a, b) => a - b));
+    expect(delays, 'the delays must not decrease').toEqual([...delays].sort((a, b) => a - b));
     expect(reconnects, 'an attempt whose hello never completed is not a reconnection').toEqual([]);
     await loop.stop();
   });
@@ -1020,7 +1020,7 @@ describe('the reconnect driver', () => {
     const resets = framesOn(server.dialerSockets[1]).filter((frame) => frame.type === 'reset');
     expect(
       resets.map((frame) => frame.code),
-      'the reset never reached the wire; the remote still believes that stream is live',
+      'the reset never reached the wire; the remote still holds that stream open',
     ).toEqual([ResetCode.CANCELLED]);
 
     acknowledge();
@@ -1149,7 +1149,7 @@ describe('the reconnect driver', () => {
     // third close and no further dial: a refused dial lost no socket, so it fires no close of its own
     // (WSM-RCN-040).
     expect(closes.map((reason) => reason.willRetry)).toEqual([true, false]);
-    expect(server.dials - dialsBefore, 'exactly maxAttempts dials, then silence').toBe(2);
+    expect(server.dials - dialsBefore, 'exactly maxAttempts dials, then no further dial').toBe(2);
     expect(peer.willRetry).toBe(false);
     await loop.stop();
   });
@@ -1219,7 +1219,7 @@ describe('the reconnect driver', () => {
     expect(peer.isOpen, 'a peer that never established is not open').toBe(false);
     // Nothing is reported. Nothing was established, so nothing was lost, and `establish()` throwing is the report
     // (WSM-RCN-006). A `CloseReason` here would be a second report of one failure.
-    expect(closes, 'a callback nobody could be listening to is not a report').toEqual([]);
+    expect(closes, 'no onClose fires for a peer that was never established').toEqual([]);
   });
 
   it('keeps its record of delays bounded - WSM-RCN-001', async () => {
@@ -1244,11 +1244,11 @@ describe('the reconnect driver', () => {
     server.drop();
     await until(() => loop.attempts === 150, 5000, 'the attempt cap running out');
 
-    expect(loop.delays.length, 'the most recent hundred, and not one more').toBe(100);
+    expect(loop.delays.length, 'delays keeps the most recent 100 entries').toBe(100);
     await loop.stop();
   });
 
-  it('never dials at all when maxAttempts is zero - WSM-RCN-044', async () => {
+  it('makes no reconnect dial when maxAttempts is zero - WSM-RCN-044', async () => {
     // maxAttempts 0 means one connection and no reconnection. The loss is reported once, with `willRetry` false,
     // so the application does not wait for a retry.
     const server = new FakeServer();
@@ -1281,8 +1281,8 @@ describe('the reconnect driver', () => {
   it('decides by its own arithmetic and not by peer.willRetry - WSM-RCN-044/WSM-RCN-001', async () => {
     // `willRetry` is peer state that any holder of the peer can write - `ts/peer.spec.ts` writes it, and so can an
     // application. A supervisor that used it as its stop condition would let one stray assignment stop the
-    // reconnect loop, with nothing reporting that the peer stopped retrying; it would look like a server that never
-    // came back. The attempt counter is the helper's entire persistent state (WSM-RCN-001) and the cap is computed
+    // reconnect loop, with nothing reporting that the peer stopped retrying: the application sees no error and no
+    // further dial. The attempt counter is the helper's entire persistent state (WSM-RCN-001) and the cap is computed
     // from it, so only `CloseReason` reads the field. The `maxAttempts: 0` test above does not cover this: there
     // the loss already carries `willRetry` false, so both readings agree.
     const server = new FakeServer();
@@ -1450,7 +1450,7 @@ describe('the reconnect driver', () => {
     server.refusals = 200;
     server.drop();
     await until(() => server.dials >= 3, 3000, 'a few refused dials');
-    expect(peer.isOpen, 'the gap is where this test has to happen').toBe(false);
+    expect(peer.isOpen, 'close() must run while the peer is between sockets').toBe(false);
 
     await peer.close();
     const dials = server.dials;

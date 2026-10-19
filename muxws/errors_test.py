@@ -205,7 +205,7 @@ def test_the_transport_bases_are_root_exported_and_their_subclasses_are_not():
 
 
 def test_reset_codes_are_the_pinned_integers():
-    """Nine members; 5 is unassigned (STREAM_LIMIT is retired) and is never reused."""
+    """Nine members; 5 is unassigned and is never reused."""
     assert [(c.name, c.value) for c in ResetCode] == [
         ("NO_ERROR", 0),
         ("CANCELLED", 1),
@@ -221,13 +221,6 @@ def test_reset_codes_are_the_pinned_integers():
     assert 5 not in {c.value for c in ResetCode}
     with pytest.raises(ValueError, match="5"):
         ResetCode(5)
-
-
-def test_no_stream_limit_class_exists():
-    """WSM-ERR-001 is retired: StreamRefused covers every refusal and has no sibling class."""
-    import muxws.errors as errors
-
-    assert not hasattr(errors, "StreamLimit")
 
 
 @pytest.mark.parametrize(

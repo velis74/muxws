@@ -79,7 +79,7 @@ class Wire:
         self.backend = backend
         #: Every frame the browser saw, in order, recorded through the WSM-OBS-003 hook.
         self.seen: list[tuple[str, Frame, int]] = []
-        #: The browser's market data, filled only from the pushed streams (D1).
+        #: The browser's market data, filled only from the pushed streams.
         self.board: dict[str, Any] = {}
         #: The first row each symbol pushed, kept separately because `board` holds the latest one.
         #: The first row is the snapshot, which lets the grid be drawn before the first tick.
@@ -106,7 +106,7 @@ class Wire:
         self._tasks = [asyncio.create_task(self.dialer.serve()), asyncio.create_task(self.acceptor.serve())]
 
     async def hello(self, **tags: Any) -> Any:
-        """Send the hello `connect(hello=...)` would send, as a request so the reply can be read (D3)."""
+        """Send the hello `connect(hello=...)` would send, as a request so the reply can be read."""
         return await self.dialer.request({"action": "hello", "tags": tags or {"topic": "board"}})
 
     def received(self, direction: str = "rx") -> list[Frame]:
@@ -203,7 +203,7 @@ async def test_ticks_keep_flowing_during_an_export() -> None:
         print(f"export fragments={len(fragments)} span={fragments[0]}..{fragments[-1]} of {len(received)} frames")
         # The export is fragmented; with a single frame there is nothing to interleave.
         assert len(fragments) >= 8, f"the export arrived in {len(fragments)} fragments; it cannot stall anything"
-        assert len(fragments) < BACKLOG, "the tick streams ran dry before the export finished"
+        assert len(fragments) < BACKLOG, "no tick stream had a queued frame before the last export fragment"
         assert payload["count"] == EXPORT_ROWS
 
         # Between any two export fragments, every tick stream sent exactly one frame and nothing else
@@ -357,7 +357,7 @@ async def test_the_export_payload_fragments() -> None:
         assert payload["trades"][-1]["seq"] == EXPORT_ROWS - 1
 
 
-def test_the_market_is_deterministic_whatever_the_reader_clicked() -> None:
+def test_market_values_do_not_depend_on_other_requests() -> None:
     """D2: values do not depend on which other requests were made.
 
     With one shared seeded generator, ACME's tenth price would depend on whether an export was
@@ -371,7 +371,9 @@ def test_the_market_is_deterministic_whatever_the_reader_clicked() -> None:
     busy.depth("BOLT")
     busy.history("ACME")
     busy.tick("BOLT")
-    assert [busy.tick("ACME") for _ in range(10)] == ten, "ACME's prices depended on what else was asked for"
+    assert [busy.tick("ACME") for _ in range(10)] == ten, (
+        "ACME's prices differ between markets driven with different requests"
+    )
 
     # Also across processes: `random.Random` hashes a string seed itself, not through `hash()`, so the
     # result does not depend on PYTHONHASHSEED.
@@ -396,7 +398,7 @@ async def test_the_kill_switch_closes_every_peer() -> None:
         while not wire.closes and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.005)
         # The browser's `on_close` is called.
-        assert wire.closes, "the kill switch closed nothing the browser could observe"
+        assert wire.closes, "the kill switch did not call the browser's on_close"
         print(f"the browser was told: code={wire.closes[0].code} clean={wire.closes[0].was_clean}")
         assert wire.dialer.is_open is False
         assert wire.dialer.streams == {}

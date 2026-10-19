@@ -20,8 +20,8 @@ MuxwsError                     everything below is one of these
 │   ├── CodecNotRegistered     the configured codec name was never registered
 │   └── CodecMismatch          the two ends disagree; the handshake was rejected
 ├── OriginRefused              accept() refused the handshake's Origin header
-├── TransportUrlError          this transport cannot open that address — retype the URL
-├── TransportUnsupportedError  this runtime has no such transport — change where you run
+├── TransportUrlError          this transport cannot open that address
+├── TransportUnsupportedError  this runtime cannot provide the transport
 └── StreamReset                a stream ended early — carries code, reason, stream_id
     ├── RemoteError            code 2  the remote handler raised
     ├── StreamRefused          code 4  not accepted and definitively not processed
@@ -68,11 +68,8 @@ Codes are numeric on the wire and named in both APIs. The same codes are used by
 | 8 | `INTERNAL_ERROR` | A bug in the peer implementation itself, not in the application handler. | Surface and log. |
 | 9 | `CONNECTION_CLOSED` | Synthesised locally when the socket dies, on every stream live at that instant. **Never appears on the wire.** | Do not retry on this peer now; rebuild from `on_reconnect`. |
 
-**Code 5 is retired.** No name maps to it, and a peer must not send it. A peer that *receives* it
-treats it as any unknown code.
-
-**An unrecognised code resets that stream and leaves the connection open.** A future generation's
-code, or 5, is raised as a plain `StreamReset` whose `code` is the raw integer. For this reason `code`
+**An unrecognised code resets that stream and leaves the connection open.** It is raised as a plain
+`StreamReset` whose `code` is the raw integer. For this reason `code`
 is typed as "a `ResetCode` *or* an `int`": converting a wire value directly into a closed enumeration
 would raise in the read loop, after which the peer would report itself open while every await hangs.
 
@@ -209,8 +206,7 @@ an untrusted remote. See [Observability](/guide/observability#what-does-leave-th
 `StreamReset`: they are configuration failures, not stream failures, and neither is retryable.
 
 - **`CodecNotRegistered`** is raised **before any socket is opened**. The message names the configured
-  codec and the registered codecs. It means this process's configuration is wrong. muxws never falls
-  back to JSON.
+  codec and the registered codecs. It means this process's configuration is wrong.
 - **`CodecMismatch`** means the two ends are configured for different codecs and the handshake was
   rejected. A retry fails the same way. Fix the configuration on one end.
 
@@ -268,9 +264,8 @@ except TransportUnsupportedError:
     ...  # the URL is fine; this process or this platform cannot dial it
 ```
 
-Most applications need only the two base classes. They are exported from the package root in both
-languages and have no dependencies, so `except TransportUrlError` works in a process that cannot
-import the transport that raised.
+Most applications need only the two base classes. They have no dependencies, so
+`except TransportUrlError` works in a process that cannot import the transport that raised.
 
 ### Writing an adapter of your own
 

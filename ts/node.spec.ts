@@ -310,16 +310,19 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
     // mismatch for a connection where nothing is listening, which is outside WSM-CDC-024. The second
     // port is the stricter case and the one to keep if port 400 is in use on the test machine.
     ['a port whose number is 400', 400],
-  ])('leaves an acceptor that is simply not running as its own error - %s', async (_name, port) => {
-    const caught = await connect(`ws://127.0.0.1:${port}`).then(
-      () => null,
-      (error: unknown) => error,
-    );
+  ])(
+    'reports a refused connection on a port with no listener as its own error, not CodecMismatch - %s',
+    async (_name, port) => {
+      const caught = await connect(`ws://127.0.0.1:${port}`).then(
+        () => null,
+        (error: unknown) => error,
+      );
 
-    expect(caught).toBeInstanceOf(Error);
-    expect(caught).not.toBeInstanceOf(CodecMismatch);
-    expect((caught as Error).message).toContain('ECONNREFUSED');
-  });
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(CodecMismatch);
+      expect((caught as Error).message).toContain('ECONNREFUSED');
+    },
+  );
 });
 
 describe('a url this transport cannot open - WSM-ERR-016', () => {
@@ -378,7 +381,7 @@ describe('a url this transport cannot open - WSM-ERR-016', () => {
 });
 
 describe('serve() reports a refused handshake by returning, not by rejecting', () => {
-  it('matches Python, whose serve() also catches CodecMismatch', async () => {
+  it('returns on a refused handshake instead of rejecting', async () => {
     // When `CodecMismatch` is raised, the refusal has already been sent as HTTP 400 (WSM-CDC-022)
     // and logged with both codec names (WSM-CDC-029). Rejecting adds no diagnostic, and in Node it
     // causes an unhandled rejection inside a `ws` connection handler, which terminates the
@@ -396,10 +399,7 @@ describe('serve() reports a refused handshake by returning, not by rejecting', (
     } as unknown as Parameters<typeof serve>[0];
 
     await expect(serve(negotiatedSomethingElse, { handler: () => undefined })).resolves.toBeUndefined();
-    expect(closedWith, 'the socket is still closed - returning quietly is not ignoring it').toEqual([
-      1008,
-      'codec mismatch',
-    ]);
+    expect(closedWith, 'the socket is closed after serve() returns').toEqual([1008, 'codec mismatch']);
   });
 });
 

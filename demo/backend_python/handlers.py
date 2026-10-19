@@ -139,7 +139,7 @@ class MarketService:
             task.cancel()
         self.registry.deregister(peer)
 
-    # ------------------------------------------------------------------ the hello (D3)
+    # ------------------------------------------------------------------ the hello
 
     async def _hello(self, peer: Peer, payload: Any, stream: Stream) -> None:
         """The subscription: an ordinary stream with no marker on the wire (WSM-RCN-021).
@@ -151,8 +151,7 @@ class MarketService:
 
         Nothing depends on the reply. `connect()`'s reconnect helper owns this stream and discards
         the reply; the acknowledgement WSM-RCN-022 requires is this handler returning. The frontend
-        receives its data on the pushed streams below; the backend is the only source of symbol data
-        (D1).
+        receives its data on the pushed streams below; the backend is the only source of symbol data.
         """
         tags = payload.get("tags") if isinstance(payload, dict) else None
         if isinstance(tags, dict):
@@ -215,7 +214,7 @@ class MarketService:
             return
         try:
             # The snapshot first, so the row is drawn before the first price change; the frontend
-            # holds no seed data (D1).
+            # holds no seed data.
             await stream.send(self.market.snapshot(symbol))
             while True:
                 await asyncio.sleep(self._tick_interval)

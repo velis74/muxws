@@ -172,7 +172,7 @@ class Replay:
             "acceptor": Peer(acceptor_socket, codec=self.codec, is_dialer=swapped, **options),
         }
 
-        #: Ordinal -> the id that stream actually got. Filled by every step that opens one.
+        #: Ordinal -> the id allocated to that stream. Filled by every step that opens one.
         self.ordinals: list[int] = []
         #: Both peers' view of every stream, by id: the opener's handle and the receiver's.
         self.by_id: dict[str, dict[int, Stream]] = {"dialer": {}, "acceptor": {}}
@@ -319,7 +319,7 @@ class Replay:
 
     async def call_end(self, step: dict[str, Any]) -> None:
         stream = self.stream_for(step["peer"], step["stream_ref"])
-        # An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
+        # An absent `payload` key is `ABSENT`, not `null`: they are different frames.
         await stream.end(
             step["payload"] if "payload" in step else ABSENT,
             trailers=step.get("trailers"),
@@ -399,7 +399,7 @@ class Replay:
     # ------------------------------------------------------------------ resolution
 
     def id_of(self, ordinal: int) -> int:
-        """`stream_ref: n` -> the id the n-th stream in the script actually got (WSM-TST-002)."""
+        """`stream_ref: n` -> the id allocated to the n-th stream in the script (WSM-TST-002)."""
         if not 1 <= ordinal <= len(self.ordinals):
             raise AssertionError(f"stream_ref {ordinal} names a stream this script has not opened")
         return self.ordinals[ordinal - 1]
@@ -567,7 +567,7 @@ async def test_sequence_corpus_replays_under_msgpack(path: Path, swapped: bool):
     await replay(path, swapped=swapped, codec=MsgpackCodec())
 
 
-def test_the_binary_codec_fixture_is_replayed_rather_than_skipped_everywhere():
+def test_every_codec_specific_fixture_is_run_by_some_pass():
     """The fixture the JSON pass skips must be a fixture some pass runs (WSM-CDC-007).
 
     Asserted over the corpus, not left to the parametrization above: a `requires_codec` naming a
@@ -591,7 +591,7 @@ def test_the_bytes_placeholder_is_resolved_before_a_step_runs():
     and that loading resolves it.
     """
     raw = json.dumps(_load(SEQUENCES_DIR / "bytes-payload-under-binary-codec.json"))
-    assert '"$bytes"' in raw, "the fixture no longer carries the placeholder this test is about"
+    assert '"$bytes"' in raw, "the fixture contains no $bytes placeholder"
 
     resolved = _load_sequence(SEQUENCES_DIR / "bytes-payload-under-binary-codec.json")
     found: list[bytes] = []
@@ -653,7 +653,7 @@ async def _wire_of_the_whole_corpus() -> list[tuple[str, str | bytes]]:
         replaying = await replay(path, swapped=False)
         for socket in replaying.sockets.values():
             wire.extend((path.stem, message) for message in socket.sent)
-    assert wire, "the corpus produced no frames at all"
+    assert wire, "the corpus produced no frames"
     return wire
 
 
@@ -661,7 +661,7 @@ async def test_no_limit_and_no_version_appears_on_the_wire():
     """WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay the whole corpus and check every sent envelope.
 
     There is no `settings` frame and no announced limit; the `muxws.v1.` subprotocol prefix is the
-    only version; WSM-FRM-003 is retired because there is no `settings` frame. The envelope on the
+    only version. The envelope on the
     wire is checked, not a decoded `Frame`, which drops unknown keys.
     """
     for name, message in await _wire_of_the_whole_corpus():
@@ -674,8 +674,8 @@ async def test_no_limit_and_no_version_appears_on_the_wire():
 async def test_window_update_is_never_sent():
     """WSM-BPR-001: `window_update` is a reserved frame type in v1 and nothing may send it.
 
-    Separate from the test above, though it replays the same corpus: flow control is reserved, and
-    this test is removed when flow control is implemented.
+    Separate from the test above, though it replays the same corpus: the rule is WSM-BPR-001, not
+    WSM-CON-031.
     """
     for name, message in await _wire_of_the_whole_corpus():
         assert json.loads(message)["type"] != "window_update", f"{name} sent a window_update frame"

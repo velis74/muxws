@@ -61,9 +61,8 @@ from muxws import MAX_FRAME_BYTES
 MAX_FRAME_BYTES  # 65536
 ```
 
-It is a protocol constant. It is not negotiated, not announced, not read from configuration, and not
-derived from any value the remote sends. A sender always fragments at it; a receiver accepts any frame
-up to it, and may accept larger frames.
+It is a protocol constant, not derived from any value the remote sends. A sender always fragments at
+it; a receiver accepts any frame up to it, and may accept larger frames.
 
 **The constant bounds interleaving latency.** One muxws connection is one WebSocket, and a WebSocket
 sends messages in a single order. A frame being written occupies the socket until it is complete. The
@@ -154,9 +153,8 @@ peer = await connect(url, max_payload_bytes=67_108_864)  # the default: 64 MiB
 const peer = await connect(url, { maxPayloadBytes: 67_108_864 }); // the default: 64 MiB
 ```
 
-The default is 64 MiB, and the limit is **local**. It is not announced, not negotiated, and not
-carried in any frame. A sender learns it only from the reset. If senders could read the limit, it
-would become part of the protocol that both ends must agree on.
+The default is 64 MiB, and the limit is **local**: a sender learns it only from the reset. See
+[No limit is negotiated](/guide/connection-lifecycle#no-limit-is-negotiated).
 
 **Raise it on the receiving peer.** The sender has no setting for it. If a browser uploads 200 MB
 documents to a server, set it on the server's `accept()`:

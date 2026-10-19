@@ -1023,7 +1023,7 @@ class Peer:
     # ------------------------------------------------------------------ ending
 
     async def _fail_connection(self, reason: str) -> None:
-        """ILL-C: goaway(PROTOCOL_ERROR), close the socket, then fail every live stream."""
+        """Connection-level protocol error: goaway(PROTOCOL_ERROR), close the socket, fail every live stream."""
         logger.warning("muxws conn=%s connection-level protocol error: %s", self.id, reason)
         # Marked as sent before the drain, so no stream is opened while the queued frames are sent
         # (WSM-CON-021).

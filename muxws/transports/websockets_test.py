@@ -100,10 +100,10 @@ async def _upgrade(url: str, offered: str) -> tuple[int, dict[str, str]]:
     parts = urlsplit(url)
     host, port = parts.hostname or "127.0.0.1", parts.port or 80
     reader, writer = await asyncio.open_connection(host, port)
-    return await _speak_the_upgrade(reader, writer, host=f"{host}:{port}", request_target="/", offered=offered)
+    return await _send_upgrade_request(reader, writer, host=f"{host}:{port}", request_target="/", offered=offered)
 
 
-async def _speak_the_upgrade(
+async def _send_upgrade_request(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     *,
@@ -374,7 +374,7 @@ async def test_an_unreachable_acceptor_is_not_reported_as_a_codec_mismatch():
         await muxws.connect(f"ws://127.0.0.1:{port}")
 
 
-async def test_real_socket_carries_the_m2_shapes(server: str):
+async def test_real_socket_carries_unary_streaming_notify_and_cancel(server: str):
     """Unary, streaming response, notify and cancel, over a real socket."""
     peer = await muxws.connect(server)
     try:
@@ -526,7 +526,7 @@ async def _upgrade_over_unix(url: str, offered: str) -> tuple[int, dict[str, str
     assert target is not None, f"{url!r} must parse as a ws+unix: URL"
     logical = urlsplit(target.uri)
     reader, writer = await asyncio.open_unix_connection(target.path)
-    return await _speak_the_upgrade(
+    return await _send_upgrade_request(
         reader,
         writer,
         host=logical.netloc,
@@ -565,7 +565,7 @@ async def test_a_matching_codec_offer_over_a_unix_socket_is_answered_with_http_1
 
 
 @requires_af_unix
-async def test_a_unix_socket_carries_the_m2_shapes(unix_server: str):
+async def test_a_unix_socket_carries_every_call_shape(unix_server: str):
     """Unary, streaming response, notify, a remote failure and cancel, over a socket file.
 
     `connect()` with a `ws+unix:` URL returns a peer that behaves like a TCP one for every
@@ -762,7 +762,7 @@ async def test_the_librarys_own_diagnostic_survives_the_translation(url: str, un
 
     cause = info.value.__cause__
     assert isinstance(cause, underlying), f"__cause__ is {cause!r}"
-    assert str(cause) in str(info.value), "the library's own words are quoted, not paraphrased"
+    assert str(cause) in str(info.value), "the message does not contain the websockets message"
 
 
 async def test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch():
@@ -909,7 +909,7 @@ async def test_a_missing_websockets_package_names_the_extra_that_installs_it(
     assert isinstance(info.value, MuxwsError)
     assert isinstance(info.value, RuntimeError)
     assert "pip install muxws[websockets]" in str(info.value)
-    assert not isinstance(info.value, TransportUrlError), "the address was never the problem"
+    assert not isinstance(info.value, TransportUrlError), "a missing package raised TransportUrlError"
 
 
 async def test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error(
@@ -929,8 +929,8 @@ async def test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_er
     with pytest.raises(ModuleNotFoundError) as info:
         await muxws.connect("ws://127.0.0.1:9/x")
 
-    assert info.value.name == LOST_TRANSITIVE_DEPENDENCY, "the module that is actually missing"
-    assert not isinstance(info.value, MuxwsError), "muxws must not claim a failure it cannot remedy"
+    assert info.value.name == LOST_TRANSITIVE_DEPENDENCY, "the error names the missing module"
+    assert not isinstance(info.value, MuxwsError), "a broken install raised WebsocketsNotInstalledError"
     assert INSTALL_HINT not in str(info.value), "the package is installed; suggesting the install is wrong"
 
 
@@ -1026,7 +1026,7 @@ async def test_a_refused_origin_is_closed_with_1008(allowed: Any, origin: str | 
     assert outcomes[0].origin == origin
 
 
-async def test_serve_returns_quietly_on_a_refused_origin():
+async def test_serve_returns_without_raising_on_a_refused_origin():
     returned: list[bool] = []
 
     async def handle(connection: Any) -> None:

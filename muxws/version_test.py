@@ -18,7 +18,7 @@ def test_package_has_no_required_runtime_dependencies():
         assert "extra ==" in requirement, requirement
 
 
-def test_every_name_in_all_is_actually_importable():
+def test_every_name_in_all_is_importable():
     """Every name in `__all__` resolves on the package root.
 
     A name listed but not imported raises `AttributeError` on access. No other test imports these

@@ -6,7 +6,7 @@ import { ABSENT, type Frame, V1_FRAME_TYPES, framesEqual, fromMapping, toMapping
 
 const codec = new JsonCodec();
 
-/** Fixtures spell a frame as its envelope, so an absent payload key means ABSENT (D1). */
+/** Fixtures spell a frame as its envelope, so an absent payload key means ABSENT. */
 function frameFromFixture(mapping: Record<string, unknown>): Frame {
   return fromMapping(mapping);
 }
@@ -69,7 +69,7 @@ describe('the v1 frame set', () => {
     expect(V1_FRAME_TYPES.has(closing.type)).toBe(true);
     expect(codec.encode(closing)).toBe('{"type":"data","stream":7,"end":true,"trailers":{"checksum":"deadbeef"}}');
     expect(framesEqual(codec.decode(codec.encode(closing)), closing)).toBe(true);
-    // And `end` carries no payload of its own: the key is absent, not null (D1).
+    // And `end` carries no payload of its own: the key is absent, not null.
     expect('payload' in toMapping(closing)).toBe(false);
   });
 

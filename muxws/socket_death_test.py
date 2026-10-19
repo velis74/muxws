@@ -96,7 +96,7 @@ async def test_cancel_and_reset_are_noops_after_death(make_pair):
         assert len(pair.dialer_socket.sent) == after_death, "a no-op puts nothing on the wire"
         assert len(pair.dialer._writer) == 0, "and queues nothing for a socket that will never carry it"
         assert stream.closed.is_set()
-        assert isinstance(stream._close_cause, ConnectionLost), "and none of them rewrote how it died"
+        assert isinstance(stream._close_cause, ConnectionLost), "the stream's close cause is not ConnectionLost"
     finally:
         await pair.stop()
 
@@ -141,12 +141,12 @@ async def test_on_close_fires_once_per_loss_with_correct_will_retry(make_pair):
             "was_clean",
             "will_retry",
         }
-        assert reason.will_retry is False, "nothing retries until the helper says so"
+        assert reason.will_retry is False, "will_retry is true without a reconnect helper"
     finally:
         await pair.stop()
 
 
-async def test_will_retry_follows_the_helpers_intention(make_pair):
+async def test_will_retry_is_true_after_a_socket_loss(make_pair):
     """WSM-RCN-040: false only when `max_attempts` is exhausted or the application called `close()`."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -162,7 +162,7 @@ async def test_will_retry_follows_the_helpers_intention(make_pair):
         await pair.stop()
 
 
-async def test_a_deliberate_close_never_says_it_will_retry(make_pair):
+async def test_a_deliberate_close_reports_will_retry_false(make_pair):
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     seen: list[CloseReason] = []
@@ -316,6 +316,4 @@ async def test_a_new_socket_may_report_its_own_final_close(make_pair):
     pair.dialer._will_retry = False
     pair.dialer._die(ConnectionClosed("the second socket died too", code=1006))
 
-    assert [reason.will_retry for reason in closes] == [False, False], (
-        "the second connection's loss was swallowed by a latch left over from the first"
-    )
+    assert [reason.will_retry for reason in closes] == [False, False], "the second connection's loss was not reported"

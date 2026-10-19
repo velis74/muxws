@@ -90,7 +90,7 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     if selected is None:
         await deny(websocket, 400)
         # CodecMismatch, the same class the dialer raises for this failure (WSM-CDC-024/029).
-        # `serve()` returns quietly on it, because the 400 has already been sent.
+        # `serve()` returns without raising on it, because the 400 has already been sent.
 
         raise CodecMismatch(
             f"refused the upgrade: offered {offered!r}, this acceptor speaks {PREFIX}{configured}",

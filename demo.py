@@ -257,7 +257,7 @@ def build_parser():
         nargs="?",
         choices=BACKENDS,
         default=None,
-        help="which language serves --browser's sockets; omit it and you get python",
+        help="which language serves --browser's sockets; default: python",
     )
     # An alternative spelling of the positional above, not shown in `--help`.
     parser.add_argument("--backend", dest="backend_option", choices=BACKENDS, help=argparse.SUPPRESS)

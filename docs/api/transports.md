@@ -528,7 +528,6 @@ async def main() -> None:
         await asyncio.sleep(0.02)
 
     peer = await muxws.connect(f"ws://127.0.0.1:{port}/ws")
-    # 5.0 seconds, as a float.
     print(await peer.request({"n": 1}, timeout=5.0))
     await peer.close(drain=0.5)
 
@@ -627,7 +626,6 @@ async def main() -> None:
     async with websockets.serve(handle, "127.0.0.1", 0, select_subprotocol=muxws.select_subprotocol) as service:
         port = service.sockets[0].getsockname()[1]
         peer = await muxws.connect(f"ws://127.0.0.1:{port}")
-        # 5.0 seconds, as a float.
         print(await peer.request({"n": 1}, timeout=5.0))
         await peer.close(drain=0.5)
 
@@ -1059,7 +1057,6 @@ async function main(): Promise<void> {
 
   const peer = new Peer(adapter, { codec: new JsonCodec(), isDialer: true });
   void peer.serve();
-  // 5000 milliseconds, as an integer.
   console.log(await peer.request({ n: 1 }, { timeoutMs: 5000 }));
 
   await peer.close({ drainMs: 500 });

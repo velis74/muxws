@@ -1256,9 +1256,8 @@ export class Peer {
     if (!(await this.admitRemoteOpen(streamId))) return false;
 
     if (this.remoteStreamCount() >= this.maxConcurrentStreams) {
-      // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). There
-      // is no STREAM_LIMIT code and no announced quota; the sender learns of the limit only from this
-      // reset.
+      // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). The
+      // limit is not announced; the sender learns of it only from this reset.
       this.enqueue({
         type: 'reset',
         stream: streamId,

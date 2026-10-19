@@ -7,7 +7,7 @@ default fails this test.
 
 Two separate tests:
 
-* `test_every_public_python_symbol_is_documented` - the surface has an entry at all.
+* `test_every_public_python_symbol_is_documented` - the surface has an entry.
 * `test_documented_signatures_match_the_source` - the entry describes the thing it names. A
   documented symbol that does not resolve fails this test, so the site cannot keep an entry for a
   symbol that does not exist.
@@ -70,9 +70,8 @@ OPTIONAL_MODULES = {
 }
 
 #: Minimum number of comparisons `test_documented_signatures_match_the_source` must make, so a
-#: resolution bug or an environment without extras fails instead of comparing nothing. With every
-#: extra installed 106 comparisons run; the three optional-extra pages account for about sixteen of
-#: them, so the minimum holds in an environment without extras.
+#: resolution bug or an environment without extras fails instead of comparing nothing. The minimum
+#: is below the count an environment without extras compares.
 MINIMUM_SIGNATURES_COMPARED = 85
 
 #: Dunders the site documents under a name of their own. `len(registry)` is not a symbol.
@@ -382,7 +381,7 @@ def _defaults_agree(documented: str | None, actual: Any, namespace: dict[str, An
         return True
     try:
         return bool(evaluated == actual) and type(evaluated) is type(actual)
-    except Exception:  # pragma: no cover - a default with an exploding __eq__
+    except Exception:  # pragma: no cover - a default with an __eq__ that raises
         return False
 
 

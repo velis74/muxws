@@ -52,7 +52,7 @@ async def test_at_most_one_unsent_fragment_per_stream(writer: Writer):
         depths.append(writer.prepared_depth_of(1))
         writer.advance(1)
 
-    assert len(depths) > 5, "the payload must actually fragment for this to mean anything"
+    assert len(depths) > 5, "the payload was not fragmented"
     assert max(depths) <= 1, f"more than one fragment was queued at once: {depths}"
 
 
@@ -175,7 +175,7 @@ async def test_discard_keeps_an_open_none_of_which_was_sent(writer: Writer):
     assert [frame.type for frame in await _drain(writer)] == ["open", "reset"]
 
 
-async def test_a_spent_lane_is_retired(writer: Writer):
+async def test_a_drained_lane_is_removed(writer: Writer):
     """WSM-STM-001: nothing is retained per closed stream, including an empty queue."""
     writer.enqueue(Frame("data", stream=1, payload={"n": 1}))
     await _drain(writer)
@@ -230,7 +230,7 @@ async def test_a_stream_queue_holds_one_prepared_fragment(codec: JsonCodec):
     assert queue.has_work, "the tail is still there even with nothing prepared"
 
 
-async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(make_pair):
+async def test_the_write_loop_yields_once_per_frame(make_pair):
     """WSM-INV-004 on a fast socket, where the send path does not suspend on its own.
 
     The round-robin requires that another stream can enqueue a frame while a large payload is being
@@ -267,7 +267,7 @@ async def test_the_write_loop_yields_so_the_rotation_has_something_to_rotate(mak
         ticking = False
 
         positions = [index for index, stream in enumerate(order) if stream == export.id]
-        assert len(positions) > 3, f"the export must actually fragment for this to mean anything: {len(positions)}"
+        assert len(positions) > 3, f"the export was not fragmented: {len(positions)}"
         between = [stream for stream in order[positions[0] : positions[-1]] if stream != export.id]
         assert between, (
             f"{len(positions)} export fragments reached the wire with nothing else between them: the "

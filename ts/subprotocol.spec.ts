@@ -82,7 +82,7 @@ describe('the acceptor', () => {
     expect(logged).toContain('WSM-CDC-025');
   });
 
-  it('refuses an offer carrying no muxws entry at all', () => {
+  it('refuses an offer with no muxws entry', () => {
     const { selected, logged } = selectAndCapture(['bearer.abc'], 'json');
     expect(selected).toBeNull();
     expect(logged).toContain('no muxws.v1.* subprotocol');

@@ -12,13 +12,10 @@ writing a tag updates no index. On the acceptor, a reconnect produces a new `Pee
 empty. A dialer's `Peer` survives a reconnect and keeps its `tags`.
 
 **The registry is updated only by `register` and `deregister`.** A tag write after `register` is not
-reflected in the index until the next `register(peer)`. Usage rule:
+reflected in the index until the next `register(peer)`. Call `register(peer)` again after each write
+to a key that is used for lookup.
 
-> **Look up on keys you do not mutate, and mutate keys you do not look up.** If you need both on one
-> key, call `register(peer)` after each write.
-
-A peer is removed from the index automatically when its connection closes. The close hook is
-installed once per peer, however many times the peer is re-registered.
+A peer is removed from the index automatically when its connection closes.
 
 The registry is **per-process**. muxws ships no cross-process backplane. A multi-process deployment
 that needs "every peer for user 42 across all processes" implements it in the application, typically
@@ -89,8 +86,7 @@ console.log(registry.size, registry.indexSize, registry.peersFor({ user: 42 }).m
 Indexes a peer under **every key its `tags` holds at the time of the call**.
 
 Re-registering **replaces** the peer's previous entries: after the call the peer is found under its
-new values and no longer under the old ones. For a key that is both mutated and looked up, call
-`register(peer)` after each write.
+new values and no longer under the old ones.
 
 A tag value that cannot serve as a lookup key is skipped without an error: a dict or a list in
 Python (unhashable), an object, an array, `null` or `undefined` in TypeScript (objects and arrays
@@ -136,7 +132,7 @@ _, socket = memory_pair()
 peer = Peer(socket, codec=JsonCodec(), is_dialer=False)
 
 peer.tags["room"] = "lobby"
-peer.tags["roles"] = ["admin"]  # a list cannot be a lookup key; passed over, not rejected
+peer.tags["roles"] = ["admin"]  # a list cannot be a lookup key; skipped without an error
 registry.register(peer)
 print("lobby:", len(registry.peers_for(room="lobby")), "| roles indexed:", registry.index_size)
 
@@ -153,7 +149,7 @@ const [, socket] = memoryPair();
 const peer = new Peer(socket, { codec: new JsonCodec(), isDialer: false });
 
 peer.tags.room = 'lobby';
-peer.tags.roles = ['admin']; // an array cannot be a lookup key; passed over, not rejected
+peer.tags.roles = ['admin']; // an array cannot be a lookup key; skipped without an error
 registry.register(peer);
 console.log('lobby:', registry.peersFor({ room: 'lobby' }).length, '| indexed keys:', registry.indexSize);
 
@@ -167,8 +163,6 @@ console.log('kitchen:', registry.peersFor({ room: 'kitchen' }).length);
 
 Forgets a peer entirely. Idempotent: deregistering a peer that was never registered, or one that was
 already removed when its connection closed, does nothing.
-
-A peer is also deregistered automatically when its connection closes.
 
 ### Signature
 
@@ -525,7 +519,7 @@ console.log('still two after three rewrites:', registry.indexSize);
 ## `TagValue`
 
 TypeScript only. What may serve as a lookup value: the five primitive `typeof` results. Anything else
-— an object, an array, `null`, `undefined` — is passed over by `register` and matches nothing in
+— an object, an array, `null`, `undefined` — is skipped by `register` and matches nothing in
 `peersFor`.
 
 Python has no equivalent type: any value that `hash()` accepts is indexable, including a tuple.

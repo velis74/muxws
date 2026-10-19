@@ -20,11 +20,10 @@ peer = await connect("ws://localhost:8000/ws")
 answer = await peer.request({"action": "list"})
 ```
 
-The subprotocol is an **assertion, not a negotiation**. The dialer offers `muxws.v1.<codec>` as the
-first entry of its subprotocol list; the acceptor either selects exactly that value or refuses the
-upgrade with HTTP 400, which the dialer raises as `CodecMismatch`. The peer has no fallback encoding,
-no list of acceptable alternatives, and no runtime codec branching. The `v1` in that name is the only
-version identifier on the wire. See [Codecs](/guide/codecs) and [Interop](/guide/interop).
+The acceptor either selects the dialer's `muxws.v1.<codec>` subprotocol or refuses the upgrade with
+HTTP 400, which the dialer raises as `CodecMismatch`. See
+[Codecs](/guide/codecs#both-ends-must-agree-and-the-subprotocol-states-the-codec) and
+[Interop](/guide/interop).
 
 ::: info The hello is not a handshake
 A dialer using the reconnect helper may configure a `hello=` payload. The hello is an ordinary
@@ -34,10 +33,9 @@ When a hello **is** configured, `peer.is_open` / `peer.isOpen` stays false until
 acknowledged, so no application frame is sent before it. See [Reconnect](/guide/reconnect).
 :::
 
-## No limit is ever negotiated
+## No limit is negotiated
 
-No limit is sent on the wire. A peer does not advertise a capability list or a maximum, and does not
-receive the remote's limits. muxws has three size and concurrency limits, each of a different kind:
+No limit is sent on the wire. muxws has three size and concurrency limits, each of a different kind:
 
 | Number | Default | Whose is it | How the other end learns it |
 |---|---|---|---|
@@ -97,13 +95,13 @@ implements nothing.
 ```python
 # fragment
 rtt = await peer.ping()                 # seconds, as a float; default deadline 5.0 seconds
-rtt = await peer.ping(timeout=2.0)      # 2.0 seconds
+rtt = await peer.ping(timeout=2.0)
 ```
 
 ```typescript
 // fragment
 const rtt = await peer.ping();          // milliseconds; default deadline 5000 milliseconds
-const fast = await peer.ping(2000);     // 2000 milliseconds
+const fast = await peer.ping(2000);
 ```
 
 `ping()` fails in two ways:
@@ -176,13 +174,13 @@ Streams still live when the deadline expires are handled as on socket death: eac
 ```python
 # fragment
 await peer.close()                                    # drain defaults to 10.0 seconds
-await peer.close(reason="deploying", drain=2.0)       # 2.0 seconds
+await peer.close(reason="deploying", drain=2.0)
 ```
 
 ```typescript
 // fragment
 await peer.close();                                              // drainMs defaults to 10000 milliseconds
-await peer.close({ reason: 'deploying', drainMs: 2000 });        // 2000 milliseconds
+await peer.close({ reason: 'deploying', drainMs: 2000 });
 ```
 
 `close()` also ends reconnection. On a dialer with a reconnect helper, it stops the helper **first**,

@@ -128,7 +128,7 @@ def test_python_and_typescript_versions_match(pyproject: dict[str, dict[str, Any
     """
     project = pyproject["project"]
     assert "version" not in project, "a literal version here would be a second source of truth"
-    assert project["dynamic"] == ["version"], "the version is hatch's to read"
+    assert project["dynamic"] == ["version"], "the version must be declared dynamic"
 
     source = ROOT / str(pyproject["tool.hatch.version"]["path"])
     assert source == ROOT / "muxws" / "__init__.py", f"hatch reads the version from {source}"
@@ -162,7 +162,7 @@ def test_the_version_appears_in_exactly_one_python_source(pyproject: dict[str, d
 
 
 def test_python_package_has_no_required_runtime_dependencies(pyproject: dict[str, dict[str, Any]]):
-    """WSM-PKG-002: `pip install muxws` must pull in nothing at all."""
+    """WSM-PKG-002: `pip install muxws` installs no dependency."""
     assert pyproject["project"]["dependencies"] == []
 
 
@@ -254,7 +254,7 @@ def test_importing_muxws_and_serving_a_stream_needs_no_third_party_module():
     assert "MUXWS-EXCHANGED" in done.stdout
 
 
-def test_the_third_party_blocker_actually_blocks():
+def test_the_import_blocker_refuses_an_installed_third_party_package():
     """Control for the test above: the import blocker refuses a third-party package.
 
     `msgpack` is installed by the `dev` extra, so it is importable in this process; the child must
@@ -300,10 +300,10 @@ def test_the_demo_adds_no_runtime_dependency(pyproject: dict[str, dict[str, Any]
     optional by running a Vite build; this test checks the declarations, which install for every
     consumer regardless of what the bundle imports.
     """
-    assert pyproject["project"]["dependencies"] == [], "the demo is not a reason to grow this list"
+    assert pyproject["project"]["dependencies"] == [], "required dependencies must stay empty"
 
     extras = pyproject["project.optional-dependencies"]
-    assert "demo" in extras, "the demo's Python needs live behind an extra or they live nowhere"
+    assert "demo" in extras, "the demo's Python dependencies must be declared in the demo extra"
     for name in ("fastapi", "uvicorn"):
         assert any(name in requirement for requirement in extras["demo"]), extras["demo"]
 
@@ -332,7 +332,7 @@ def test_the_demo_adds_no_runtime_dependency(pyproject: dict[str, dict[str, Any]
     assert leaked == set(), f"the demo's packages reached the published manifest: {sorted(leaked)}"
 
 
-# --------------------------------------------------------------------------- what actually ships
+# --------------------------------------------------------------------------- built artefacts
 
 
 def _demo_members(names: list[str], *, strip_leading_directory: bool) -> list[str]:
@@ -526,7 +526,7 @@ def test_every_third_party_import_is_an_extra_and_lives_only_in_its_own_module()
     assert misplaced == {}, "an optional dependency reached from outside the module its extra is for"
 
 
-def test_the_import_walker_sees_what_it_is_trusted_to_see():
+def test_the_import_walker_finds_modules_and_nested_imports():
     """Control for both tests above: the walker finds modules and imports.
 
     Checks three failure modes, each of which would make the assertions above pass for any library:
@@ -535,7 +535,7 @@ def test_the_import_walker_sees_what_it_is_trusted_to_see():
     """
     modules = {path.relative_to(ROOT).as_posix() for path in _library_modules()}
     assert len(modules) > 15, modules
-    assert _ADAPTERS <= modules, "the excluded adapters must exist, or the exclusion excuses nothing"
+    assert _ADAPTERS <= modules, "an excluded adapter module does not exist"
     assert not any(name.endswith("_test.py") for name in modules)
 
     # Each adapter imports the package its extra is named for.
@@ -578,7 +578,7 @@ def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts:
     assert compiled == [], f"the wheel ships bytecode: {compiled[:5]}"
 
 
-def test_the_demo_extra_can_actually_serve_a_websocket(pyproject: dict[str, Any]):
+def test_the_demo_extra_includes_a_websocket_implementation(pyproject: dict[str, Any]):
     """`pip install -e ".[demo,starlette]"` installs everything the demo needs, including a WebSocket library.
 
     uvicorn has no WebSocket protocol implementation of its own. Without `websockets` or `wsproto` it

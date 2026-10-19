@@ -1,8 +1,7 @@
 # Demos
 
-The repository contains three demos, all started through `demo.py`. They use muxws but are not part of
-it: no module under `muxws/` imports them, no library test depends on them, and neither published
-package contains them.
+The repository contains three demos, all started through `demo.py`. They are not part of the
+published packages.
 
 `python demo.py` without arguments prints the help and exits without starting anything. Exactly one of
 `--browser`, `--uds` and `--bench` is required; they are mutually exclusive:
@@ -77,16 +76,12 @@ that dials it as `ws+unix:///…/muxws.sock:/ws`. The demo runs `docs/examples/u
 `docs/examples/uds_client.py` as subprocesses, so it runs exactly the files the guide documents. It
 needs `pip install -e ".[websockets]"` and a platform that has `AF_UNIX`.
 
-The demo shows two properties of this transport that involve nothing on the wire:
+The demo shows two properties of this transport that involve nothing on the wire (see
+[Transports](/guide/transports#unix-domain-sockets)):
 
-- **File permissions control who can connect.** The socket file has an owner, a group and a mode, so
-  the kernel checks access before any HTTP is sent. Placing the socket in a directory that only the
-  intended callers can traverse restricts access with `chmod`.
-- **`SO_PEERCRED` identifies the caller.** On an open connection, the acceptor receives the caller's
-  pid, uid and gid from the kernel. The caller cannot forge these values, and they are not sent over
-  the connection. The demo prints what the acceptor received after the client's own output.
-  `SO_PEERCRED` is Linux-specific; macOS and the BSDs have `getpeereid()`, which CPython does not
-  expose, so on those platforms only the file permissions apply.
+- **File permissions control who can connect.**
+- **`SO_PEERCRED` identifies the caller.** On Linux the acceptor receives the caller's pid, uid and
+  gid from the kernel. The demo prints what the acceptor received after the client's own output.
 
 A web page cannot open a file as a socket, so this demo cannot be part of the browser demo. The URL
 grammar, the split at the first colon and the platform differences are in
@@ -118,11 +113,8 @@ is the WebSocket library's framing, masking and message assembly; the difference
 `raw-websocket` and `muxws` is the envelope, the codec and the stream bookkeeping. Only the second part
 is caused by muxws.
 
-The `raw-socket` receiver finds frame boundaries and counts bytes; it does not reassemble payloads, so
-its figure is an upper bound. A receiver that copied each payload out of a `StreamReader` would be
-limited by that buffer above about 64 KiB, and the baseline would fall below the `raw-websocket` mode.
-`raw-socket` is the highest figure in every row that measures it; a row where it is not indicates that
-the baseline measured something other than the transport.
+The `raw-socket` receiver finds frame boundaries and counts bytes without reassembling payloads, so
+its figure is an upper bound for the transport.
 
 ### The axes
 
@@ -132,12 +124,11 @@ The default matrix is transport (`tcp` loopback, `unix` socket file) × payload 
 
 Cells that cannot run are skipped, and the report lists them as skipped: the `unix` rows where
 `socket.AF_UNIX` does not exist, and the msgpack rows where msgpack is not installed
-(`pip install -e ".[msgpack]"`). A shortened table is therefore never presented as complete.
+(`pip install -e ".[msgpack]"`).
 
 ### The method
 
-Each cell runs its acceptor in a separate process, so the two ends use two cores. With both peers in
-one event loop they would share one core and slow each other down. The dialer sends a warmup, waits
+Each cell runs its acceptor in a separate process, so the two ends use two cores. The dialer sends a warmup, waits
 until the connection is empty, starts the clock, sends for a fixed wall-clock budget, ends the run and
 waits for the acceptor to report how many payloads it received. The clock stops when that report
 arrives, so the time to drain buffers is included in the elapsed time and a mode cannot gain by
@@ -164,8 +155,7 @@ a text codec the 256 KiB rows also include fragmentation: a payload over the 65,
 fragmented, and the splitter processes a text payload one codepoint at a time. `--full` measures the
 same cell under msgpack, whose encoded payload is bytes and is sliced at any byte.
 
-Two figures are derived from the measurement rather than measured separately. A delaying proxy would
-add its own cost to every byte, and `tc netem` requires root.
+Two figures are derived from the measurement rather than measured separately:
 
 - **The crossover**, per cell: the measured muxws throughput in MB/s, expressed in Gbit/s. On a link
   slower than that, the link is the bottleneck and the envelope has no measurable cost.
@@ -173,7 +163,7 @@ add its own cost to every byte, and `tc netem` requires root.
   a fraction of a 40 ms link round trip.
 
 `demo/bench_test.py` checks the structure of a run (three modes in, three results out, a report that
-renders) and never a rate, because a rate threshold would fail on a loaded CI runner.
+renders), not a rate.
 
 ## See also
 

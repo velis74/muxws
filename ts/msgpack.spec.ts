@@ -29,7 +29,7 @@ const codec = new MsgpackCodec();
 /** Both suites resolve the repository root from the process's working directory - see conformance/README.md. */
 const SOURCE_DIR = join(process.cwd(), 'ts');
 
-/** Fixtures spell a frame as its envelope, so an absent payload key means ABSENT (D1). */
+/** Fixtures spell a frame as its envelope, so an absent payload key means ABSENT. */
 function frameFromFixture(mapping: Record<string, unknown>): Frame {
   return fromMapping(mapping);
 }

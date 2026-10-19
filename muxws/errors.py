@@ -9,8 +9,8 @@ from typing import Any
 class ResetCode(IntEnum):
     """Numeric on the wire, named in both APIs; shared by `reset` and `goaway`.
 
-    There are nine members. `5` is retired (WSM-STM-022): the number MUST NOT be reused and MUST NOT
-    appear on the wire, so no name maps to it.
+    There are nine members, numbered 0-4 and 6-9. A number without a member is not a code this
+    generation defines.
     """
 
     NO_ERROR = 0
@@ -18,7 +18,6 @@ class ResetCode(IntEnum):
     APPLICATION_ERROR = 2
     PROTOCOL_ERROR = 3
     REFUSED = 4
-    # 5 is retired - see the class docstring.
     TIMEOUT = 6
     PAYLOAD_TOO_LARGE = 7
     INTERNAL_ERROR = 8
@@ -124,7 +123,7 @@ class StreamReset(MuxwsError):
     """A stream ended early. Carries the reset code, its reason and the stream id."""
 
     #: A `ResetCode` for every code this generation defines, and a plain `int` for any other code, so
-    #: a reset with an undefined code (from another generation, or the retired 5) is still delivered.
+    #: a reset with an undefined code (for example from another generation) is still delivered.
     code: ResetCode | int = ResetCode.NO_ERROR
 
     def __init__(

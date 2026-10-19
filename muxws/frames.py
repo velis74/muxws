@@ -14,7 +14,7 @@ from muxws.errors import ProtocolError
 
 
 class _Absent:
-    """The sentinel distinguishing "no payload" from an explicit `null` (D1).
+    """The sentinel distinguishing "no payload" from an explicit `null`.
 
     Falsy, so `if frame.payload:` behaves the way a reader expects, and with a `repr` that names
     itself rather than leaking a memory address into a test failure.
@@ -49,7 +49,7 @@ _LEADING_KEYS: Final[tuple[str, ...]] = ("type", "stream")
 
 @dataclass(frozen=True, slots=True)
 class Frame:
-    """One logical protocol unit. Frozen and compared by value (D3)."""
+    """One logical protocol unit. Frozen and compared by value."""
 
     type: str
     stream: int | None = None
@@ -73,7 +73,7 @@ def to_mapping(frame: Frame) -> dict[str, Any]:
     """Render `frame` as an envelope, omitting every field still at its default.
 
     `payload` is the one field whose default is not `None`: `ABSENT` omits the key entirely, while
-    `None` emits `"payload": null` (D1).
+    `None` emits `"payload": null`.
     """
     present: dict[str, Any] = {}
     for name in _FIELD_NAMES:
@@ -97,9 +97,9 @@ def to_mapping(frame: Frame) -> dict[str, Any]:
 def from_mapping(mapping: Mapping[str, Any]) -> Frame:
     """Build a `Frame` from a decoded envelope.
 
-    Unknown keys are dropped rather than preserved (WSM-FRM-001, D2) - a decoder that round-tripped
-    them would make `decode(encode(frame)) == frame` pass on garbage. An unrecognised `type` survives
-    as an ordinary `Frame` (D4); it is the peer, not the codec, that ignores it (WSM-FRM-002).
+    Unknown keys are dropped rather than preserved (WSM-FRM-001); preserving them would make
+    `decode(encode(frame)) == frame` hold for frames carrying unknown keys. An unrecognised `type` is
+    decoded as an ordinary `Frame`; the peer, not the codec, ignores it (WSM-FRM-002).
 
     Raises `ProtocolError` when `type` is missing, when both `payload` and `fragment` are present, or
     when an envelope field has a value of the wrong type (WSM-FRM-005).

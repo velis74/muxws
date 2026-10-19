@@ -689,7 +689,7 @@ describe('dispatch', () => {
     expect(ends[ends.length - 1].stream).toBe(stream.id);
   });
 
-  it('replaces a second onStream handler and says so - WSM-STM-030', async () => {
+  it('replaces the handler on a second onStream() call and logs one warning - WSM-STM-030', async () => {
     const pair = makePair();
     const calls: string[] = [];
     pair.acceptor.onStream(() => {
@@ -1162,7 +1162,7 @@ describe('socket death', () => {
     pair.dialer.die(new ConnectionClosed('the heartbeat noticed the same death', { code: 1006 }));
     await pair.settle();
 
-    expect(seen, 'one loss, one call - a second witness of a dead socket is not a second loss').toHaveLength(1);
+    expect(seen, 'a second detection of the same dead socket fires no second onClose').toHaveLength(1);
     expect(Object.keys(seen[0]).sort()).toEqual(['code', 'reason', 'wasClean', 'willRetry']);
     // `willRetry` reads the retry intention set when the socket was established; this peer has no reconnect helper,
     // so nothing retries.
@@ -1251,10 +1251,9 @@ describe('socket death', () => {
     pair.dialer.die(new ConnectionClosed('declared dead with the socket still up', { code: 1006 }));
     await pair.settle();
 
-    expect(
-      pair.sentBy('dialer'),
-      'the synthesised reset is local: nothing whatever is sent for it (WSM-STM-014)',
-    ).toHaveLength(sentBefore);
+    expect(pair.sentBy('dialer'), 'the synthesised reset is local: nothing is sent for it (WSM-STM-014)').toHaveLength(
+      sentBefore,
+    );
     (['dialer', 'acceptor'] as const).forEach((who) => {
       pair.sentBy(who).forEach((frame) => {
         expect(frame.code).not.toBe(ResetCode.CONNECTION_CLOSED);
@@ -1415,7 +1414,7 @@ describe('edges', () => {
     expect(states).toEqual([StreamState.HALF_CLOSED_REMOTE]);
   });
 
-  it("ends quietly when a handler's stream died mid-flight - WSM-STM-035", async () => {
+  it("ends without error when the handler's stream closed before the handler returned - WSM-STM-035", async () => {
     const pair = makePair();
     let finished = false;
     pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
@@ -1433,7 +1432,7 @@ describe('edges', () => {
   });
 
   it('resets the stream but not the peer on an unknown reset code', async () => {
-    // A reset code from another protocol version, or the retired code 5, resets the stream and leaves the peer
+    // A reset code from another protocol version, or the unassigned code 5, resets the stream and leaves the peer
     // running. Converting the wire value directly to a `ResetCode` throws out of the read loop, which leaves
     // `isOpen` true, `onClose` unfired, and every pending await hanging.
     for (const wireCode of [5, 42]) {
@@ -1892,7 +1891,7 @@ describe('hostile frames and failing hooks', () => {
     expect(left.isClosed).toBe(true);
   });
 
-  it("fails an unencodable frame's stream without wedging the connection", async () => {
+  it('fails the stream of an unencodable frame and keeps the writer sending', async () => {
     // A codec that cannot encode a frame must not stop the writer: otherwise nothing drains the queue, every later
     // send stays in it, and the peer keeps reporting itself open, the writer-side equivalent of a failed read loop.
     const pair = makePair();
@@ -2089,7 +2088,7 @@ describe("open()'s overloads", () => {
     const open = pair.lastFrameOfType('dialer', 'open');
     // `"payload": null` is on the wire, not an absent key: an absent `payload` is a different frame
     // (section 2.2), and Python's `open()` sends the null.
-    expect('payload' in toMapping(open), 'open() sent no payload key at all').toBe(true);
+    expect('payload' in toMapping(open), 'open() sent no payload key').toBe(true);
     expect(open.payload).toBeNull();
     expect(open.headers ?? null).toBeNull();
     expect(open.end ?? false).toBe(false);
@@ -2156,7 +2155,6 @@ describe("open()'s overloads", () => {
     pair.acceptor.onStream(hold);
     pair.start();
 
-    // A default deadline can only be a timer, and `request()` schedules its timer synchronously
     // A default deadline would be a timer, and `request()` schedules its timer synchronously before it returns (see
     // `collectUnary`). Counting scheduled timers therefore detects a default deadline without waiting for it to
     // expire.
@@ -2167,7 +2165,7 @@ describe("open()'s overloads", () => {
 
     const explicit = pair.dialer.request({ q: 2 }, {});
     void explicit.catch(() => undefined);
-    expect(timers, 'an empty options object supplied a deadline from somewhere').not.toHaveBeenCalled();
+    expect(timers, 'an empty options object applied a deadline').not.toHaveBeenCalled();
 
     // The counter detects a deadline when one is set, so the zero count above is meaningful.
     const deadlined = pair.dialer.request({ q: 3 }, { timeoutMs: 20 });
@@ -2471,7 +2469,7 @@ describe('the frame logger', () => {
     }
   });
 
-  it('logs each unknown frame type once per peer, however often it arrives - WSM-FRM-002', async () => {
+  it('logs each unknown frame type once per peer when it arrives repeatedly - WSM-FRM-002', async () => {
     const original = logger.level;
     const lines: string[] = [];
     const spy = vi.spyOn(console, 'info').mockImplementation((message: unknown) => {
@@ -2622,7 +2620,7 @@ describe('header interceptors', () => {
     await pair.settle();
     expect(
       received.map((headers) => headers.trace),
-      'request() and notify() too',
+      'request() and notify() headers pass the interceptors too',
     ).toEqual(['t-1', 't-1', 't-1']);
 
     unregisterFirst();
@@ -2675,7 +2673,7 @@ describe('header interceptors', () => {
     expect(pair.dialer.isOpen).toBe(true);
   });
 
-  it('shapes the first frame of every answer, on a copy, whichever call sends it - WSM-API-028', async () => {
+  it('shapes the first frame of every answer on a copy, for each sending call - WSM-API-028', async () => {
     const pair = makePair();
     const seen: [Record<string, unknown>, unknown][] = [];
     const kept: Record<string, unknown>[] = [];
@@ -2714,7 +2712,9 @@ describe('header interceptors', () => {
 
     stream = pair.dialer.open('implicit', { end: true });
     await stream.closed;
-    expect(stream.replyHeaders, 'the implicit end of a returning handler too').toEqual({ 'served-by': 'acceptor' });
+    expect(stream.replyHeaders, 'replyHeaders are set on the implicit end of a returning handler').toEqual({
+      'served-by': 'acceptor',
+    });
 
     expect(seen).toEqual([
       [{ 'content-type': 'text/csv' }, 'announce'],

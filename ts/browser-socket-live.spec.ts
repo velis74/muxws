@@ -118,7 +118,7 @@ describe('an unreachable acceptor is not diagnosed as a codec mismatch', () => {
     expect(message, 'the reachable cause is not named').toMatch(/nothing is listening/);
     expect(message, 'the codec cause is not named either - both must be').toMatch(/codec/);
     // The message must not state as fact that the acceptor refused the codec.
-    expect(message, 'the message still diagnoses a cause it cannot know').not.toMatch(
+    expect(message, 'the message states the codec refusal as fact').not.toMatch(
       /^the acceptor refused the muxws handshake/,
     );
   });

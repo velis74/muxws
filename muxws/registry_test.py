@@ -44,7 +44,7 @@ async def test_register_indexes_every_key_present_at_call_time(registry: PeerReg
     assert registry.peers_for(role="admin") == [pair.dialer]
 
 
-async def test_register_passes_over_unhashable_tag_value(registry: PeerRegistry, make_pair):
+async def test_register_skips_an_unhashable_tag_value(registry: PeerRegistry, make_pair):
     """WSM-REG-011 **(spec)**: the peer is not findable by that key, and `register()` does not raise."""
     pair = make_pair()
     pair.dialer.tags.update({"session": "abc", "profile": {"deep": True}, "seen": [1, 2]})
@@ -75,14 +75,14 @@ async def test_tag_written_after_register_is_not_found_until_reregister(registry
 
     pair.dialer.tags["session"] = "changed"
     assert pair.dialer.tags["session"] == "changed", "a direct read sees the newest value at once"
-    assert registry.peers_for(session="changed") == [], "but the index has not been told"
+    assert registry.peers_for(session="changed") == [], "the index still holds the value from register()"
     assert registry.peers_for(session="abc") == [pair.dialer]
 
     registry.register(pair.dialer)
     assert registry.peers_for(session="changed") == [pair.dialer]
 
 
-async def test_overwriting_a_never_indexed_key_is_free(registry: PeerRegistry, make_pair):
+async def test_overwriting_an_unindexed_key_leaves_the_index_unchanged(registry: PeerRegistry, make_pair):
     """WSM-REG-014 **(spec)**: writing a key that is not indexed does not touch the registry.
 
     Register under `session`, then overwrite a different, never-looked-up, map-valued key a hundred
@@ -222,7 +222,7 @@ async def test_reregistering_after_each_reconnect_installs_one_close_hook(regist
     assert len(peer._close_handlers) == 1, "one hook per peer, however often it reconnects and is re-registered"
 
 
-async def test_registered_is_a_scope(registry: PeerRegistry, make_pair):
+async def test_registered_indexes_the_peer_only_inside_the_block(registry: PeerRegistry, make_pair):
     pair = make_pair()
     pair.dialer.tags["session"] = "abc"
     with registry.registered(pair.dialer):

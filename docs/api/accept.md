@@ -213,9 +213,9 @@ Install it as `websockets.serve(..., select_subprotocol=muxws.select_subprotocol
 completes the handshake before it calls the connection handler, so the selection is made in this
 hook.
 
-A refusal is **raised, not returned**. `websockets` answers a `None` return with 101 and no
-`Sec-WebSocket-Protocol` header, and a raised `NegotiationError` with the HTTP 400 the protocol
-requires.
+`select_subprotocol` refuses by raising `NegotiationError`. `websockets` answers a `None` return with
+101 and no `Sec-WebSocket-Protocol` header, and a raised `NegotiationError` with the HTTP 400 the
+protocol requires.
 
 It wraps `muxws.subprotocol`, whose public names are the building blocks of every hook in both
 ports: `PREFIX` (`"muxws.v1."`), `offer(codec_name, extra=None)` for the list a dialer

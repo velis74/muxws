@@ -445,7 +445,7 @@ class Replay {
   }
 
   private async callEnd(step: Step): Promise<void> {
-    // An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
+    // An absent `payload` key is `ABSENT`, not `null`: they are different frames.
     await this.streamFor(step.peer as Who, Number(step.stream_ref)).end({
       payload: 'payload' in step ? step.payload : undefined,
       trailers: step.trailers,
@@ -754,7 +754,7 @@ describe('conformance/sequences', () => {
     // `muxws/conformance_test.py` asserts the same two numbers and reads them from this file.
   });
 
-  it('runs every fixture under some configured codec, skipping none everywhere', () => {
+  it('runs every fixture under at least one configured codec', () => {
     // WSM-CDC-007. Asserted over the corpus rather than left to the two suites, because the failure is silent: a
     // `requires_codec` naming a codec no suite is configured with produces a fixture that every configuration
     // skips, which the report shows as covered although no library code runs it.
@@ -839,7 +839,7 @@ describe('conformance/sequences', () => {
   it('puts no limit and no version on the wire', async () => {
     // WSM-CON-031, WSM-CON-009, WSM-PKG-005: replay everything and inspect what was sent. There is no `settings`
     // frame and no announced limit of any kind; the `muxws.v1.` subprotocol prefix is the only version. There is no
-    // extension advertisement either: WSM-FRM-003 is retired, because there is no `settings` frame to advertise in.
+    // extension advertisement either, because there is no `settings` frame to advertise in.
     // `muxws/conformance_test.py` asserts the same over the same corpus.
     for (const [fileName, message] of await wireOfTheWholeCorpus()) {
       const envelope = JSON.parse(message) as Record<string, unknown>;
