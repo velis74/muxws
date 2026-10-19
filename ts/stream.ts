@@ -129,8 +129,7 @@ function deferred<V>(): Deferred<V> {
  * Return `code` if it may be sent; throw `ProtocolError` otherwise.
  *
  * `CONNECTION_CLOSED` is synthesised locally when the socket is lost and MUST NEVER appear on the
- * wire (§8.1). Reset code 5 is retired and MUST NOT be reused. Values outside `ResetCode` are not
- * defined by this protocol generation.
+ * wire (§8.1). Values outside `ResetCode` are not defined by this protocol generation.
  */
 function sendableResetCode(code: ResetCode): ResetCode {
   if (code === ResetCode.CONNECTION_CLOSED) {
@@ -141,9 +140,7 @@ function sendableResetCode(code: ResetCode): ResetCode {
   }
   const name: string | undefined = typeof code === 'number' ? ResetCode[code] : undefined;
   if (!Number.isInteger(code as number) || name === undefined) {
-    throw new ProtocolError(
-      `${String(code)} is not a reset code this generation defines; 5 is retired and must not be reused (§8.1)`,
-    );
+    throw new ProtocolError(`${String(code)} is not a reset code this generation defines (§8.1)`);
   }
   return code;
 }

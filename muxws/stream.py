@@ -42,8 +42,7 @@ def _sendable_reset_code(code: ResetCode | int) -> ResetCode:
     """Return `code` as a `ResetCode`, or raise `ProtocolError` for a code that must not be sent.
 
     `CONNECTION_CLOSED` is synthesised locally when the socket dies and MUST NEVER appear on the wire
-    (§8.1). Reset code 5 is retired and MUST NOT be reused. Codes outside the enum are not defined by
-    this protocol generation.
+    (§8.1). Codes outside the enum are not defined by this protocol generation.
     """
     if code == ResetCode.CONNECTION_CLOSED:
         raise ProtocolError(
@@ -53,9 +52,7 @@ def _sendable_reset_code(code: ResetCode | int) -> ResetCode:
     try:
         return ResetCode(code)
     except ValueError:
-        raise ProtocolError(
-            f"{code!r} is not a reset code this generation defines; 5 is retired and must not be reused (§8.1)"
-        ) from None
+        raise ProtocolError(f"{code!r} is not a reset code this generation defines (§8.1)") from None
 
 
 class Stream:
@@ -94,7 +91,7 @@ class Stream:
         self._future: asyncio.Future[Any] | None = None
         self._claim: str | None = None
         #: How the stream ended: None while live, "normal" when both ends ended, else the
-        #: `StreamReset` that killed it (WSM-ERR-009).
+        #: `StreamReset` that ended it (WSM-ERR-009).
         self._close_cause: str | StreamReset | None = None
         self._assembler = Assembler()
         #: True between the first fragment of a remote opening payload and the frame that completes
@@ -205,7 +202,7 @@ class Stream:
         """Terminate the stream in both directions.
 
         A no-op once the stream is closed, including after socket death (WSM-RCN-041). Raises
-        `ProtocolError` for `CONNECTION_CLOSED`, the retired code 5, or a code outside `ResetCode`.
+        `ProtocolError` for `CONNECTION_CLOSED` or a code outside `ResetCode`.
         """
         code = _sendable_reset_code(code)
         if self.state is StreamState.CLOSED:

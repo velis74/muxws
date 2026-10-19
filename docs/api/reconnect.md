@@ -56,7 +56,7 @@ class Reconnect:
 | `initial_delay` | `float` — seconds | `0.25` | The unjittered delay before the first retry, in seconds. Every later delay is this multiplied by `factor` for each failed attempt. |
 | `factor` | `float` | `2.0` | The multiplier per failed attempt. `1.0` gives a fixed interval; a value below 1 is rejected. |
 | `max_delay` | `float` — seconds | `30.0` | The ceiling on the unjittered delay, in seconds. Jitter is still applied after the cap, so capped retries stay dispersed. |
-| `jitter` | `float` | `0.3` | The dispersion, as a fraction between 0 and 1: the delay is multiplied by `1 + uniform(-jitter, +jitter)`. `0` disables jitter, so peers that lost their sockets at the same instant retry at the same instant. |
+| `jitter` | `float` | `0.3` | The dispersion, as a fraction between 0 and 1: the delay is multiplied by `1 + uniform(-jitter, +jitter)`. `0` disables jitter. |
 | `max_attempts` | `int \| None` | `None` | How many consecutive failed attempts before the helper gives up. `None` is unlimited. Exhausting it fires `on_close` exactly once with `will_retry` false and never dials again; `0` gives up without dialling at all. |
 
 ### Return
@@ -402,7 +402,7 @@ def backoff_delay(attempts: int, options: Reconnect, draw: RandomDraw = _uniform
 |---|---|---|---|
 | `attempts` | `int` | required | How many consecutive attempts have already failed. `0` is the first retry after a loss. |
 | `options` | `Reconnect` | required | The schedule to compute from. |
-| `draw` | `RandomDraw` | `_uniform` | A callable returning a float in the range -1 to 1, the jitter draw. Injectable, so the schedule can be tested as a pure function. The default uses `random`, not `secrets`: jitter spreads reconnects over time and has no security function. |
+| `draw` | `RandomDraw` | `_uniform` | A callable returning a float in the range -1 to 1, the jitter draw. Injectable, so the schedule can be tested as a pure function. The default draws from `random.uniform`. |
 
 ### Return
 
@@ -451,7 +451,7 @@ export function backoffDelay(attempts: number, options: Reconnect, draw: RandomD
 |---|---|---|---|
 | `attempts` | `number` | required | How many consecutive attempts have already failed. |
 | `options` | `Reconnect` | required | The schedule to compute from. |
-| `draw` | `RandomDraw` | `uniform` | A callable returning a number in the range -1 to 1. The default uses `Math.random`, not `crypto.getRandomValues`. |
+| `draw` | `RandomDraw` | `uniform` | A callable returning a number in the range -1 to 1. The default draws from `Math.random`. |
 
 ### Return
 

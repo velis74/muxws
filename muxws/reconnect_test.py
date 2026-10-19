@@ -93,7 +93,7 @@ def test_jitter_disperses_n_simultaneous_reconnects():
     draws = iter([-1.0 + 2.0 * index / 199 for index in range(200)])
     delays = [backoff_delay(0, options, draw=lambda: next(draws)) for _ in range(200)]
 
-    assert len(set(delays)) > 190, "the delays must actually differ"
+    assert len(set(delays)) > 190, "all delays are equal"
     assert min(delays) >= 0.25 * 0.7
     assert max(delays) <= 0.25 * 1.3
     spread = max(delays) - min(delays)
@@ -116,7 +116,7 @@ def test_a_factor_of_one_is_a_fixed_interval():
     assert unjittered_delay(0, options) == unjittered_delay(9, options) == 0.25
 
 
-def test_nonsense_options_are_refused_at_construction():
+def test_invalid_options_are_refused_at_construction():
     with pytest.raises(ValueError, match="initial_delay"):
         Reconnect(initial_delay=0)
     with pytest.raises(ValueError, match="factor"):
@@ -166,7 +166,7 @@ def test_counter_resets_only_on_established():
         counter.failed()  # socket opened, hello never acknowledged - still a failed attempt
 
     assert delays == [0.25, 0.5, 1.0, 2.0, 4.0]
-    assert delays == sorted(delays), "a growing delay sequence is the whole assertion"
+    assert delays == sorted(delays), "the delays did not grow across failed hellos"
 
     counter.established()
     assert unjittered_delay(counter.value, options) == 0.25
@@ -240,7 +240,7 @@ async def test_acceptor_has_no_reconnect_helper(dialable_server: DialableServer)
 
     with pytest.raises(ValueError, match="acceptor"):
         ConnectionLoop(acceptor, dialable_server.dial, options=Reconnect(), hello=Hello())
-    assert "Dialer only" in inspect.getdoc(module), "and the module says so where a reader will look"
+    assert "Dialer only" in inspect.getdoc(module), "the module docstring does not say 'Dialer only'"
 
 
 # --------------------------------------------------------------------------- the driver, wired up
@@ -327,7 +327,7 @@ async def test_a_dial_that_never_produced_a_socket_is_not_a_socket_loss(dialable
         await loop.stop()
 
 
-async def test_dead_socket_takes_the_same_backoff_path_as_a_clean_close(dialable_server: DialableServer):
+async def test_a_heartbeat_timeout_takes_the_same_backoff_path_as_a_dropped_socket(dialable_server: DialableServer):
     """WSM-RCN-011: a heartbeat timeout and a dropped socket take the same code path.
 
     The same peer loses its socket twice, once because the server dropped it and once because no pong
@@ -363,12 +363,12 @@ async def test_dead_socket_takes_the_same_backoff_path_as_a_clean_close(dialable
         assert loop.reconnections == 2
         assert loop.attempts == 0
         assert peer.is_open is True
-        assert closes[1].reason == "no pong within 0.05s", "and it says which of the two it was"
+        assert closes[1].reason == "no pong within 0.05s", "the close reason names the cause"
     finally:
         await loop.stop()
 
 
-async def test_swallowed_pong_is_detected_within_interval_plus_timeout(dialable_server: DialableServer):
+async def test_an_unanswered_ping_is_detected_within_interval_plus_timeout(dialable_server: DialableServer):
     """WSM-RCN-011 **(spec)**: detection time is bounded by `ping_interval + ping_timeout`.
 
     The server stops reading without closing. The socket stays open and every frame the dialer sends
@@ -437,7 +437,7 @@ async def test_heartbeat_timer_resets_on_any_traffic(pair):
     await pair.settle()
 
     assert beats == 25, "the heartbeat slept every round rather than pinging"
-    assert pair.frames_of_type("dialer", "ping") == [], "a busy socket must not pay for a ping"
+    assert pair.frames_of_type("dialer", "ping") == [], "a ping was sent on a socket with traffic inside the interval"
 
     silences = 0
 
@@ -494,7 +494,7 @@ async def test_max_attempts_exhausted_fires_on_close_once_and_never_dials_again(
         dials = dialable_server.dials
 
         assert [close.will_retry for close in closes] == [True, False]
-        assert len(closes) == 2, "the loss, then the withdrawal - and nothing else"
+        assert len(closes) == 2, "expected on_close(will_retry=True), then on_close(will_retry=False), and nothing else"
         assert dials == 3, "the first connection plus exactly max_attempts dials after the loss"
         assert loop.delays == [0.001, 0.002], "and it backed off between them"
         assert loop.attempts == 2
@@ -527,9 +527,9 @@ async def test_max_attempts_of_zero_gives_up_at_the_first_loss_without_dialling(
         await asyncio.wait_for(given_up.wait(), 5.0)
         await asyncio.sleep(0.05)
 
-        assert [close.will_retry for close in closes] == [False], "exactly one, and it promises nothing"
+        assert [close.will_retry for close in closes] == [False], "expected one on_close with will_retry=False"
         assert dialable_server.dials == dials, "a cap of zero never dials"
-        assert loop.delays == [], "and never waits out a backoff it is not going to use"
+        assert loop.delays == [], "a backoff was awaited with a cap of zero"
         assert peer.is_open is False
     finally:
         await loop.stop()
@@ -585,7 +585,9 @@ async def test_the_cap_exhausted_by_failed_hellos_reports_giving_up_once(dialabl
         await asyncio.sleep(0.05)
 
         assert [close.will_retry for close in closes] == [True, True, False]
-        assert sum(1 for close in closes if not close.will_retry) == 1, "and it is withdrawn once, not twice"
+        assert sum(1 for close in closes if not close.will_retry) == 1, (
+            "on_close(will_retry=False) fired more than once"
+        )
     finally:
         await loop.stop()
 
@@ -625,7 +627,9 @@ async def test_a_throwing_application_handler_does_not_stop_the_driver(dialable_
         assert len(closes) == 2
         assert loop.reconnections == 2
         logged = [record.getMessage() for record in caplog.records]
-        assert any("on_reconnect handler raised" in message for message in logged), "swallowed silently"
+        assert any("on_reconnect handler raised" in message for message in logged), (
+            "the on_reconnect exception was not logged"
+        )
         assert any("on_close handler raised" in message for message in logged)
     finally:
         await loop.stop()
@@ -718,14 +722,14 @@ async def test_three_drops_replay_byte_identical_hellos(dialable_server: Dialabl
         await quiet_loop.establish()
         quiet_loop.start()
         try:
-            assert quiet._reconnect_handlers == [], "this application asked to be told nothing"
+            assert quiet._reconnect_handlers == [], "no on_reconnect handler is registered"
             await silent.drop()
             await asyncio.wait_for(_until(lambda: len(silent.received) == 2), 5.0)
             # The previous peer's index entries are removed when its close hook runs, one or two
             # event-loop turns after the new connection is up (WSM-REG-016).
             await asyncio.wait_for(_until(lambda: registry.peers_for(tab="quiet") == [silent.acceptors[-1]]), 5.0)
 
-            assert silent.raw(1)[0] == silent.raw(0)[0], "replayed without being asked"
+            assert silent.raw(1)[0] == silent.raw(0)[0], "the helper did not replay the hello"
             assert registry.peers_for(tab="quiet") == [silent.acceptors[-1]], "and findable again"
         finally:
             await quiet_loop.stop()
@@ -1016,7 +1020,9 @@ async def test_first_attempt_failure_raises_with_unlimited_retries_configured(di
     # transport reported.
     assert peer.is_open is False, "a first connection that never established is dead, not pending"
     assert peer._death is not None
-    assert peer._death.reason == "the first connection was never established", "the helper marked it, not the race"
+    assert peer._death.reason == "the first connection was never established", (
+        "the close cause is the helper's, not the transport's"
+    )
     await asyncio.sleep(0.05)
     assert dialable_server.dials == 1, "and nothing dialled again behind the caller"
 
@@ -1209,7 +1215,7 @@ async def test_connect_and_accept_register_their_interceptors_before_any_frame()
             await peer.close()
 
 
-async def test_a_swallowed_pong_on_a_real_socket_re_dials():
+async def test_an_unanswered_ping_on_a_real_socket_redials():
     """WSM-RCN-011: the heartbeat closes the socket with a code a peer is allowed to send.
 
     `MemorySocket.close` discards the code, so the in-memory transport does not detect this. A real
@@ -1325,7 +1331,7 @@ async def test_a_deliberate_close_between_sockets_stops_the_driver(dialable_serv
     dialable_server.refuse_next(200)
     await dialable_server.drop()
     await asyncio.wait_for(_until(lambda: dialable_server.dials >= 3), 5.0)
-    assert peer.is_open is False, "the gap is where this test has to happen"
+    assert peer.is_open is False, "close() must run while the peer is between sockets"
 
     await peer.close()
     dials = dialable_server.dials
@@ -1376,7 +1382,7 @@ async def test_a_stream_reset_inside_the_hello_window_still_reaches_the_wire(dia
 
         resets = [frame for frame in dialable_server.frames(1) if frame.type == "reset"]
         assert [frame.code for frame in resets] == [int(ResetCode.CANCELLED)], (
-            "the reset never reached the wire; the remote still believes that stream is live"
+            "the reset never reached the wire; the remote still holds that stream"
         )
     finally:
         release.set()
@@ -1419,7 +1425,9 @@ async def test_every_reconnect_presents_the_same_credential_at_a_fresh_upgrade()
     )
 
 
-async def test_header_interceptors_survive_a_reconnect_and_leave_the_hello_alone(dialable_server: DialableServer):
+async def test_header_interceptors_persist_across_a_reconnect_and_do_not_run_on_the_hello(
+    dialable_server: DialableServer,
+):
     """WSM-API-026/027: registrations belong to the `Peer`, and open interceptors do not run on the hello.
 
     The hellos are compared as raw messages, as in WSM-RCN-027's test: an interceptor applied to the

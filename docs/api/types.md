@@ -23,13 +23,13 @@ bytes and two keys.
 
 | Field | Type | Default | What it carries |
 |---|---|---|---|
-| `type` | `str` / `string` | required | The frame type. A v1 peer sends `open`, `data`, `reset`, `ping`, `pong` or `goaway`. Always emitted, even though it has no default to compare against. |
+| `type` | `str` / `string` | required | The frame type. A v1 peer sends `open`, `data`, `reset`, `ping`, `pong` or `goaway`. Always emitted. |
 | `stream` | `int \| None` / `number \| null` | `None` / `null` | Which stream this frame belongs to. Absent on `ping`, `pong` and `goaway`, which are connection-level. Odd ids are the dialer's, even ids the acceptor's. |
-| `payload` | `Any` / `unknown \| Absent` | `ABSENT` | The application value. The **only** field whose default is not null: `ABSENT` omits the key, while `None` / `null` emits `"payload": null`. "No payload" and "a payload that is null" are different frames; the sentinel distinguishes them. |
+| `payload` | `Any` / `unknown \| Absent` | `ABSENT` | The application value. The **only** field whose default is not null: `ABSENT` omits the key, while `None` / `null` emits `"payload": null`. |
 | `fragment` | `str \| bytes \| None` / `string \| ArrayBuffer \| null` | `None` / `null` | One slice of an encoded payload. A frame carries `payload` **or** `fragment`, never both. |
 | `more` | `bool` / `boolean` | `False` / `false` | True on every fragment but the last. The receiver concatenates until it sees a fragment without it. |
 | `headers` | `dict[str, Any] \| None` / `Record<string, unknown> \| null` | `None` / `null` | Per-stream metadata, sent once with the `open`. Carried on the **first** fragment and never split across fragments. |
-| `end` | `bool` / `boolean` | `False` / `false` | This side is done sending. A **flag on a frame, not a frame type**: there is no "end" frame type. Carried on the last fragment. |
+| `end` | `bool` / `boolean` | `False` / `false` | This side is done sending. A flag, not a frame type. Carried on the last fragment. |
 | `trailers` | `dict[str, Any] \| None` / `Record<string, unknown> \| null` | `None` / `null` | Metadata known only after the payloads, such as a row count or a checksum. Carried on the `end` frame, on its last fragment only. |
 | `code` | `int \| None` / `number \| null` | `None` / `null` | A `ResetCode` value, on `reset` and `goaway`. Carried as an integer, so a code this generation does not define is preserved. |
 | `reason` | `str \| None` / `string \| null` | `None` / `null` | Human-readable text accompanying `code`. Never parsed for meaning. |
@@ -337,9 +337,6 @@ Builds a `Frame` from a decoded envelope. The inverse of `to_mapping` / `toMappi
 differences: unknown keys are dropped rather than preserved, and an unrecognised `type` is kept as an
 ordinary frame.
 
-Because unknown keys are dropped, `decode(encode(frame)) == frame` cannot pass on a frame carrying
-extra keys.
-
 ### Signature
 
 ```python
@@ -465,16 +462,15 @@ console.log('round trip:', framesEqual(original, codec.decode(codec.encode(origi
 
 The largest encoded message a sender may emit: **65 536 bytes, exactly 64 KiB**.
 
-It is a **protocol constant, not a setting**. It is not negotiated, not announced, not read from
-configuration and not configurable. The cap limits how long one stream can occupy a socket that has a
-single global message order: a 1 MB frame would delay every other stream until it was sent.
+It is a **protocol constant**: not negotiated and not configurable. The cap limits how long one stream
+can occupy a socket that has a single global message order: a 1 MB frame would delay every other
+stream until it was sent.
 
 A receiver accepts any message up to this size and may accept larger ones; a sender always fragments
 at this size, whatever the remote accepts.
 
 The peer's constructor takes a `max_frame_bytes` / `maxFrameBytes` that defaults to this value. The
-conformance runner lowers it to exercise fragmentation with small fixtures. It is not a tuning
-parameter.
+conformance runner lowers it to exercise fragmentation with small fixtures.
 
 ### Signature
 
@@ -647,10 +643,9 @@ Fragmentation is automatic and mandatory: the writer fragments every send, one s
 same computation as a pure function, for tests, the conformance corpus and inspection of fragment
 boundaries.
 
-It is a pure function of `(frame, cap, codec)`: it reads nothing else and mutates no argument. It
-encodes the logical payload with the codec, slices the encoded form, and puts each slice into a frame
-that the codec encodes again, so both ports cut at the same places. Text is cut on whole Unicode
-code points, never inside a multi-byte sequence.
+It reads only its arguments and mutates none of them. It encodes the logical payload with the codec,
+slices the encoded form, and puts each slice into a frame that the codec encodes again, so both ports
+cut at the same places. Text is cut on whole Unicode code points, never inside a multi-byte sequence.
 
 `headers` are on the first fragment; `end` and `trailers` are on the last; `more` is true on every
 fragment except the last.
@@ -865,9 +860,6 @@ export interface CloseReason {
 | `was_clean` / `wasClean` | `bool` / `boolean` | required | Whether a close handshake completed. |
 | `will_retry` / `willRetry` | `bool` / `boolean` | `False` in Python; **required** in TypeScript | Whether the reconnect helper will dial again. False when the attempt budget is exhausted, when `close()` was called, and on any peer without the reconnect helper. A handler that tears down application state should check it: a close with `will_retry` true is followed by a reconnect attempt. |
 
-The default on `will_retry` is the only difference between the two: Python's dataclass has one, and
-a TypeScript interface cannot declare defaults.
-
 ### Return
 
 Python: a frozen `CloseReason`. TypeScript: an interface, so an object literal is one.
@@ -974,8 +966,7 @@ The parameters of the callable itself:
 ### Return
 
 Python's alias returns `Any` and the value is ignored; a coroutine function is the normal case.
-TypeScript's returns `void | Promise<void>`. A handler answers with `stream.reply(...)`, not with a
-return value.
+TypeScript's returns `void | Promise<void>`.
 
 ### Raises
 

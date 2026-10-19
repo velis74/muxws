@@ -7,7 +7,7 @@ Without the dependency check, missing dependencies fail late and away from the c
 `fastapi` is an ImportError inside a child process. Without `websockets`, uvicorn serves the page and
 answers 404 to every upgrade request, so the browser shows a muxws handshake error.
 
-`muxws/packaging_test.py::test_the_demo_extra_can_actually_serve_a_websocket` asserts that the
+`muxws/packaging_test.py::test_the_demo_extra_includes_a_websocket_implementation` asserts that the
 `[demo]` extra declares `websockets`. The check tested here reports packages that are declared but
 not installed, for example after installing the wrong extra or `muxws` from PyPI instead of the
 repository.
@@ -81,7 +81,7 @@ def test_a_missing_websocket_implementation_is_named(entry_point: Any, monkeypat
     assert "websockets" in problems[0]
     # The message names the symptom: a 404 to the upgrade appears in the browser as a muxws handshake
     # failure that names no package.
-    assert "404" in problems[0], "the message does not describe the symptom the reader will meet"
+    assert "404" in problems[0], "the message does not mention the 404 handshake failure"
 
 
 def test_either_websocket_implementation_satisfies_the_check(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
@@ -113,7 +113,7 @@ def test_a_missing_direct_import_is_named_with_the_reason(entry_point: Any, monk
 
     problems = entry_point.missing_dependencies()
     assert [problem.split(" - ")[0].strip() for problem in problems] == ["fastapi"]
-    assert "FastAPI" in problems[0], "a bare package name leaves the reader to guess what it is for"
+    assert "FastAPI" in problems[0], "the message names the package without its purpose"
 
 
 def test_the_node_backend_is_not_asked_for_the_python_backends_packages(
@@ -168,10 +168,10 @@ def test_the_node_backends_own_packages_are_named(entry_point: Any, monkeypatch:
     assert [problem.split(" - ")[0].strip() for problem in problems] == ["tsx", "ws"]
     # The reason is part of the message; `tsx` is invoked from `package.json`, not imported.
     assert "build step" in problems[0]
-    assert entry_point.missing_dependencies("python") == [], "these are not the Python backend's"
+    assert entry_point.missing_dependencies("python") == [], "tsx and ws must not be reported for the python backend"
 
 
-def test_the_frontend_is_demanded_by_both_backends(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
+def test_both_backends_require_the_frontend_dependencies(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
     """Both backends use the same frontend, so both require its dependencies."""
     monkeypatch.setattr(entry_point, "node_package_installed", lambda name: name != "vue")
 
@@ -196,7 +196,7 @@ def test_a_bare_invocation_prints_the_help_and_exits_zero(entry_point: Any, caps
 
 
 @pytest.mark.parametrize("flag", ["--browser", "--uds", "--bench"])
-def test_each_flag_selects_its_own_demo_and_leaves_the_others_alone(entry_point: Any, flag: str):
+def test_each_flag_sets_only_its_own_demo_attribute(entry_point: Any, flag: str):
     """Each flag sets exactly one of the three demo attributes."""
     arguments = entry_point.parse_arguments([flag])
     selected = {name for name in ("browser", "uds", "bench") if getattr(arguments, name)}
@@ -256,7 +256,7 @@ def test_full_is_refused_by_every_demo_but_bench(entry_point: Any, capsys: pytes
     assert "--bench" in capsys.readouterr().err
 
 
-def test_bench_runs_a_trimmed_matrix_unless_full_says_otherwise(entry_point: Any):
+def test_full_flag_is_passed_to_bench(entry_point: Any):
     """`--full` is passed through to the measurement."""
     assert entry_point.parse_arguments(["--bench"]).full is False
     assert entry_point.parse_arguments(["--bench", "--full"]).full is True
@@ -280,7 +280,7 @@ def test_the_default_backend_is_python(entry_point: Any):
         (["--browser", "node", "--backend", "node"], "node"),
     ],
 )
-def test_the_backend_argument_accepts_what_it_should(entry_point: Any, argv: list[str], expected: str):
+def test_each_accepted_backend_spelling_selects_its_backend(entry_point: Any, argv: list[str], expected: str):
     assert entry_point.parse_arguments(argv).backend == expected
 
 
@@ -311,7 +311,7 @@ def test_asking_for_both_backends_at_once_is_refused(entry_point: Any, capsys: p
     assert "pick one" in capsys.readouterr().err
 
 
-def test_help_names_both_backends_and_reads_as_prose(entry_point: Any):
+def test_help_names_both_backend_directories_and_runners(entry_point: Any):
     """`--help` describes both backends.
 
     Not a golden-file comparison: it asserts that both backend directories and both runners are
@@ -324,7 +324,7 @@ def test_help_names_both_backends_and_reads_as_prose(entry_point: Any):
     assert "--backend" not in text
 
 
-def test_the_frontend_runs_unless_no_fe_says_otherwise(entry_point: Any):
+def test_no_fe_disables_the_frontend(entry_point: Any):
     """`--no-fe` starts the backend without the frontend, for use with another client."""
     assert entry_point.parse_arguments(["--browser"]).frontend is True
     assert entry_point.parse_arguments(["--browser", "node"]).frontend is True
@@ -342,9 +342,7 @@ def test_no_fe_does_not_demand_the_frontend_dependencies(entry_point: Any, monke
     with_frontend = entry_point.missing_dependencies("python", True)
     assert [problem.split(" - ")[0].strip() for problem in with_frontend] == ["npm install"]
 
-    assert entry_point.missing_dependencies("python", False) == [], (
-        "--no-fe was refused over a dev server it was told not to start"
-    )
+    assert entry_point.missing_dependencies("python", False) == [], "--no-fe reported frontend dependencies as missing"
 
 
 def test_the_node_backend_still_needs_npm_install_under_no_fe(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
@@ -356,7 +354,7 @@ def test_the_node_backend_still_needs_npm_install_under_no_fe(entry_point: Any, 
     monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
 
     problems = entry_point.missing_dependencies("node", False)
-    assert problems, "the node backend cannot run without node_modules and the check said nothing"
+    assert problems, "missing node_modules was not reported for the node backend"
     assert not any("frontend" in problem for problem in problems), problems
 
 
@@ -381,7 +379,7 @@ def test_uds_is_a_mode_of_its_own_and_not_a_third_backend(entry_point: Any):
         (["--uds", "--no-fe"], "nothing to turn off"),
     ],
 )
-def test_uds_refuses_the_arguments_that_cannot_mean_anything(
+def test_uds_rejects_arguments_of_other_demos(
     entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str], expected: str
 ):
     with pytest.raises(SystemExit) as refusal:
@@ -390,9 +388,7 @@ def test_uds_refuses_the_arguments_that_cannot_mean_anything(
     assert expected in capsys.readouterr().err
 
 
-def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
-    entry_point: Any, monkeypatch: pytest.MonkeyPatch
-):
+def test_uds_demo_requires_only_its_own_two_packages(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
     """The socket demo starts neither uvicorn nor a dev server and does not require them.
 
     A missing `AF_UNIX` (Windows) is reported in the same list before anything starts.
@@ -400,7 +396,7 @@ def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
     monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: False)
 
     assert entry_point.missing_dependencies(uds=True) == [], (
-        "the socket demo was refused over dependencies it never loads"
+        "the uds demo reported packages it does not import as missing"
     )
 
     # `raising=False` so the removal also succeeds on a platform without `AF_UNIX`.
@@ -410,9 +406,7 @@ def test_the_uds_demo_asks_for_two_packages_and_not_the_browser_demo_s_six(
     assert "AF_UNIX" in problems[0]
 
 
-def test_the_measurement_asks_for_websockets_before_it_starts_measuring(
-    entry_point: Any, monkeypatch: pytest.MonkeyPatch
-):
+def test_bench_checks_websockets_before_the_first_cell(entry_point: Any, monkeypatch: pytest.MonkeyPatch):
     """`--bench` is checked like the demos that start a server, and asks for neither msgpack nor AF_UNIX.
 
     Every cell runs a pair of child processes, so a missing `websockets` would otherwise raise
@@ -423,7 +417,7 @@ def test_the_measurement_asks_for_websockets_before_it_starts_measuring(
     monkeypatch.delattr(entry_point.socket, "AF_UNIX", raising=False)
 
     assert entry_point.missing_dependencies(bench=True) == [], (
-        "the measurement was refused over something it skips or never loads"
+        "bench reported a package it skips or does not import as missing"
     )
 
     monkeypatch.setattr(entry_point, "BENCH_IMPORTS", (("no_such_module", "invented for this test"),))

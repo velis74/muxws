@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from muxws import ResetCode
+
 CONFORMANCE = Path(__file__).parent.parent / "conformance"
 INVALID_FILES = sorted((CONFORMANCE / "invalid").glob("*.json"))
 FRAME_FILES = [CONFORMANCE / "frames" / "v1-frames.json"]
@@ -55,7 +57,8 @@ def test_invalid_fixtures_parse(path: Path):
     for entry in fixture["expect_out"]:
         assert entry["type"] in {"reset", "goaway"}
         assert isinstance(entry["code"], int)
-        assert entry["code"] != 5, "reset code 5 is retired and must never appear"
+        assert entry["code"] in set(ResetCode), f"{entry['code']} is not a defined reset code"
+        assert entry["code"] != ResetCode.CONNECTION_CLOSED, "CONNECTION_CLOSED never appears on the wire"
 
 
 def test_every_invalid_case_of_wsm_tst_003_has_a_fixture():
@@ -137,7 +140,7 @@ def test_boundary_fixtures_are_name_cap_payload_fragments(path: Path):
         assert set(case) == {"name", "cap", "payload", "fragments"}
         assert isinstance(case["cap"], int)
         assert case["cap"] > 0
-        assert len(case["fragments"]) > 1, f"{case['name']} does not actually fragment"
+        assert len(case["fragments"]) > 1, f"{case['name']} does not fragment"
         assert all(isinstance(fragment, str) for fragment in case["fragments"])
 
 

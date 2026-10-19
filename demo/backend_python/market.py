@@ -2,7 +2,7 @@
 
 Nothing here uses a network; the demo runs without an upstream data feed.
 
-Every number is drawn from a generator seeded from the symbol and the purpose (D2), not from one
+Every number is drawn from a generator seeded from the symbol and the purpose, not from one
 shared generator. With a shared generator a symbol's tenth price would depend on which other
 requests (for example an export) ran first; with separate generators the values are the same on
 every run regardless of user actions.
@@ -38,7 +38,7 @@ SYMBOLS: tuple[tuple[str, str, float], ...] = (
     ("TIDE", "Tidewater Marine", 38.75),
 )
 
-#: Fixed, not taken from the clock, so the demo starts from the same market every time (D2).
+#: Fixed, not taken from the clock, so the demo starts from the same market every time.
 DEFAULT_SEED = 1_234_567
 
 #: Levels per side of the book. 1500 levels a side make the depth reply about 190 KB, larger than
@@ -62,8 +62,8 @@ HISTORY_POINTS = 120
 def _generator(seed: int, purpose: str, symbol: str) -> random.Random:
     """One generator per (seed, purpose, symbol).
 
-    `random`, not `secrets`: a fake price is not security-sensitive, and `secrets` cannot be seeded
-    (D2). `random` hashes the string seed itself, so it is stable across runs and platforms and
+    `random`, not `secrets`: a fake price is not security-sensitive, and `secrets` cannot be seeded.
+    `random` hashes the string seed itself, so it is stable across runs and platforms and
     independent of `PYTHONHASHSEED`.
     """
     return random.Random(f"{seed}:{purpose}:{symbol}")  # noqa: S311 - a fake price is not a secret
@@ -105,7 +105,7 @@ class Instrument:
 
 
 class Market:
-    """The demo's only source of truth about symbols (D1).
+    """The demo's only source of truth about symbols.
 
     The frontend holds no seed data: every symbol it renders arrives over the socket, so the board is
     empty without a connection.

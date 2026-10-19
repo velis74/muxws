@@ -50,20 +50,17 @@ rotates between streams with at most one prepared frame per stream. See
 [Sizes & fragmentation](/guide/sizes-and-fragmentation).
 
 **Transport-level head-of-line blocking** is caused by packet loss: one lost TCP segment stalls every
-muxws stream until it is retransmitted. **muxws does not solve this, and no protocol above TCP can.**
+muxws stream until it is retransmitted. **muxws does not solve this**; it requires a transport with
+per-stream loss recovery.
 
 Only the layer that handles packets can see packet loss. QUIC is that layer: every UDP datagram carries
 frames tagged with a stream id and an offset, so when a datagram is lost QUIC knows which streams it
 affected and delivers data for the other streams immediately.
 
-A WebSocket gives muxws a single ordered byte stream that the kernel has already repaired. When a
-segment is lost, all data after it is held back until the retransmission arrives, and the data that
-reaches `receive()` has no gaps. Loss is not observable per stream at this layer. Per-stream loss
-recovery requires replacing TCP, as QUIC does.
-
-muxws therefore removes application-level head-of-line blocking and does not affect transport-level
-head-of-line blocking. On a browser-to-server connection carrying many small conversations and some
-large ones, application-level blocking is the more frequent of the two.
+A WebSocket gives muxws a single ordered byte stream in which the kernel has already reordered and
+retransmitted lost segments. When a segment is lost, all data after it is held back until the
+retransmission arrives, and the data that reaches `receive()` has no gaps. Loss is not observable per
+stream at this layer. Per-stream loss recovery requires replacing TCP, as QUIC does.
 
 Three other QUIC features are unavailable for the same reason: **0-RTT resumption**, **connection
 migration** across a network change, and **per-stream congestion control**.
@@ -128,15 +125,13 @@ muxws has no flow control: a fast producer can outrun a slow consumer. Two limit
 per-connection window. A server that pushes telemetry faster than a browser processes it fills the
 send buffer and then memory.
 
-`window_update` is a reserved frame name, and a v1 peer must never send one. Flow control is reserved
-for a later protocol generation. In muxws v1, backpressure consists of those two limits only.
+`window_update` is a reserved frame name, and a v1 peer must never send one.
 
 ### Priority
 
 The writer is strictly fair: an interactive query and a 1 MB export get an equal share of the queue.
 HTTP/2 defined a dependency tree, which implementations did not adopt; HTTP/3 replaced it with the
-urgency-and-incremental scheme of RFC 9218. muxws has neither. A priority weight on `open()` would be a
-local sender-side scheduling decision and would require no wire change.
+urgency-and-incremental scheme of RFC 9218. muxws has neither.
 
 ### No `STOP_SENDING` distinct from `reset`
 
@@ -148,16 +143,14 @@ but finish what you were doing".
 
 muxws has no `SETTINGS`. `max_payload_bytes` and `max_concurrent_streams` are local limits of each
 receiver and are not announced, so a sender learns of them only when the receiver answers with
-`PAYLOAD_TOO_LARGE` or `REFUSED`. Without negotiation, two peers cannot disagree about a negotiated
-value, and no exchange has to complete before the first stream is opened; the sender has to handle the
+`PAYLOAD_TOO_LARGE` or `REFUSED`. No exchange precedes the first stream; the sender handles the
 rejection. See [Connection lifecycle](/guide/connection-lifecycle).
 
 ### No header compression
 
 `headers` are sent uncompressed on every `open`. With a few keys the overhead is negligible; with a full
 trace context on every stream it is noticeable. HPACK and QPACK exist because HTTP sends the same set
-of headers on every request. muxws traffic does not usually have that shape, but where it does,
-compression would reduce the size.
+of headers on every request.
 
 ## Measuring the cost yourself
 

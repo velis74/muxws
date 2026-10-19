@@ -200,7 +200,7 @@ def test_server_push_runs_end_to_end() -> None:
 
 @needs_acceptor
 def test_reconnecting_client_runs_end_to_end() -> None:
-    """`hello=` and `reconnect=` against an acceptor with no reconnect-specific code at all."""
+    """`hello=` and `reconnect=` against an acceptor with no reconnect-specific code."""
     with example_server("quickstart_server.py") as url:
         assert run_client("reconnect_client.py", url) == documented_output("reconnect")
 

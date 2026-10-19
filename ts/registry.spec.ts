@@ -157,7 +157,10 @@ describe('peer.tags', () => {
       // The closed connection's index entries are removed as well.
       await until(() => registry.peersFor({ tab: 'abc' }).length === 1, 3000, 'the successor in the index');
       expect(registry.peersFor({ tab: 'abc' })).toEqual([successor]);
-      expect(registry.peersFor({ muted: true }), 'a silenced tab must not silence its successor').toEqual([]);
+      expect(
+        registry.peersFor({ muted: true }),
+        'a tag set on the previous connection must not appear on the new peer',
+      ).toEqual([]);
     } finally {
       await loop.stop();
     }
@@ -216,7 +219,7 @@ describe('register', () => {
     expect(registry.peersFor({ session: 'changed' })).toEqual([peer]);
   });
 
-  it('makes overwriting a never-indexed key free - WSM-REG-014', () => {
+  it('does no index work when an unindexed key is overwritten - WSM-REG-014', () => {
     const peer = makePair().dialer;
     peer.tags.session = 'abc';
     registry.register(peer);
@@ -228,7 +231,7 @@ describe('register', () => {
       expect(registry.peersFor({ session: 'abc' })).toEqual([peer]);
     }
 
-    expect(registry.indexSize, 'a rewrite must cost the registry nothing').toBe(sizeBefore);
+    expect(registry.indexSize, 'overwriting an unindexed key must not change the index').toBe(sizeBefore);
   });
 
   it('keys the index by name and value, so two tags cannot collide into one bucket', () => {
@@ -359,7 +362,7 @@ describe('the registry lifetime', () => {
       registry.register(peer);
     }
 
-    expect(hooked, 'one hook per peer, however often it is re-registered').toHaveBeenCalledTimes(1);
+    expect(hooked, 'one close hook per peer after repeated register() calls').toHaveBeenCalledTimes(1);
     expect(registry.peersFor({ session: 's49' })).toEqual([peer]);
     expect(registry.peersFor({ session: 's0' })).toEqual([]);
     expect(registry.indexSize).toBe(1);
@@ -378,7 +381,7 @@ describe('the registry lifetime', () => {
       expect(registry.peersFor({ session: `s${generation}` }), 'every socket loss deregisters the peer').toEqual([]);
     }
 
-    expect(hooked, 'one hook per peer, however often it reconnects and is re-registered').toHaveBeenCalledTimes(1);
+    expect(hooked, 'one close hook per peer across reconnects and re-registrations').toHaveBeenCalledTimes(1);
   });
 
   it('deregisters idempotently', () => {

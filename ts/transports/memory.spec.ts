@@ -67,7 +67,7 @@ describe('the in-memory pair', () => {
     expect(await pending).toBe('now');
   });
 
-  it('injects past the other peer', async () => {
+  it('delivers an injected message to the receiving end without the other end sending it', async () => {
     const [left, right] = memoryPair();
     right.inject('{"type":"widget"}');
     expect(await right.receive()).toBe('{"type":"widget"}');

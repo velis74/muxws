@@ -128,9 +128,9 @@ def make_lone() -> Callable[..., Lone]:
 
 
 class DialableServer:
-    """A fake server the reconnect driver can actually dial (§7).
+    """A fake server the reconnect driver can dial (§7).
 
-    Every `dial()` builds a fresh `memory_pair()`, stands an acceptor `Peer` up over one end, starts
+    Every `dial()` builds a fresh `memory_pair()`, creates an acceptor `Peer` over one end, starts
     its `serve()` task and returns the other end, so `server.dial` is a `Dial` callable a
     `ConnectionLoop` can be constructed with directly. Each connection is a new acceptor peer, as on
     the acceptor side of a reconnect (WSM-RCN-033): no state carries over from the previous connection.
@@ -149,7 +149,7 @@ class DialableServer:
         #: A handler a test supplies. When set it replaces `on_hello` entirely.
         self.handler: StreamHandler | None = None
         #: How the built-in handler answers a stream: `"ack"` acknowledges it by returning
-        #: (WSM-RCN-022), `"reset"` resets it, `"hang"` never answers, `"drop"` kills the socket with
+        #: (WSM-RCN-022), `"reset"` resets it, `"hang"` never answers, `"drop"` drops the socket with
         #: the hello outstanding.
         self.on_hello = "ack"
         self.acceptors: list[Peer] = []

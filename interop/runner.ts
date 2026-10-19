@@ -963,7 +963,7 @@ class Side {
 
   private async corpusEnd(step: Step): Promise<null> {
     const { stream } = await this.streamFor(Number(step.stream_ref));
-    // An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
+    // An absent `payload` key is `ABSENT`, not `null`: they are different frames.
     await stream.end({
       payload: 'payload' in step ? step.payload : undefined,
       trailers: step.trailers,

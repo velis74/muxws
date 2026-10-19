@@ -1,8 +1,4 @@
 """Send-path throughput: frames per second through the codec and the peer, printed on every run.
-
-The demo's rate of four ticks per second per symbol comes from an `asyncio.sleep(0.25)` in its
-generator and does not reflect this path's maximum.
-
 Each assertion is a minimum far below typical throughput, so the figure is reported on every run and
 a large slowdown fails the test, while a loaded CI runner still passes.
 """
@@ -28,7 +24,7 @@ async def _drain_until(done: Callable[[], bool], *, limit: float = 30.0) -> None
         await asyncio.sleep(0)
 
 
-async def test_how_many_small_frames_a_second_one_peer_pair_moves(pair):
+async def test_small_frame_throughput_on_one_stream_is_above_the_minimum(pair):
     """One stream, small payloads, over the in-memory transport: codec and peer overhead only."""
     received = 0
 
@@ -50,10 +46,10 @@ async def test_how_many_small_frames_a_second_one_peer_pair_moves(pair):
     rate = received / elapsed
     print(f"\n  {received} frames in {elapsed:.3f}s = {rate:,.0f} frames/second (one stream)")
     assert received > 4_000, f"only {received} of 5000 frames arrived"
-    assert rate > 2_000, f"{rate:,.0f} frames/second is far below anything this path should manage"
+    assert rate > 2_000, f"{rate:,.0f} frames/second is below the minimum of 2,000"
 
 
-async def test_the_rate_holds_up_across_many_concurrent_streams(pair):
+async def test_throughput_across_twenty_streams_is_above_the_minimum(pair):
     """Twenty interleaved streams, as in the demo; the round-robin rotation does not reduce the rate."""
     received = 0
 

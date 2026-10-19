@@ -71,7 +71,7 @@ def test_the_grammar_splits_a_socket_path_from_a_request_target(url: str, path: 
 
 
 @pytest.mark.parametrize("url", ["ws://127.0.0.1:8000/ws", "wss://example.test/ws", "ws://[::1]:9000/"])
-def test_a_tcp_url_is_handed_back_untouched(url: str):
+def test_a_non_unix_url_parses_to_none(url: str):
     """`None` for anything that is not `ws+unix:`, because this is the branch and not a validator.
 
     Every URL passed to `connect()` goes through the parser. If it raised on other URLs, a typo in an
@@ -121,7 +121,7 @@ def test_a_request_target_that_is_not_an_absolute_path_is_refused():
         parse_unix_url("ws+unix:///run/muxws/api.sock:ws")
 
 
-def test_a_platform_without_af_unix_is_told_so_by_name(monkeypatch: pytest.MonkeyPatch):
+def test_a_platform_without_af_unix_raises_unix_sockets_unsupported_error(monkeypatch: pytest.MonkeyPatch):
     """Windows: a named error out of the parse, not an `AttributeError` out of the dial.
 
     `websockets`' `unix_connect` imports where AF_UNIX does not exist and fails at
@@ -136,7 +136,7 @@ def test_a_platform_without_af_unix_is_told_so_by_name(monkeypatch: pytest.Monke
         parse_unix_url("ws+unix:///run/muxws/api.sock:/ws")
 
 
-def test_both_refusals_are_catchable_as_muxws_errors_and_as_what_they_are():
+def test_both_refusals_are_catchable_as_muxws_errors_and_as_their_builtin_bases():
     """Both errors are catchable as `MuxwsError` and as their builtin base.
 
     An application that wraps its startup in `except MuxwsError` catches them. Code that does not

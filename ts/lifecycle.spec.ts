@@ -247,7 +247,7 @@ describe('ping and pong', () => {
     expect(echoed).toEqual(sent);
   });
 
-  it('needs no application involvement to answer a ping', async () => {
+  it('answers a ping with no onStream handler registered', async () => {
     // WSM-CON-010: no `onStream` handler anywhere, and the ping still round-trips.
     const pair = makePair();
     pair.start();
@@ -566,7 +566,7 @@ describe('goaway', () => {
       await pair.settle();
 
       const goaway = pair.framesOfType('dialer', 'goaway');
-      expect(goaway.length, 'the exhausting peer must say goodbye rather than just refusing').toBeGreaterThan(0);
+      expect(goaway.length, 'a peer out of stream ids must send goaway, not only refuse opens').toBeGreaterThan(0);
       expect(goaway[goaway.length - 1].code).toBe(ResetCode.NO_ERROR);
       expect(String(goaway[goaway.length - 1].reason)).toContain('exhausted');
       expect(pair.dialer.isOpen, 'and must then close').toBe(false);

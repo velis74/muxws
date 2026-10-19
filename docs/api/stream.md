@@ -341,7 +341,7 @@ not wait.
 
 ### Raises
 
-Raises: nothing. It is set on every path, including the ones on which no headers ever came.
+Raises: nothing.
 
 ### Example
 
@@ -726,7 +726,7 @@ None — a readonly field.
 
 ### Raises
 
-Raises: nothing. It has no rejection path at all.
+Raises: nothing.
 
 ### Example
 
@@ -1594,7 +1594,7 @@ await dialer.close({ drainMs: 100 });
 
 ## `stream.reply()` (Python)
 
-`send` plus `end` in one call, which is what a unary handler wants.
+`send` plus `end` in one call, for unary handlers.
 
 It is equivalent to `end(payload, trailers=trailers, headers=headers)`.
 
@@ -1927,8 +1927,7 @@ async def reset(self, code: ResetCode, reason: str | None = None) -> None:
 ### Raises
 
 - `ProtocolError` — `code` is `ResetCode.CONNECTION_CLOSED`, or a number this generation does not
-  define (5 is retired and must not be reused). Raised before anything is sent, and raised even on a
-  stream that is already closed.
+  define. Raised before anything is sent, and raised even on a stream that is already closed.
 
 ### Example
 
@@ -1996,7 +1995,7 @@ Queued frames of the stream are dropped as described under
 ### Raises
 
 Rejects with `ProtocolError` for `ResetCode.CONNECTION_CLOSED` and for any number this generation
-does not define, including the retired 5. The check runs before anything is sent and before the
+does not define. The check runs before anything is sent and before the
 already-closed check. `reset` is an `async` method, so the failure is a rejection of the returned
 promise, not a synchronous throw.
 
@@ -2062,7 +2061,7 @@ A generator, as the protocol requires; `await stream` evaluates to the first pay
 - `RemoteError`, `StreamRefused`, `StreamTimeout`, `StreamReset` — the stream was reset.
 - `ConnectionLost` — the socket died.
 - `asyncio.CancelledError` — the awaiting task was cancelled. Before it propagates, the stream is
-  reset with `CANCELLED`, so the remote stops producing for a consumer that has gone away.
+  reset with `CANCELLED`, so the remote stops sending on the stream.
 
 ### Example
 
@@ -2269,9 +2268,7 @@ await dialer.close({ drainMs: 100 });
 
 ## `stream.result()` (Python)
 
-The same memoized answer as `await stream`, with a deadline wrapped around the wait.
-
-`await stream` and `await stream.result()` resolve from the same memoized answer, so a second read
+The same memoized answer as `await stream`, with a deadline wrapped around the wait. A second read
 returns the first read's value, not the next payload.
 
 ### Signature
@@ -2499,7 +2496,7 @@ export type { SendOptions as StreamSendOptions };
 
 ### Return
 
-Nothing — it is a type. It exists at compile time only and is absent from the emitted JavaScript.
+Nothing — it is a type. It exists at compile time only.
 
 ### Raises
 

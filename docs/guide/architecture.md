@@ -29,9 +29,8 @@ the socket's text send and binary send, and to know which message type to expect
 message to determine its type.
 
 Codecs are registered explicitly with `register_codec` / `registerCodec` during bootstrap, before
-connecting; only `json` is registered by default. There is no entry-point scan, no lazy registration,
-no self-registration of a codec module on import, and no detection of installed modules. A codec name
-that was never registered fails at startup; there is no fallback to JSON. See [Codecs](/guide/codecs).
+connecting; only `json` is registered by default. A codec name that was never registered fails at
+startup. See [Codecs](/guide/codecs).
 
 ### 2. The frame layer
 
@@ -207,8 +206,7 @@ See [Transports](/guide/transports) for the shipped implementations, and
 
 This guide describes behaviour and its reasons. The normative rules, numbered and testable, against
 which every implementation is checked, are in
-[SPEC.md](https://github.com/velis74/muxws/blob/main/SPEC.md) at the repository root. This is the only
-page of the site that links to it, so that the site contains no second copy of the normative text.
+[SPEC.md](https://github.com/velis74/muxws/blob/main/SPEC.md) at the repository root.
 
 ## See also
 

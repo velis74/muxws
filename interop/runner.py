@@ -809,7 +809,7 @@ class Side:
 
     async def corpus_end(self, step: dict[str, Any]) -> None:
         stream = await self.stream_for(step["stream_ref"])
-        # An absent `payload` key is `ABSENT`, not `null`: they are different frames (D1).
+        # An absent `payload` key is `ABSENT`, not `null`: they are different frames.
         await stream.end(
             step["payload"] if "payload" in step else ABSENT,
             trailers=step.get("trailers"),

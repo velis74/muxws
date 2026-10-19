@@ -130,7 +130,7 @@ _ID_ARGUMENT_NAMES = frozenset({"id", "sid", "stream", "stream_id", "streamid"})
 #:   allocates nothing.
 #: - `Stream.__init__` is the library's own constructor and requires a `Peer`; every caller-facing
 #:   route to a `Stream` (`open`, `notify`, `request`, and dispatch to `on_stream`) allocates the id
-#:   itself. SPEC.md Appendix B notes this exception to the rule's wording.
+#:   itself. GAPS.md lists this deviation from the rule's wording.
 _ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION = frozenset(
     {
         ("ConnectionLost.__init__", "stream_id"),
@@ -345,7 +345,7 @@ async def test_unknown_frame_type_is_ignored(make_pair, caplog):
             pair.acceptor_socket.inject('{"type":"widget","stream":1}')
             await pair.settle()
 
-        assert [frame.type for frame in arrived] == ["widget"], "the frame must actually have arrived"
+        assert [frame.type for frame in arrived] == ["widget"], "on_frame did not record the frame"
         assert pair.acceptor.is_open
         assert pair.sent_by("acceptor") == before, "an unknown type is never answered"
         assert pair.acceptor.streams == {}, "nor does it open anything"
@@ -436,7 +436,7 @@ async def test_unknown_envelope_field_is_ignored(make_lone):
 
     # Two silent peers also have equal wires, so the handler must have run and answered.
     assert clean_seen == [{"q": 1}]
-    assert clean_wire, "the control exchange produced no frames at all"
+    assert clean_wire, "the control exchange produced no frames"
     assert tainted_alive is clean_alive is True
     assert tainted_seen == clean_seen, "the payload the handler saw"
     assert tainted_wire == clean_wire, "an unknown envelope field changed what went out"
@@ -580,7 +580,7 @@ async def test_handler_returning_ends_stream_implicitly(make_pair):
 
 
 async def test_second_on_stream_replaces_and_logs(make_pair, caplog):
-    """WSM-STM-030: exactly one handler; a second replaces the first and says so."""
+    """WSM-STM-030: exactly one handler; a second replaces the first and logs a warning."""
     pair = make_pair()
     calls: list[str] = []
 
@@ -892,7 +892,9 @@ async def test_connection_closed_code_never_appears_on_the_wire(make_pair):
         await pair.dialer_socket.drop()
         await pair.settle()
 
-        assert any(frame.type == "open" for frame in queued), "the watch has to be on the real path"
+        assert any(frame.type == "open" for frame in queued), (
+            "no open frame was recorded; the spy is not on the send path"
+        )
         for frame in queued:
             assert frame.code != int(ResetCode.CONNECTION_CLOSED), f"code 9 was queued for the wire: {frame}"
         for who in ("dialer", "acceptor"):
@@ -922,7 +924,7 @@ async def test_on_frame_sees_both_directions_with_byte_lengths(make_pair):
         await pair.stop()
 
 
-async def test_a_throwing_on_frame_handler_does_not_break_the_connection(make_pair, caplog):
+async def test_an_on_frame_handler_that_raises_leaves_the_connection_open(make_pair, caplog):
     """WSM-OBS-003: an exception from `on_frame` does not affect the connection.
 
     `on_frame` is called from the read loop and from the write loop. If its exception propagated, it
@@ -942,7 +944,7 @@ async def test_a_throwing_on_frame_handler_does_not_break_the_connection(make_pa
         with caplog.at_level("ERROR"):
             answer = await pair.dialer.request({"q": 1})
 
-        assert answer == {"ok": True}, "the connection carried on working"
+        assert answer == {"ok": True}, "the connection closed after on_frame raised"
         assert pair.dialer.is_open is True
         assert {"tx", "rx"} <= set(seen), "and the handler behind the broken one still ran"
         assert any("on_frame handler raised" in record.getMessage() for record in caplog.records)
@@ -1036,8 +1038,8 @@ async def test_cancelling_a_request_resets_its_stream_with_or_without_a_timeout(
 
         resets = [f.code for f in pair.sent_by("dialer") if f.type == "reset"]
         assert resets == [int(ResetCode.CANCELLED)]
-        assert pair.dialer._streams == {}, "the stream is gone"
-        assert pair.acceptor._streams == {}, "and the remote stopped working on it"
+        assert pair.dialer._streams == {}, "the dialer still holds the stream"
+        assert pair.acceptor._streams == {}, "the acceptor still holds the stream"
     finally:
         await pair.stop()
 
@@ -1139,7 +1141,7 @@ async def test_a_fragmented_open_that_ends_on_its_last_fragment(make_pair):
         await pair.stop()
 
 
-async def test_a_handler_whose_stream_died_mid_flight_ends_quietly(make_pair):
+async def test_a_handler_return_after_resetting_its_stream_does_not_raise(make_pair):
     """WSM-STM-035's implicit end must not itself raise when the stream is already gone."""
     pair = make_pair()
     finished = asyncio.Event()
@@ -1162,7 +1164,7 @@ async def test_a_handler_whose_stream_died_mid_flight_ends_quietly(make_pair):
 
 
 async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(make_pair):
-    """A reset code this peer does not know, including the retired 5, resets the stream and keeps the peer open.
+    """A reset code this peer does not know, including the unassigned 5, resets the stream and keeps the peer open.
 
     Converting the wire value directly to `ResetCode` raises `ValueError` in the read loop, which
     leaves `is_open` true, `on_close` not called, and every pending await blocked on a queue that no
@@ -1177,7 +1179,9 @@ async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(
         try:
             stream = pair.dialer.open({"q": 1})
             await pair.settle()
-            pair.dialer_socket.inject(f'{{"type":"reset","stream":{stream.id},"code":{wire_code},"reason":"old peer"}}')
+            pair.dialer_socket.inject(
+                f'{{"type":"reset","stream":{stream.id},"code":{wire_code},"reason":"unknown code"}}'
+            )
             await pair.settle()
 
             assert pair.dialer.is_open, f"code {wire_code} must not kill the connection"
@@ -1424,10 +1428,10 @@ async def test_close_marks_the_peer_dead_when_the_adapter_close_raises(make_pair
         await pair.stop()
 
 
-# --------------------------------------------------------------------------- hostile frames and broken hooks
+# --------------------------------------------------------------------------- invalid frames and raising hooks
 
 
-async def test_a_wrong_parity_open_cannot_pose_as_a_fragment_continuation(make_pair):
+async def test_a_wrong_parity_open_during_reassembly_is_a_connection_error(make_pair):
     """WSM-SID-005: parity is checked before anything else, whatever reassembly is in flight.
 
     If continuation were inferred from an assembler running on that id, a stream this peer opened
@@ -1739,7 +1743,7 @@ async def test_an_unsendable_connection_level_frame_closes_the_socket(make_pair)
         await pair.stop()
 
 
-async def test_an_unencodable_frame_fails_its_stream_without_wedging_the_connection(make_pair):
+async def test_an_unencodable_frame_fails_its_stream_and_the_writer_keeps_running(make_pair):
     """A frame the codec cannot encode fails its own stream and leaves the writer task running.
 
     If the writer task stopped, nothing would drain the queue: every later send would stay queued
@@ -1875,7 +1879,7 @@ async def test_open_takes_zero_mandatory_arguments_and_defaults_payload_to_null(
 
     Other tests always pass a payload, so they do not detect a mandatory `payload` parameter. The
     default is `null`, not `ABSENT`: a receiver that distinguishes "no payload key" from
-    "payload: null" (D1) treats the two as different frames.
+    "payload: null" treats the two as different frames.
     """
     parameters = inspect.signature(Peer.open).parameters
     mandatory = [
@@ -2174,9 +2178,11 @@ async def test_an_envelope_lookalike_payload_survives_being_fragmented(make_pair
         await pair.settle(60)
 
         pieces = [frame for frame in pair.sent_by("dialer") if frame.fragment is not None]
-        assert len(pieces) > 1, "the payload must actually have been cut for this to prove anything"
+        assert len(pieces) > 1, "the payload was not fragmented"
         assert all(piece.type == "open" and piece.stream == 1 for piece in pieces)
-        assert any('"type":"reset"' in str(piece.fragment) for piece in pieces), "the bait must be on the wire"
+        assert any('"type":"reset"' in str(piece.fragment) for piece in pieces), (
+            "no fragment on the wire contains the envelope-like key"
+        )
         # The receiver reassembled the whole payload and read no key from it.
         assert reassembled == [big]
         assert pair.frames_of_type("acceptor", "goaway") == []
@@ -2248,7 +2254,7 @@ async def test_the_opening_payload_is_never_looked_at_for_routing(make_pair):
     """
     assert list(inspect.signature(Peer.on_stream).parameters) == ["self", "handler"]
     for absence in ("route", "add_route", "routes", "handlers", "dispatch", "handler_for"):
-        assert not hasattr(Peer, absence), f"Peer.{absence} is a routing table by another name"
+        assert not hasattr(Peer, absence), f"Peer.{absence} exists; Peer has no routing table"
 
     pair = make_pair()
     arrived: list[Any] = []
@@ -2312,7 +2318,7 @@ async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_p
         # `on_frame` observed the reset without consuming it; it is an observer (WSM-OBS-003), not a
         # handler.
         assert "rx:reset" in frames_seen
-        assert closes_seen == [], "the connection is fine; one stream failed"
+        assert closes_seen == [], "the connection closed when one stream failed"
     finally:
         await pair.stop()
 
@@ -2377,7 +2383,7 @@ async def test_open_interceptors_shape_the_headers_of_every_open(make_pair):
         await pair.stop()
 
 
-async def test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing(make_pair):
+async def test_an_open_interceptor_that_raises_fails_the_open_allocates_no_id_and_sends_nothing(make_pair):
     """WSM-API-027: the interceptor's own exception at the call site, no id allocated, nothing enqueued."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
@@ -2415,7 +2421,7 @@ async def test_an_open_interceptor_that_raises_fails_the_open_and_spends_nothing
             pair.dialer.open("x")
         unregister()
 
-        assert pair.dialer.open("x").id == 1, "no failed open spent an id"
+        assert pair.dialer.open("x").id == 1, "a failed open allocated an id"
         assert pair.dialer.is_open
     finally:
         await pair.stop()
@@ -2474,7 +2480,7 @@ async def test_reply_headers_interceptors_shape_the_first_frame_of_every_answer(
         await pair.stop()
 
 
-async def test_a_reply_headers_interceptor_that_raises_fails_the_call_and_spends_nothing(make_pair):
+async def test_a_reply_headers_interceptor_that_raises_fails_the_call_and_sends_nothing(make_pair):
     """WSM-API-028: the call raises and sends nothing, the first frame stays unsent, and at the
     implicit end of a handler the failure is reported as the handler's."""
     pair = make_pair()
@@ -2601,7 +2607,7 @@ async def test_incoming_interceptors_see_each_streams_leading_headers_once(make_
 
 
 async def test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing(make_pair, caplog):
-    """WSM-API-029: logged, the next interceptor still runs, and stream and connection carry on."""
+    """WSM-API-029: logged, the next interceptor still runs, and the stream and the connection stay open."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     after: list[Any] = []

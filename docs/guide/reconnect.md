@@ -88,8 +88,8 @@ should_retry(5, options)  # False
 
 ## The counter resets only on an *established* connection
 
-The helper's only persistent state is one attempt counter. It is reset at exactly one point in the
-code, when the connection is established, which requires **both**:
+The helper's only persistent state is one attempt counter. It is reset only when the connection is
+established, which requires **both**:
 
 1. the socket is open with the `muxws.v1.<codec>` subprotocol accepted, **and**
 2. the hello has been acknowledged.
@@ -103,10 +103,7 @@ backend is down, for example a load balancer in front of a failing service, acce
 immediately and then fails or does not answer the hello. If the counter were reset when `dial()`
 returned, each attempt would count as a success followed by a loss, `attempts` would be 0 at the start
 of every cycle, and every delay would be `initial_delay`: retries at a fixed 250 ms interval against an
-overloaded server. Tests that only check that the connection is re-established do not detect this.
-
-The counter must have only one reset call site. A second call site would reset the counter on a
-different condition, and the delay sequence would stop growing.
+overloaded server.
 
 ## The heartbeat
 
@@ -165,8 +162,7 @@ recomputed, and cannot be supplied as a callback. Modifying the dict after the c
 
 **Sent unchanged on every connection the peer makes**, with identical bytes each time.
 
-**Sent as an ordinary `open(payload, headers=..., end=True)`.** No flag, reserved field or structure
-marks it on the wire; on the wire it is indistinguishable from any other unary open.
+**Sent as an ordinary `open(payload, headers=..., end=True)`.** No field marks it on the wire.
 
 **Delivered to the acceptor's `on_stream` handler.** The acceptor registers no separate handler for it
 and cannot disable it; it arrives as an ordinary stream, and the application recognises it by its
@@ -190,25 +186,15 @@ Until the hello is acknowledged, `peer.is_open` / `peer.isOpen` is **false** and
 `ConnectionLost`. This ensures that no application frame precedes the hello on a new socket.
 
 ::: danger A credential MUST NOT go in the hello
-Authentication belongs to the WebSocket upgrade: a cookie, an `Authorization` header, a signed URL,
-or an extra subprotocol entry, checked *before* `accept()` and before any muxws frame is sent. See
-[Transports](/guide/transports#where-authentication-belongs).
-
-A credential in the hello is checked only after the socket is open and the acceptor has allocated
-resources for it. It is sent unchanged on every reconnection for the life of the process, so it cannot
-be rotated, and it is passed as an ordinary payload to every frame observer on the connection. The
-hello identifies a client; it does not authorize the connection.
+Authentication belongs to the WebSocket upgrade, before `accept()`. The hello is checked only after
+the socket is open, is sent unchanged on every reconnection, and reaches every frame observer as an
+ordinary payload. See [Where authentication belongs](/guide/transports#where-authentication-belongs).
 :::
 
 ## What a reconnect restores
 
 `on_reconnect(attempt, peer)` fires once per re-established connection, after the socket is open with
-the subprotocol accepted **and** after the hello is acknowledged. When it fires, the following hold:
-
-- the socket is open, and
-- the acceptor has acknowledged the hello on it.
-
-Nothing else is restored:
+the subprotocol accepted **and** after the hello is acknowledged. Nothing else is restored:
 
 - **No stream is restored.** Every stream live at the time of the loss was failed with
   `ConnectionLost`. No stream is resumed and no in-flight frame is re-sent.
@@ -230,22 +216,17 @@ def resubscribe(attempt: int, peer) -> None:
 ```
 
 ::: tip `tags` and reconnects
-On the **acceptor** side, a reconnect produces a new `Peer` object with empty `tags`. The acceptor
-does not know that the new socket belongs to a client it served before, so the old tags are not
-carried over. The acceptor writes its index entries again, from the hello handler. See
-[Registry](/guide/registry).
-
-On the **dialer** side, the `Peer` object remains, and the library neither reads nor clears its
-`tags`; values the dialer wrote there remain.
+On the acceptor, a reconnect produces a new `Peer` with empty `tags`. See
+[Tags end with their connection](/guide/registry#peer-tags).
 :::
 
-## Client identity: a recommendation, not a feature
+## Client identity
 
 muxws does not generate or store a client identity. It has no concept of a tab id, a session id or a
 client id, and does not inspect the `hello` payload. An application that needs a stable identity
 across reconnections supplies one, and the storage location determines its lifetime:
 
-| Storage | Verdict |
+| Storage | Suitability |
 |---|---|
 | `sessionStorage` | **Recommended.** One value per tab, kept across reloads of that tab and discarded when the tab closes. |
 | `localStorage` | Not suitable. Shared across all tabs of the origin, so several tabs present the same identity and the acceptor cannot distinguish their subscriptions. |
@@ -261,9 +242,6 @@ if (tab === null) {
 }
 const peer = await connect(url, { hello: { tab }, reconnect: new Reconnect() });
 ```
-
-muxws does not generate an identity, because the correct lifetime of the identity depends on the
-application.
 
 ## Giving up
 

@@ -58,7 +58,7 @@ async def test_unregistered_name_raises_before_socket(configured_codec, monkeypa
     assert "json" in message
 
 
-async def test_no_fallback_to_json_ever(configured_codec):
+async def test_an_unregistered_configured_codec_does_not_fall_back_to_json(configured_codec):
     """WSM-INV-015: a deployment that believes it runs msgpack must never silently run JSON."""
     configured_codec("msgpack")
     with pytest.raises(CodecNotRegistered):

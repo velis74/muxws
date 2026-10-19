@@ -72,7 +72,7 @@ describe('the writer', () => {
       writer.advance(1);
     }
 
-    expect(depths.length).toBeGreaterThan(5); // the payload must actually fragment for this to mean anything
+    expect(depths.length).toBeGreaterThan(5); // the payload must be fragmented
     expect(Math.max(...depths)).toBeLessThanOrEqual(1);
   });
 
@@ -127,7 +127,7 @@ describe('the writer', () => {
     });
   });
 
-  it('cuts where the splitter cuts - one boundary computation, used two ways', () => {
+  it('cuts at the same boundaries as splitFrame', () => {
     const writer = makeWriter();
     const source: Frame = { type: 'data', stream: 1, payload: big(3000), end: true };
     writer.enqueue(source);
@@ -269,7 +269,7 @@ describe('a stream queue', () => {
   });
 });
 
-describe('the peer actually uses the writer', () => {
+describe('the peer sends through the writer', () => {
   /**
    * The rotation must be on the peer's send path, not only implemented in `ts/writer.ts`: a peer
    * that queued its own frames FIFO would pass every test above and still serialise the streams.
@@ -298,7 +298,7 @@ describe('the peer actually uses the writer', () => {
 
       const streams = left.sent.map((message) => codec.decode(message).stream);
       const small = streams.indexOf(3);
-      expect(small, 'the small frame never went out at all').toBeGreaterThan(-1);
+      expect(small, 'the small frame was not sent').toBeGreaterThan(-1);
       expect(small, `the small frame waited ${small} frames behind the big one`).toBeLessThan(4);
       expect(streams.filter((id) => id === 1).length, 'the big payload must still be fragmenting').toBeGreaterThan(10);
     } finally {
@@ -344,7 +344,7 @@ describe('WSM-INV-004 on a fast socket', () => {
     ticking = false;
 
     const positions = order.map((stream, index) => (stream === exported.id ? index : -1)).filter((i) => i >= 0);
-    expect(positions.length, 'the export must actually fragment for this to mean anything').toBeGreaterThan(3);
+    expect(positions.length, 'the export must be fragmented').toBeGreaterThan(3);
     const between = order
       .slice(positions[0], positions[positions.length - 1])
       .filter((stream) => stream !== exported.id);

@@ -1,8 +1,7 @@
 # Codecs
 
 A codec converts a muxws frame to the bytes of one WebSocket message and back. muxws ships two codecs:
-`json`, which is registered by default, and `msgpack`, which requires an optional dependency. The
-codec interface has four methods and two attributes, so a further codec is a few dozen lines.
+`json`, which is registered by default, and `msgpack`, which requires an optional dependency.
 
 Each connection uses **one codec**, chosen before the socket is opened. Both ends must use the same
 codec.
@@ -65,9 +64,9 @@ The dialer offers it **first** in its subprotocol list. An application may appen
 it; the acceptor ignores them. The acceptor either selects that exact value or **refuses the upgrade
 with HTTP 400**.
 
-The subprotocol is an **assertion, not a negotiation**. The peer has no fallback encoding, no list of
-acceptable alternatives, no per-connection multi-codec support and no runtime codec branching. Two
-peers configured with different codecs do not connect.
+The subprotocol asserts the codec; it is not negotiated. The peer has no fallback encoding, no list
+of acceptable alternatives and no runtime codec branching. Two peers configured with different codecs
+do not connect.
 
 The refusal happens at the handshake, before the connection is established. The dialer raises
 `CodecMismatch`, and the message names both environment variables, because the dialer cannot tell
@@ -100,17 +99,16 @@ CodecNotRegistered: codec 'msgpakc' is not registered (MUXWS_CODEC='msgpakc'); r
 deployment fails with a named error at the call that starts the connection, not with a decode error
 once frames are flowing.
 
-**muxws never falls back to JSON.** With a fallback, a deployment configured for msgpack on both ends
-but missing the registration would run over JSON on both ends without any error.
+A fallback would let a deployment configured for msgpack on both ends but missing the registration
+run over JSON on both ends without any error.
 
 `registered_codecs()` / `registeredCodecs()` returns the sorted list of registered names; the error
 message above prints that list.
 
 ## Registering msgpack
 
-Registration is **explicit**. muxws uses no dynamic import, no lazy auto-registration, no entry-point
-scan, and no check of whether a module is installed. A codec module does not register itself at import
-time, because a module with import-time side effects cannot be removed by tree-shaking.
+Registration is **explicit**: a codec module does not register itself at import time, because a
+module with import-time side effects cannot be removed by tree-shaking.
 
 Install the extra and call `register_codec` during bootstrap:
 
@@ -174,15 +172,9 @@ and muxws does not base64-encode them for you … Either encode them in the appl
 the msgpack codec.
 ```
 
-If the JSON codec base64-encoded bytes, they would decode as a `str`, because a decoded JSON document
-does not distinguish a base64 string from any other string. The same `send(b"...")` would then deliver
-a `str` under JSON and `bytes` under msgpack, and the receiver could not tell which it received.
-
-A sentinel such as `{"$bytes": "..."}` on the wire, unwrapped on decode, would preserve the type.
-muxws does not use one because **muxws defines no vocabulary inside `payload`** (WSM-FRM-006): no
-`kind`, no reserved key, no discriminator. A reserved key would require every consumer sharing the
-socket to nest its own vocabulary inside muxws's, and a payload that contained that key for its own
-purposes would be decoded incorrectly.
+The JSON codec does not encode bytes itself: a decoded JSON string cannot be told apart from base64
+text, so the receiver would get a `str` under JSON and `bytes` under msgpack, and muxws reserves no key
+inside `payload` (WSM-FRM-006) that could mark the value as bytes.
 
 `conformance/` uses `{"$bytes": [...]}` in its fixtures. That convention applies only to the fixture
 files, which are read by a test runner that implements it; it does not apply to payloads.

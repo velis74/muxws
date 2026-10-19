@@ -59,7 +59,7 @@ def test_every_mode_produces_a_result_for_the_cell_it_was_asked_for(
         assert (result.transport, result.codec, result.streams) == ("tcp", "json", 1), mode
 
 
-def test_each_mode_moved_messages_and_reported_a_rate(
+def test_each_mode_reports_a_positive_message_count_and_rate(
     smoke: tuple[list[Result], list[RoundTrip], list[str]],
 ):
     """Every result carries a positive message count and rates derived from it.
@@ -77,7 +77,7 @@ def test_each_mode_moved_messages_and_reported_a_rate(
 def test_the_payload_length_reported_is_the_one_all_three_modes_carried(
     smoke: tuple[list[Result], list[RoundTrip], list[str]],
 ):
-    """`payload_bytes` is the encoded length actually sent, and it is the same length in every mode.
+    """`payload_bytes` is the encoded length sent, and it is the same length in every mode.
 
     The three rows are comparable only if they carry the same application payload. A mode that
     counted its own framing as payload would report a different length.
@@ -91,7 +91,7 @@ def test_the_payload_length_reported_is_the_one_all_three_modes_carried(
         assert length >= PAYLOAD, mode
 
 
-def test_on_progress_is_told_about_every_cell_before_it_is_measured(
+def test_on_progress_is_called_for_every_cell_before_it_is_measured(
     smoke: tuple[list[Result], list[RoundTrip], list[str]],
 ):
     """The hook is called once per cell and once for the round trip.
@@ -140,7 +140,7 @@ def written(kind: str) -> SimpleNamespace:
     return SimpleNamespace(type=kind, more=False)
 
 
-async def test_the_send_window_raises_rather_than_waiting_on_a_connection_that_is_gone():
+async def test_a_pending_send_window_wait_raises_connection_error_on_close():
     """A close reported by the peer makes a pending wait raise `ConnectionError`.
 
     `Stream.send()` enqueues and returns, so after a lost connection frames are not written and
@@ -172,7 +172,7 @@ async def test_the_send_window_counts_payloads_and_not_the_frames_that_carry_no_
     peer.frame("tx", written("ping"), 0)
     waiting = asyncio.ensure_future(window.wait_for_room())
     await asyncio.sleep(0)
-    assert not waiting.done(), "a frame carrying no payload bought room for one"
+    assert not waiting.done(), "a frame without a payload enlarged the window"
 
     peer.frame("tx", written("data"), 0)
     await waiting

@@ -83,20 +83,16 @@ handshake with HTTP 400, before a socket exists. Peers of different generations 
 
 - **Unknown frame types** are ignored and are never an error. The connection continues. Each type is
   logged once per peer, at info level, for at most 32 distinct types.
-- **Unknown envelope fields** are ignored. A decoder must *drop* them rather than preserve them; if it
-  preserved them, `decode(encode(frame)) == frame` would also pass for frames carrying unknown fields.
+- **Unknown envelope fields** are ignored. A decoder must *drop* them rather than preserve them.
 
 An additive extension, such as a new field on `data` or a new frame type that receivers may ignore, is
 deployed by sending it. Peers that support it act on it; other peers ignore it. Nothing is negotiated.
 
-A peer has no mechanism to announce what it supports. An announcement mechanism would itself be a
-protocol feature that both ends must implement consistently. `window_update` is reserved as a frame
-name and is not implemented; a v1 peer must not send it.
+A peer has no mechanism to announce what it supports. `window_update` is reserved as a frame name and
+is not implemented; a v1 peer must not send it.
 
-**Reset code 5 is retired**, not reserved. It was `STREAM_LIMIT`, for rejection against an announced
-concurrency limit; muxws announces no limits. Code 5 must never be sent and must never be reused. A
-peer that receives it treats it as any unknown code: it resets that stream and keeps the connection.
-See [Errors](/guide/errors).
+**A reset code the receiver does not define** resets that stream and keeps the connection. See
+[Errors](/guide/errors).
 
 ## Writing a further implementation
 
@@ -139,8 +135,8 @@ them:
   pinned byte string would fail a legal encoder. msgpack fixtures assert only the round trip.
 - **No limit and no version appears in any frame**, including inside a `description` or a `reason`
   string. A schema test searches the corpus text for those names.
-- **Reset code 5 never appears**, and neither does code 9: `CONNECTION_CLOSED` is generated locally
-  when a socket closes and must never be sent.
+- **Every reset code is one this generation defines, and none is 9**: `CONNECTION_CLOSED` is
+  generated locally when a socket closes and must never be sent.
 - **Every duration is in milliseconds, and its key ends in `_ms`.** The corpus is read by one language
   whose durations are milliseconds and one whose durations are seconds; the runner converts.
 - **A fixture that is one object per file has a `name` equal to its file basename**, asserted by every
@@ -160,10 +156,6 @@ them:
    a frame for an id above it is a connection error. `sequences/` tests this.
 4. **Misbehaviour.** `invalid/` specifies which failures reset one stream and which end the connection,
    in the `connection_survives` column.
-
-### If the schema and a runner disagree
-
-One of them is wrong. Determine which one and fix it; do not choose one silently.
 
 ## See also
 

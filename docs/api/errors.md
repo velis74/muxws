@@ -60,22 +60,13 @@ rejects. From that entry point a malformed URL raises the runtime's `DOMExceptio
 for every URL its parsers reach. The exception is an authority with an unbalanced `[` (`ws://[::1`):
 `urllib.parse.urlsplit` rejects it before either check, so `connect()` raises a bare `ValueError`.
 
-`except MuxwsError` catches every transport error without importing a transport module.
-`except TransportUrlError` and `except TransportUnsupportedError` each catch one of the two groups.
-
 `StreamClosed` is not a `StreamReset`: a stream that ended normally while a last `send()` was in
 flight is an expected race, not a failure. `ConnectionLost` is a `StreamReset`: for a stream, socket
 loss is one more way of ending early, so one `except StreamReset` covers every early end.
 
-Reset codes 5 and 9:
-
-- **Reset code 5 (`STREAM_LIMIT`) is retired.** No name maps to it and it is never sent. A peer that
-  receives it treats it as any other unknown code: it resets that one stream and keeps the
-  connection. The code for refusing a stream over a concurrency limit is `REFUSED` (4).
-- **Reset code 9, `CONNECTION_CLOSED`, must never appear on the wire.** It is synthesised locally on
-  every stream that is live when the socket dies. On the wire it would tell the remote that the
-  remote's own connection had died, which is false. `stream.reset()` refuses it with a
-  `ProtocolError` and does not send it.
+**Reset code 9, `CONNECTION_CLOSED`, must never appear on the wire.** It is synthesised locally on
+every stream that is live when the socket dies and describes local socket loss, which has no meaning
+to the remote. `stream.reset()` refuses it with a `ProtocolError` and does not send it.
 
 ## `MuxwsError`
 
@@ -459,8 +450,7 @@ void main();
 ## `StreamClosed`
 
 `send()`, `end()` or `reply()` on a stream that closed **normally**. It is neither a `StreamReset`
-nor a `ProtocolError`: a normal close that races a last `send()` is an expected outcome, not a
-failure and not a caller bug. A caller can catch it and continue.
+nor a `ProtocolError`; a caller can catch it and continue.
 
 ### Signature
 
@@ -725,7 +715,7 @@ A stream ended early. The base class of every early end; it carries the reset co
 the stream id. `except StreamReset` covers every way a stream can fail to finish.
 
 Python types the `code` attribute `ResetCode | int`: a code this generation defines is the enum
-member, and an undefined code (a later generation's, or the retired 5) is a bare `int`. A reset with
+member, and an undefined code is a bare `int`. A reset with
 an unknown code still ended the stream, so it is represented rather than rejected. TypeScript types
 it `ResetCode`, a numeric enum, which can hold any number.
 
@@ -768,7 +758,7 @@ A new exception instance carrying `code`, `reason` and `stream_id` / `streamId`.
 
 ### Raises
 
-Raises: nothing. An undefined code is stored as a plain integer rather than rejected.
+Raises: nothing.
 
 ### Example
 
@@ -1143,10 +1133,6 @@ Synthesised locally on every stream that is live when the socket dies. Its code 
 `CONNECTION_CLOSED` (9), which **must never appear on the wire**: nothing sends it, and
 `stream.reset(ResetCode.CONNECTION_CLOSED)` raises `ProtocolError` instead of sending it.
 
-It is a `StreamReset`, so one `except StreamReset` around a stream also covers socket loss.
-`ConnectionClosed`, which the *connection* raises, is not a `StreamReset`, because it does not
-concern a single stream.
-
 Nothing is buffered while a peer is between sockets. A reconnect yields a new socket and an accepted
 identity; no stream survives it.
 
@@ -1262,8 +1248,8 @@ void main();
 
 ## `ResetCode`
 
-Numeric on the wire, named in both APIs. The same enumeration serves `reset` and `goaway`. There are
-**nine** members: `5` is missing because it is retired, and no name maps to it.
+Numeric on the wire, named in both APIs. The same enumeration serves `reset` and `goaway`. It has
+**nine** members.
 
 | Value | Name | What it means |
 |---|---|---|
@@ -1272,13 +1258,12 @@ Numeric on the wire, named in both APIs. The same enumeration serves `reset` and
 | 2 | `APPLICATION_ERROR` | The remote handler raised. Surfaces locally as `RemoteError`. |
 | 3 | `PROTOCOL_ERROR` | The peer violated the protocol. |
 | 4 | `REFUSED` | Not accepted and definitively not processed. Surfaces locally as `StreamRefused`. |
-| — | *(5 is retired)* | Retired code `STREAM_LIMIT`. The number is never reused and never sent; a peer receiving it treats it as any unknown code. |
 | 6 | `TIMEOUT` | A local deadline expired. Surfaces locally as `StreamTimeout`. |
 | 7 | `PAYLOAD_TOO_LARGE` | An encoded message or a reassembled payload exceeded what the receiver accepts. |
 | 8 | `INTERNAL_ERROR` | A bug in the peer implementation itself, not in the application handler. |
 | 9 | `CONNECTION_CLOSED` | Synthesised locally when the socket dies. **Never appears on the wire.** Surfaces locally as `ConnectionLost`. |
 
-An unrecognised code (a later generation's, or the retired 5) resets the named stream and leaves the
+An unrecognised code resets the named stream and leaves the
 connection open. Converting the wire value directly into a closed enumeration would raise inside the
 read loop and leave the peer apparently open, with every pending await hanging.
 
@@ -1291,7 +1276,6 @@ class ResetCode(IntEnum):
     APPLICATION_ERROR = 2
     PROTOCOL_ERROR = 3
     REFUSED = 4
-    # 5 is retired - see the class docstring.
     TIMEOUT = 6
     PAYLOAD_TOO_LARGE = 7
     INTERNAL_ERROR = 8
@@ -1305,7 +1289,6 @@ export enum ResetCode {
   APPLICATION_ERROR = 2,
   PROTOCOL_ERROR = 3,
   REFUSED = 4,
-  // 5 is retired - see the doc comment above.
   TIMEOUT = 6,
   PAYLOAD_TOO_LARGE = 7,
   INTERNAL_ERROR = 8,
@@ -1326,7 +1309,7 @@ not a function.
 
 ### Raises
 
-Python's `ResetCode(value)` raises `ValueError` for a number no member carries, including `5`.
+Python's `ResetCode(value)` raises `ValueError` for a number no member carries.
 TypeScript raises nothing.
 
 ### Example
@@ -1337,9 +1320,9 @@ from muxws import ResetCode
 print(len(ResetCode), [member.name for member in ResetCode])
 print(ResetCode.CANCELLED == 1, int(ResetCode.PAYLOAD_TOO_LARGE))
 try:
-    ResetCode(5)
+    ResetCode(42)
 except ValueError:
-    print("5 is retired: no member maps to it")
+    print("no member maps to 42")
 ```
 
 ```ts
@@ -1348,7 +1331,7 @@ import { ResetCode } from 'muxws';
 const names = Object.values(ResetCode).filter((entry) => typeof entry === 'string');
 console.log(names.length, names);
 console.log(ResetCode.CANCELLED === 1, ResetCode.PAYLOAD_TOO_LARGE);
-console.log('5 is retired:', ResetCode[5] === undefined);
+console.log('no member maps to 42:', ResetCode[42] === undefined);
 ```
 
 ## `exception_for_reset` / `exceptionForReset`
@@ -1403,7 +1386,7 @@ Raises: nothing.
 ```python
 from muxws.errors import exception_for_reset, ResetCode
 
-for code in (ResetCode.APPLICATION_ERROR, ResetCode.REFUSED, ResetCode.PROTOCOL_ERROR, 5):
+for code in (ResetCode.APPLICATION_ERROR, ResetCode.REFUSED, ResetCode.PROTOCOL_ERROR, 42):
     failure = exception_for_reset(code, "because", stream_id=3)
     print(code, "->", type(failure).__name__, failure.code)
 ```
@@ -1411,7 +1394,7 @@ for code in (ResetCode.APPLICATION_ERROR, ResetCode.REFUSED, ResetCode.PROTOCOL_
 ```ts
 import { ResetCode, exceptionForReset } from 'muxws';
 
-[ResetCode.APPLICATION_ERROR, ResetCode.REFUSED, ResetCode.PROTOCOL_ERROR, 5 as ResetCode].forEach((code) => {
+[ResetCode.APPLICATION_ERROR, ResetCode.REFUSED, ResetCode.PROTOCOL_ERROR, 42 as ResetCode].forEach((code) => {
   const failure = exceptionForReset(code, 'because', { streamId: 3 });
   console.log(code, '->', failure.name, failure.code);
 });
@@ -1560,9 +1543,8 @@ In Python it is a `ValueError` as well as a `MuxwsError`: code that does not kno
 `except MuxwsError`. TypeScript has one prototype chain, so the class extends `MuxwsError` and is
 identified by `name`; the handler that always catches it is `instanceof MuxwsError`.
 
-It is always raised **before the dial**, never from a failed dial. As a result, a URL whose text
-contains `HTTP 400` is not reported as a refused handshake, and a bad address is never raised later
-from a background reconnection.
+It is always raised **before the dial**, never from a failed dial or from a background
+reconnection.
 
 ### Signature
 
@@ -1647,8 +1629,6 @@ valid; change the environment the code runs in*. No retry, backoff or different 
 Python it is a `RuntimeError` as well as a `MuxwsError`.
 
 A subclass raised because a package is missing **names the install command** in its message.
-`ModuleNotFoundError: No module named 'websockets'` does not state that the fix is
-`pip install muxws[websockets]`.
 
 ### Signature
 
@@ -1874,9 +1854,7 @@ installed.
 This class refuses `http://` and `https://` URLs. Neither TypeScript entry point refuses them: the
 platform `WebSocket` and `ws` both convert those schemes to `ws:`/`wss:` and dial.
 
-The URL is parsed before the dial, outside the handler for failed dials. That handler identifies a
-refused muxws handshake by looking for a 400; if the parse ran inside it, a URL whose text contains
-`HTTP 400` would be reported as a `CodecMismatch` for a connection that was never made.
+The URL is parsed before the dial, outside the handler for failed dials.
 [`verify_dialable_url`](./transports.md#verify-dialable-url-python) runs the parse.
 
 ### Signature
@@ -1929,8 +1907,7 @@ asyncio.run(main())
 `ws+unix://` dial, because both import the same dependency.
 
 **The message names the extra:** `pip install muxws[websockets]`, which the module also exports as
-[`INSTALL_HINT`](./transports.md#install-hint-python). The condition is permanent and local and has
-one fix; `ModuleNotFoundError: No module named 'websockets'` does not name the fix.
+[`INSTALL_HINT`](./transports.md#install-hint-python).
 
 Only an **absent** package is converted: a `ModuleNotFoundError` whose `name` is exactly
 `websockets`. Any other import failure (a broken install, a syntax error inside the package) is
@@ -2038,12 +2015,8 @@ try {
 `await import('ws')` inside the `muxws/node` dial failed because the optional peer dependency is not
 installed. **The message names the install that fixes it:** `npm install ws`.
 
-Without the class the error is `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'ws' imported
-from …/node_modules/muxws/dist/node.js`, which names a path inside `node_modules` and no remedy.
-
 Only `ERR_MODULE_NOT_FOUND` is converted. Any other import failure (a broken install, a syntax error
-inside `ws`) is rethrown unchanged, because reporting it as an absent package would direct the reader
-to reinstall a package that is installed.
+inside `ws`) is rethrown unchanged.
 
 The import is dynamic and runs only on the dial path, so `accept()`, `serve()`, `handleProtocols()`
 and `refuseMismatchedUpgrade()` do not import `ws`.

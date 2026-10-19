@@ -10,12 +10,12 @@ only entry point; all further work is done on the returned `Peer`.
 
 Behaviour common to every `connect()`:
 
-- **A failed first attempt raises.** Reconnection applies only to a connection that was established
-  and then lost. The first dial is never retried, and no option changes this, so an unreachable or
-  mistyped URL is reported as an exception from `connect()`.
-- **`max_payload_bytes`, `max_concurrent_streams` and `error_serializer` apply to this peer only.**
-  None of them is sent to or negotiated with the remote. The remote observes a limit only as the
-  reset it receives when it exceeds the limit.
+- **A failed first attempt raises**, for every `reconnect` value: a failure of the first dial or of
+  the first hello raises from `connect()`. Reconnection applies only to a
+  connection that was established and then lost. An application that needs the first dial retried
+  calls `connect()` in its own loop.
+- **`max_payload_bytes`, `max_concurrent_streams` and `error_serializer` apply to this peer only**;
+  see [conventions](./index.md).
 - **Durations are seconds as floats in Python and milliseconds as integers in TypeScript.** The
   defaults are the same in both ports, each expressed in its own unit.
 
@@ -124,8 +124,7 @@ returns.
   `ValueError`; the `InvalidURI` or `ValueError` from `websockets.uri.parse_uri` is chained as
   `__cause__`. It also covers a `ws+unix://` URL whose *authority* is unusable, because the string
   checked for that arm is the logical `ws://` URI the dial synthesises: `ws+unix://user@/a.sock:/y`
-  raises `WebsocketUrlError` about `ws://user@/y`. Raised **before** the dial, so a URL whose text
-  contains `HTTP 400` is not reported as a `CodecMismatch`.
+  raises `WebsocketUrlError` about `ws://user@/y`. Raised before the dial.
 - A bare `ValueError` — an authority with an unbalanced `[`, as in `ws://[::1`. `urllib.parse.urlsplit`
   rejects it at the start of the scheme check, before both URL checks below. It is not a
   `TransportUrlError` and not a `MuxwsError`.
@@ -146,10 +145,6 @@ and `UnixSocketsUnsupportedError` — live in their transport's module and are n
 `except TransportUrlError` or `except TransportUnsupportedError`, both exported from `muxws`.
 `TransportUrlError` means the address is unusable; `TransportUnsupportedError` means this process or
 platform cannot dial it.
-
-**The first attempt is not retried.** For every `reconnect` value, including `Reconnect()`, a failure
-of the first dial or of the first hello raises from `connect()`. An application that needs the first
-dial retried calls `connect()` in its own loop.
 
 **No socket stays open after a failure.** An exception raised after the dial closes the dialled
 socket before it reaches the caller.
@@ -245,8 +240,6 @@ Rejects with:
 `UnixSocketsUnsupportedError` is exported from `muxws`, the entry point that ships this transport, and
 from nowhere else; `TransportUrlError` and `TransportUnsupportedError` are the root-exported bases to
 catch when the concrete class does not matter.
-
-**The first attempt is not retried**, for every `reconnect` value; its failure rejects the promise.
 
 **No socket stays open after a failure.** An error thrown after the dial closes the dialled socket
 before the promise rejects.

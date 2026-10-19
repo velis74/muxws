@@ -195,7 +195,7 @@ async function bundleFacts(entry: string, alsoImport: string[] = []): Promise<Bu
 describe('the browser entry point (WSM-PKG-003)', () => {
   it('imports nothing optional', { timeout: 60_000 }, async () => {
     const facts = await bundleFacts('ts/index.ts');
-    expect(facts.failure, 'the browser bundle must build at all').toBe('');
+    expect(facts.failure, 'the browser bundle build failed').toBe('');
     // Non-vacuity: an empty chunk would satisfy every assertion below without bundling the library.
     // `Peer` is the entry point's largest export and is not tree-shaken.
     expect(facts.bytes).toBeGreaterThan(10_000);
@@ -287,7 +287,7 @@ describe("the shipped build's externals (WSM-ERR-016)", () => {
 
   it('leaves node:net a real import, so the unix dial has a socket to open', { timeout: 60_000 }, async () => {
     const { code, failure } = await shippedNodeBundle();
-    expect(failure, 'the node bundle must build at all').toBe('');
+    expect(failure, 'the node bundle build failed').toBe('');
     // Non-vacuity: an empty chunk would satisfy the `not.toContain` below without bundling anything.
     // `unixConnector` is the only code in this entry point that imports a builtin.
     expect(code).toContain('unixConnector');
@@ -436,7 +436,7 @@ describe('the library imports nothing above it in the stack - WSM-INV-001', () =
         }
       }
     }
-    expect(misplaced, 'an optional peer leaked out of the subpath its extra exists for').toEqual([]);
+    expect(misplaced, 'an optional peer is imported outside its own entry point').toEqual([]);
   });
 
   it('detects a type-only import, which a runtime check cannot', () => {

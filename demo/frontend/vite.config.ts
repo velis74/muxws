@@ -7,10 +7,9 @@ export default defineConfig({
   plugins: [vue()],
   resolve: {
     alias: {
-      // `muxws` is the *root* of this npm workspace, and npm links only workspace **members** into
-      // `node_modules` - so the bare specifier every consumer outside this repository writes has
-      // nothing to resolve to here. A consumer deletes this alias and changes nothing else: every
-      // import in `src/` is the published one, spelled the published way.
+      // npm links only workspace members into `node_modules`, and `muxws` is the workspace root, so
+      // the bare specifier `muxws` does not resolve inside this repository. Outside it the alias is
+      // removed and the imports in `src/` stay unchanged.
       muxws: fileURLToPath(new URL('../../ts/index.ts', import.meta.url)),
     },
   },

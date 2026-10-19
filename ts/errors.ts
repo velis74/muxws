@@ -14,8 +14,8 @@
 /**
  * Numeric on the wire, named in both APIs; shared by `reset` and `goaway`.
  *
- * There are nine members. `5` is retired (WSM-STM-022): it MUST NOT be reused and MUST NOT appear
- * on the wire, so no name maps to it.
+ * There are nine members, numbered 0-4 and 6-9. A number without a member is not a code this
+ * generation defines.
  */
 export enum ResetCode {
   NO_ERROR = 0,
@@ -23,7 +23,6 @@ export enum ResetCode {
   APPLICATION_ERROR = 2,
   PROTOCOL_ERROR = 3,
   REFUSED = 4,
-  // 5 is retired; see the doc comment above.
   TIMEOUT = 6,
   PAYLOAD_TOO_LARGE = 7,
   INTERNAL_ERROR = 8,

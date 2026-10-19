@@ -318,7 +318,7 @@ it('interleaves tick frames between the fragments of a 1 MB export', async () =>
     );
     // The export was fragmented.
     expect(fragments.length).toBeGreaterThanOrEqual(8);
-    expect(fragments.length, 'the tick streams ran dry before the export finished').toBeLessThan(BACKLOG);
+    expect(fragments.length, 'the tick streams had no frames queued before the export finished').toBeLessThan(BACKLOG);
     expect(payload.count).toBe(EXPORT_ROWS);
 
     // Between any two fragments of the export, every tick stream delivered exactly one frame and no

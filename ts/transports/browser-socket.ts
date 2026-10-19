@@ -20,7 +20,7 @@ const CLOSED = 3;
 
 /**
  * The close code used when a subprotocol mismatch is detected on an already-open socket, because the
- * transport offers no handshake hook (WSM-CDC-028, D1). Mirrors `websockets_.POLICY_VIOLATION`.
+ * transport offers no handshake hook (WSM-CDC-028). Mirrors `websockets_.POLICY_VIOLATION`.
  */
 export const POLICY_VIOLATION = 1008;
 
@@ -78,9 +78,9 @@ interface Waiter {
  */
 function unopenedError(configured: string, url: string): CodecMismatch {
   return new CodecMismatch(
-    `the muxws socket to ${url} never opened. A browser is not shown the HTTP status, so this is ` +
-      'either of two things and muxws cannot tell them apart: nothing is listening at that address ' +
-      '(check the server is running, and that a dev-server proxy points at the port it is actually ' +
+    `the muxws socket to ${url} never opened. A browser is not shown the HTTP status, so the cause ` +
+      'is one of two, which muxws cannot distinguish: nothing is listening at that address (check ' +
+      'that the server is running and that a dev-server proxy points at the port the server listens ' +
       `on), or the acceptor refused the handshake because it speaks a codec other than '${configured}' ` +
       '(VITE_MUXWS_CODEC in the browser, MUXWS_CODEC on the server; muxws asserts the codec at the ' +
       'handshake and never falls back, WSM-CDC-022/024).',

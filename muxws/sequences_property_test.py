@@ -34,7 +34,7 @@ STEPS = 40
 
 
 class Recorder:
-    """What actually crossed the wire, and what the application saw."""
+    """The frames sent on the wire, and what the application saw."""
 
     def __init__(self) -> None:
         self.sent: list[Frame] = []
@@ -162,10 +162,12 @@ async def test_a_random_sequence_then_socket_death_fails_everything_and_sends_no
     assert on_wire == [], f"seed {seed}: CONNECTION_CLOSED reached the wire; it is synthesised locally (§8.1)"
 
     assert pair.dialer.is_open is False, f"seed {seed}: the peer reports itself open after its socket died"
-    assert pair.dialer.streams == {}, f"seed {seed}: streams survived the socket that carried them"
+    assert pair.dialer.streams == {}, f"seed {seed}: live streams remain after the socket died"
 
     for stream in live_before:
-        assert stream.state is StreamState.CLOSED, f"seed {seed}: stream {stream.id} outlived its socket"
+        assert stream.state is StreamState.CLOSED, (
+            f"seed {seed}: stream {stream.id} is not closed after its socket died"
+        )
         with pytest.raises(ConnectionLost):
             await asyncio.wait_for(stream.result(), timeout=1.0)
 

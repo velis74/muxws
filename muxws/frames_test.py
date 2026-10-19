@@ -15,7 +15,7 @@ CORPUS_IDS = [case["name"] for case in CORPUS]
 
 
 def frame_from_fixture(mapping: dict[str, Any]) -> Frame:
-    """Fixtures spell a frame as its envelope, so an absent payload key means ABSENT (D1)."""
+    """Fixtures spell a frame as its envelope, so an absent payload key means ABSENT."""
     return from_mapping(mapping)
 
 
@@ -149,7 +149,7 @@ def test_end_and_trailers_are_flags_and_not_frame_types(codec: JsonCodec):
     assert {"end", "trailers"} <= names, "both are envelope flags on a frame that already exists"
     assert V1_FRAME_TYPES.isdisjoint({"end", "trailers", "settings", "window_update"})
 
-    # WSM-FRM-012's own sentence: a peer with nothing left to say sends this and no other frame.
+    # WSM-FRM-012's own sentence: a peer ending its side of the stream sends this and no other frame.
     finished = codec.decode('{"type":"data","stream":7,"end":true}')
     assert finished == Frame("data", stream=7, end=True)
     assert finished.payload is ABSENT

@@ -295,7 +295,7 @@ def test_msgpack_fragment_boundaries_are_byte_boundaries(codec: MsgpackCodec):
     blob = bytes(range(256)) * 12
     parts = split_frame(Frame("data", stream=1, payload=blob, end=True), cap=cap, codec=codec)
 
-    assert len(parts) > 1, "the payload must actually have been fragmented"
+    assert len(parts) > 1, "the payload was not fragmented"
     sizes = [len(codec.encode(part)) for part in parts]
     assert max(sizes) <= cap
 
@@ -318,7 +318,7 @@ def test_msgpack_fragment_boundaries_are_byte_boundaries(codec: MsgpackCodec):
 
 
 class _SpySocket:
-    """A `SocketAdapter` that records which send method the peer reached for.
+    """A `SocketAdapter` that records which send method the peer called.
 
     It delegates to a real `MemorySocket`, so the peer on the other end answers and the same test
     checks both the send method and a working connection.
@@ -380,8 +380,8 @@ async def test_binary_codec_uses_send_bytes_never_send_text(registered: MsgpackC
 
     try:
         assert await dialer.request({"action": "ping", "blob": b"\x00\xff"}) == {"action": "ping", "blob": b"\x00\xff"}
-        assert spy.text_calls == [], "a binary codec reached send_text"
-        assert spy.byte_calls, "nothing reached send_bytes"
+        assert spy.text_calls == [], "a binary codec called send_text"
+        assert spy.byte_calls, "nothing called send_bytes"
         assert all(isinstance(message, bytes) for message in spy.byte_calls)
     finally:
         await _stop(tasks, left, right)

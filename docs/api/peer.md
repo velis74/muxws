@@ -6,8 +6,7 @@ outline: deep
 
 A `Peer` is one end of one WebSocket. Each language has one peer type, and both ends use it: a server
 pushes a stream to a browser with the same `open()` the browser uses, and the browser receives it
-with the same `on_stream` handler the server uses. Server push is a client request with the roles
-swapped, with the same correlation and the same cancellation.
+with the same `on_stream` handler the server uses.
 
 A peer is obtained from [`connect()`](./connect.md) or [`accept()`](./accept.md). The constructor is
 public and the in-memory examples below use it; over a real socket, use the factories, which resolve
@@ -15,13 +14,9 @@ the codec and perform the handshake.
 
 Properties that apply throughout this page:
 
-- **`peer.id` is a per-process prefix plus a per-connection counter.** It is not unique across
-  processes, and it **changes** when a reconnected peer takes a new socket.
 - **`open()` takes no deadline.** Deadlines are parameters of the calls that wait: `stream.result(timeout=)`
   in seconds, `stream.result({ timeoutMs })` in milliseconds, and the same on `request()`.
-
-Durations are seconds as floats in Python and milliseconds as integers in TypeScript, at every
-occurrence.
+- **Durations** are seconds (float) in Python and milliseconds (integer) in TypeScript.
 
 ## `Peer()` (Python)
 
@@ -1999,8 +1994,8 @@ self.id = f"{_PROCESS_PREFIX}-{next(_CONNECTION_COUNTER)}"
 
 ### Parameters
 
-None — `id` is a plain instance attribute, assigned in `__init__` and reassigned when the peer adopts
-a new socket. It is writable; muxws assigns a new value when the peer adopts its next socket.
+None — `id` is a plain, writable instance attribute, assigned in `__init__` and reassigned when the
+peer adopts a new socket.
 
 ### Return
 

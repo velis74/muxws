@@ -168,7 +168,7 @@ async def _assert_idle_cell(pair: Pair, event: str, outcome: str) -> None:
         await pair.settle()
 
         observed = [*seen, *pair.dialer.streams.values(), *pair.acceptor.streams.values()]
-        assert observed, "the assertion below would be vacuous with nothing to observe"
+        assert observed, "no stream was observed"
         for stream in observed:
             assert stream.state is not StreamState.IDLE, (
                 f"a stream reachable through the public API is idle, so stream.{event.removeprefix('send_')}() "
@@ -883,7 +883,7 @@ async def test_a_cancelled_await_does_not_destroy_the_memoized_future(make_pair)
 
 @pytest.mark.parametrize("code", [ResetCode.CONNECTION_CLOSED, 5, 42, -1])
 async def test_the_application_cannot_put_an_unsendable_code_on_the_wire(code: Any, pair: Pair):
-    """§8.1: code 9 is synthesised locally and never sent; 5 is retired; the rest do not exist."""
+    """§8.1: code 9 is synthesised locally and never sent; 5 is unassigned; the rest do not exist."""
     stream = pair.dialer.open({"q": 1})
     with pytest.raises(ProtocolError):
         await stream.reset(code)
@@ -952,13 +952,13 @@ async def test_leading_headers_are_sendable_once_and_only_first(make_pair):
         await pair.settle()
         data = pair.frames_of_type("acceptor", "data")
         assert [frame.headers for frame in data] == [{"content-type": "text/csv"}, None]
-        # ABSENT and not None: a headers frame carries no payload key at all (D1).
+        # ABSENT and not None: a headers frame carries no payload key at all.
         assert data[0].payload is ABSENT
     finally:
         await pair.stop()
 
 
-async def test_leading_headers_on_a_locally_opened_stream_point_at_open(make_pair):
+async def test_leading_headers_on_a_locally_opened_stream_raise_an_error_naming_open(make_pair):
     pair = make_pair()
     pair.acceptor.on_stream(_echo_handler)
     pair.start()
@@ -994,7 +994,7 @@ async def test_leading_headers_arrive_before_the_first_payload(make_pair):
         await pair.stop()
 
 
-async def test_leading_headers_can_ride_the_first_payload(make_pair):
+async def test_leading_headers_can_be_carried_on_the_first_payload_frame(make_pair):
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -1058,7 +1058,7 @@ async def test_reply_headers_arrived_settles_on_every_path(make_pair):
         await pair.stop()
 
 
-async def test_an_opens_headers_are_the_acceptors_from_construction(make_pair):
+async def test_the_acceptor_stream_exposes_the_open_headers_and_empty_reply_headers(make_pair):
     pair = make_pair()
     answered: list[Stream] = []
 

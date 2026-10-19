@@ -375,7 +375,7 @@ describe('the awaitable handle', () => {
     }
   });
 
-  it('resolves on the first payload while request polices a second - WSM-API-006/007', async () => {
+  it('resolves await on the first payload, and request() rejects a second payload - WSM-API-006/007', async () => {
     const pair = new Pair();
     pair.acceptor.onStream(async (_p, stream) => {
       await stream.send({ n: 1 });
@@ -423,7 +423,7 @@ describe('the awaitable handle', () => {
 });
 
 describe('reset stream nobody consumed', () => {
-  it('reports no unhandled rejection and does reach the error hook', async () => {
+  it('reaches the error hook and raises no unhandled rejection', async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (event: PromiseRejectionEvent): void => {
       unhandled.push(event.reason);
@@ -855,7 +855,7 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
       await pair.settle();
       const data = pair.framesOfType('acceptor', 'data');
       expect(data.map((frame) => frame.headers ?? null)).toEqual([{ 'content-type': 'text/csv' }, null]);
-      // ABSENT and not null: a headers frame carries no payload key at all (D1).
+      // ABSENT and not null: a headers frame carries no payload key at all.
       expect(data[0].payload).toBe(ABSENT);
     } finally {
       await pair.stop();
@@ -896,7 +896,7 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     }
   });
 
-  it('ride the first payload when the answer has nothing to announce early', async () => {
+  it('are sent on the first payload frame when no headers were sent before it', async () => {
     const pair = new Pair();
     pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
       await stream.reply({ rows: 2 }, { headers: { 'content-type': 'application/json' } });
@@ -914,7 +914,7 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     }
   });
 
-  it('resets the stream, and only the stream, when they arrive late', async () => {
+  it('resets that stream, not the connection, when leading headers arrive on a later frame', async () => {
     const pair = new Pair();
     pair.acceptor.onStream(hold);
     pair.start();
@@ -960,7 +960,7 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     }
   });
 
-  it('is what the acceptor already had: an open’s headers, from construction', async () => {
+  it('exposes the open’s headers on the acceptor’s stream from construction, with replyHeaders empty', async () => {
     const pair = new Pair();
     const answered: Stream[] = [];
     pair.acceptor.onStream(capture(answered));

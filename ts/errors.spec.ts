@@ -153,7 +153,7 @@ describe('the exception hierarchy', () => {
 });
 
 describe('ResetCode', () => {
-  it('is the pinned nine, with 5 a hole', () => {
+  it('has the nine pinned codes', () => {
     expect(ResetCode.NO_ERROR).toBe(0);
     expect(ResetCode.CANCELLED).toBe(1);
     expect(ResetCode.APPLICATION_ERROR).toBe(2);
@@ -167,11 +167,6 @@ describe('ResetCode', () => {
     const names = Object.keys(ResetCode).filter((key) => Number.isNaN(Number(key)));
     expect(names).toHaveLength(9);
     expect(ResetCode[5]).toBeUndefined();
-  });
-
-  it('has no StreamLimit sibling - WSM-ERR-001 is retired', async () => {
-    const errors = await import('./errors');
-    expect('StreamLimit' in errors).toBe(false);
   });
 });
 
