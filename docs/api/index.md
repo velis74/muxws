@@ -1,3 +1,7 @@
+---
+description: 'muxws API reference for Python and TypeScript: connect, accept, Peer, Stream, Reconnect, errors, codecs, registry, transports and types.'
+---
+
 # API Reference
 
 This reference documents every public symbol in both languages: the signature as the source declares

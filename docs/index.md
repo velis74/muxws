@@ -1,4 +1,6 @@
 ---
+title: 'WebSocket multiplexing for Python and TypeScript'
+description: 'muxws multiplexes independent, cancellable, bidirectional streams over one WebSocket, in Python (FastAPI, Starlette) and TypeScript (browser, Node).'
 layout: home
 
 hero:
