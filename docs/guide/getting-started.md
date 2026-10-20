@@ -1,3 +1,7 @@
+---
+description: 'Install muxws, run a FastAPI WebSocket server, and call it from Python and TypeScript clients: requests, streams, server push and reconnect.'
+---
+
 # Getting Started
 
 ## Installation

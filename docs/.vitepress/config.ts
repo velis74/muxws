@@ -2,10 +2,16 @@ import { defineConfig } from 'vitepress';
 
 export default defineConfig({
   title: 'muxws',
-  description: 'Multiplexed, cancellable streams over one WebSocket',
+  description:
+    'WebSocket multiplexing for Python and TypeScript: cancellable streams, request/response, server push and reconnect over one socket. FastAPI, browser, Node.',
   // docs/design/ holds design documents that are not part of the published site.
   srcExclude: ['design/**'],
   head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/muxws-icon.svg' }]],
+  // Canonical URL of each page as published on docs.velis.si, under the `--base` given to the build.
+  transformHead({ pageData, siteConfig }) {
+    const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html');
+    return [['link', { rel: 'canonical', href: `https://docs.velis.si${siteConfig.site.base}${path}` }]];
+  },
   themeConfig: {
     logo: '/muxws-icon.svg',
     nav: [
