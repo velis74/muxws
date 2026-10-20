@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress';
 export default defineConfig({
   title: 'muxws',
   description:
-    'WebSocket multiplexing for Python and TypeScript: cancellable streams, request/response, server push and reconnect over one socket. FastAPI, browser, Node.',
+    'HTTP/2-style streams over one WebSocket: either end opens them, each cancels alone, large payloads don\'t delay small ones. Python and TypeScript.',
   // docs/design/ holds design documents that are not part of the published site.
   srcExclude: ['design/**'],
   head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/muxws-icon.svg' }]],
