@@ -89,12 +89,13 @@ in every language.
 | `reason` | string | no | absent | `reset`, `goaway` | Human-readable, for logs. MUST NOT be parsed. |
 | `nonce` | string | yes | — | `ping`, `pong` | Opaque, echoed verbatim. Sender-chosen. |
 | `last_stream` | int | yes | — | `goaway` | Highest id from the *other* peer this peer has processed and will still complete. |
+| `oneway` | bool | no | `false` | `open` | The opener reads nothing on this stream; the receiver sends no frame on it (WSM-FRM-020). |
 
 `fragment` is listed on `reset` as well as on `open` and `data` because a `reset` carrying a large
 structured error object goes through the same splitter as any other stream-level frame, and both
 implementations fragment it (`conformance/frames/v1-frames.json` contains one).
 
-The envelope consists of exactly these twelve fields. Both reference implementations omit a field
+The envelope consists of exactly these thirteen fields. Both reference implementations omit a field
 whose value equals its default, and the wire forms in the corpus are written that way. A receiver
 applies the defaults whether a field is omitted or present.
 
@@ -120,6 +121,7 @@ A receiver ignores envelope fields it does not know (WSM-FRM-001) and frame type
 ```json
 {"type":"open","stream":1,"end":true,"payload":{"action":"list"}}
 {"type":"open","stream":3,"headers":{"trace":"abc123","attempt":2},"payload":{"action":"export"}}
+{"type":"open","stream":5,"end":true,"oneway":true,"payload":{"event":"cache-invalidated"}}
 {"type":"data","stream":3,"headers":{"content-type":"text/csv","rows-estimated":40000}}
 {"type":"data","stream":7,"payload":{"rows":128}}
 {"type":"data","stream":7,"end":true,"payload":{"rows":4},"trailers":{"checksum":"deadbeef"}}
@@ -135,7 +137,10 @@ stream sends metadata about its response on a frame with no payload. That frame 
 **first** on the stream, the only frame on which it may send headers (WSM-FRM-016). The opener sends
 its headers on `open`.
 
-A fragmented payload has `headers` on the first fragment only, `end` and `trailers` on the last only,
+The `oneway` line is a one-shot push: the receiver runs its handler and sends nothing back on the
+stream (WSM-FRM-020, WSM-STM-040).
+
+A fragmented payload has `headers` and `oneway` on the first fragment only, `end` and `trailers` on the last only,
 `code` and `reason` on every fragment of a `reset`, and `more: true` on all but the last:
 
 ```json
@@ -241,6 +246,10 @@ silently ignore; `RAISE` local API error at the call site with nothing sent (WSM
 | `half_closed_remote` | RAISE | ILL-C | → `half_closed_remote` | → `closed` | ILL-S | ILL-S | → `closed` | → `closed` | → `closed` |
 | `closed` | RAISE | ILL-C | RAISE | RAISE | IGN | IGN | NOOP | IGN | NOOP |
 
+A `oneway` open (WSM-FRM-020) carries `end`. The opener goes from `idle` to `closed` when it enqueues
+the `open` (WSM-STM-041). The receiver goes from `idle` to `half_closed_remote` and to `closed` when
+its handler returns, without sending a frame (WSM-STM-040).
+
 ### 4.3 Stream-level versus connection-level
 
 A case not listed below is classified by one test: **if the peers can still agree about the state of
@@ -268,7 +277,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   (WSM-API-027). It MUST NOT queue, and `open()` MUST NOT fail for concurrency: that limit is the
   receiver's (WSM-STM-036) and surfaces asynchronously as `StreamRefused` on the pending await.
 - **WSM-API-005** `notify()` MUST be async and MUST return nothing. It MUST NOT return a `Stream` or
-  any awaitable handle.
+  any awaitable handle. It MUST send its `open` with `end: true` and `oneway: true` (WSM-FRM-020).
+  Test: `conformance/sequences/notify-is-a-oneway-open-nobody-answers.json`.
 - **WSM-API-006** `request()` MUST be `open(payload, end=true)` awaited **to the stream's end**, plus
   a check that raises if the remote sent more than one payload.
 - **WSM-API-007** `await stream` MUST resolve on the **first** payload and MUST NOT check for a
@@ -441,8 +451,9 @@ every *other* stream, the connection is kept** (WSM-STM-024).
 **Call shapes.** Unary is `open(end)` → `data(end)`; a streaming response is `open(end)` → `data`…
 `data(end)`, optionally led by a payload-less `data(headers)` announcing what is coming
 (WSM-FRM-016); bidirectional is `open` → interleaved `data` both ways → `data(end)` both ways; a
-one-shot push is `open(end)` with nothing awaited. Durations are **seconds as floats in Python** and
-**milliseconds in TypeScript**; wire field names stay snake_case in every language.
+one-shot push is `open(end, oneway)` with nothing awaited and nothing answered. Durations are
+**seconds as floats in Python** and **milliseconds in TypeScript**; wire field names stay snake_case
+in every language.
 
 ### 5.2 `WSM-AUT-` — authentication, headers, routing
 
@@ -852,8 +863,8 @@ not part of this tree.
 - **WSM-FRM-006** muxws MUST NOT define any message vocabulary inside `payload`: no `kind` field, no
   reserved key, no discriminator of any sort.
 - **WSM-FRM-010** `open` opens a stream. Sender: either peer, using its own parity. Fields: `stream`
-  (required), `headers`, `payload`/`fragment`+`more`, `end`. `end: true` on `open` is the unary
-  request shape.
+  (required), `headers`, `payload`/`fragment`+`more`, `end`, `oneway`. `end: true` on `open` is the
+  unary request shape.
 - **WSM-FRM-011** `data` carries a payload chunk on an existing stream. Fields: `stream`,
   `headers` (first one only, WSM-FRM-016), `payload`/`fragment`+`more`, `end`, `trailers`. A peer
   MUST NOT send `data` on a stream where its own side is already half-closed.
@@ -881,6 +892,13 @@ not part of this tree.
   Tests: `conformance/frames/v1-frames.json` (`data-with-headers`),
   `conformance/sequences/answering-side-announces-headers.json`,
   `conformance/invalid/headers-on-a-later-frame.json`.
+- **WSM-FRM-020** `oneway: true` on an `open` states that the opener reads nothing on the stream. A
+  sender MUST set `end: true` with it, and a receiver MUST treat a `oneway` open as carrying `end`
+  whether or not it does. `oneway` is carried on the `open` only, on the first fragment of a
+  fragmented one; a receiver MUST ignore it on any other frame. A receiver that does not implement
+  it answers the stream as an ordinary unary one, and the opener ignores that answer
+  (WSM-STM-041). Tests: `conformance/frames/v1-frames.json` (`open-oneway`),
+  `conformance/sequences/notify-is-a-oneway-open-nobody-answers.json`.
 
 ### 5.9 `WSM-INV-` — cross-cutting invariants
 
@@ -1218,6 +1236,19 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   Test: `caps_test.py::test_open_beyond_receiver_limit_is_refused_and_opener_raises_nothing_locally`.
 - **WSM-STM-037** Streams this peer opened itself MUST NOT count against WSM-STM-036; the limit
   bounds work the *remote* can impose, and each peer counts only the other's opens.
+- **WSM-STM-040** A receiver MUST NOT send any frame on a `oneway` stream (WSM-FRM-020): no `data`,
+  no implicit end (WSM-STM-035 does not apply) and no `reset` other than for a stream-level error of
+  §4.3. The stream stays `half_closed_remote` while its handler runs, so it counts against
+  WSM-STM-036, and MUST close without a frame when the handler returns. Every send on it MUST raise
+  `StreamClosed` (WSM-ERR-009), and `reset()` closes it locally without a frame. A handler that
+  raises MUST be logged and MUST NOT produce a reset (WSM-STM-034 does not apply). An open that
+  WSM-STM-033, WSM-CON-021 or WSM-STM-036 would refuse MUST be dropped without invoking the handler
+  and without a frame, and logged.
+  Tests: `conformance/sequences/oneway-handler-error-is-not-answered.json`,
+  `conformance/sequences/oneway-beyond-the-concurrency-limit-is-dropped.json`.
+- **WSM-STM-041** The opener of a `oneway` stream MUST close it when it enqueues the `open`: the
+  stream is not in its live map, and a frame the remote sends for that id is ignored under
+  WSM-STM-002. Test: `conformance/sequences/oneway-answer-from-the-remote-is-ignored.json`.
 
 ### 5.16 `WSM-TST-` — the conformance corpus
 

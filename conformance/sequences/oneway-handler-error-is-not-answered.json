@@ -1,0 +1,18 @@
+{
+  "name": "oneway-handler-error-is-not-answered",
+  "description": "A handler that raises on a oneway stream is logged and produces no reset (WSM-STM-040): the opener reads nothing on the stream, so WSM-STM-034's reset(APPLICATION_ERROR) has nobody to inform. The connection survives, which the request after it proves by completing.",
+  "steps": [
+    { "peer": "dialer", "call": "notify", "payload": { "handler": "raise", "message": "the handler blew up" } },
+    { "settle": 24 },
+
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "oneway": true } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset", "stream_ref": 1 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "data", "stream_ref": 1 } },
+
+    { "peer": "dialer", "call": "request", "payload": { "q": "still there?" }, "as": "r2" },
+    { "settle": 24 },
+    { "peer": "acceptor", "call": "reply", "stream_ref": 2, "payload": { "a": "yes" } },
+    { "settle": 24 },
+    { "expect_result": { "ref": "r2", "value": { "a": "yes" } } }
+  ]
+}

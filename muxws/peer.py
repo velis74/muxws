@@ -295,10 +295,13 @@ class Peer:
         (WSM-RCN-004/043), so the helper calls `_allocate_and_enqueue` directly. The guard takes no
         parameters, so no call through this method can bypass it and precede the hello (WSM-RCN-023).
         """
+        return self._open(payload, headers=headers, end=end, oneway=False)
+
+    def _open(self, payload: Any, *, headers: dict[str, Any] | None, end: bool, oneway: bool) -> Stream:
         self._raise_if_unopenable()
         if self._open_interceptors:
             headers = _intercepted_headers(self._open_interceptors, headers, payload, "open")
-        return self._allocate_and_enqueue(payload, headers=headers, end=end)
+        return self._allocate_and_enqueue(payload, headers=headers, end=end, oneway=oneway)
 
     def _intercepted_reply_headers(self, headers: dict[str, Any] | None, stream: Stream) -> dict[str, Any] | None:
         """The leading headers of this peer's answer on `stream`, as the reply interceptors leave them.
@@ -310,11 +313,14 @@ class Peer:
             return headers
         return _intercepted_headers(self._reply_interceptors, headers, stream, "reply headers")
 
-    def _allocate_and_enqueue(self, payload: Any, *, headers: dict[str, Any] | None, end: bool) -> Stream:
+    def _allocate_and_enqueue(
+        self, payload: Any, *, headers: dict[str, Any] | None, end: bool, oneway: bool = False
+    ) -> Stream:
         """Allocate an id and enqueue the `open` with no suspension point between them (WSM-SID-006).
 
         Wire order therefore equals allocation order. If two `open()` calls could interleave here, ids
         could go on the wire out of order, which the remote treats as a protocol error (WSM-INV-005).
+        A `oneway` stream carries `end` and is closed once its `open` is enqueued (WSM-STM-041).
         """
         if self._exhausted():
             raise ConnectionGoingAway(
@@ -326,9 +332,14 @@ class Peer:
         if self._exhausted():
             self._begin_exhaustion_shutdown()
         stream = Stream(self, stream_id, headers=headers, payload=payload, local=True)
+        stream.oneway = oneway
+        end = end or oneway
         stream.state = StreamState.HALF_CLOSED_LOCAL if end else StreamState.OPEN
-        self._streams[stream_id] = stream
-        self._enqueue(Frame("open", stream=stream_id, payload=payload, headers=headers, end=end))
+        if not oneway:
+            self._streams[stream_id] = stream
+        self._enqueue(Frame("open", stream=stream_id, payload=payload, headers=headers, end=end, oneway=oneway))
+        if oneway:
+            stream._close_normally()
         return stream
 
     def _raise_if_unopenable(self) -> None:
@@ -349,8 +360,8 @@ class Peer:
             raise ConnectionGoingAway("this peer sent goaway and opens no further streams (WSM-CON-021)")
 
     async def notify(self, payload: Any = None, *, headers: dict[str, Any] | None = None) -> None:
-        """One-shot push. Returns nothing and produces no awaitable handle (WSM-API-005)."""
-        stream = self.open(payload, headers=headers, end=True)
+        """One-shot push: a `oneway` open the remote does not answer. Returns nothing (WSM-API-005)."""
+        stream = self._open(payload, headers=headers, end=True, oneway=True)
         stream._claim = "notify"
         return None
 
@@ -761,6 +772,10 @@ class Peer:
             return False
 
         if self._remote_stream_count() >= self._max_concurrent_streams:
+            if frame.oneway:
+                # Nothing is sent on a oneway stream, a refusal included (WSM-STM-040).
+                logger.warning("muxws conn=%s dropped oneway stream %s: concurrency limit reached", self.id, stream_id)
+                return True
             # Refused without invoking the handler, so the opener may retry it elsewhere
             # (WSM-STM-036). The limit is not announced; the sender learns of it from this reset.
             self._enqueue(
@@ -774,7 +789,9 @@ class Peer:
             return True
 
         stream = Stream(self, stream_id, headers=frame.headers, local=False)
-        stream.state = StreamState.HALF_CLOSED_REMOTE if frame.end else StreamState.OPEN
+        stream.oneway = frame.oneway
+        # A oneway open carries `end` whether or not the frame says so (WSM-FRM-020).
+        stream.state = StreamState.HALF_CLOSED_REMOTE if frame.end or frame.oneway else StreamState.OPEN
         self._streams[stream_id] = stream
         self._intercept_incoming(stream, stream.headers)
 
@@ -828,6 +845,12 @@ class Peer:
 
     def _start_handler(self, stream: Stream) -> None:
         """Dispatch to the one handler, or refuse when there is none (WSM-STM-033)."""
+        if stream.oneway and (self._goaway.sent or self._handler is None):
+            # Nothing is sent on a oneway stream, a refusal included (WSM-STM-040).
+            reason = "this peer is going away" if self._goaway.sent else "no on_stream handler"
+            logger.warning("muxws conn=%s dropped oneway stream %s: %s", self.id, stream.id, reason)
+            stream._close_normally()
+            return
         if self._goaway.sent:
             # This peer sent goaway and starts no new handler. REFUSED tells the opener the stream
             # was not processed, so it may retry it elsewhere (WSM-CON-021).
@@ -855,7 +878,16 @@ class Peer:
             # Cancellation is propagated, not reported as an application error (WSM-ERR-014).
             raise
         except Exception as exc:  # noqa: BLE001 - every handler failure becomes one reset
+            if stream.oneway:
+                # Logged, never answered (WSM-STM-040).
+                logger.exception("muxws conn=%s handler of oneway stream %s raised", self.id, stream.id)
+                stream._close_normally()
+                return
             await self._reset_for_handler_error(stream, exc)
+            return
+        if stream.oneway:
+            # Closed without a frame; WSM-STM-035 does not apply (WSM-STM-040).
+            stream._close_normally()
             return
         # WSM-STM-035: a handler that returns without ending its stream ends it implicitly.
         if stream.state in (StreamState.OPEN, StreamState.HALF_CLOSED_REMOTE):

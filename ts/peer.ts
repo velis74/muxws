@@ -726,12 +726,16 @@ export class Peer {
   open<T = unknown>(payload?: unknown, options?: OpenOptions): Stream<T>;
   open<T = unknown>(options: OpenOptions): Stream<T>;
   open<T = unknown>(first?: unknown, second?: OpenOptions): Stream<T> {
+    return this.openWith<T>(first, second, false);
+  }
+
+  private openWith<T>(first: unknown, second: OpenOptions | undefined, oneway: boolean): Stream<T> {
     this.throwIfUnopenable();
-    if (this.openInterceptors.size === 0) return this.allocateAndEnqueue<T>(first, second);
+    if (this.openInterceptors.size === 0) return this.allocateAndEnqueue<T>(first, second, oneway);
     const { payload, headers, end } = resolveCall(first, second, OPEN_OPTION_KEYS);
     // Before the allocation, so an interceptor that throws consumes no id (WSM-API-027).
     const intercepted = interceptedHeaders(this.openInterceptors, headers, payload, 'open');
-    return this.allocateAndEnqueue<T>(payload, { headers: intercepted ?? undefined, end });
+    return this.allocateAndEnqueue<T>(payload, { headers: intercepted ?? undefined, end }, oneway);
   }
 
   /**
@@ -745,23 +749,28 @@ export class Peer {
    *
    * Allocation and enqueue are one indivisible step (WSM-SID-006): there is no `await` in this
    * method. An `await` between the allocation and the `enqueue` would let two concurrent calls
-   * interleave and send stream ids out of order (WSM-INV-005).
+   * interleave and send stream ids out of order (WSM-INV-005). A `oneway` stream carries `end` and is closed once
+   * its `open` is enqueued (WSM-STM-041).
    */
-  allocateAndEnqueue<T = unknown>(first?: unknown, second?: OpenOptions): Stream<T> {
+  allocateAndEnqueue<T = unknown>(first?: unknown, second?: OpenOptions, oneway = false): Stream<T> {
     if (this.exhausted()) {
       throw new ConnectionGoingAway(
         `stream ids are exhausted at ${MAX_STREAM_ID}; this connection can open no more (WSM-SID-007)`,
       );
     }
-    const { payload, headers, end } = resolveCall(first, second, OPEN_OPTION_KEYS);
+    const resolved = resolveCall(first, second, OPEN_OPTION_KEYS);
+    const { payload, headers } = resolved;
+    const end = resolved.end === true || oneway;
 
     const streamId = this.nextId;
     this.nextId += 2;
     this.highestLocalOpen = streamId;
     const stream = new Stream<T>(this, streamId, { headers, payload, local: true });
+    stream.oneway = oneway;
     stream.state = end ? StreamState.HALF_CLOSED_LOCAL : StreamState.OPEN;
-    this.liveStreams.set(streamId, stream);
-    this.enqueue({ type: 'open', stream: streamId, payload, headers, end });
+    if (!oneway) this.liveStreams.set(streamId, stream);
+    this.enqueue({ type: 'open', stream: streamId, payload, headers, end, oneway });
+    if (oneway) stream.closeSilently();
     if (this.exhausted()) this.beginExhaustionShutdown();
     return stream;
   }
@@ -807,9 +816,9 @@ export class Peer {
     return this.nextId > MAX_STREAM_ID;
   }
 
-  /** One-shot push. Returns nothing and produces no awaitable handle (WSM-API-005). */
+  /** One-shot push: a `oneway` open the remote does not answer. Returns nothing (WSM-API-005). */
   async notify(payload?: unknown, options?: { headers?: Record<string, unknown> }): Promise<void> {
-    const stream = this.open(payload, { headers: options?.headers, end: true });
+    const stream = this.openWith(payload, { headers: options?.headers, end: true }, true);
     stream.claim = 'notify';
   }
 
@@ -1283,6 +1292,11 @@ export class Peer {
     if (!(await this.admitRemoteOpen(streamId))) return false;
 
     if (this.remoteStreamCount() >= this.maxConcurrentStreams) {
+      if (frame.oneway === true) {
+        // Nothing is sent on a oneway stream, a refusal included (WSM-STM-040).
+        logger.warn(`muxws conn=${this.id} dropped oneway stream ${streamId}: concurrency limit reached`);
+        return true;
+      }
       // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). The
       // limit is not announced; the sender learns of it only from this reset.
       this.enqueue({
@@ -1295,7 +1309,9 @@ export class Peer {
     }
 
     const stream = new Stream(this, streamId, { headers: frame.headers ?? null, local: false });
-    stream.state = frame.end === true ? StreamState.HALF_CLOSED_REMOTE : StreamState.OPEN;
+    stream.oneway = frame.oneway === true;
+    // A oneway open carries `end` whether or not the frame says so (WSM-FRM-020).
+    stream.state = frame.end === true || stream.oneway ? StreamState.HALF_CLOSED_REMOTE : StreamState.OPEN;
     this.liveStreams.set(streamId, stream);
     this.interceptIncoming(stream, stream.headers);
 
@@ -1351,6 +1367,13 @@ export class Peer {
 
   /** Run the handler for a new remote stream, or refuse the stream when there is none (WSM-STM-033). */
   private startHandler(stream: Stream): void {
+    if (stream.oneway && (this.goaway.sent || this.handler === null)) {
+      // Nothing is sent on a oneway stream, a refusal included (WSM-STM-040).
+      const reason = this.goaway.sent ? 'this peer is going away' : 'no on_stream handler';
+      logger.warn(`muxws conn=${this.id} dropped oneway stream ${stream.id}: ${reason}`);
+      stream.closeSilently();
+      return;
+    }
     if (this.goaway.sent) {
       // After sending `goaway` no new handler runs. REFUSED means the stream was not processed, so the
       // opener may retry elsewhere (WSM-CON-021).
@@ -1397,7 +1420,18 @@ export class Peer {
       // A handler that throws after its stream was aborted is not reported as an application error
       // and no reset is sent for it (WSM-ERR-014).
       if (controller.signal.aborted) return;
+      if (stream.oneway) {
+        // Logged, never answered (WSM-STM-040).
+        logger.error(`muxws conn=${this.id} handler of oneway stream ${stream.id} threw`, error);
+        stream.closeSilently();
+        return;
+      }
       this.resetForHandlerError(stream, error);
+      return;
+    }
+    if (stream.oneway) {
+      // Closed without a frame; WSM-STM-035 does not apply (WSM-STM-040).
+      stream.closeSilently();
       return;
     }
     // WSM-STM-035: a handler that returns without ending its stream ends it implicitly.

@@ -1,0 +1,20 @@
+{
+  "name": "oneway-answer-from-the-remote-is-ignored",
+  "description": "A receiver that does not implement oneway answers the notify as an ordinary unary stream: an implicit end, or a reset when its handler raises. The opener closed the stream when it sent the open, so both frames name an id that is not live and at or below its high-water mark, and are ignored (WSM-STM-041, WSM-STM-002): no reset and no goaway in answer, and the connection carries the next request.",
+  "steps": [
+    { "peer": "dialer", "call": "notify", "payload": { "handler": "return" } },
+    { "settle": 24 },
+    { "peer": "dialer", "inject": { "type": "data", "stream_ref": 1, "end": true } },
+    { "peer": "dialer", "inject": { "type": "reset", "stream_ref": 1, "code": 2, "reason": "an old receiver" } },
+    { "settle": 24 },
+
+    { "peer": "dialer", "expect_no_frame": { "type": "reset", "stream_ref": 1 } },
+    { "peer": "dialer", "expect_no_frame": { "type": "goaway" } },
+
+    { "peer": "dialer", "call": "request", "payload": { "q": "still there?" }, "as": "r2" },
+    { "settle": 24 },
+    { "peer": "acceptor", "call": "reply", "stream_ref": 2, "payload": { "a": "yes" } },
+    { "settle": 24 },
+    { "expect_result": { "ref": "r2", "value": { "a": "yes" } } }
+  ]
+}

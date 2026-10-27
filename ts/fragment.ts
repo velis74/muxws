@@ -135,6 +135,7 @@ function fragmentFrame(source: Frame, chunk: string | ArrayBuffer, options: { fi
     reason: source.reason ?? null,
     nonce: source.nonce ?? null,
     last_stream: source.last_stream ?? null,
+    oneway: options.first ? (source.oneway ?? false) : false,
   };
 }
 
