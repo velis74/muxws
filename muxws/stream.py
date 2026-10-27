@@ -86,6 +86,9 @@ class Stream:
         #: True when this peer opened the stream, false when the remote did (WSM-STM-037 counts only
         #: the remote's).
         self.local = local
+        #: True for a stream opened with `oneway`: neither peer sends a frame on it after the `open`
+        #: (WSM-FRM-020).
+        self.oneway = False
 
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._future: asyncio.Future[Any] | None = None
@@ -183,7 +186,12 @@ class Stream:
         return headers
 
     def _raise_if_not_sendable(self) -> None:
-        """Raise the stream's reset, or `StreamClosed` after a normal close (WSM-ERR-009)."""
+        """Raise the stream's reset, or `StreamClosed` after a normal close (WSM-ERR-009).
+
+        Nothing is sent on a `oneway` stream, so every send raises `StreamClosed` (WSM-STM-040).
+        """
+        if self._close_cause is None and self.oneway:
+            raise StreamClosed(f"stream {self.id} is oneway; nothing can be sent on it")
         if self._close_cause is None:
             return
         if isinstance(self._close_cause, StreamReset):
@@ -210,7 +218,7 @@ class Stream:
         # `_has_a_socket`, not `is_open`: `is_open` is false during the hello window while the socket
         # is open (WSM-RCN-043), and the reset of a stream the acceptor pushed in that window must be
         # sent.
-        if self._peer._has_a_socket:
+        if self._peer._has_a_socket and not self.oneway:
             self._peer._enqueue_reset(self.id, code, reason)
         self._fail(exception_for_reset(code, reason, stream_id=self.id), notify_remote=False)
 

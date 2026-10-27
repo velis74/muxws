@@ -308,11 +308,18 @@ other call addresses an existing stream by `stream_ref`.
 | `close` | `code`?, `reason`?, `drain_ms`? | `peer.close(...)`, **started and not awaited** - `close()` sends `goaway` and *then* drains, and the steps after it are what the drain window exists to let happen (WSM-CON-025). Defaults: `code` 0 (`NO_ERROR`), `drain_ms` 10000. |
 | `await_close` | — | Await the `close()` this peer already has in flight. Fails if there is none. |
 
-`request` and `notify` do not return a stream handle (`request` returns a *value*), so both runners
-find the stream those calls allocated in the public `peer.streams` map, by a bounded poll. A single
+`request` and `notify` do not return a stream handle (`request` returns a *value*). Both runners
+find the stream `request` allocated in the public `peer.streams` map, by a bounded poll. A single
 read is not sufficient: Python executes the `open()` inside `request()` only when the task is first
 scheduled, while TypeScript executes it synchronously, and the fixtures must not depend on that
-difference.
+difference. The stream of a `notify` is closed once its `open` is enqueued and is never in
+`peer.streams` (WSM-STM-041), so its ordinal is the id of the first `open` that peer put on the wire
+after the call, found by the same bounded poll.
+
+The incoming-stream handler of both runners records the stream and holds it open until it closes,
+so a script can `reply` on it. Two opening payloads change that: `{"handler": "raise", "message": m}`
+makes it raise an `Error` with message `m` (WSM-STM-034, or WSM-STM-040 on a `oneway` stream), and
+`{"handler": "return"}` makes it return at once, which ends a `oneway` stream (WSM-STM-040).
 
 `timeout_ms` and `drain_ms` are **milliseconds**, like every duration in this corpus; the Python
 runner divides by 1000 because Python's durations are seconds (WSM-CON-012).
