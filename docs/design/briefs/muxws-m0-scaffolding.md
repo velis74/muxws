@@ -96,7 +96,7 @@ description = "Multiplexed, cancellable, bidirectional streams over one WebSocke
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Jure Erznožnik", email = "jure.erznoznik@gmail.com" },
+    { name = "Jure Erznožnik", email = "jure.erznoznik@velis.si" },
 ]
 requires-python = ">=3.10"
 keywords = ["websocket", "multiplexing", "streams", "asyncio"]
