@@ -1,6 +1,6 @@
 /// <reference types="vitest" />
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 
 import { visualizer } from 'rollup-plugin-visualizer';
 import { defineConfig } from 'vite';
@@ -55,10 +55,12 @@ function finishDeclarations(): void {
  * resolve in a consumer's installation.
  */
 function rejectNodeModulesImports(): void {
-  const paths = declarationFiles(OUT_DIR).flatMap(
-    (file) => readFileSync(file, 'utf8').match(/(?:\bfrom\s*|\bimport\s*\()['"][^'"]*node_modules[^'"]*['"]/gu) ?? [],
+  const imports = declarationFiles(OUT_DIR).flatMap((file) =>
+    [...readFileSync(file, 'utf8').matchAll(/(?:\bfrom\s*|\bimport\s*\()(['"])([^'"]*node_modules[^'"]*)\1/gu)].map(
+      (match) => `${relative(OUT_DIR, file)}: ${match[2]}`,
+    ),
   );
-  if (paths.length) throw new Error(`declarations import from node_modules paths: ${paths.join(', ')}`);
+  if (imports.length) throw new Error(`declarations import from node_modules paths:\n${imports.join('\n')}`);
 }
 
 export default defineConfig({
