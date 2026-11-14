@@ -11,7 +11,7 @@ opening payload, and whether the responder sends one payload or several.
 | **Unary** | `open(end)` → `data(end)` | `await peer.request(payload)` | `await peer.request(payload)` |
 | **Streaming response** | `open(end)` → `data` … `data(end)` | `async for item in peer.open(payload, end=True)` | `for await (const item of peer.open(payload, { end: true }))` |
 | **Bidirectional** | `open` → `data` both ways → `data(end)` both ways | `stream = peer.open(payload)` | `const stream = peer.open(payload)` |
-| **One-shot push** | `open(end)`, nothing back | `await peer.notify(payload)` | `await peer.notify(payload)` |
+| **One-shot push** | `open(end, oneway)`, nothing back | `await peer.notify(payload)` | `await peer.notify(payload)` |
 
 Every shape works in both directions. An acceptor calls `peer.request(...)` on a client in the same
 way a client calls it on a server.
@@ -118,9 +118,12 @@ await peer.notify({"event": "cache-invalidated"})
 await peer.notify({ event: 'cache-invalidated' });
 ```
 
-It is `open(payload, end=True)` with the returned stream discarded. The remote's handler runs, but
-the caller receives no result. If the remote resets the stream, nothing is raised to the caller; the
-incoming `reset` frame appears in the `muxws.frames` log. See
+The `open` carries `end` and `oneway`, and the stream is closed as soon as it is enqueued. The
+remote's handler runs with the stream `half_closed_remote`, and the remote sends nothing on it: no
+end when the handler returns, no reset when it raises (the error is logged on the remote), and no
+refusal when it has no handler, has sent `goaway` or is at its concurrency limit. Every send the
+handler attempts on that stream raises `StreamClosed`. A remote that does not know `oneway` answers
+as for `open(end)`; that answer names a closed stream and is ignored. See
 [Observability](/guide/observability).
 
 ## `open()` is synchronous

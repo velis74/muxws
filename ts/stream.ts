@@ -240,6 +240,9 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /** @internal True when this peer opened the stream (WSM-STM-037 counts only the remote's). */
   local: boolean;
 
+  /** @internal True for a stream opened with `oneway`: nothing is sent on it after the `open` (WSM-FRM-020). */
+  oneway = false;
+
   /**
    * @internal True from the first fragment of a remote opening payload until the frame that
    * completes it.
@@ -406,8 +409,14 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     return leading;
   }
 
-  /** Throw per WSM-ERR-009: a fresh `StreamReset` subclass after a reset, `StreamClosed` after a normal close. */
+  /**
+   * Throw per WSM-ERR-009: a fresh `StreamReset` subclass after a reset, `StreamClosed` after a normal close, and
+   * `StreamClosed` on a live `oneway` stream, on which nothing is sent (WSM-STM-040).
+   */
   private raiseIfNotSendable(): void {
+    if (this.closeCause === null && this.oneway) {
+      throw new StreamClosed(`stream ${this.id} is oneway; nothing can be sent on it`);
+    }
     if (this.closeCause === null) return;
     if (this.closeCause !== 'normal') throw freshReset(this.closeCause);
     throw new StreamClosed(`stream ${this.id} closed normally; nothing more can be sent on it`);
@@ -431,7 +440,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     // `hasASocket`, not `isOpen`: during the hello window `isOpen` is false while the socket is open
     // (WSM-RCN-043). Checking `isOpen` would drop the `reset` for a stream the acceptor opened in that
     // window.
-    if (this.peer.hasASocket) {
+    if (this.peer.hasASocket && !this.oneway) {
       this.peer.enqueueReset(this.id, sendable, reason ?? null);
     }
     this.fail(exceptionForReset(sendable, reason ?? null, { streamId: this.id }));
@@ -524,6 +533,11 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   private localEnd(): void {
     if (this.state === StreamState.HALF_CLOSED_REMOTE) this.closeNormally();
     else this.state = StreamState.HALF_CLOSED_LOCAL;
+  }
+
+  /** @internal Close without a frame: a `oneway` stream at its opener, or at its receiver once the handler ends. */
+  closeSilently(): void {
+    if (this.state !== StreamState.CLOSED) this.closeNormally();
   }
 
   private closeNormally(): void {

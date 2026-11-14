@@ -77,8 +77,9 @@ def _fragment_frame(
 ) -> Frame:
     """Build one fragment frame.
 
-    `headers` ride only the first fragment and are never split (WSM-FRG-021); `end` and `trailers`
-    ride only the last (WSM-FRG-020); `more` is true on every fragment but the last.
+    `headers` and `oneway` ride only the first fragment and `headers` are never split (WSM-FRG-021,
+    WSM-FRM-020); `end` and `trailers` ride only the last (WSM-FRG-020); `more` is true on every
+    fragment but the last.
     """
     return Frame(
         type=source.type,
@@ -93,6 +94,7 @@ def _fragment_frame(
         reason=source.reason,
         nonce=source.nonce,
         last_stream=source.last_stream,
+        oneway=source.oneway if first else False,
     )
 
 

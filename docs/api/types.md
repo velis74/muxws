@@ -15,7 +15,7 @@ Field names are not abbreviated and are **snake_case in both languages**: `last_
 One logical protocol unit, and one WebSocket message. Python's is a frozen slotted dataclass compared
 by value; TypeScript's is a readonly interface compared with `framesEqual`.
 
-A frame has twelve fields; most frames set three or four. A field at its default is **omitted from
+A frame has thirteen fields; most frames set three or four. A field at its default is **omitted from
 the envelope**, so the JSON form of a `ping` is `{"type":"ping","nonce":"771c698c25d5c0d1"}`: 42
 bytes and two keys.
 
@@ -35,6 +35,7 @@ bytes and two keys.
 | `reason` | `str \| None` / `string \| null` | `None` / `null` | Human-readable text accompanying `code`. Never parsed for meaning. |
 | `nonce` | `str \| None` / `string \| null` | `None` / `null` | Correlates a `pong` with the `ping` it answers. Echoed back verbatim. |
 | `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has dispatched. Streams above it were not processed and can be retried elsewhere. |
+| `oneway` | `bool` / `boolean` | `False` / `false` | On `open`: the opener reads nothing on the stream, and the receiver sends no frame on it. Set by `notify()`, always with `end`. Carried on the first fragment. |
 
 Envelope keys are emitted in a fixed order — `type`, then `stream`, then the rest alphabetically —
 so that two implementations produce byte-identical output for the same frame.
@@ -60,6 +61,7 @@ class Frame:
     reason: str | None = None
     nonce: str | None = None
     last_stream: int | None = None
+    oneway: bool = False
 ```
 
 ```ts
@@ -76,6 +78,7 @@ export interface Frame {
   readonly reason?: string | null;
   readonly nonce?: string | null;
   readonly last_stream?: number | null;
+  readonly oneway?: boolean;
 }
 ```
 
@@ -97,8 +100,9 @@ Every constructor parameter is an envelope field; see the table above for what e
 | `reason` | `str \| None` / `string \| null` | `None` / `null` | See the field table. |
 | `nonce` | `str \| None` / `string \| null` | `None` / `null` | See the field table. |
 | `last_stream` | `int \| None` / `number \| null` | `None` / `null` | See the field table. Snake_case in both languages. |
+| `oneway` | `bool` / `boolean` | `False` / `false` | See the field table. |
 
-All twelve are positional-or-keyword in Python, in the order above.
+All thirteen are positional-or-keyword in Python, in the order above.
 
 ### Return
 
@@ -415,7 +419,7 @@ console.log('no payload key means ABSENT:', fromMapping({ type: 'ping' }).payloa
 
 ## `framesEqual`
 
-TypeScript only. Structural equality over the twelve envelope fields, with defaults normalised first,
+TypeScript only. Structural equality over the thirteen envelope fields, with defaults normalised first,
 so a frame written `{ type: 'ping' }` compares equal to one written
 `{ type: 'ping', stream: null, more: false }`.
 
@@ -439,7 +443,7 @@ export function framesEqual(a: Frame, b: Frame): boolean;
 
 ### Return
 
-`true` when every one of the twelve fields is equal after defaults are normalised, otherwise `false`.
+`true` when every one of the thirteen fields is equal after defaults are normalised, otherwise `false`.
 
 ### Raises
 

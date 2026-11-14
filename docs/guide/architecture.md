@@ -39,7 +39,7 @@ startup. See [Codecs](/guide/codecs).
 `Frame` is the logical protocol unit: one frame per WebSocket message, immutable and compared by
 value, with spelled-out snake_case field names in both languages. Rendering a frame to an envelope
 omits every field that has its default value, so an ordinary `data` frame is encoded with three keys
-rather than all twelve fields of the model.
+rather than all thirteen fields of the model.
 
 Two properties of the model affect the wire format:
 

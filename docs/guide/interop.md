@@ -6,7 +6,7 @@ implementations: a further implementation, a proxy, a test harness, or a service
 
 ## The JSON wire form is frozen
 
-The twelve envelope fields, the six frame types, the defaults, the reset codes and the fragmentation
+The thirteen envelope fields, the six frame types, the defaults, the reset codes and the fragmentation
 rules do not change under the subprotocol name `muxws.v1.json`. A peer implemented against this wire
 form interoperates with every release of both reference implementations that offers `muxws.v1.json`.
 
@@ -14,7 +14,7 @@ There are six frame types:
 
 `open` · `data` · `reset` · `ping` · `pong` · `goaway`
 
-The envelope has twelve fields:
+The envelope has thirteen fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -30,11 +30,12 @@ The envelope has twelve fields:
 | `reason` | string | absent |
 | `nonce` | string | absent |
 | `last_stream` | integer | absent |
+| `oneway` | boolean | `false` — on `open`: the receiver sends no frame on the stream |
 
 Field names are not abbreviated and are `snake_case` in **every** language, including the TypeScript
 implementation, whose own API is camelCase.
 
-Four properties of the encoding apply to every implementation:
+Five properties of the encoding apply to every implementation:
 
 **A field with its default value is omitted.** Both reference implementations emit only fields with
 non-default values, and the pinned wire strings in the corpus are written that way. A receiver applies
@@ -53,6 +54,11 @@ sentinel), whether or not the application uses the difference.
 connection-level protocol error. So is an envelope field whose value has the wrong type, such as a
 string `stream` or a non-boolean `end`; the accepted types are listed under
 [`from_mapping`](/api/types#from-mapping-frommapping).
+
+**`oneway` needs no support from the receiver.** A receiver ignores envelope fields it does not know
+(WSM-FRM-001), so one that does not implement `oneway` answers the stream as an ordinary
+`open(end)`. The opener closed the stream when it sent the `open` and ignores that answer
+(WSM-STM-041).
 
 Two kinds of information are never sent:
 
@@ -144,7 +150,7 @@ them:
 
 ### Implementation order
 
-1. **The envelope.** Encode and decode the twelve fields, omitting defaults and keeping an absent
+1. **The envelope.** Encode and decode the thirteen fields, omitting defaults and keeping an absent
    `payload` distinct from a `null` `payload`. `frames/v1-frames.json` tests this.
 2. **Fragmentation.** Slice the *encoded* form of the payload at boundaries the codec can represent;
    for text, at whole codepoints, so a surrogate pair is never split. Reserve space for the envelope,

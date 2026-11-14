@@ -63,6 +63,7 @@ class Frame:
     reason: str | None = None
     nonce: str | None = None
     last_stream: int | None = None
+    oneway: bool = False
 
 
 _FIELD_NAMES: Final[frozenset[str]] = frozenset(f.name for f in fields(Frame))
@@ -127,7 +128,7 @@ def _checked_field(name: str, value: Any) -> Any:
     if name == "type":
         if isinstance(value, str):
             return value
-    elif name in ("more", "end"):
+    elif name in ("more", "end", "oneway"):
         if isinstance(value, bool):
             return value
     elif value is None:

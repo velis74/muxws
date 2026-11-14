@@ -54,7 +54,7 @@ const INVALID_FILES = fixtureFiles(INVALID_DIR);
  * the counts agree. Without this, a fixture that is no longer collected leaves a suite that passes without testing
  * it. Keep each declaration on one line.
  */
-const EXPECTED_SEQUENCE_FIXTURES = 14;
+const EXPECTED_SEQUENCE_FIXTURES = 17;
 const EXPECTED_INVALID_FIXTURES = 9;
 
 /**
@@ -315,6 +315,8 @@ class Replay {
         if (asked !== null && typeof asked === 'object' && asked.handler === 'raise') {
           throw new Error(asked.message ?? 'the handler raised');
         }
+        // `{"handler": "return"}` returns at once, which ends a oneway stream (WSM-STM-040).
+        if (asked !== null && typeof asked === 'object' && asked.handler === 'return') return;
         await stream.closed;
       });
     });
@@ -423,11 +425,27 @@ class Replay {
     this.adopt(step, (await this.discover(peer, before)).stream, task);
   }
 
+  /**
+   * `peer.notify(...)`, awaited. The stream is closed at once and is not in `peer.streams` (WSM-STM-041), so its
+   * ordinal is the id of the `open` it put on the wire.
+   */
   private async callNotify(step: Step): Promise<void> {
-    const peer = this.peers[step.peer as Who];
-    const before = new Set(peer.streams.keys());
-    await peer.notify(step.payload ?? null, { headers: step.headers });
-    this.adopt(step, (await this.discover(peer, before)).stream);
+    const who = step.peer as Who;
+    const opens = (): number[] =>
+      this.framesSentBy(who)
+        .filter((frame) => frame.type === 'open')
+        .map((frame) => Number(frame.stream));
+    const before = new Set(opens());
+    await this.peers[who].notify(step.payload ?? null, { headers: step.headers });
+    for (let round = 0; round < POLL_TURNS; round += 1) {
+      const fresh = opens().find((id) => !before.has(id));
+      if (fresh !== undefined) {
+        this.ordinals.push(fresh);
+        return;
+      }
+      await turn();
+    }
+    throw new Error('the notify put no open on the wire');
   }
 
   private async callSend(step: Step): Promise<void> {

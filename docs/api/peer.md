@@ -341,7 +341,9 @@ console.log(stream.id, options.end, Object.keys(stream.headers ?? {}).length);
 
 ## `peer.notify()` (Python)
 
-One-way push: open a stream carrying the payload, end it, and return `None`.
+One-way push: send one `open` carrying the payload with `end` and `oneway` set, and return `None`.
+The stream is closed once the `open` is enqueued, and the remote sends nothing on it: no end, and no
+reset when its handler raises.
 
 ### Signature
 
@@ -353,12 +355,12 @@ async def notify(self, payload: Any = None, *, headers: dict[str, Any] | None = 
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `payload` | `Any` | `None` | The payload. Sent on the `open` frame, with `end` set. |
+| `payload` | `Any` | `None` | The payload. Sent on the `open` frame, with `end` and `oneway` set. |
 | `headers` | `dict[str, Any] \| None` | `None` | Per-stream metadata on that frame, as the peer's open interceptors leave it. |
 
 ### Return
 
-`None`. No stream handle is returned, because a notification has no reply to wait for.
+`None`. No stream handle is returned, because the remote answers nothing on the stream.
 
 ### Raises
 
@@ -417,13 +419,13 @@ async notify(payload?: unknown, options?: { headers?: Record<string, unknown> })
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `payload` | `unknown` | `null` | The payload, sent on the `open` frame with `end` set. Unlike `open()`, a lone object here is always the payload; the options object is the second argument. |
+| `payload` | `unknown` | `null` | The payload, sent on the `open` frame with `end` and `oneway` set. Unlike `open()`, a lone object here is always the payload; the options object is the second argument. |
 | `options.headers` | `Record<string, unknown>` | none | Per-stream metadata on that frame, as the peer's open interceptors leave it. |
 
 ### Return
 
-`Promise<void>`. No stream handle is returned; the stream is consumed internally, and a failure on it
-is reported to `peer.onError`.
+`Promise<void>`. No stream handle is returned: the stream is closed once the `open` is enqueued, and
+the remote sends nothing on it.
 
 ### Raises
 
@@ -1126,7 +1128,7 @@ await dialer.close({ drainMs: 100 });
 ## `peer.onError()` (TypeScript)
 
 Register a handler for a stream failure that has **no consumer**: a stream that was never awaited or
-iterated, or the internal stream behind `notify()`, which returns no handle.
+iterated.
 
 There is no Python equivalent. In TypeScript an unhandled rejection can terminate the process, so
 `Stream` attaches a rejection handler to its internal promise in its constructor and reports the

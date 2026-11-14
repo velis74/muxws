@@ -51,7 +51,7 @@ INVALID = sorted(INVALID_DIR.glob("*.json"))
 #: Both runners declare and assert these two numbers, and
 #: `test_both_runners_collect_the_same_number_of_fixtures` reads the TypeScript file to check that
 #: they agree. A fixture that is no longer collected fails the count.
-EXPECTED_SEQUENCE_FIXTURES = 14
+EXPECTED_SEQUENCE_FIXTURES = 17
 EXPECTED_INVALID_FIXTURES = 9
 
 #: The nine cases WSM-TST-003 enumerates, by name. A count alone passes when one case is deleted and
@@ -75,7 +75,7 @@ REQUIRED_INVALID_CASES = frozenset(
 #: digest and reads this literal from this file, so there is one checked-in digest and an
 #: implementation that reads a different corpus fails. A change to the JSON wire requires
 #: updating this line in the same commit.
-JSON_WIRE_DIGEST = "c9d11fccae5fb76273f7328274ccda66968297e5ed2527f8ce40ae360ccb8d49"
+JSON_WIRE_DIGEST = "216c9462b79a866970deb9fb3718d85588ff52ec45db8ddf124b8c48569999b9"
 
 #: Wall-clock limit, in seconds, on any one waiting step. A fixture that cannot make progress fails
 #: with a named assertion instead of hanging the suite.
@@ -202,13 +202,16 @@ class Replay:
 
         The `{"handler": "raise"}` payload makes the handler raise, which reaches the handler-failure
         path of WSM-STM-034. `stream.reset(APPLICATION_ERROR)` sends the same code but no serialized
-        error object, which the fixture asserts.
+        error object, which the fixture asserts. The `{"handler": "return"}` payload makes it return at
+        once, which ends a oneway stream (WSM-STM-040).
         """
 
         async def handler(payload: Any, stream: Stream) -> None:
             self.by_id[who][stream.id] = stream
             if isinstance(payload, dict) and payload.get("handler") == "raise":
                 raise Error(str(payload.get("message", "the handler raised")))
+            if isinstance(payload, dict) and payload.get("handler") == "return":
+                return
             await stream.closed.wait()
 
         return handler
@@ -303,10 +306,22 @@ class Replay:
         self._adopt(step, stream, task=task)
 
     async def call_notify(self, step: dict[str, Any]) -> None:
-        peer = self.peers[step["peer"]]
-        before = set(peer.streams)
-        await peer.notify(step.get("payload"), headers=step.get("headers"))
-        self._adopt(step, await self._discover(peer, before))
+        """`peer.notify(...)`, awaited. The stream is closed at once and not in `peer.streams`
+        (WSM-STM-041), so its ordinal is the id of the `open` it put on the wire."""
+        who = step["peer"]
+        before = {frame.stream for frame in self.frames_sent_by(who) if frame.type == "open"}
+        await self.peers[who].notify(step.get("payload"), headers=step.get("headers"))
+        for _ in range(POLL_TURNS):
+            fresh = [
+                frame.stream
+                for frame in self.frames_sent_by(who)
+                if frame.type == "open" and frame.stream not in before
+            ]
+            if fresh:
+                self.ordinals.append(fresh[0])
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("the notify put no open on the wire")
 
     async def call_send(self, step: dict[str, Any]) -> None:
         stream = self.stream_for(step["peer"], step["stream_ref"])

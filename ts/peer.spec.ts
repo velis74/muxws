@@ -18,6 +18,7 @@ import {
   ProtocolError,
   RemoteError,
   ResetCode,
+  StreamClosed,
   StreamReset,
   StreamTimeout,
 } from './errors';
@@ -2844,5 +2845,146 @@ describe('header interceptors', () => {
     expect(logged.error.filter((line) => line.includes('incoming headers interceptor threw'))).toHaveLength(2);
     expect(logged.error.filter((line) => line.includes('returned a thenable'))).toHaveLength(1);
     expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
+  });
+});
+
+describe('oneway streams', () => {
+  it('leaves no live stream at the opener of a notify - WSM-STM-041', async () => {
+    const pair = makePair();
+    const seen = new Promise<unknown>((resolve) => {
+      pair.acceptor.onStream((payload) => {
+        resolve(payload);
+      });
+    });
+    pair.start();
+
+    await pair.dialer.notify({ event: 'cache-invalidated' });
+    expect(pair.dialer.streams.size).toBe(0);
+    expect(await seen).toEqual({ event: 'cache-invalidated' });
+    const [opened] = pair.framesOfType('dialer', 'open');
+    expect([opened.end, opened.oneway]).toEqual([true, true]);
+  });
+
+  it('refuses every send on a oneway stream and closes it without a frame - WSM-STM-040', async () => {
+    const pair = makePair();
+    const outcome: { state?: StreamState; raised?: unknown; stream?: Stream } = {};
+    pair.acceptor.onStream(async (payload, stream) => {
+      outcome.state = stream.state;
+      try {
+        await stream.send({ answer: 1 });
+      } catch (error) {
+        outcome.raised = error;
+      }
+      outcome.stream = stream;
+    });
+    pair.start();
+
+    await pair.dialer.notify({ q: 1 });
+    await pair.settle(24);
+
+    expect(outcome.state).toBe(StreamState.HALF_CLOSED_REMOTE);
+    expect(outcome.raised).toBeInstanceOf(StreamClosed);
+    expect(outcome.stream?.state).toBe(StreamState.CLOSED);
+    expect(pair.acceptor.streams.size).toBe(0);
+    expect(pair.framesOfType('acceptor', 'data')).toEqual([]);
+    expect(pair.framesOfType('acceptor', 'reset')).toEqual([]);
+  });
+
+  it('closes a oneway stream locally on reset() without a frame - WSM-STM-040', async () => {
+    const pair = makePair();
+    const closed = new Promise<void>((resolve) => {
+      pair.acceptor.onStream(async (payload, stream) => {
+        await stream.reset(ResetCode.CANCELLED, 'not interested');
+        resolve();
+      });
+    });
+    pair.start();
+
+    await pair.dialer.notify({ q: 1 });
+    await closed;
+    await pair.settle();
+    expect(pair.framesOfType('acceptor', 'reset')).toEqual([]);
+  });
+
+  it('logs a oneway handler that throws and sends no reset - WSM-STM-040', async () => {
+    const pair = makePair();
+    pair.acceptor.onStream(() => {
+      throw new HandlerFailure('the handler blew up');
+    });
+    pair.start();
+
+    await pair.dialer.notify({ q: 1 });
+    await pair.settle(24);
+
+    expect(pair.framesOfType('acceptor', 'reset')).toEqual([]);
+    expect(logged.error.filter((line) => line.includes('handler of oneway stream'))).toHaveLength(1);
+  });
+
+  it('drops a oneway open without a handler, with no frame - WSM-STM-040', async () => {
+    const pair = makePair();
+    pair.start();
+
+    await pair.dialer.notify({ q: 1 });
+    await pair.settle(24);
+
+    expect(pair.framesOfType('acceptor', 'reset')).toEqual([]);
+    expect(pair.acceptor.streams.size).toBe(0);
+    expect(logged.warn.filter((line) => line.includes('no on_stream handler'))).toHaveLength(1);
+  });
+
+  it('drops a oneway open after this peer sent goaway - WSM-STM-040', async () => {
+    const pair = makePair();
+    const called: unknown[] = [];
+    pair.acceptor.onStream((payload) => {
+      called.push(payload);
+    });
+    pair.start();
+    const closing = pair.acceptor.close({ drainMs: 200 });
+    await pair.settle();
+    expect(pair.framesOfType('acceptor', 'goaway').length).toBe(1);
+
+    pair.inject('acceptor', { type: 'open', stream: 101, payload: { q: 1 }, end: true, oneway: true });
+    await pair.settle();
+    expect(called).toEqual([]);
+    expect(pair.framesOfType('acceptor', 'reset')).toEqual([]);
+    await closing.catch(() => undefined);
+  });
+
+  it('takes a oneway open without end as ending - WSM-FRM-020', async () => {
+    const pair = makePair();
+    const states: StreamState[] = [];
+    pair.acceptor.onStream((payload, stream) => {
+      states.push(stream.state);
+    });
+    pair.start();
+
+    pair.inject('acceptor', { type: 'open', stream: 101, payload: { q: 1 }, oneway: true });
+    await pair.settle();
+    expect(states).toEqual([StreamState.HALF_CLOSED_REMOTE]);
+    expect(pair.framesOfType('acceptor', 'data')).toEqual([]);
+    expect(pair.framesOfType('acceptor', 'reset')).toEqual([]);
+  });
+
+  it('carries oneway on the first fragment of a fragmented notify - WSM-FRM-020', async () => {
+    const pair = makePair({ maxFrameBytes: 96 });
+    const seen = new Promise<unknown>((resolve) => {
+      pair.acceptor.onStream((payload) => {
+        resolve(payload);
+      });
+    });
+    pair.start();
+
+    const payload = { body: 'x'.repeat(400) };
+    await pair.dialer.notify(payload);
+    expect(await seen).toEqual(payload);
+    const fragments = pair.framesOfType('dialer', 'open');
+    expect(fragments.length).toBeGreaterThan(1);
+    expect(fragments.map((fragment) => fragment.oneway === true)).toEqual([
+      true,
+      ...fragments.slice(1).map(() => false),
+    ]);
+    expect(fragments[fragments.length - 1].end).toBe(true);
+    await pair.settle();
+    expect(pair.framesOfType('acceptor', 'data')).toEqual([]);
   });
 });

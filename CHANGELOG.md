@@ -7,6 +7,24 @@ below.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-10-27
+
+### Added
+
+- `oneway`, an optional boolean field of the `open` frame (WSM-FRM-020). The receiver of a `oneway` stream
+  sends no frame on it (WSM-STM-040): no implicit end when the handler returns, no reset when the handler
+  raises (the error is logged), and no reset when the open is refused for a missing handler, a sent `goaway`
+  or the concurrency limit (the open is dropped and logged). The handler runs with the stream
+  `half_closed_remote`; every send on it raises `StreamClosed`, and `reset()` closes it without a frame.
+- `Frame.oneway` (Python and TypeScript).
+
+### Changed
+
+- `notify()` sends its `open` with `end` and `oneway` and closes the stream when the `open` is enqueued
+  (WSM-API-005, WSM-STM-041): a push takes one frame and the remote answers nothing. A remote that does
+  not implement `oneway` answers as for `open(end)`; the answer names a closed stream and is ignored.
+  The wire subprotocol stays `muxws.v1.<codec>`: a receiver ignores fields it does not know (WSM-FRM-001).
+
 ## [0.4.3] - 2026-10-19
 
 ### Added

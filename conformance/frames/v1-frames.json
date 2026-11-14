@@ -20,6 +20,11 @@
     "json_wire": "{\"type\":\"open\",\"stream\":5}"
   },
   {
+    "name": "open-oneway",
+    "frame": { "type": "open", "stream": 5, "payload": { "event": "cache-invalidated" }, "end": true, "oneway": true },
+    "json_wire": "{\"type\":\"open\",\"stream\":5,\"end\":true,\"oneway\":true,\"payload\":{\"event\":\"cache-invalidated\"}}"
+  },
+  {
     "name": "data-chunk",
     "frame": { "type": "data", "stream": 7, "payload": { "rows": 128 } },
     "json_wire": "{\"type\":\"data\",\"stream\":7,\"payload\":{\"rows\":128}}"

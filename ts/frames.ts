@@ -36,6 +36,7 @@ export interface Frame {
   readonly reason?: string | null;
   readonly nonce?: string | null;
   readonly last_stream?: number | null;
+  readonly oneway?: boolean;
 }
 
 const FIELD_NAMES = [
@@ -51,6 +52,7 @@ const FIELD_NAMES = [
   'reason',
   'nonce',
   'last_stream',
+  'oneway',
 ] as const;
 
 type FieldName = (typeof FIELD_NAMES)[number];
@@ -67,6 +69,7 @@ const FIELD_DEFAULTS: Record<Exclude<FieldName, 'payload'>, unknown> = {
   reason: null,
   nonce: null,
   last_stream: null,
+  oneway: false,
 };
 
 /** Envelope keys are emitted `type`, then `stream`, then the rest alphabetically (WSM-CDC-005). */
@@ -155,6 +158,7 @@ function validField(name: Exclude<FieldName, 'payload'>, value: unknown): boolea
       return typeof value === 'string';
     case 'more':
     case 'end':
+    case 'oneway':
       return typeof value === 'boolean';
     default:
       break;
@@ -176,7 +180,7 @@ function validField(name: Exclude<FieldName, 'payload'>, value: unknown): boolea
   }
 }
 
-/** Structural equality over the twelve envelope fields, with defaults normalised first. */
+/** Structural equality over the thirteen envelope fields, with defaults normalised first. */
 export function framesEqual(a: Frame, b: Frame): boolean {
   return FIELD_NAMES.every((name) => deepEqual(fieldValue(a, name), fieldValue(b, name)));
 }

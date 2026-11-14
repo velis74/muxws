@@ -1,0 +1,19 @@
+{
+  "name": "oneway-beyond-the-concurrency-limit-is-dropped",
+  "description": "A oneway open beyond the receiver's concurrency limit is dropped without invoking the handler and without a frame (WSM-STM-040): reset(REFUSED), which WSM-STM-036 sends for an ordinary open, would be read by nobody. The connection survives and the first stream still works. max_concurrent_streams is an instruction to the runner, never a wire value (WSM-CON-031).",
+  "max_concurrent_streams": 1,
+  "steps": [
+    { "peer": "dialer", "call": "open", "payload": { "q": "the first" }, "as": "first" },
+    { "settle": 24 },
+    { "peer": "dialer", "call": "notify", "payload": { "handler": "return" } },
+    { "settle": 24 },
+
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset", "stream_ref": 2 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "data", "stream_ref": 2 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } },
+
+    { "peer": "acceptor", "call": "reply", "stream_ref": 1, "payload": { "still": "working" } },
+    { "settle": 24 },
+    { "expect_result": { "ref": "first", "value": { "still": "working" } } }
+  ]
+}

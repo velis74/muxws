@@ -1,0 +1,14 @@
+{
+  "name": "notify-is-a-oneway-open-nobody-answers",
+  "description": "A notify is exactly one open carrying end and oneway, and nothing else: no handle and no awaited result (WSM-API-005, WSM-FRM-020). The receiver's handler returns at once, and the receiver sends nothing on the stream: no implicit end, which WSM-STM-035 would send for an ordinary stream, and no reset (WSM-STM-040). The expect_no_frame steps on the acceptor are the assertion that matters.",
+  "steps": [
+    { "peer": "dialer", "call": "notify", "payload": { "handler": "return" } },
+    { "settle": 24 },
+
+    { "peer": "dialer", "expect_frame": { "type": "open", "stream_ref": 1, "end": true, "oneway": true } },
+    { "peer": "dialer", "expect_no_frame": { "type": "data", "stream_ref": 1 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "data", "stream_ref": 1 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "reset", "stream_ref": 1 } },
+    { "peer": "acceptor", "expect_no_frame": { "type": "goaway" } }
+  ]
+}
