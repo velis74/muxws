@@ -857,6 +857,8 @@ class Side {
       if (asked !== null && typeof asked === 'object' && asked.handler === 'raise') {
         throw new Error(asked.message ?? 'the handler raised');
       }
+      // `{"handler": "return"}` returns at once, which ends a oneway stream (WSM-STM-040).
+      if (asked !== null && typeof asked === 'object' && asked.handler === 'return') return;
       await stream.closed;
     });
   }
@@ -939,10 +941,21 @@ class Side {
     return this.adopt(step, (await this.discover(before)).stream, task);
   }
 
+  /**
+   * `peer.notify(...)`, awaited. The stream is closed at once and is not in `peer.streams` (WSM-STM-041), so its id
+   * is that of the `open` it put on the wire.
+   */
   private async corpusNotify(step: Step): Promise<number> {
-    const before = new Set(this.peer.streams.keys());
+    const opens = (): number[] =>
+      this.sent.filter((frame) => frame.type === 'open').map((frame) => Number(frame.stream));
+    const before = new Set(opens());
     await this.peer.notify(step.payload ?? null, { headers: step.headers });
-    return this.adopt(step, (await this.discover(before)).stream);
+    for (let round = 0; round < STREAM_ARRIVAL_TURNS; round += 1) {
+      const fresh = opens().find((id) => !before.has(id));
+      if (fresh !== undefined) return fresh;
+      await turn();
+    }
+    throw new StepError('the notify put no open on the wire');
   }
 
   private async corpusSend(step: Step): Promise<null> {

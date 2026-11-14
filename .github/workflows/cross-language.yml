@@ -77,7 +77,7 @@ jobs:
           export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh python ts main json
           interop/drive.sh python ts unix json
-          interop/drive.sh python ts corpus json 13
+          interop/drive.sh python ts corpus json 16
       - name: ts acceptor, python dialer, json
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
@@ -87,7 +87,7 @@ jobs:
           export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh ts python main json
           interop/drive.sh ts python unix json
-          interop/drive.sh ts python corpus json 13
+          interop/drive.sh ts python corpus json 16
       - name: python acceptor, ts dialer, msgpack
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
@@ -97,7 +97,7 @@ jobs:
           export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh python ts main msgpack
           interop/drive.sh python ts unix msgpack
-          interop/drive.sh python ts corpus msgpack 14
+          interop/drive.sh python ts corpus msgpack 17
       - name: ts acceptor, python dialer, msgpack
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
@@ -107,7 +107,7 @@ jobs:
           export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh ts python main msgpack
           interop/drive.sh ts python unix msgpack
-          interop/drive.sh ts python corpus msgpack 14
+          interop/drive.sh ts python corpus msgpack 17
 
       # WSM-TST-005: the acceptor is SIGKILLed with streams open and a second one is started on the
       # same port, in both role assignments, so each language's acceptor receives a hello replayed by

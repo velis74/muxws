@@ -722,6 +722,9 @@ class Side:
         self.by_id[stream.id] = stream
         if isinstance(payload, dict) and payload.get("handler") == "raise":
             raise Error(str(payload.get("message", "the handler raised")))
+        # `{"handler": "return"}` returns at once, which ends a oneway stream (WSM-STM-040).
+        if isinstance(payload, dict) and payload.get("handler") == "return":
+            return
         await stream.closed.wait()
 
     # ------------------------------------------------------------------ the script
@@ -795,9 +798,16 @@ class Side:
         return self._adopt(step, await self._discover(before), task=task)
 
     async def corpus_notify(self, step: dict[str, Any]) -> int:
-        before = set(self.peer.streams)
+        """`peer.notify(...)`, awaited. The stream is closed at once and not in `peer.streams`
+        (WSM-STM-041), so its id is that of the `open` it put on the wire."""
+        before = {frame.stream for frame in self.sent if frame.type == "open"}
         await self.peer.notify(step.get("payload"), headers=step.get("headers"))
-        return self._adopt(step, await self._discover(before))
+        for _ in range(STREAM_ARRIVAL_TURNS):
+            fresh = [frame.stream for frame in self.sent if frame.type == "open" and frame.stream not in before]
+            if fresh:
+                return fresh[0]
+            await asyncio.sleep(0)
+        raise StepError("the notify put no open on the wire")
 
     async def corpus_send(self, step: dict[str, Any]) -> None:
         stream = await self.stream_for(step["stream_ref"])
