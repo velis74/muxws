@@ -50,9 +50,26 @@ function finishDeclarations(): void {
   }
 }
 
+/**
+ * Fail the build when a generated declaration imports a type by a `node_modules` path, which does not
+ * resolve in a consumer's installation.
+ */
+function rejectNodeModulesImports(): void {
+  const paths = declarationFiles(OUT_DIR).flatMap(
+    (file) => readFileSync(file, 'utf8').match(/(?:\bfrom\s*|\bimport\s*\()['"][^'"]*node_modules[^'"]*['"]/gu) ?? [],
+  );
+  if (paths.length) throw new Error(`declarations import from node_modules paths: ${paths.join(', ')}`);
+}
+
 export default defineConfig({
   plugins: [
-    dts({ tsconfigPath: './tsconfig.build.json', afterBuild: finishDeclarations }),
+    dts({
+      tsconfigPath: './tsconfig.build.json',
+      afterBuild: () => {
+        rejectNodeModulesImports();
+        finishDeclarations();
+      },
+    }),
     visualizer({ open: false, filename: 'coverage/stats.html', gzipSize: true, brotliSize: true }),
   ],
   resolve: {
