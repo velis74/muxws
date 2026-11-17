@@ -13,9 +13,9 @@
   "containerEnv": { "UV_LINK_MODE": "copy", "MUXWS_DEMO_VITE_HOST": "1" },
   "postCreateCommand": "pipx install uv && uv sync --locked && npm ci",
   "postAttachCommand": "curl -sf -o /dev/null localhost:5173 && echo 'The demo is already running.' || uv run python demo.py --browser",
-  "forwardPorts": [5173],
+  // No forwardPorts: the ports are forwarded when the demo starts listening, and onAutoForward opens the frontend.
   "portsAttributes": {
-    "5173": { "label": "Demo frontend", "onAutoForward": "openBrowser" },
+    "5173": { "label": "Demo frontend", "onAutoForward": "openBrowserOnce" },
     "8020": { "label": "Demo backend", "onAutoForward": "silent" }
   },
   // No venv activation in terminals: it types into the demo's terminal and interrupts the demo; uv run needs none.
