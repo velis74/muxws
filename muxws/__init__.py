@@ -5,6 +5,8 @@ reconnect schedule.
 
 """
 
+from importlib.metadata import version
+
 from muxws.api import accept, connect, resolve_codec, select_subprotocol, serve
 from muxws.codecs import Codec, get_codec, register_codec, registered_codecs
 from muxws.codecs.json_ import JsonCodec
@@ -47,7 +49,7 @@ from muxws.registry import PeerRegistry
 from muxws.stream import Stream, StreamState
 from muxws.transports import SocketAdapter
 
-__version__ = "0.4.4"
+__version__ = version("muxws")
 
 # The library registers JSON itself (WSM-CDC-004); the codec module must not (WSM-CDC-014).
 register_codec("json", JsonCodec())

@@ -49,23 +49,11 @@ const OPTIONAL = ['@msgpack/msgpack', 'ws'];
 
 // --------------------------------------------------------------------------- one version stream
 
-/**
- * The version hatch uses for the wheel.
- *
- * `pyproject.toml` declares the version `dynamic` and points hatch at a Python source file, so the
- * Python version is read from that file. The pointer is asserted as well; otherwise a manifest
- * without a dynamic version would make this compare `package.json` against a file no wheel uses.
- */
+/** The static version in `pyproject.toml`, which the build backend writes into the wheel. */
 function pythonVersion(): string {
   const pyproject = readFileSync(resolve(ROOT, 'pyproject.toml'), 'utf8');
-  expect(pyproject, 'the version must not be spelled out a second time').not.toMatch(/^version\s*=/m);
-  expect(pyproject).toMatch(/^dynamic\s*=\s*\["version"\]/m);
-  const pointer = /^path\s*=\s*"([^"]+)"/m.exec(pyproject);
-  expect(pointer, '[tool.hatch.version] must say where the version lives').not.toBeNull();
-
-  const source = readFileSync(resolve(ROOT, (pointer as RegExpExecArray)[1]), 'utf8');
-  const found = source.match(/^__version__ = "([^"]+)"/m);
-  expect(found, `no __version__ in ${(pointer as RegExpExecArray)[1]}`).not.toBeNull();
+  const found = pyproject.match(/^version = "([^"]+)"$/m);
+  expect(found, 'pyproject.toml must declare a static version').not.toBeNull();
   return (found as RegExpMatchArray)[1];
 }
 

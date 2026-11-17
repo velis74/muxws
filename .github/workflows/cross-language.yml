@@ -23,15 +23,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: '3.12'
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
-      # `[dev]` already carries `msgpack`, so the Python side needs nothing conditional.
-      - run: pip install -e .[dev]
+      # The `dev` dependency group carries `msgpack`, so the Python side needs nothing conditional.
+      # `interop/drive.sh` runs the Python peers from the `.venv` this creates.
+      - run: uv sync --locked
       # `@msgpack/msgpack` is an optional peer dependency (WSM-PKG-003) and a devDependency, so
       # `npm ci` installs it; the second command installs it explicitly in case it is removed from
       # devDependencies. `ts/packaging.spec.ts` bundles `ts/index.ts` and checks that the output does
@@ -72,7 +73,6 @@ jobs:
           MUXWS_CODEC: json
           VITE_MUXWS_CODEC: json
         run: |
-          export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh python ts main json
           interop/drive.sh python ts unix json
           interop/drive.sh python ts corpus json 16
@@ -82,7 +82,6 @@ jobs:
           MUXWS_CODEC: json
           VITE_MUXWS_CODEC: json
         run: |
-          export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh ts python main json
           interop/drive.sh ts python unix json
           interop/drive.sh ts python corpus json 16
@@ -92,7 +91,6 @@ jobs:
           MUXWS_CODEC: msgpack
           VITE_MUXWS_CODEC: msgpack
         run: |
-          export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh python ts main msgpack
           interop/drive.sh python ts unix msgpack
           interop/drive.sh python ts corpus msgpack 17
@@ -102,7 +100,6 @@ jobs:
           MUXWS_CODEC: msgpack
           VITE_MUXWS_CODEC: msgpack
         run: |
-          export MUXWS_VENV=$(dirname $(which python))
           interop/drive.sh ts python main msgpack
           interop/drive.sh ts python unix msgpack
           interop/drive.sh ts python corpus msgpack 17
@@ -116,13 +113,13 @@ jobs:
         env:
           MUXWS_CODEC: json
           VITE_MUXWS_CODEC: json
-        run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh python ts reconnect json
+        run: interop/drive.sh python ts reconnect json
       - name: reconnect, ts acceptor, python dialer
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         env:
           MUXWS_CODEC: json
           VITE_MUXWS_CODEC: json
-        run: MUXWS_VENV=$(dirname $(which python)) interop/drive.sh ts python reconnect json
+        run: interop/drive.sh ts python reconnect json
 
       # Every TypeScript `### Example` block on an API page, plus the quick-start clients dialling the
       # Python acceptor and their stdout compared with the block printed in the guide.
@@ -130,4 +127,4 @@ jobs:
       # `python3`, and a failed probe turns the two client tests into skips rather than failures.
       - name: typescript examples
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: MUXWS_PYTHON="$(which python)" npx vitest run docs/examples/examples.spec.ts
+        run: MUXWS_PYTHON="$PWD/.venv/bin/python" npx vitest run docs/examples/examples.spec.ts

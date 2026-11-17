@@ -31,7 +31,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VENV="${MUXWS_VENV:-/home/jure/.venv/muxws/bin}"
+VENV="${MUXWS_VENV:-.venv/bin}"
 USAGE="usage: drive.sh <python|ts> <python|ts> [main|unix|reconnect|corpus] [expected-codec] [expected-fixtures]"
 ACCEPTOR="${1:?$USAGE}"
 DIALER="${2:?$USAGE}"
@@ -118,7 +118,7 @@ PORT_LINE='"port": *[0-9]+'
 PATH_LINE='"path": *"[^"]+"'
 CODEC_LINE='"codec": *"[a-z0-9_-]+"'
 
-# CI passes `MUXWS_VENV=$(dirname $(which python))`. An empty value selects the default above under
+# The default is the environment `uv sync` creates in the repository. An empty value selects it under
 # `:-`; if that path does not exist, the acceptor fails to start and the only symptom is a 30-second
 # `wait_for` timeout.
 if [ "$ACCEPTOR" = python ] || [ "$DIALER" = python ]; then

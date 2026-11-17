@@ -1,13 +1,14 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
 
 [project]
 name = "muxws"
-dynamic = ["version"]
+version = "0.4.4"
 description = "Multiplexed, cancellable, bidirectional streams over one WebSocket - protocol and reference implementation."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Jure Erznožnik", email = "jure.erznoznik@velis.si" },
 ]
@@ -19,7 +20,6 @@ classifiers = [
     # production deployment. 1.0 requires the first confirmed production use.
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -41,35 +41,23 @@ starlette = ["starlette>=0.37"]
 # `websockets.asyncio.client`, which requires 13; the TCP path sets the minimum.
 websockets = ["websockets>=14"]
 msgpack = ["msgpack>=1.0"]
-# The demo (`demo.py`, `demo/backend_python/`) uses the package and is not part of it: it is excluded
-# from both artefacts and the library does not import it. `pip install -e ".[demo,starlette]"` installs
-# everything `python demo.py --browser` needs; WSM-PKG-002 requires `[project] dependencies` to be empty.
-# `websockets` is required although muxws does not import it here: uvicorn has no WebSocket protocol
-# implementation of its own, and without one it answers 404 to every upgrade request while serving
-# plain HTTP, so the page loads and the socket connection fails.
-# All three are used by the Python backend only. `python demo.py --browser node` serves the same
-# frontend from `demo/backend_node/` under Node and imports none of them; `missing_dependencies()` in
-# `demo.py` therefore checks the selected backend first. `--uds` needs only `[websockets]`; `--bench`
-# starts neither uvicorn nor a browser.
-demo = ["fastapi", "uvicorn", "websockets"]
+
+[dependency-groups]
 dev = [
+    "muxws[starlette,websockets,msgpack]",
     "coverage",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
-    # `muxws/packaging_test.py` builds a wheel and reads its member list; the manifest alone does not
-    # show what hatch puts in the artefact. Without `build` the test is skipped.
-    "build",
-    "starlette",
-    "websockets",
-    "msgpack",
+    "ruff",
     # `transports/starlette_test.py` drives an ASGI app with Starlette's TestClient, which requires
     # httpx2. With plain `httpx` it works and emits a deprecation warning at import time, where a
     # module-level `pytest.mark.filterwarnings` does not apply.
     "httpx2",
-    # The quick start in `docs/guide/getting-started.md` is a FastAPI app served by uvicorn, and
-    # `docs/examples/run_examples_test.py` starts it. Without these two the three end-to-end example
-    # tests are skipped.
+    # The browser demo's Python backend (`demo/backend_python/`), and the quick start in
+    # `docs/guide/getting-started.md`, which `docs/examples/run_examples_test.py` starts. uvicorn has no
+    # WebSocket protocol implementation of its own and uses `websockets`, without which it answers 404
+    # to every upgrade request while serving plain HTTP.
     "fastapi",
     "uvicorn",
 ]
@@ -80,9 +68,6 @@ Repository = "https://github.com/velis74/muxws"
 Issues = "https://github.com/velis74/muxws/issues"
 Documentation = "https://docs.velis.si/muxws/"
 
-[tool.hatch.version]
-path = "muxws/__init__.py"
-
 # The release tool updates the Python and npm manifests without configuration. `ts/version.ts`
 # holds the version as an exported constant for the npm package and is listed here so the release tool
 # updates it too. Without it, `package.json` gets the new version, `ts/version.ts` keeps the old one,
@@ -90,29 +75,20 @@ path = "muxws/__init__.py"
 [tool.publish]
 additional_files = ["ts/version.ts"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["muxws"]
-# The wheel needs its own exclude list: the sdist exclude list below applies to the sdist only, and
-# `python -m build` builds the wheel from the sdist. Tests and `conftest.py` are not part of the
-# library; a packaged `conftest.py` can be picked up by pytest in a consumer's environment.
-exclude = ["**/*_test.py", "**/conftest.py", "**/__pycache__"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/muxws",
-    "/conformance",
-    "/README.md",
-    "/LICENSE",
-]
-exclude = [
-    "**/*_test.py",
-]
+[tool.uv.build-backend]
+module-name = "muxws"
+module-root = ""
+source-include = ["LICENSE", "conformance/**"]
+source-exclude = ["**/*_test.py"]
+# Applies to the wheel only. `conftest.py` stays in the sdist with the rest of the source; a packaged
+# `conftest.py` can be picked up by pytest in a consumer's environment.
+wheel-exclude = ["**/conftest.py"]
 
 [tool.pytest.ini_options]
 # pytest collects only these paths. `docs/examples` contains `run_examples_test.py`, which checks that
 # the examples print what the guide says they print. `demo` contains `demo/entry_point_test.py` and
-# `demo/backend_python/handlers_test.py`; they need nothing beyond the `dev` extra. `[tool.coverage.run]`
-# omits `demo/*`, so demo code does not count towards library coverage.
+# `demo/backend_python/handlers_test.py`; they need nothing beyond the `dev` dependency group.
+# `[tool.coverage.run]` omits `demo/*`, so demo code does not count towards library coverage.
 testpaths = ["muxws", "docs/examples", "demo"]
 python_files = ["*_test.py"]
 asyncio_mode = "auto"
@@ -126,7 +102,7 @@ asyncio_mode = "auto"
 # formatter must not rewrite. Executed Python lives in `docs/examples/*.py`, which this exclusion does
 # not affect.
 exclude = ['ts', '*.md', 'dist', 'build', 'node_modules', '.git', '.idea', '.vscode',
-    '.pytest_cache', '.ruff_cache']
+    '.pytest_cache', '.ruff_cache', '.venv']
 line-length = 120
 
 [tool.ruff.lint]

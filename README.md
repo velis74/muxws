@@ -41,13 +41,13 @@ serves it locally.
 
 ### Run locally
 
-Requirements: Python 3.10+, Node 22+.
+Requirements: [uv](https://docs.astral.sh/uv/), Node 22+.
 
 ```bash
 git clone https://github.com/velis74/muxws.git && cd muxws
-pip install -e ".[demo,starlette]"
-npm install
-python demo.py --browser    # then open http://127.0.0.1:5173
+uv sync
+npm ci
+uv run python demo.py --browser    # then open http://127.0.0.1:5173
 ```
 
 ## Status

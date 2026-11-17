@@ -238,7 +238,7 @@ def _available_transports(wanted: Sequence[str], notes: list[str]) -> tuple[str,
 def _available_codecs(wanted: Sequence[str], notes: list[str]) -> tuple[str, ...]:
     """`wanted` minus the codecs whose dependency is absent."""
     if "msgpack" in wanted and importlib.util.find_spec("msgpack") is None:
-        notes.append('msgpack cells skipped: msgpack is not installed (pip install -e ".[msgpack]")')
+        notes.append("msgpack cells skipped: msgpack is not installed (uv sync)")
         return tuple(name for name in wanted if name != "msgpack")
     return tuple(wanted)
 

@@ -11,5 +11,5 @@
   // rather than one loosened one, so the library keeps being checked as the dual-target package it
   // ships as. `npm run lint:ci` runs both.
   "include": ["ts/**/*"],
-  "exclude": ["dist", "coverage", "node_modules", "docs", "muxws"]
+  "exclude": [".venv", "dist", "coverage", "node_modules", "docs", "muxws"]
 }

@@ -4,7 +4,8 @@ The repository contains three demos, all started through `demo.py`. They are not
 published packages.
 
 `python demo.py` without arguments prints the help and exits without starting anything. Exactly one of
-`--browser`, `--uds` and `--bench` is required; they are mutually exclusive:
+`--browser`, `--uds` and `--bench` is required; they are mutually exclusive. The commands below run
+in the environment `uv sync` creates (prefix them with `uv run`, or activate `.venv`):
 
 ```bash
 python demo.py                    # the help, and nothing else
@@ -23,9 +24,9 @@ require uvicorn, and neither the socket demo nor the benchmark requires `node_mo
 
 | | command | needs |
 |---|---|---|
-| A browser against either language's backend | `--browser`, `--browser node` | `pip install -e ".[demo,starlette]"` and `npm install` |
-| A socket file, its permissions and its caller's credentials | `--uds` | `pip install -e ".[websockets]"` |
-| The throughput of muxws compared with the same bytes without muxws | `--bench` | `pip install -e ".[websockets]"` |
+| A browser against either language's backend | `--browser`, `--browser node` | `uv sync` and `npm ci` |
+| A socket file, its permissions and its caller's credentials | `--uds` | `uv sync` |
+| The throughput of muxws compared with the same bytes without muxws | `--bench` | `uv sync` |
 
 ## The browser demo
 
@@ -45,12 +46,12 @@ request. See [Rationale](/guide/rationale#symmetry-one-peer-type-per-language).
 
 ### Run locally
 
-Requirements: Python 3.10+, Node 22+.
+Requirements: [uv](https://docs.astral.sh/uv/), Node 22+.
 
 ```bash
-pip install -e ".[demo,starlette]"
-npm install
-python demo.py --browser
+uv sync
+npm ci
+uv run python demo.py --browser
 ```
 
 ### Ports and backends
@@ -84,7 +85,7 @@ python demo.py --uds
 No browser and no TCP port: an acceptor bound to a socket file in a temporary directory, and a client
 that dials it as `ws+unix:///…/muxws.sock:/ws`. The demo runs `docs/examples/uds_server.py` and
 `docs/examples/uds_client.py` as subprocesses, so it runs exactly the files the guide documents. It
-needs `pip install -e ".[websockets]"` and a platform that has `AF_UNIX`.
+needs `uv sync` and a platform that has `AF_UNIX`.
 
 The demo shows two properties of this transport that involve nothing on the wire (see
 [Transports](/guide/transports#unix-domain-sockets)):
@@ -134,7 +135,7 @@ The default matrix is transport (`tcp` loopback, `unix` socket file) × payload 
 
 Cells that cannot run are skipped, and the report lists them as skipped: the `unix` rows where
 `socket.AF_UNIX` does not exist, and the msgpack rows where msgpack is not installed
-(`pip install -e ".[msgpack]"`).
+(`uv sync`).
 
 ### The method
 

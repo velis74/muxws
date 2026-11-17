@@ -11,16 +11,16 @@ listens on 127.0.0.1:8020 (override with `MUXWS_DEMO_PORT`) and the dev server p
 (`demo/frontend/vite.config.ts`), so the page and the socket share one origin and need no CORS.
 
 This file uses muxws and is not part of it. Nothing under `muxws/` imports it, and it is not in
-either published artefact: `[tool.hatch.build.targets.wheel]` ships only `muxws` and the npm package
-ships only `dist/*`. `muxws/packaging_test.py` builds a wheel and checks its contents.
+either published artefact: `[tool.uv.build-backend]` ships only `muxws` and the npm package ships
+only `dist/*`. `muxws/packaging_test.py` builds a wheel and checks its contents.
 
-    pip install -e ".[demo,starlette]"    # the Python backend only
-    npm install                           # both backends and the frontend
-    python demo.py --browser              # or: python demo.py --browser node
+    uv sync                               # the Python backend only
+    npm ci                                # both backends and the frontend
+    uv run python demo.py --browser       # or: uv run python demo.py --browser node
 
 `python demo.py --uds` runs the Unix-domain-socket pair from `docs/examples/`: an acceptor bound to
-a socket file and a client dialling it as `ws+unix:///…/muxws.sock:/ws`. It needs only
-`pip install -e ".[websockets]"`, since it starts neither uvicorn nor a browser. A browser page
+a socket file and a client dialling it as `ws+unix:///…/muxws.sock:/ws`. It needs only `websockets`
+from the `dev` dependency group, since it starts neither uvicorn nor a browser. A browser page
 cannot open a socket file, so this transport is not part of `--browser`.
 
 `python demo.py --bench` sends one payload three ways over one transport (a raw socket, a raw
@@ -28,8 +28,8 @@ WebSocket, and muxws) and prints the throughput of each. The raw socket is the b
 WebSocket is the intermediate step, so muxws's overhead is reported as a percentage of what the
 transport carries. `muxws/throughput_test.py` reports only frames per second.
 
-`[demo]` includes `websockets`: uvicorn has no WebSocket protocol implementation of its own, and
-without one it answers 404 to every upgrade request while serving the page.
+The `dev` dependency group includes `websockets`: uvicorn has no WebSocket protocol implementation of
+its own, and without one it answers 404 to every upgrade request while serving the page.
 """
 
 import argparse
@@ -49,7 +49,7 @@ BACKENDS = ("python", "node")
 #: Python, the interpreter running this file.
 DEFAULT_BACKEND = "python"
 
-#: What `pip install -e ".[demo,starlette]"` provides, as `(import name, why it is needed)`.
+#: What `uv sync` provides for the **Python backend**, as `(import name, why it is needed)`.
 #:
 #: Used by the Python backend only; `--browser node` loads none of these.
 #:
@@ -178,7 +178,7 @@ def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False, ben
         print(f"{headline} cannot start. Missing:\n", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
-        print('\nFrom the repository root:\n\n    pip install -e ".[websockets]"\n', file=sys.stderr)
+        print("\nFrom the repository root:\n\n    uv sync\n", file=sys.stderr)
         raise SystemExit(1)
 
     print("This demo cannot start. Missing:\n", file=sys.stderr)
@@ -188,7 +188,7 @@ def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False, ben
     # Only the commands this run needs: the Node backend imports none of the Python packages.
     print("\nFrom the repository root:\n", file=sys.stderr)
     if backend != "node":
-        print('    pip install -e ".[demo,starlette]"', file=sys.stderr)
+        print("    uv sync", file=sys.stderr)
     # The Node backend needs `npm install` even with `--no-fe`, for `tsx`, `ws` and the library's
     # TypeScript sources.
     if frontend or backend == "node":
@@ -343,7 +343,7 @@ def run_fe():
 
 
 def run_fastapi():
-    # uvicorn is imported inside the function because it belongs to the `demo` extra (WSM-PKG-002:
+    # uvicorn is imported inside the function because muxws does not depend on it (WSM-PKG-002:
     # `pip install muxws` installs no dependencies). This also lets `--browser node` run without
     # uvicorn installed.
     import uvicorn

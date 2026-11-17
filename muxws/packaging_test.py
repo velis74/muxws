@@ -2,8 +2,8 @@
 
 `version_test.py` asserts related facts through the installed distribution: `muxws.__version__`
 against `package.json`, and `importlib.metadata.requires` against the extras. An editable install
-carries the metadata from the last `pip install -e .`, so a runtime dependency added to
-`pyproject.toml` afterwards does not appear there until the package is reinstalled. A wheel is built
+carries the metadata from the last `uv sync`, so a runtime dependency added to `pyproject.toml`
+afterwards does not appear there until the environment is synced again. A wheel is built
 from the manifest on disk, and WSM-PKG-001/002 apply to it.
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -121,21 +122,12 @@ def npm_manifest() -> dict[str, Any]:
 def test_python_and_typescript_versions_match(pyproject: dict[str, dict[str, Any]]):
     """WSM-PKG-001: two manifests, one version stream.
 
-    `pyproject.toml` declares the version `dynamic` and points hatch at `muxws/__init__.py`, so the
-    test reads the version from that file. The indirection is asserted too: if the manifest declared a
-    static version or pointed hatch at another file, comparing `package.json` against
-    `muxws/__init__.py` would check a file no wheel is built from.
+    The version is static in `pyproject.toml`; `muxws.__version__` reads it from the installed
+    distribution's metadata.
     """
     project = pyproject["project"]
-    assert "version" not in project, "a literal version here would be a second source of truth"
-    assert project["dynamic"] == ["version"], "the version must be declared dynamic"
-
-    source = ROOT / str(pyproject["tool.hatch.version"]["path"])
-    assert source == ROOT / "muxws" / "__init__.py", f"hatch reads the version from {source}"
-
-    found = re.findall(r'^__version__ = "([^"]+)"', source.read_text(encoding="utf-8"), re.MULTILINE)
-    assert len(found) == 1, f"exactly one __version__ assignment, found {len(found)}"
-    python_version = found[0]
+    assert "version" not in project.get("dynamic", []), "the version must be static"
+    python_version = project["version"]
 
     npm_version = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))["version"]
     # Two empty strings, or two `None` values, would also be equal, so the format is checked first.
@@ -146,7 +138,7 @@ def test_python_and_typescript_versions_match(pyproject: dict[str, dict[str, Any
 def test_the_version_appears_in_exactly_one_python_source(pyproject: dict[str, dict[str, Any]]):
     """WSM-PKG-005: no second, finer version number anywhere - the generation is on the wire alone.
 
-    A `__version__` copied into a second module can diverge from the one hatch reads while neither
+    A `__version__` assigned in a second module can diverge from the package metadata while neither
     manifest changes.
     """
     _ = pyproject
@@ -257,7 +249,7 @@ def test_importing_muxws_and_serving_a_stream_needs_no_third_party_module():
 def test_the_import_blocker_refuses_an_installed_third_party_package():
     """Control for the test above: the import blocker refuses a third-party package.
 
-    `msgpack` is installed by the `dev` extra, so it is importable in this process; the child must
+    `msgpack` is installed by the `dev` dependency group, so it is importable in this process; the child must
     refuse it, or the previous test does not run in isolation.
     """
     pytest.importorskip("msgpack", reason="the control needs a third-party module that is present")
@@ -278,7 +270,7 @@ def test_the_toml_reader_agrees_with_tomllib(pyproject: dict[str, dict[str, Any]
     # the test for the corresponding rule, not this one.
     for key in ("dependencies", "dynamic", "version", "requires-python"):
         assert pyproject["project"].get(key) == parsed["project"].get(key), key
-    assert pyproject["tool.hatch.version"].get("path") == parsed["tool"]["hatch"]["version"].get("path")
+    assert pyproject["dependency-groups"].get("dev") == parsed["dependency-groups"].get("dev")
 
     extras = parsed["project"].get("optional-dependencies", {})
     assert sorted(pyproject.get("project.optional-dependencies", {})) == sorted(extras)
@@ -302,10 +294,9 @@ def test_the_demo_adds_no_runtime_dependency(pyproject: dict[str, dict[str, Any]
     """
     assert pyproject["project"]["dependencies"] == [], "required dependencies must stay empty"
 
-    extras = pyproject["project.optional-dependencies"]
-    assert "demo" in extras, "the demo's Python dependencies must be declared in the demo extra"
+    dev = pyproject["dependency-groups"]["dev"]
     for name in ("fastapi", "uvicorn"):
-        assert any(name in requirement for requirement in extras["demo"]), extras["demo"]
+        assert any(name in requirement for requirement in dev), dev
 
     assert npm_manifest.get("dependencies", {}) == {}, "the published npm package installs nothing"
     # A non-optional peer dependency is installed for every consumer. The demo's frontend packages
@@ -353,16 +344,18 @@ def _demo_members(names: list[str], *, strip_leading_directory: bool) -> list[st
 def built_artefacts(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     """A real sdist and a real wheel, built from this working tree into a temporary directory.
 
-    `--outdir` is required: the default is `dist/`, which in this repository holds the Vite bundle
+    `--out-dir` is required: the default is `dist/`, which in this repository holds the Vite bundle
     that `npm test` checks.
 
-    `python -m build` with neither flag builds the sdist and then builds the wheel from it, as a
-    release does, so a file the sdist include-list admits appears in both.
+    `uv build` with neither `--sdist` nor `--wheel` builds the sdist and then builds the wheel from
+    it, as a release does, so a file the sdist admits appears in the wheel unless the wheel excludes it.
     """
-    pytest.importorskip("build", reason="`pip install -e .[dev]` provides it; without it nothing is built")
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("`uv` is not on PATH; nothing is built")
     outdir = tmp_path_factory.mktemp("artefacts")
     done = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "build", "--outdir", str(outdir)],
+        [uv, "build", "--out-dir", str(outdir)],
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -380,12 +373,11 @@ def built_artefacts(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Pat
 def test_the_published_artefacts_contain_no_demo_files(built_artefacts: tuple[Path, Path]):
     """The demo ships with the repository and not with the package.
 
-    Read from the artefacts rather than from `pyproject.toml`. `[tool.hatch.build.targets.wheel]
-    packages = ["muxws"]` and the sdist's include-list both exclude the demo; the build shows whether
-    hatch applies them.
+    Read from the artefacts rather than from `pyproject.toml`: `[tool.uv.build-backend]` names the
+    module and the extra source files, and the build shows what the backend puts in each archive.
 
     The first assertion checks that the archives are not empty. `demo.py` is a top-level module beside
-    `muxws/`, and a wheel built without that `packages` line would include it.
+    `muxws/`.
     """
     wheel, sdist = built_artefacts
     assert DEMO_ENTRY_POINT.is_file(), "nothing to exclude: this test would pass against any manifest"
@@ -552,10 +544,8 @@ def test_the_import_walker_finds_modules_and_nested_imports():
 def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts: tuple[Path, Path]):
     """The wheel contains the library modules and no tests.
 
-    Read from the built artefact rather than from `pyproject.toml`: `[tool.hatch.build.targets.wheel]`
-    needs its own `exclude`, because the sdist's list applies to the sdist only, and `python -m build`
-    builds the wheel from the sdist, so a wheel built that way can look correct whether or not that
-    list exists. Inspecting the built wheel detects a missing list.
+    Read from the built artefact rather than from `pyproject.toml`: the sdist keeps `conftest.py`, and
+    only `wheel-exclude` keeps it out of the wheel built from that sdist.
 
     Tests are not part of the library, and a package-level `conftest.py` on the import path changes
     the behaviour of a consumer's pytest run.
@@ -578,23 +568,19 @@ def test_the_published_wheel_ships_the_library_and_nothing_else(built_artefacts:
     assert compiled == [], f"the wheel ships bytecode: {compiled[:5]}"
 
 
-def test_the_demo_extra_includes_a_websocket_implementation(pyproject: dict[str, Any]):
-    """`pip install -e ".[demo,starlette]"` installs everything the demo needs, including a WebSocket library.
+def test_the_dev_group_includes_a_websocket_implementation(pyproject: dict[str, Any]):
+    """`uv sync` installs everything the demo needs, including a WebSocket library.
 
     uvicorn has no WebSocket protocol implementation of its own. Without `websockets` or `wsproto` it
     serves HTTP and answers 404 to every upgrade, logging "No supported WebSocket library detected".
     The demo page loads but the socket fails, and because a browser does not expose the HTTP status,
     the dialer reports a codec mismatch.
-
-    Asserted against the manifest and not against the environment: the test environment has `[dev]`,
-    which includes `websockets`, so a working socket here does not show what the `demo` extra
-    installs.
     """
-    demo = pyproject["project.optional-dependencies"]["demo"]
+    dev = pyproject["dependency-groups"]["dev"]
 
-    assert any("uvicorn" in requirement for requirement in demo), "the demo extra does not install a server"
+    assert any("uvicorn" in requirement for requirement in dev), "the dev group does not install a server"
     implementations = ("websockets", "wsproto", "uvicorn[standard]")
-    assert any(any(name in requirement for name in implementations) for requirement in demo), (
-        f"the demo extra installs uvicorn with no WebSocket implementation: {demo}. uvicorn answers "
+    assert any(any(name in requirement for name in implementations) for requirement in dev), (
+        f"the dev group installs uvicorn with no WebSocket implementation: {dev}. uvicorn answers "
         f"404 to every upgrade without one, and the failure surfaces in the browser as a codec mismatch"
     )
