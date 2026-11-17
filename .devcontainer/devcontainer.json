@@ -1,0 +1,27 @@
+// GitHub Codespaces and local dev containers: installs both toolchains and starts the browser demo
+// (`python demo.py --browser`) on every start. Its output is in /tmp/muxws-demo.log.
+{
+  "name": "muxws demo",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "hostRequirements": { "cpus": 2 },
+  // Outside the workspace: ruff and markdownlint would otherwise lint the installed packages.
+  "remoteEnv": {
+    "VIRTUAL_ENV": "/home/vscode/venv",
+    "PATH": "/home/vscode/venv/bin:${containerEnv:PATH}"
+  },
+  "postCreateCommand": "pipx install uv && uv venv \"$VIRTUAL_ENV\" && uv pip install -e '.[demo,starlette]' && npm install",
+  "postStartCommand": "nohup python demo.py --browser > /tmp/muxws-demo.log 2>&1 &",
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": { "label": "Demo frontend", "onAutoForward": "openBrowser" },
+    "8020": { "label": "Demo backend", "onAutoForward": "silent" }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": { "python.defaultInterpreterPath": "/home/vscode/venv/bin/python" }
+    }
+  }
+}

@@ -35,6 +35,15 @@ serves it locally.
 | The normative rules and the conformance fixtures for new implementations | [`SPEC.md`](https://github.com/velis74/muxws/blob/main/SPEC.md), [`conformance/`](https://github.com/velis74/muxws/blob/main/conformance/README.md) |
 | Changes per release, and the changes required when upgrading | [Changelog](https://docs.velis.si/muxws/guide/changelog), [Migration guide](https://docs.velis.si/muxws/guide/migration) |
 
+## Demo
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
+
+The codespace installs both toolchains, starts the browser demo (the Vue frontend and the Python
+backend) and opens the page. It runs on your own GitHub account's Codespaces quota. Locally the same
+demo is `pip install -e ".[demo,starlette]"`, `npm install` and `python demo.py --browser`; see
+[Demos](https://docs.velis.si/muxws/guide/demos).
+
 ## Status
 
 Alpha. The wire protocol and the packages are versioned independently:

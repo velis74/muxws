@@ -37,6 +37,13 @@ A Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite 
 `/ws` to the backend, so the page and the WebSocket have the same origin and no CORS configuration is
 needed. Ctrl-C stops both.
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
+
+The same demo runs in GitHub Codespaces, on the visitor's own GitHub account quota: the codespace
+installs both toolchains, starts `python demo.py --browser` and opens the page. The demo's output is in
+`/tmp/muxws-demo.log`; to switch to the Node backend, stop it (`pkill -f demo.py`) and run
+`python demo.py --browser node` in the terminal.
+
 All of the following run concurrently on one socket: twenty symbols, each pushed on its own stream at
 four ticks a second; a quote as a unary `reply()`; a history response that arrives point by point and
 can be cancelled before it completes; a 1500-level depth book that exceeds the frame cap; and a
