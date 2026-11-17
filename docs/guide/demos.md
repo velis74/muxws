@@ -53,9 +53,11 @@ npm install
 python demo.py --browser
 ```
 
-A Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite dev server proxies
-`/ws` to the backend, so the page and the WebSocket have the same origin and no CORS configuration is
-needed. Ctrl-C stops both.
+### Ports and backends
+
+The demo serves a Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite dev
+server proxies `/ws` to the backend, so the page and the WebSocket have the same origin and no CORS
+configuration is needed. Ctrl-C stops both.
 
 **The second backend tests that both implementations are interchangeable.**
 
