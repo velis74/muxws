@@ -7,6 +7,8 @@
     "ghcr.io/devcontainers/features/node:1": { "version": "22" }
   },
   "hostRequirements": { "cpus": 2 },
+  // Makes Vite listen on all interfaces: `localhost` resolves to `::1` only in the container.
+  "containerEnv": { "MUXWS_DEMO_VITE_HOST": "1" },
   // Outside the workspace: ruff and markdownlint would otherwise lint the installed packages.
   "remoteEnv": {
     "VIRTUAL_ENV": "/home/vscode/venv",
