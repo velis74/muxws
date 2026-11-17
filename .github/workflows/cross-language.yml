@@ -32,15 +32,13 @@ jobs:
           node-version: '22'
       # `[dev]` already carries `msgpack`, so the Python side needs nothing conditional.
       - run: pip install -e .[dev]
-      # `npm install`, not `npm ci`: package-lock.json is not committed, so CI resolves dependencies
-      # on every run and tests against current upstream versions.
-      # `@msgpack/msgpack` is an optional peer dependency (WSM-PKG-003) and a devDependency, so this
-      # install includes it; the second command installs it explicitly in case it is removed from
+      # `@msgpack/msgpack` is an optional peer dependency (WSM-PKG-003) and a devDependency, so
+      # `npm ci` installs it; the second command installs it explicitly in case it is removed from
       # devDependencies. `ts/packaging.spec.ts` bundles `ts/index.ts` and checks that the output does
       # not reference msgpack.
       - id: install
         run: |
-          npm install
+          npm ci
           npm install --no-save @msgpack/msgpack
 
       # WSM-TST-004 and WSM-CDC-007: {Python acceptor, TS dialer} and {TS acceptor, Python dialer},

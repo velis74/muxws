@@ -43,9 +43,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
-      # `npm install`, not `npm ci`: package-lock.json is not committed, so CI resolves dependencies
-      # on every run and tests against current upstream versions.
-      - run: npm install
+      - run: npm ci
       # `lint:ci`, not `lint`: `lint` runs with `--fix`, which rewrites auto-fixable violations and
       # exits 0, so in CI those violations would pass unreported.
       - run: npm run lint:ci
