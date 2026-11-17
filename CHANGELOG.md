@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Python package is built with `uv_build`. The `dev` and `demo` extras are gone: development and demo
   dependencies are the `dev` dependency group (`uv sync`).
 
+### Fixed
+
+- The icon in the README resolves on the PyPI project page.
+
 ## [0.4.4] - 2026-10-27
 
 ### Added

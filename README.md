@@ -1,4 +1,5 @@
-# <img src="muxws-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> muxws
+<!-- markdownlint-disable-next-line MD013 -->
+# <img src="https://raw.githubusercontent.com/velis74/muxws/main/muxws-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> muxws
 
 **Multiplexed streams over one WebSocket, with HTTP/2 and HTTP/3 stream semantics.** muxws carries many
 independent, cancellable, bidirectional streams on one socket; either end can open a stream. It needs no
