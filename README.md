@@ -39,10 +39,16 @@ serves it locally.
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
 
-The codespace installs both toolchains, starts the browser demo (the Vue frontend and the Python
-backend) and opens the page. It runs on your own GitHub account's Codespaces quota. Locally the same
-demo is `pip install -e ".[demo,starlette]"`, `npm install` and `python demo.py --browser`; see
-[Demos](https://docs.velis.si/muxws/guide/demos).
+### Run locally
+
+Requirements: Python 3.10+, Node 22+.
+
+```bash
+git clone https://github.com/velis74/muxws.git && cd muxws
+pip install -e ".[demo,starlette]"
+npm install
+python demo.py --browser    # then open http://127.0.0.1:5173
+```
 
 ## Status
 

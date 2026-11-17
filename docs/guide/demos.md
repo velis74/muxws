@@ -29,21 +29,6 @@ require uvicorn, and neither the socket demo nor the benchmark requires `node_mo
 
 ## The browser demo
 
-```bash
-python demo.py --browser
-```
-
-A Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite dev server proxies
-`/ws` to the backend, so the page and the WebSocket have the same origin and no CORS configuration is
-needed. Ctrl-C stops both.
-
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
-
-The same demo runs in GitHub Codespaces, on the visitor's own GitHub account quota: the codespace
-installs both toolchains, starts `python demo.py --browser` and opens the page. The demo's output is in
-`/tmp/muxws-demo.log`; to switch to the Node backend, stop it (`pkill -f demo.py`) and run
-`python demo.py --browser node` in the terminal.
-
 All of the following run concurrently on one socket: twenty symbols, each pushed on its own stream at
 four ticks a second; a quote as a unary `reply()`; a history response that arrives point by point and
 can be cancelled before it completes; a 1500-level depth book that exceeds the frame cap; and a
@@ -55,6 +40,22 @@ connection, which the in-memory test transport cannot show. See
 The tick board is not requested by the browser. The backend calls `peer.open()` itself and the browser
 receives the stream through its own `on_stream` handler; push uses the same peer type and mechanism as a
 request. See [Rationale](/guide/rationale#symmetry-one-peer-type-per-language).
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
+
+### Run locally
+
+Requirements: Python 3.10+, Node 22+.
+
+```bash
+pip install -e ".[demo,starlette]"
+npm install
+python demo.py --browser
+```
+
+A Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite dev server proxies
+`/ws` to the backend, so the page and the WebSocket have the same origin and no CORS configuration is
+needed. Ctrl-C stops both.
 
 **The second backend tests that both implementations are interchangeable.**
 
