@@ -1,5 +1,5 @@
 // GitHub Codespaces and local dev containers: installs both toolchains and starts the browser demo
-// (`python demo.py --browser`) on every start. Its output is in /tmp/muxws-demo.log.
+// (`uv run python demo.py --browser`) on every start. Its output is in /tmp/muxws-demo.log.
 {
   "name": "muxws demo",
   "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
@@ -7,15 +7,12 @@
     "ghcr.io/devcontainers/features/node:1": { "version": "22" }
   },
   "hostRequirements": { "cpus": 2 },
-  // Makes Vite listen on all interfaces: `localhost` resolves to `::1` only in the container.
-  "containerEnv": { "MUXWS_DEMO_VITE_HOST": "1" },
-  // Outside the workspace: ruff and markdownlint would otherwise lint the installed packages.
-  "remoteEnv": {
-    "VIRTUAL_ENV": "/home/vscode/venv",
-    "PATH": "/home/vscode/venv/bin:${containerEnv:PATH}"
-  },
-  "postCreateCommand": "pipx install uv && uv venv \"$VIRTUAL_ENV\" && uv pip install -e '.[demo,starlette]' && npm install",
-  "postStartCommand": "nohup python demo.py --browser > /tmp/muxws-demo.log 2>&1 &",
+  // MUXWS_DEMO_VITE_HOST: Vite listens on all interfaces; `localhost` resolves to `::1` only in the container.
+  // UV_LINK_MODE: the uv cache and the workspace are on different filesystems, so uv copies instead of
+  // hard-linking.
+  "containerEnv": { "UV_LINK_MODE": "copy", "MUXWS_DEMO_VITE_HOST": "1" },
+  "postCreateCommand": "pipx install uv && uv sync --locked && npm ci",
+  "postStartCommand": "nohup uv run python demo.py --browser > /tmp/muxws-demo.log 2>&1 &",
   "forwardPorts": [5173],
   "portsAttributes": {
     "5173": { "label": "Demo frontend", "onAutoForward": "openBrowser" },
@@ -23,7 +20,7 @@
   },
   "customizations": {
     "vscode": {
-      "settings": { "python.defaultInterpreterPath": "/home/vscode/venv/bin/python" }
+      "settings": { "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python" }
     }
   }
 }
