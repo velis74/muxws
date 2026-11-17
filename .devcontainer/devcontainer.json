@@ -1,5 +1,5 @@
 // GitHub Codespaces and local dev containers: installs both toolchains and starts the browser demo
-// (`uv run python demo.py --browser`) on every start. Its output is in /tmp/muxws-demo.log.
+// (`uv run python demo.py --browser`) in the editor's terminal.
 {
   "name": "muxws demo",
   "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
@@ -12,13 +12,14 @@
   // hard-linking.
   "containerEnv": { "UV_LINK_MODE": "copy", "MUXWS_DEMO_VITE_HOST": "1" },
   "postCreateCommand": "pipx install uv && uv sync --locked && npm ci",
-  "postStartCommand": "nohup uv run python demo.py --browser > /tmp/muxws-demo.log 2>&1 &",
+  "postAttachCommand": "curl -sf -o /dev/null localhost:5173 && echo 'The demo is already running.' || uv run python demo.py --browser",
   "forwardPorts": [5173],
   "portsAttributes": {
     "5173": { "label": "Demo frontend", "onAutoForward": "openBrowser" },
     "8020": { "label": "Demo backend", "onAutoForward": "silent" }
   },
   "customizations": {
+    "codespaces": { "openFiles": [".devcontainer/README.md"] },
     "vscode": {
       "settings": { "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python" }
     }
