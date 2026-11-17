@@ -18,10 +18,15 @@
     "5173": { "label": "Demo frontend", "onAutoForward": "openBrowser" },
     "8020": { "label": "Demo backend", "onAutoForward": "silent" }
   },
+  // No venv activation in terminals: it types into the demo's terminal and interrupts the demo; uv run needs none.
   "customizations": {
     "codespaces": { "openFiles": [".devcontainer/README.md"] },
     "vscode": {
-      "settings": { "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python" }
+      "settings": {
+        "python.terminal.activateEnvironment": false,
+        "python-envs.terminal.autoActivationType": "off",
+        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python"
+      }
     }
   }
 }
