@@ -46,7 +46,7 @@ def entry_point() -> Any:
 def node_modules_present(entry_point: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with `node_modules` reported as installed, whether or not it is.
 
-    The Python CI job installs the `dev` dependency group and does not run `npm install`, so the real directory
+    The Python CI job installs the `dev` dependency group and does not run `npm ci`, so the real directory
     differs between jobs. Tests about a missing package replace this stub with their own.
     """
     monkeypatch.setattr(entry_point, "node_package_installed", lambda _name: True)
@@ -177,7 +177,7 @@ def test_both_backends_require_the_frontend_dependencies(entry_point: Any, monke
 
     for backend in ("python", "node"):
         problems = entry_point.missing_dependencies(backend)
-        assert any("npm install" in problem for problem in problems), backend
+        assert any("npm ci" in problem for problem in problems), backend
 
 
 def test_a_bare_invocation_prints_the_help_and_exits_zero(entry_point: Any, capsys: pytest.CaptureFixture[str]):
@@ -340,7 +340,7 @@ def test_no_fe_does_not_demand_the_frontend_dependencies(entry_point: Any, monke
     monkeypatch.setattr(entry_point, "node_package_installed", lambda name: name != "vue")
 
     with_frontend = entry_point.missing_dependencies("python", True)
-    assert [problem.split(" - ")[0].strip() for problem in with_frontend] == ["npm install"]
+    assert [problem.split(" - ")[0].strip() for problem in with_frontend] == ["npm ci"]
 
     assert entry_point.missing_dependencies("python", False) == [], "--no-fe reported frontend dependencies as missing"
 

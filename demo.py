@@ -72,7 +72,7 @@ PYTHON_BACKEND_IMPORTS = (
 #: this check does not apply to the Node backend.
 WEBSOCKET_IMPLEMENTATIONS = ("websockets", "wsproto")
 
-#: What `npm install` provides for the **Node backend**, as `(package, why it is needed)`.
+#: What `npm ci` provides for the **Node backend**, as `(package, why it is needed)`.
 #:
 #: Checked before starting; otherwise a missing package fails inside `npm run`, in a child process,
 #: after the frontend has started.
@@ -111,7 +111,7 @@ UDS_POLL_INTERVAL_SECONDS = 0.05
 
 
 def node_package_installed(name):
-    """Whether `npm install` put `name` in this repository's `node_modules`.
+    """Whether `npm ci` put `name` in this repository's `node_modules`.
 
     A separate function so that tests can replace it to simulate a missing package; the test
     environment has every package installed.
@@ -158,12 +158,12 @@ def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False, benc
                 "muxws handshake error rather than as a missing package."
             )
 
-    # The frontend is the same for both backends. Without this check a missing `npm install` fails
+    # The frontend is the same for both backends. Without this check a missing `npm ci` fails
     # inside the `npm run demo:dev` child process after the backend has started.
     #
     # Skipped under `--no-fe`, which does not start the frontend.
     if frontend and not node_package_installed("vue"):
-        problems.append(f"{'npm install':12} - the frontend's dependencies are not installed")
+        problems.append(f"{'npm ci':12} - the frontend's dependencies are not installed")
     return problems
 
 
@@ -189,10 +189,10 @@ def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False, ben
     print("\nFrom the repository root:\n", file=sys.stderr)
     if backend != "node":
         print("    uv sync", file=sys.stderr)
-    # The Node backend needs `npm install` even with `--no-fe`, for `tsx`, `ws` and the library's
+    # The Node backend needs `npm ci` even with `--no-fe`, for `tsx`, `ws` and the library's
     # TypeScript sources.
     if frontend or backend == "node":
-        print("    npm install\n", file=sys.stderr)
+        print("    npm ci\n", file=sys.stderr)
     raise SystemExit(1)
 
 

@@ -68,7 +68,7 @@ python demo.py --browser node
 
 This runs the TypeScript backend in `demo/backend_node/` under `tsx`, serving the same frontend. The
 frontend code is identical for both backends, so the frontend depends only on the wire protocol, not
-on either implementation. The TypeScript backend needs `npm install` and no Python packages beyond the
+on either implementation. The TypeScript backend needs `npm ci` and no Python packages beyond the
 interpreter running `demo.py`; the dependency check therefore determines the backend before it checks
 for missing packages.
 
