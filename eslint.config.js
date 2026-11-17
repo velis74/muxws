@@ -13,7 +13,7 @@ export default [
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
       ],
     },
-    ignores: ['dist/*', 'coverage/*', 'node_modules/*', 'docs/*', 'vite.config.ts'],
+    ignores: ['.venv/*', 'dist/*', 'coverage/*', 'node_modules/*', 'docs/*', 'vite.config.ts'],
   },
   {
     // The demo frontend. It has its own tsconfig; `lint:ci` includes `demo/frontend` in its eslint

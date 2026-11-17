@@ -7,6 +7,13 @@ below.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-11-17
+
+### Changed
+
+- The Python package is built with `uv_build`. The `dev` and `demo` extras are gone: development and demo
+  dependencies are the `dev` dependency group (`uv sync`).
+
 ## [0.4.4] - 2026-10-27
 
 ### Added
@@ -222,6 +229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - First release: the Python package `muxws` and the npm package `muxws`, speaking the `muxws.v1` wire with the
   `json` and `msgpack` codecs.
 
+[0.4.5]: https://github.com/velis74/muxws/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/velis74/muxws/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/velis74/muxws/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/velis74/muxws/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/velis74/muxws/compare/v0.4.0...v0.4.1

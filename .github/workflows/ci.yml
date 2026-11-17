@@ -21,14 +21,15 @@ jobs:
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e .[dev] ruff
-      - run: ruff check .
-      - run: ruff format --check .
-      - run: pytest --cov=muxws --cov-report=json
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest --cov=muxws --cov-report=json
+      - run: uv build
       - uses: actions/upload-artifact@v4
         with:
           name: python-coverage
@@ -39,13 +40,11 @@ jobs:
   node:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
-      # `npm install`, not `npm ci`: package-lock.json is not committed, so CI resolves dependencies
-      # on every run and tests against current upstream versions.
-      - run: npm install
+      - run: npm ci
       # `lint:ci`, not `lint`: `lint` runs with `--fix`, which rewrites auto-fixable violations and
       # exits 0, so in CI those violations would pass unreported.
       - run: npm run lint:ci
@@ -75,7 +74,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v4

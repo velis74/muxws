@@ -35,6 +35,21 @@ serves it locally.
 | The normative rules and the conformance fixtures for new implementations | [`SPEC.md`](https://github.com/velis74/muxws/blob/main/SPEC.md), [`conformance/`](https://github.com/velis74/muxws/blob/main/conformance/README.md) |
 | Changes per release, and the changes required when upgrading | [Changelog](https://docs.velis.si/muxws/guide/changelog), [Migration guide](https://docs.velis.si/muxws/guide/migration) |
 
+## Demo
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
+
+### Run locally
+
+Requirements: [uv](https://docs.astral.sh/uv/), Node 22+.
+
+```bash
+git clone https://github.com/velis74/muxws.git && cd muxws
+uv sync
+npm ci
+uv run python demo.py --browser    # then open http://127.0.0.1:5173
+```
+
 ## Status
 
 Alpha. The wire protocol and the packages are versioned independently:

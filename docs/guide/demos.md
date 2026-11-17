@@ -4,7 +4,8 @@ The repository contains three demos, all started through `demo.py`. They are not
 published packages.
 
 `python demo.py` without arguments prints the help and exits without starting anything. Exactly one of
-`--browser`, `--uds` and `--bench` is required; they are mutually exclusive:
+`--browser`, `--uds` and `--bench` is required; they are mutually exclusive. The commands below run
+in the environment `uv sync` creates (prefix them with `uv run`, or activate `.venv`):
 
 ```bash
 python demo.py                    # the help, and nothing else
@@ -23,19 +24,11 @@ require uvicorn, and neither the socket demo nor the benchmark requires `node_mo
 
 | | command | needs |
 |---|---|---|
-| A browser against either language's backend | `--browser`, `--browser node` | `pip install -e ".[demo,starlette]"` and `npm install` |
-| A socket file, its permissions and its caller's credentials | `--uds` | `pip install -e ".[websockets]"` |
-| The throughput of muxws compared with the same bytes without muxws | `--bench` | `pip install -e ".[websockets]"` |
+| A browser against either language's backend | `--browser`, `--browser node` | `uv sync` and `npm ci` |
+| A socket file, its permissions and its caller's credentials | `--uds` | `uv sync` |
+| The throughput of muxws compared with the same bytes without muxws | `--bench` | `uv sync` |
 
 ## The browser demo
-
-```bash
-python demo.py --browser
-```
-
-A Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite dev server proxies
-`/ws` to the backend, so the page and the WebSocket have the same origin and no CORS configuration is
-needed. Ctrl-C stops both.
 
 All of the following run concurrently on one socket: twenty symbols, each pushed on its own stream at
 four ticks a second; a quote as a unary `reply()`; a history response that arrives point by point and
@@ -49,6 +42,24 @@ The tick board is not requested by the browser. The backend calls `peer.open()` 
 receives the stream through its own `on_stream` handler; push uses the same peer type and mechanism as a
 request. See [Rationale](/guide/rationale#symmetry-one-peer-type-per-language).
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/muxws?quickstart=1)
+
+### Run locally
+
+Requirements: [uv](https://docs.astral.sh/uv/), Node 22+.
+
+```bash
+uv sync
+npm ci
+uv run python demo.py --browser
+```
+
+### Ports and backends
+
+The demo serves a Vue application on `http://127.0.0.1:5173` and a backend on `:8020`. The Vite dev
+server proxies `/ws` to the backend, so the page and the WebSocket have the same origin and no CORS
+configuration is needed. Ctrl-C stops both.
+
 **The second backend tests that both implementations are interchangeable.**
 
 ```bash
@@ -57,7 +68,7 @@ python demo.py --browser node
 
 This runs the TypeScript backend in `demo/backend_node/` under `tsx`, serving the same frontend. The
 frontend code is identical for both backends, so the frontend depends only on the wire protocol, not
-on either implementation. The TypeScript backend needs `npm install` and no Python packages beyond the
+on either implementation. The TypeScript backend needs `npm ci` and no Python packages beyond the
 interpreter running `demo.py`; the dependency check therefore determines the backend before it checks
 for missing packages.
 
@@ -74,7 +85,7 @@ python demo.py --uds
 No browser and no TCP port: an acceptor bound to a socket file in a temporary directory, and a client
 that dials it as `ws+unix:///…/muxws.sock:/ws`. The demo runs `docs/examples/uds_server.py` and
 `docs/examples/uds_client.py` as subprocesses, so it runs exactly the files the guide documents. It
-needs `pip install -e ".[websockets]"` and a platform that has `AF_UNIX`.
+needs `uv sync` and a platform that has `AF_UNIX`.
 
 The demo shows two properties of this transport that involve nothing on the wire (see
 [Transports](/guide/transports#unix-domain-sockets)):
@@ -124,7 +135,7 @@ The default matrix is transport (`tcp` loopback, `unix` socket file) × payload 
 
 Cells that cannot run are skipped, and the report lists them as skipped: the `unix` rows where
 `socket.AF_UNIX` does not exist, and the msgpack rows where msgpack is not installed
-(`pip install -e ".[msgpack]"`).
+(`uv sync`).
 
 ### The method
 

@@ -9,5 +9,5 @@
     "MD051": false
   },
   // docs/design/ holds the design briefs as they were handed over; they are not published
-  "ignores": ["**/node_modules/**", "**/dist/**", "coverage/**", "docs/.vitepress/cache/**", "docs/design/**"]
+  "ignores": [".venv/**", "**/node_modules/**", "**/dist/**", "coverage/**", "docs/.vitepress/cache/**", "docs/design/**"]
 }

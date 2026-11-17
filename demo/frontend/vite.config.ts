@@ -3,6 +3,12 @@ import { fileURLToPath } from 'node:url';
 import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';
 
+// Set in GitHub Codespaces (`app.github.dev`), where the page is served as `<codespace>-5173.<domain>`
+// over HTTPS.
+const codespacesDomain = process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN;
+// Set by `.devcontainer/devcontainer.json`.
+const listenOnAllInterfaces = Boolean(process.env.MUXWS_DEMO_VITE_HOST);
+
 export default defineConfig({
   plugins: [vue()],
   resolve: {
@@ -19,6 +25,12 @@ export default defineConfig({
     // printed 5173, so the reader would open a port this run does not serve, possibly a dev server left
     // over from an earlier run. `strictPort` makes Vite exit instead.
     strictPort: true,
+    // In the dev container: listen on all interfaces, since `localhost` resolves to `::1` only there and
+    // `demo.py` prints `127.0.0.1`. In Codespaces: also allow the forwarded host, which Vite otherwise
+    // answers with 403. Elsewhere Vite's defaults apply. The HMR client connects to the page's own host
+    // and port.
+    ...((listenOnAllInterfaces || codespacesDomain) && { host: true }),
+    ...(codespacesDomain && { allowedHosts: [`.${codespacesDomain}`] }),
     proxy: {
       // `ws: true` makes Vite proxy the WebSocket upgrade. Without it Vite proxies the upgrade request as
       // an ordinary GET, the response carries no `Sec-WebSocket-Protocol`, and the dial fails as a
