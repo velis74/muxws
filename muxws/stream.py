@@ -21,6 +21,7 @@ from muxws.fragment import Assembler
 from muxws.frames import ABSENT, Frame
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to a type checker
+    from muxws.exchange import ExchangeRecorder
     from muxws.peer import Peer
 
 
@@ -108,6 +109,8 @@ class Stream:
         #: stream, or the `open` it read for a remote one.
         self._sent_a_frame = local
         self._received_a_frame = not local
+        #: What the stream carries, for `on_exchange`; None when no handler was registered at creation.
+        self._exchange: ExchangeRecorder | None = None
 
     # ------------------------------------------------------------------ sending
 
@@ -118,6 +121,8 @@ class Stream:
             raise StreamClosed(f"stream {self.id} already sent end; it cannot send again")
         leading = self._leading_headers(headers)
         self._peer._enqueue(Frame("data", stream=self.id, payload=payload, headers=leading, end=end))
+        if self._exchange is not None:
+            self._exchange.side(self.local).add(payload)
         if end:
             self._local_end()
 
@@ -148,6 +153,11 @@ class Stream:
         self._peer._enqueue(
             Frame("data", stream=self.id, payload=payload, headers=leading, end=True, trailers=trailers)
         )
+        if self._exchange is not None:
+            side = self._exchange.side(self.local)
+            if payload is not ABSENT:
+                side.add(payload)
+            side.trailers = trailers
         self._local_end()
 
     async def reply(
@@ -245,10 +255,16 @@ class Stream:
         """Store `headers` as `reply_headers` (when given) and set `reply_headers_arrived`."""
         if headers is not None:
             self.reply_headers = headers
+            if self._exchange is not None:
+                self._exchange.response.headers = headers
+        if self._exchange is not None:
+            self._exchange.answered()
         self.reply_headers_arrived.set()
 
     def _accept_payload(self, payload: Any) -> None:
         """Deliver one reassembled payload to whichever shape is consuming this stream."""
+        if self._exchange is not None:
+            self._exchange.side(not self.local).add(payload)
         if self._future is not None and not self._future.done():
             self._future.set_result(payload)
         self._queue.put_nowait(payload)
@@ -256,6 +272,10 @@ class Stream:
     def _remote_end(self, trailers: dict[str, Any] | None) -> None:
         if trailers is not None:
             self.trailers = trailers
+        if self._exchange is not None:
+            side = self._exchange.side(not self.local)
+            side.trailers = trailers
+            side.ended = True
         if self.state is StreamState.HALF_CLOSED_LOCAL:
             self._close_normally()
         elif self.state is not StreamState.CLOSED:
@@ -264,6 +284,8 @@ class Stream:
             self._settle_future_if_empty()
 
     def _local_end(self) -> None:
+        if self._exchange is not None:
+            self._exchange.side(self.local).ended = True
         if self.state is StreamState.HALF_CLOSED_REMOTE:
             self._close_normally()
         else:
@@ -301,11 +323,16 @@ class Stream:
         self._future.set_exception(error)
         self._future.add_done_callback(lambda future: future.exception())
 
-    def _fail(self, error: StreamReset, *, notify_remote: bool) -> None:
-        """Close the stream because it was reset, locally or remotely, or because the socket died."""
+    def _fail(self, error: StreamReset, *, notify_remote: bool, reset_by: str | None = "local") -> None:
+        """Close the stream because it was reset, locally or remotely, or because the socket died.
+
+        `reset_by` is "local" or "remote" for a reset, None for a socket loss.
+        """
         _ = notify_remote
         if self.state is StreamState.CLOSED:
             return
+        if self._exchange is not None:
+            self._exchange.reset_by = reset_by
         self.state = StreamState.CLOSED
         self._close_cause = error
         self._assembler.reset()

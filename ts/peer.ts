@@ -17,6 +17,7 @@ import {
   StreamReset,
   StreamTimeout,
 } from './errors';
+import { checkMaxPayloads, type Exchange, type ExchangeOptions, ExchangeRecorder, limitExchange } from './exchange';
 import { encodedLength, MAX_FRAME_BYTES, splitFrame } from './fragment';
 import { ABSENT, type Absent, type Frame } from './frames';
 import { GoawayState, MAX_STREAM_ID, newNonce, PingRegistry } from './lifecycle';
@@ -432,6 +433,8 @@ export class Peer {
 
   private readonly errorHandlers: ((error: unknown, stream: Stream | null) => void)[] = [];
 
+  private readonly exchangeHandlers: { handler: (exchange: Exchange) => void; maxPayloads: number | null }[] = [];
+
   /**
    * Keyed by one symbol per registration, so a function registered twice is two registrations and
    * each unregister function removes only its own. `adoptSocket` keeps all three: they belong to the
@@ -648,6 +651,34 @@ export class Peer {
   }
 
   /**
+   * Call `handler` once for every stream that finishes, with the stream's `Exchange`.
+   *
+   * Only streams created while at least one handler is registered are recorded. Each side's `payloads`
+   * are cut to `maxPayloads` (default 100; `null` for all, `0` for none). A handler runs synchronously
+   * when the stream closes; what it throws is logged, and what it returns is ignored. Throws
+   * `RangeError` for a negative or non-integer `maxPayloads`.
+   */
+  onExchange(handler: (exchange: Exchange) => void, options: ExchangeOptions = {}): void {
+    const maxPayloads = options.maxPayloads === undefined ? 100 : options.maxPayloads;
+    checkMaxPayloads(maxPayloads);
+    this.exchangeHandlers.push({ handler, maxPayloads });
+  }
+
+  /** A recorder for a new stream, or `null` when no `onExchange` handler is registered. */
+  private newRecorder(): ExchangeRecorder | null {
+    if (this.exchangeHandlers.length === 0) return null;
+    let limit: number | null = 0;
+    for (const { maxPayloads } of this.exchangeHandlers) {
+      if (maxPayloads === null) {
+        limit = null;
+        break;
+      }
+      limit = Math.max(limit, maxPayloads);
+    }
+    return new ExchangeRecorder(this.id, limit);
+  }
+
+  /**
    * Register an interceptor for the headers of every stream this peer opens (WSM-API-026/027).
    *
    * `open()`, `notify()` and `request()` call it synchronously as `(headers, payload)` before an id is
@@ -767,6 +798,12 @@ export class Peer {
     this.highestLocalOpen = streamId;
     const stream = new Stream<T>(this, streamId, { headers, payload, local: true });
     stream.oneway = oneway;
+    stream.recorder = this.newRecorder();
+    if (stream.recorder !== null) {
+      stream.recorder.local.headers = headers;
+      if (!isAbsent(payload)) stream.recorder.local.payload(payload);
+      if (end) stream.recorder.local.end(null);
+    }
     stream.state = end ? StreamState.HALF_CLOSED_LOCAL : StreamState.OPEN;
     if (!oneway) this.liveStreams.set(streamId, stream);
     this.enqueue({ type: 'open', stream: streamId, payload, headers, end, oneway });
@@ -1232,6 +1269,7 @@ export class Peer {
         exceptionForReset(ResetCode.REFUSED, `the remote went away before processing stream ${stream.id}`, {
           streamId: stream.id,
         }),
+        'remote',
       );
     });
     return true;
@@ -1312,6 +1350,11 @@ export class Peer {
     stream.oneway = frame.oneway === true;
     // A oneway open carries `end` whether or not the frame says so (WSM-FRM-020).
     stream.state = frame.end === true || stream.oneway ? StreamState.HALF_CLOSED_REMOTE : StreamState.OPEN;
+    stream.recorder = this.newRecorder();
+    if (stream.recorder !== null) {
+      stream.recorder.remote.headers = frame.headers ?? null;
+      if (stream.state === StreamState.HALF_CLOSED_REMOTE) stream.recorder.remote.end(null);
+    }
     this.liveStreams.set(streamId, stream);
     this.interceptIncoming(stream, stream.headers);
 
@@ -1323,9 +1366,11 @@ export class Peer {
       if (isAbsent(payload)) return true;
       stream.opening = false;
       stream.payload = payload;
+      stream.recorder?.remote.payload(payload);
     } else {
       const payload = payloadOf(frame);
       stream.payload = isAbsent(payload) ? null : payload;
+      if (!isAbsent(payload)) stream.recorder?.remote.payload(payload);
     }
 
     this.startHandler(stream);
@@ -1360,7 +1405,11 @@ export class Peer {
     if (isAbsent(payload)) return true;
     stream.opening = false;
     stream.payload = payload;
-    if (frame.end === true) stream.state = StreamState.HALF_CLOSED_REMOTE;
+    stream.recorder?.remote.payload(payload);
+    if (frame.end === true) {
+      stream.state = StreamState.HALF_CLOSED_REMOTE;
+      stream.recorder?.remote.end(null);
+    }
     this.startHandler(stream);
     return true;
   }
@@ -1383,14 +1432,14 @@ export class Peer {
         code: ResetCode.REFUSED,
         reason: 'this peer is going away',
       });
-      stream.fail(exceptionForReset(ResetCode.REFUSED, 'peer is going away', { streamId: stream.id }));
+      stream.fail(exceptionForReset(ResetCode.REFUSED, 'this peer is going away', { streamId: stream.id }));
       return;
     }
     if (this.handler === null) {
       // The wire `reason` uses the Python wording, so both implementations send the same bytes for
-      // this event; the local error message uses the TypeScript name.
+      // this event; the local failure carries the same reason (WSM-OBS-011).
       this.enqueue({ type: 'reset', stream: stream.id, code: ResetCode.REFUSED, reason: 'no on_stream handler' });
-      stream.fail(exceptionForReset(ResetCode.REFUSED, 'no handler', { streamId: stream.id }));
+      stream.fail(exceptionForReset(ResetCode.REFUSED, 'no on_stream handler', { streamId: stream.id }));
       return;
     }
     // Stored on the stream so an incoming reset(CANCELLED) aborts it (WSM-ERR-013). The controller
@@ -1507,6 +1556,7 @@ export class Peer {
       const payload = payloadOf(frame);
       stream.fail(
         this.resetException(frame.code ?? 0, frame.reason ?? null, streamId, isAbsent(payload) ? null : payload),
+        'remote',
       );
       return true;
     }
@@ -1853,6 +1903,21 @@ export class Peer {
   /** @internal Called by `Stream` on close. No state is retained per closed stream (WSM-STM-001). */
   forget(stream: Stream): void {
     this.liveStreams.delete(stream.id);
+    const recorder = stream.recorder;
+    if (recorder === null) return;
+    stream.recorder = null;
+    const exchange = recorder.finish(stream);
+    // Every handler registered now, including those registered after the stream was created.
+    const calls = this.exchangeHandlers.map(({ handler, maxPayloads }) => () => {
+      const result: unknown = handler(limitExchange(exchange, maxPayloads));
+      // A rejection of a returned promise is logged like a synchronous throw.
+      if (isThenable(result)) {
+        result.then(undefined, (error: unknown) => {
+          logger.error(`muxws conn=${this.id} a onExchange handler threw; the rest still run`, error);
+        });
+      }
+    });
+    this.fanOut('onExchange', calls);
   }
 
   /** Debug representation; mirrors Python's `__repr__`. */

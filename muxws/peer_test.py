@@ -134,6 +134,7 @@ _ID_ARGUMENT_NAMES = frozenset({"id", "sid", "stream", "stream_id", "streamid"})
 _ID_ARGUMENTS_THAT_ARE_NOT_AN_ALLOCATION = frozenset(
     {
         ("ConnectionLost.__init__", "stream_id"),
+        ("Exchange.__init__", "stream"),
         ("Frame.__init__", "stream"),
         ("RemoteError.__init__", "stream_id"),
         ("Stream.__init__", "stream_id"),
@@ -2288,11 +2289,12 @@ async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_p
     error: an error handled outside the call site is not seen by the caller's `try`, and the await
     either hangs or returns a value that was never sent.
 
-    The test lists the four hooks exhaustively and registers all of them before failing a stream.
-    All four fire, all see the reset, and the exception is still raised from the `await`.
+    The test lists the five hooks exhaustively and registers all of them before failing a stream.
+    All five fire, all see the reset, and the exception is still raised from the `await`.
     """
     assert {name for name in dir(Peer) if name.startswith("on_")} == {
         "on_close",
+        "on_exchange",
         "on_frame",
         "on_reconnect",
         "on_stream",
@@ -2309,11 +2311,17 @@ async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_p
     pair.acceptor.on_stream(handler)
     pair.dialer.on_frame(lambda direction, frame, _length: frames_seen.append(f"{direction}:{frame.type}"))
     pair.dialer.on_close(closes_seen.append)
+    exchanges_seen: list[Any] = []
+    pair.dialer.on_exchange(exchanges_seen.append)
     pair.start()
     try:
         with pytest.raises(RemoteError) as info:
             await pair.dialer.request({"q": 1})
         assert info.value.code is ResetCode.APPLICATION_ERROR
+        # `on_exchange` reported the reset after the stream closed; it is an observer (WSM-OBS-004).
+        assert [(exchange.outcome, exchange.code) for exchange in exchanges_seen] == [
+            ("reset", ResetCode.APPLICATION_ERROR)
+        ]
 
         # `on_frame` observed the reset without consuming it; it is an observer (WSM-OBS-003), not a
         # handler.

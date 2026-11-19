@@ -33,14 +33,14 @@ newer, the first release whose top-level `connect` is `websockets.asyncio.client
 |---|---|
 | [connect](/api/connect) | Dialling a peer, in Python, in the browser and under Node, with every connection option. |
 | [accept](/api/accept) | The acceptor side: `accept`, `serve`, the `Origin` policies, and the subprotocol hooks that refuse a codec you do not speak. |
-| [Peer](/api/peer) | The object both ends hold: opening streams, the handler and lifecycle callbacks, header interceptors, `ping`, `close`, `serve`. |
+| [Peer](/api/peer) | The object both ends hold: opening streams, the handler and lifecycle callbacks, the frame and exchange observers, header interceptors, `ping`, `close`, `serve`. |
 | [Stream](/api/stream) | One call: sending, ending, replying, awaiting, iterating, cancelling and resetting. |
 | [Reconnect](/api/reconnect) | The dialer-only helper: backoff, the hello, and the three functions that compute its schedule. |
 | [Errors](/api/errors) | The exception tree, the nine reset codes, and how a reset becomes an exception. |
 | [Codec](/api/codec) | The codec protocol, the two codecs that ship, the registry, and the settings that select one. |
 | [Registry](/api/registry) | `PeerRegistry`: tagging live peers and looking them up again. |
 | [Transports](/api/transports) | `SocketAdapter` and every adapter that implements it, in both languages, plus the `ws+unix:` URL grammar and the `websockets` dial gates. |
-| [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, the two callback aliases and the three interceptor aliases. |
+| [Types](/api/types) | `Frame` and its envelope, the frame helpers, `CloseReason`, `Exchange` and `ExchangeSide`, the two callback aliases and the three interceptor aliases. |
 
 For an introduction, see the [rationale](/guide/rationale) and the
 [quick start](/guide/getting-started). This reference assumes an open connection.

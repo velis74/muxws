@@ -82,6 +82,16 @@ export {
   TransportUrlError,
   exceptionForReset,
 } from './errors';
+export {
+  Exchange,
+  type ExchangeDict,
+  type ExchangeDictOptions,
+  type ExchangeOptions,
+  type ExchangeOutcome,
+  type ExchangeParty,
+  type ExchangeSide,
+  type ExchangeSideDict,
+} from './exchange';
 export { ABSENT, type Absent, type Frame, V1_FRAME_TYPES, framesEqual, fromMapping, toMapping } from './frames';
 export { Assembler, MAX_FRAME_BYTES, encodedLength, splitFrame } from './fragment';
 // `GoawayState`, `MAX_STREAM_ID`, `PingRegistry`, `newNonce` and `logFrame` are not exported: they

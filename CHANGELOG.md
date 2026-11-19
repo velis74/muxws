@@ -7,6 +7,21 @@ below.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-11-19
+
+### Added
+
+- `peer.on_exchange(handler, *, max_payloads=100)` (TypeScript `peer.onExchange(handler, { maxPayloads })`): the
+  handler is called once per finished stream, on every close path, with an `Exchange` (WSM-OBS-004 to WSM-OBS-011).
+  Payloads are the logical values, reassembled and decoded; `max_payloads` limits how many per side the handler
+  receives. A peer with no handler registered records nothing.
+- `Exchange` and `ExchangeSide` (Python and TypeScript): what each side sent (headers, payloads, payload count,
+  trailers, end), the outcome (`ok`, `reset`, `lost`) with the reset's origin, code and reason, the start time,
+  the time to the first response and the duration. `Exchange.as_dict(trim_payload_size=None)` (TypeScript
+  `asDict({ trimPayloadSize })`) returns the same JSON-ready record in both languages, binary values as base64
+  and long payloads trimmed. TypeScript also exports `ExchangeOutcome`, `ExchangeParty`, `ExchangeOptions`,
+  `ExchangeDictOptions`, `ExchangeDict` and `ExchangeSideDict`.
+
 ## [0.4.5] - 2026-11-17
 
 ### Changed
