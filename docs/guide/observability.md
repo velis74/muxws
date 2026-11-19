@@ -228,6 +228,210 @@ code guarded by it runs once.
 Before the handler runs, every live stream has been failed with `ConnectionLost`, so `peer.streams` is
 empty inside it.
 
+## Writing the muxws logs to a file
+
+The muxws loggers are standard Python loggers, so the application's logging configuration decides
+where their lines go.
+
+| Logger | What it emits |
+|---|---|
+| `muxws.frames` | One line per frame at `DEBUG` (see [the format](#the-format)); connection and stream problems at `INFO`, `WARNING` and `ERROR`: unknown frame types, dropped oneway streams, protocol errors, a replaced `on_stream` handler, handlers that raised, and frames that could not be encoded or sent. |
+| `muxws.reconnect` | At `DEBUG`, each failed dial and each socket that ended under the reconnect helper. |
+| `muxws.registry` | No lines. |
+| `muxws.origin` | At `INFO`, each handshake refused by `allowed_origins`. |
+| `muxws.codec` | At `ERROR`, each subprotocol mismatch: a refused upgrade or a wrongly negotiated subprotocol. |
+
+All five are children of `muxws`, so one entry for `muxws` covers them; an entry for a child overrides
+its level.
+
+### Django
+
+A logging configuration takes effect in the process that applies it. For muxws that is the process
+running the connections: under Django, the ASGI server process (uvicorn, daphne) that loads the
+settings through `asgi.py`. Django applies `settings.LOGGING` with `logging.config.dictConfig` when it
+sets up; another process, such as a Celery worker, applies its own configuration.
+
+<<< @/examples/django_logging.py
+
+- `muxws.frames` at `DEBUG` writes one line per frame and is meant for diagnosis; `INFO` turns the
+  per-frame lines off, `WARNING` also the unknown frame types. `"muxws.reconnect": {"level": "DEBUG"}`
+  adds the reconnect helper's failed dials.
+- `"propagate": False` keeps the lines out of the root logger's handlers, such as the console.
+- The `app.muxws.exchanges` entry belongs to the [exchange log](#exchange-log) below.
+  `"()": "queued_file.QueuedFileHandler"` is the import path of [the queued handler](#the-write-path);
+  in a project it is the path of the module that holds it.
+
+Without Django, the same dictionary is applied with `logging.config.dictConfig(LOGGING)` at startup.
+
+### TypeScript
+
+The TypeScript logger writes to `console`: `debug` and `info` to standard output, `warn` and `error`
+to standard error. `logger.level` selects what is written; a file is the redirection of the process's
+output, for example `node server.js >> muxws.log 2>&1`, or the log driver of the container or service
+manager.
+
+## Exchange log
+
+The exchange log writes one JSON line (JSONL) per stream: what the opening side sent, what the other
+side sent, how the stream ended and how long it took. It is a recipe, not part of muxws: copy
+`exchange_log.py` or `exchange-log.ts` into the application. It is built on
+[`on_frame`](#peer-on-frame-handler) and [`on_close`](#close-reasons) and reassembles fragmented
+payloads with `Assembler`.
+
+::: danger The exchange log writes payloads
+muxws never logs payloads (see [What is never logged](#what-is-never-logged)); this recipe does.
+Payloads and headers can contain passwords, tokens and personal data, and the log file holds them.
+Remove them with `redact` (payloads) and `include` (whole streams), restrict access to the file, and
+keep the exchange log off in production unless it is needed.
+:::
+
+### Python
+
+::: details `exchange_log.py`
+
+<<< @/examples/exchange_log.py
+
+:::
+
+```python
+# fragment
+from muxws import accept, resolve_codec
+
+from exchange_log import ExchangeLog
+
+
+def without_password(payload, side):
+    if isinstance(payload, dict) and "password" in payload:
+        return {**payload, "password": "***"}
+    return payload
+
+
+exchanges = ExchangeLog(resolve_codec(), redact=without_password)
+
+
+@app.websocket("/ws")
+async def ws(websocket):
+    peer = await accept(websocket)
+    exchanges.attach(peer)
+    peer.on_stream(handle)
+    await peer.serve()
+```
+
+`ExchangeLog(codec, *, write=None, logger="app.muxws.exchanges", trim_payload_size=4096,
+max_messages=100, redact=None, include=None, clock=None)`
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `codec` | required | The codec of the connections: the `codec=` given to `accept()` / `connect()`, or `resolve_codec()` for the configured one. It decodes payloads reassembled from fragments. |
+| `write` | `None` | `callable(str)` receiving each finished line, without a newline. `None` passes the line to `logging.getLogger(logger).info`. |
+| `logger` | `"app.muxws.exchanges"` | The logger name used when `write` is `None`. |
+| `trim_payload_size` | `4096` | Longest logged payload, in UTF-8 bytes of its JSON text. A longer payload is logged as a string: its first `trim_payload_size` bytes, cut on a character boundary, then `…(trimmed N bytes)…`, where `N` is the number of bytes cut off. A shorter one is logged as its JSON value. `None` never trims. Headers and trailers are never trimmed. |
+| `max_messages` | `100` | Payloads kept per side of a stream. Further payloads are not decoded and are counted in `dropped`. `None` keeps all. |
+| `redact` | `None` | `callable(payload, side) -> payload`, applied to every kept payload before it is serialised; `side` is `"request"` or `"response"`. |
+| `include` | `None` | `callable(headers, payload) -> bool`, called once per stream with the opening frame's headers (`None` when it has none) and payload (reassembled when fragmented, `None` when absent or when the stream ends before it is complete). `False` leaves the stream out of the log. `None` logs every stream. |
+| `clock` | `None` | Monotonic time in seconds, for the durations; `None` is `time.monotonic`. |
+
+`attach(peer)` registers an `on_frame` and an `on_close` handler on `peer`. One `ExchangeLog` can be
+attached to any number of peers, dialers and acceptors alike. A dialer's reconnected sockets are logged
+too, each under its own `conn`.
+
+Serialising a payload converts `bytes` to base64 text, `NaN` and infinities to `null`, lone surrogates
+to `\uXXXX` escapes and any other value JSON cannot hold to its `str()`, so every line is strict JSON in
+UTF-8.
+
+### TypeScript (Node)
+
+::: details `exchange-log.ts`
+
+<<< @/examples/exchange-log.ts
+
+:::
+
+```ts
+// fragment
+import { createWriteStream } from 'node:fs';
+
+import { JsonCodec } from 'muxws';
+
+import { ExchangeLog } from './exchange-log';
+
+const file = createWriteStream('/var/log/myapp/exchanges.jsonl', { flags: 'a' });
+const exchanges = new ExchangeLog({ codec: new JsonCodec(), write: (line) => file.write(`${line}\n`) });
+
+exchanges.attach(peer);
+```
+
+`new ExchangeLog({ codec, write, trimPayloadSize, maxMessages, redact, include, clock })` takes the
+same options as the Python class, in camelCase, with two differences: `write` is required, and `clock`
+returns milliseconds (default `performance.now`). A `fs.WriteStream` in append mode buffers the writes,
+so `write` returns without waiting for the disk.
+
+### The record
+
+```json
+{"ts":"2026-11-19T09:32:22.359Z","conn":"c42-0","stream":1,"opened_by":"local","oneway":false,"request":{"headers":{"trace":"4f1a"},"payloads":[{"action":"get_user","id":7}],"trailers":null,"dropped":0,"bytes":103},"response":{"headers":{"status":200},"payloads":[{"id":7,"name":"Ana"}],"trailers":null,"dropped":0,"bytes":120},"outcome":"ok","code":null,"reason":null,"first_response_ms":0.212,"duration_ms":0.255}
+```
+
+The keys always appear in this order:
+
+| Key | Value |
+|---|---|
+| `ts` | When the stream was opened, UTC, ISO 8601 with milliseconds and `Z`. |
+| `conn` | `peer.id` of the connection. |
+| `stream` | The stream id. |
+| `opened_by` | `"local"` when the logging peer opened the stream, `"remote"` when the other end did. |
+| `oneway` | `true` for a `notify()` stream. |
+| `request` | What the opening side sent, whichever side writes the log. |
+| `response` | What the other side sent. |
+| `outcome` | `"ok"` when both sides ended, `"reset"` when either side reset the stream, `"lost"` when the connection closed first. |
+| `code`, `reason` | The code and reason of the `reset` frame; `null` for `"ok"` and `"lost"`. |
+| `first_response_ms` | Milliseconds from the open to the first frame of the other side; `null` when none arrived. |
+| `duration_ms` | Milliseconds from the open to the end of the stream. |
+
+`request` and `response` have the same shape:
+
+| Key | Value |
+|---|---|
+| `headers` | The side's leading headers, or `null`. |
+| `payloads` | The side's payloads in order, at most `max_messages`. A fragmented payload appears once, decoded. |
+| `trailers` | The side's trailers, or `null`. |
+| `dropped` | Payloads beyond `max_messages`. |
+| `bytes` | The sum of `byte_length` of the side's frames on the stream, fragments and `reset` included. |
+
+A stream's line is written when both sides have ended, when either side resets it, or when the
+connection closes; an `on_close` writes every unfinished stream of that connection with `"lost"`. A
+`notify()` stream is written as soon as its open is complete, with an empty `response` and `"ok"`.
+Frames without a stream (`ping`, `pong`, `goaway`) are not logged.
+
+### The write path
+
+The `on_frame` handler runs inside the peer's read loop and write loop, so `write`, `redact` and
+`include` must return quickly (see [`peer.on_frame`](#peer-on-frame-handler)). An exception raised
+by `write`, `redact`, `include` or the serialisation drops that stream's record and never reaches the
+connection; the other streams are logged. Python logs the exception at `ERROR` under the logger named
+after the module (`exchange_log`), TypeScript at `warn` on the muxws `logger`.
+
+In Python the default `write` is a logging call, and a `logging.FileHandler` writes to disk on the
+calling thread, which is the event loop. `QueuedFileHandler` puts the record on a queue instead, and a
+`QueueListener` thread appends it to the file:
+
+<<< @/examples/queued_file.py
+
+The Django configuration [above](#django) attaches it to `app.muxws.exchanges` with a `%(message)s`
+formatter, so each line in the file is exactly one record. Without Django:
+
+```python
+# fragment
+import logging
+
+from queued_file import QueuedFileHandler
+
+exchanges_logger = logging.getLogger("app.muxws.exchanges")
+exchanges_logger.addHandler(QueuedFileHandler("/var/log/myapp/exchanges.jsonl"))
+exchanges_logger.setLevel(logging.INFO)
+exchanges_logger.propagate = False
+```
+
 ## See also
 
 - [`api/peer`](/api/peer) — `on_frame`, `on_close`, `on_reconnect`, `id`, `streams`

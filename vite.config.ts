@@ -107,5 +107,11 @@ export default defineConfig({
     coverage: { provider: 'v8', include: ['ts/**/*'], exclude: ['**/index.ts'] },
     globals: true,
     environment: 'jsdom',
+    // `docs/examples/` imports the package by name, as a reader does; `docs/examples/tsconfig.json`
+    // maps the same two specifiers for `tsc` and `tsx`.
+    alias: [
+      { find: /^muxws$/u, replacement: resolve(import.meta.dirname, 'ts/index.ts') },
+      { find: /^muxws\/node$/u, replacement: resolve(import.meta.dirname, 'ts/node.ts') },
+    ],
   },
 });
