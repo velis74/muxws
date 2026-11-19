@@ -5,7 +5,7 @@
   "type": "module",
   "sideEffects": false,
   "description": "Multiplexed, cancellable, bidirectional streams over one WebSocket",
-  "author": "Jure Erznožnik",
+  "author": "Jure Erznožnik <jure.erznoznik@velis.si>",
   "files": [
     "dist/*"
   ],
