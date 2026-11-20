@@ -7,9 +7,6 @@ The module name carries a trailing underscore for the same reason `json_.py` doe
 is imported only by an application that imports this module. The module does not register itself
 (WSM-CDC-014); the application calls `register_codec("msgpack", MsgpackCodec())` during bootstrap
 (WSM-CDC-013).
-
-Test fixtures do not pin msgpack bytes (WSM-CDC-006): this library and `@msgpack/msgpack` choose
-integer widths and map formats differently and both are valid. Tests assert round-trips only.
 """
 
 from __future__ import annotations

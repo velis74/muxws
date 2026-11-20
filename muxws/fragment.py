@@ -162,11 +162,8 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
 def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> Iterator[Frame]:
     """Yield `frame` when it already fits, else the fragment frames that replace it, **lazily**.
 
-    The writer consumes this one slice at a time, because a stream holds at most one unsent fragment
-    (WSM-FRG-018): fragment *n+1* is sliced after fragment *n* has been handed to the socket, so the
-    writer can interleave other streams' frames between them (WSM-FRG-019).
-
-    `split_frame` and the writer both use this function, so they cut at the same boundaries.
+    Fragment *n+1* is sliced only when it is requested, so a stream holds at most one unsent fragment
+    and other streams' frames can be interleaved between them (WSM-FRG-018/019).
 
     A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads nothing else and mutates neither
     argument. `cap` defaults to the protocol constant; a smaller value comes only from a test or the
@@ -268,11 +265,7 @@ class Assembler:
 
     @property
     def byte_length(self) -> int:
-        """Bytes accumulated so far.
-
-        The peer checks `max_payload_bytes` against this as fragments arrive, before reassembly
-        (WSM-FRG-032).
-        """
+        """Bytes accumulated so far, counted as fragments arrive, before reassembly (WSM-FRG-032)."""
         return self._bytes
 
     def reset(self) -> None:

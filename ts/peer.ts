@@ -91,9 +91,9 @@ export interface PeerOptions {
   isDialer: boolean;
   errorSerializer?: ErrorSerializer;
   /**
-   * Test-only (WSM-FRG-005). The cap is a protocol constant; the conformance runner lowers it to
-   * exercise fragmentation with small fixtures. A value too small to hold an envelope plus one
-   * indivisible unit raises `ProtocolError` at construction (WSM-FRG-034).
+   * Test-only (WSM-FRG-005). The cap is a protocol constant; a lower value exercises fragmentation with
+   * small fixtures. A value too small to hold an envelope plus one indivisible unit raises `ProtocolError`
+   * at construction (WSM-FRG-034).
    */
   maxFrameBytes?: number;
   /**
@@ -258,11 +258,11 @@ function resolveCall(first: unknown, second: RequestOptions | undefined, keys: R
 }
 
 /**
- * @internal WSM-FRG-034: a cap too small to hold an envelope plus one unit raises `ProtocolError` at
- * construction. `dialAndEstablish` also calls it before the first dial.
+ * @internal Return `cap`; raise `ProtocolError` when it is too small to hold an envelope plus one
+ * indivisible unit of payload (WSM-FRG-034).
  *
- * The cap is a protocol constant (WSM-FRG-004); a smaller value is passed only through the test-only
- * constructor option of WSM-FRG-005, which the conformance runner uses.
+ * The cap is a protocol constant (WSM-FRG-004); a smaller value comes only from the test-only
+ * constructor option of WSM-FRG-005.
  */
 export function checkedFrameCap(cap: number, codec: Codec): number {
   if (cap === MAX_FRAME_BYTES) return cap;
@@ -623,7 +623,7 @@ export class Peer {
     this.reconnectHandlers.push(handler);
   }
 
-  /** @internal Called by `ConnectionLoop` after the hello is acknowledged. */
+  /** @internal Call the `onReconnect` handlers with `attempt`. Precondition: the hello is acknowledged. */
   fireReconnect(attempt: number): void {
     this.fanOut('onReconnect', this.reconnectHandlers, attempt, this);
   }
@@ -733,9 +733,7 @@ export class Peer {
     this.errorHandlers.push(handler);
   }
 
-  /**
-   * @internal Called by `Stream`. Report the failure of a stream without a consumer (WSM-API-016).
-   */
+  /** @internal Report the failure of a stream without a consumer (WSM-API-016). */
   reportStreamError(error: unknown, stream: Stream | null = null): void {
     if (this.errorHandlers.length === 0) {
       logger.debug(
@@ -846,7 +844,7 @@ export class Peer {
     }
   }
 
-  /** The WSM-SID-007 shutdown in progress, if any; tests await it. */
+  /** The WSM-SID-007 shutdown in progress, if any. */
   exhaustionShutdown: Promise<void> | null = null;
 
   private exhausted(): boolean {
@@ -917,7 +915,7 @@ export class Peer {
 
   // ------------------------------------------------------------------ the writer
 
-  /** @internal Called by `Stream` and `Peer`. Synchronous, so `open()` does not suspend mid-allocation. */
+  /** @internal Queue `frame` for the writer. Synchronous, so `open()` does not suspend mid-allocation. */
   enqueue(frame: Frame): void {
     this.writer.enqueue(frame);
   }
@@ -1902,7 +1900,7 @@ export class Peer {
     }
   }
 
-  /** @internal Called by `Stream` on close. No state is retained per closed stream (WSM-STM-001). */
+  /** @internal Drop a closed stream. No state is retained per closed stream (WSM-STM-001). */
   forget(stream: Stream): void {
     this.liveStreams.delete(stream.id);
     const recorder = stream.recorder;

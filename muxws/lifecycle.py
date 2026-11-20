@@ -23,8 +23,7 @@ MAX_STREAM_ID = 2**31 - 1
 def new_nonce() -> str:
     """A ping nonce.
 
-    16 hex characters from `secrets`, so the nonce is not guessable. The reconnect jitter in
-    `reconnect.py` uses `random`.
+    16 hex characters from `secrets`, so the nonce is not guessable.
     """
     return secrets.token_hex(8)
 

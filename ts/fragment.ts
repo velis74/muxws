@@ -89,9 +89,6 @@ function isContinuation(byte: number): boolean {
  *
  * Returns 0 when nothing fits: `limit` is narrower than the codepoint at `start`, or `start` is the
  * end of the encoding.
- *
- * Exported for the spec tests, which assert the boundary rule on this function directly, as the
- * Python tests do with `_floor_boundary`.
  */
 export function boundaryWithin(units: Encoded, start: number, limit: number): number {
   let cut = Math.min(start + limit, units.bytes.length);
@@ -195,10 +192,7 @@ function largestFittingCount(
   return best;
 }
 
-/**
- * All fragments as an array: `iterFragments` collected eagerly. Used by the pure-function tests and
- * the conformance corpus.
- */
+/** All fragments as an array: `iterFragments` collected eagerly. */
 export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Frame[] {
   return [...iterFragments(frame, cap, codec)];
 }
@@ -210,11 +204,9 @@ export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: 
  * (WSM-FRG-018): fragment n+1 is sliced only after fragment n has been passed to the socket. Slicing
  * all fragments up front would fix the wire order and prevent interleaving (WSM-FRG-019).
  *
- * `splitFrame` and the writer both use this generator, so they split at the same boundaries.
- *
  * A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads no other state and mutates neither
- * argument. `cap` defaults to the protocol constant; only tests and the conformance runner pass a
- * smaller value (WSM-FRG-005), and it is never read from the wire.
+ * argument. `cap` defaults to the protocol constant; a smaller value is a test setting
+ * (WSM-FRG-005), and it is never read from the wire.
  *
  * The payload is encoded with the codec, the encoded form is sliced, and each slice is placed in a
  * frame that the codec encodes again (WSM-FRG-011). Each slice is sized with an envelope reservation
@@ -308,7 +300,7 @@ export class Assembler {
     return this.bytes;
   }
 
-  /** Drop the partial buffer. Called when the stream is reset. */
+  /** Drop the partial buffer. */
   reset(): void {
     this.parts = [];
     this.bytes = 0;

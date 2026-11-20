@@ -190,8 +190,8 @@ class Peer:
         """Whether a socket is attached, so a frame put on the writer now can reach the wire.
 
         Differs from `is_open` during the hello window: there `is_open` is false (WSM-RCN-043) while
-        the socket is open and carries the hello. `Stream.reset()` uses this property, so a reset of a
-        stream the acceptor pushed during the hello window is sent to the remote (WSM-STM-021).
+        the socket is open and carries the hello. A reset of a stream the acceptor pushed during the
+        hello window is sent to the remote while this is true (WSM-STM-021).
         """
         return self._is_open
 
@@ -316,13 +316,7 @@ class Peer:
     # ------------------------------------------------------------------ opening
 
     def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, end: bool = False) -> Stream:
-        """Open a stream. Synchronous; between sockets it raises instead of queuing the open (WSM-API-001/004).
-
-        The guard and the allocation are separate methods. The reconnect helper's hello is sent while
-        `is_open` is still false, because its acknowledgement establishes the connection
-        (WSM-RCN-004/043), so the helper calls `_allocate_and_enqueue` directly. The guard takes no
-        parameters, so no call through this method can bypass it and precede the hello (WSM-RCN-023).
-        """
+        """Open a stream. Synchronous; between sockets it raises instead of queuing the open (WSM-API-001/004)."""
         return self._open(payload, headers=headers, end=end, oneway=False)
 
     def _open(self, payload: Any, *, headers: dict[str, Any] | None, end: bool, oneway: bool) -> Stream:
@@ -334,8 +328,8 @@ class Peer:
     def _intercepted_reply_headers(self, headers: dict[str, Any] | None, stream: Stream) -> dict[str, Any] | None:
         """The leading headers of this peer's answer on `stream`, as the reply interceptors leave them.
 
-        Called by the stream before its first frame is marked as sent, so after an interceptor raises
-        the stream can still send its first frame (WSM-API-028).
+        Runs before the stream's first frame is marked as sent, so after an interceptor raises the
+        stream can still send its first frame (WSM-API-028).
         """
         if not self._reply_interceptors:
             return headers
@@ -349,6 +343,7 @@ class Peer:
         Wire order therefore equals allocation order. If two `open()` calls could interleave here, ids
         could go on the wire out of order, which the remote treats as a protocol error (WSM-INV-005).
         A `oneway` stream carries `end` and is closed once its `open` is enqueued (WSM-STM-041).
+        Has no `is_open` guard, so the hello can go out before the connection is open (WSM-RCN-023/043).
         """
         if self._exhausted():
             raise ConnectionGoingAway(
@@ -1201,10 +1196,9 @@ class Peer:
     def _die(self, cause: ConnectionClosed, *, notify: bool = True) -> None:
         """Socket death: every live stream fails with `ConnectionLost`, then `on_close` handlers run.
 
-        `notify=False` is used only for a first connection that was never established: `connect()`
-        raises instead (WSM-RCN-006), and the caller never received the peer, so no handler is
-        registered. The peer is still marked dead, so `is_open` is false regardless of how the read
-        loop and the cancellation are ordered.
+        `notify=False` skips the handlers. It applies to a first connection that was never established,
+        whose peer has no handler registered (WSM-RCN-006). The peer is still marked dead, so `is_open`
+        is false regardless of how the read loop and the cancellation are ordered.
         """
         if not self._is_open:
             return
@@ -1234,10 +1228,6 @@ class Peer:
 
     def _notify_close(self, reason: CloseReason) -> None:
         """Call the `on_close` handlers with `reason`.
-
-        Separate from `_die` because exhausting `max_attempts` is not a socket loss, and it MUST still
-        call `on_close` once with `will_retry` false (WSM-RCN-044). Callers: `_die` for every socket
-        loss, and the reconnect helper when it gives up.
 
         At most one `will_retry=False` close is reported per peer; a second one is suppressed.
         When the attempt cap is spent by failed hellos, the last socket loss already reported
@@ -1390,7 +1380,7 @@ def _checked_frame_cap(cap: int, codec: Codec) -> int:
     """Raise `ProtocolError` when `cap` cannot hold an envelope plus one unit of payload (WSM-FRG-034).
 
     Checked at construction. The cap is a protocol constant (WSM-FRG-004); a smaller value comes only
-    from the test-only construction argument of WSM-FRG-005, which the conformance runner uses.
+    from the test-only construction argument of WSM-FRG-005.
     """
 
     from muxws.fragment import split_frame

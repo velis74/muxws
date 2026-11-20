@@ -1,7 +1,7 @@
 """Quick-start acceptor: FastAPI, one WebSocket route, one muxws peer.
 
 Run it with `python quickstart_server.py`. It listens on 127.0.0.1:8000 unless the `MUXWS_PORT`
-environment variable says otherwise - the documentation test starts it on a free port that way.
+environment variable says otherwise.
 
 The route does three things: it hands the socket to `accept()`, registers the peer's `on_stream`
 handler, and runs the read loop. Every stream the dialer opens on this connection arrives at that

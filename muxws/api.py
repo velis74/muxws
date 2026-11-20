@@ -153,18 +153,10 @@ def _websocket_dialer(
     (WSM-CDC-016/020).
     """
     offered = offer(resolved.name, subprotocols)
-    # Parsed here, not inside `dial()`: a malformed `ws+unix:` URL, a `wss+unix:` URL and a platform
-    # without AF_UNIX raise from `connect()` before any socket is opened, and every reconnect dials
-    # the same socket file.
+    # Outside `dial()`: a bad address raises before any socket opens; every reconnect dials the same target.
     unix = parse_unix_url(url)
-    # `parse_unix_url` is stdlib-only, so a malformed `ws+unix:` URL raises `UnixUrlError` even where
-    # `websockets` is absent. `verify_dialable_url` then checks the dependency, which supplies the URL
-    # parser, and then the URL.
-    #
-    # Both checks run outside `dial()`. The `except` in `dial()` answers a refused upgrade with
-    # `CodecMismatch` (WSM-CDC-022/024), and its string fallback matches `HTTP 400` in an
-    # `InvalidURI` that quotes the URL, so `connect("ws:/HTTP 400")` would be reported as a codec
-    # mismatch (WSM-ERR-016).
+    # Outside `dial()`: its `HTTP 400` fallback would report an `InvalidURI` quoting the URL as
+    # `CodecMismatch` (WSM-ERR-016).
     verify_dialable_url(url, uri=unix.uri if unix is not None else None)
 
     async def dial() -> SocketAdapter:

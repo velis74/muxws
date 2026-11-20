@@ -54,12 +54,8 @@ class WebsocketsNotInstalledError(TransportUnsupportedError):
 def require_websockets() -> Any:
     """Import `websockets`, or raise `WebsocketsNotInstalledError` naming the extra.
 
-    Used by both dial arms. The package has no required runtime dependencies (WSM-PKG-002), so the
-    import happens here and its absence is reported as a muxws error naming the install command
-    (WSM-ERR-016).
-
-    Called from `verify_dialable_url` before the URL is parsed, because `websockets` supplies the URL
-    parser.
+    The package has no required runtime dependencies (WSM-PKG-002), so the import happens here and its
+    absence is reported as a muxws error naming the install command (WSM-ERR-016).
 
     Only a `ModuleNotFoundError` whose `name` is exactly `"websockets"` becomes
     `WebsocketsNotInstalledError`. A missing submodule (`name` of `"websockets.asyncio"`) or another
@@ -83,12 +79,6 @@ def verify_dialable_url(url: str, *, uri: str | None = None) -> None:
 
     `uri` is the logical `ws://` URL that a `ws+unix:` dial passes to `unix_connect(uri=...)`; that
     URL is parsed by the handshake, so it is the one checked. For a TCP dial `url` is checked.
-
-    Called outside `connect()`'s dial closure. The closure's exception handler translates a refused
-    upgrade into `CodecMismatch` (WSM-CDC-022/024), and its string fallback matches `HTTP 400`
-    anywhere in the message, including an `InvalidURI` that quotes the URL: `connect("ws:/HTTP 400")`
-    would be reported as a codec mismatch. A real 400 requires a URL that parsed, so checking here
-    does not change how a real refusal is reported (WSM-ERR-016).
 
     `parse_uri` raises `InvalidURI` for a rejected scheme or hostname and a `ValueError` from
     `urllib.parse` for a non-integer port; `InvalidURI` is not a `ValueError`, so both are caught.

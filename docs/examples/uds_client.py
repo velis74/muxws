@@ -33,8 +33,7 @@ async def main() -> None:
             print(f"chunk {chunk['chunk']} of {chunk['of']}")
 
         # The heartbeat is a muxws `ping` frame, sent over the same socket. Only the arrival of the pong
-        # is printed: the round-trip time varies between runs, and the guide compares this output
-        # exactly.
+        # is printed; the round-trip time varies between runs.
         await peer.ping()
         print("ping: answered")
     finally:

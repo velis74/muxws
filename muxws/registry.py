@@ -44,7 +44,7 @@ class PeerRegistry:
 
     @property
     def index_size(self) -> int:
-        """How many (key, value) buckets exist. WSM-REG-014 asserts this does not grow."""
+        """How many (key, value) buckets exist."""
         return len(self._index)
 
     def register(self, peer: Peer) -> None:

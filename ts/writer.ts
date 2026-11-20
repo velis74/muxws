@@ -121,7 +121,7 @@ export class StreamQueue {
     return this.prepared !== null || this.waiting.length > 0 || this.fragments !== null;
   }
 
-  /** 0 or 1: whether a prepared fragment is held (WSM-FRG-018). Read by tests. */
+  /** 0 or 1: whether a prepared fragment is held (WSM-FRG-018). */
   get preparedDepth(): number {
     return this.prepared === null ? 0 : 1;
   }

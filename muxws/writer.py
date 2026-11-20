@@ -84,7 +84,7 @@ class StreamQueue:
     def prepare(self, cap: int, codec: Codec) -> None:
         """Slice the next fragment, and only that one.
 
-        Called after the previous fragment has reached the socket. Slicing further ahead would fix the
+        Requires the previous fragment to have reached the socket. Slicing further ahead would fix the
         order of frames before the writer chooses it (WSM-FRG-018).
         """
         self.failed_unsent_open = False

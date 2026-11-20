@@ -1,8 +1,4 @@
-"""Two in-memory socket adapters connected to each other, with no network socket.
-
-Part of the installed package, so the conformance runner and application tests can create a peer pair
-without a listening socket.
-"""
+"""Two in-memory socket adapters connected to each other, with no network socket."""
 
 from __future__ import annotations
 
@@ -21,7 +17,7 @@ class MemorySocket:
         self._outbox: asyncio.Queue[str | bytes | None] | None = None
         self._closed = False
         self._peer_socket: MemorySocket | None = None
-        #: Every message this side put on the wire, in order. The conformance runner reads it.
+        #: Every message this side put on the wire, in order.
         self.sent: list[str | bytes] = []
 
     @property
@@ -68,10 +64,7 @@ class MemorySocket:
         await self.close(code=1006, reason="dropped")
 
     def inject(self, message: str | bytes) -> None:
-        """Push a raw message into this side's inbox, bypassing the other peer.
-
-        The conformance runner uses it to deliver frames no correct implementation would send.
-        """
+        """Push a raw message into this side's inbox, bypassing the other peer and any validation."""
         self._inbox.put_nowait(message)
 
 

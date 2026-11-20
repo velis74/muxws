@@ -87,8 +87,7 @@ export type RandomDraw = () => number;
 
 /**
  * Uses `Math.random`; WSM-RCN-005 excludes `crypto.getRandomValues`, because jitter is used to spread
- * out simultaneous reconnects, not to resist an adversary. The ping nonce in `lifecycle.ts` uses
- * `crypto.getRandomValues`.
+ * out simultaneous reconnects, not to resist an adversary.
  */
 function uniform(): number {
   return Math.random() * 2 - 1;
@@ -457,8 +456,8 @@ export class ConnectionLoop {
   /**
    * A copy of the most recent {@link RECORDED_DELAYS} backoff delays, in order.
    *
-   * WSM-RCN-004's test reads this sequence. It is bounded so it does not grow without limit during a
-   * long outage with no attempt cap; it is returned as a copy so callers cannot modify the record.
+   * It is bounded so it does not grow without limit during a long outage with no attempt cap; it is
+   * returned as a copy so callers cannot modify the record.
    */
   get delays(): readonly number[] {
     return [...this.delaysTaken];

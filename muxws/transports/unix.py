@@ -82,12 +82,7 @@ class UnixTarget:
 def parse_unix_url(url: str) -> UnixTarget | None:
     """Split a `ws+unix:` URL into a socket path and a logical `ws://` URI; `None` for `ws:`/`wss:`.
 
-    `connect()` calls this for every URL. Any scheme other than `ws+unix:` and `wss+unix:` returns
-    `None` and is left to `websockets.connect()` to accept or reject.
-
-    Called once, outside the dial closure, so a malformed URL and a platform without AF_UNIX raise
-    from `connect()` before any socket is opened, as `resolve_codec()` does for the codec
-    (WSM-CDC-016), and every reconnect dials the same target (WSM-CDC-020, WSM-AUT-003).
+    Any scheme other than `ws+unix:` and `wss+unix:` returns `None`.
 
     Raises `UnixUrlError` for `wss+unix:`, for a URL with no socket path, or for a request target not
     starting with `/`; raises `UnixSocketsUnsupportedError` when the platform has no AF_UNIX.

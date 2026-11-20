@@ -1,8 +1,7 @@
 """Unix-domain-socket acceptor: `unix_serve`, one muxws peer, and the caller named by the kernel.
 
 Run it with `python uds_server.py`. It binds `<tempdir>/muxws.sock` unless the `MUXWS_SOCKET`
-environment variable says otherwise. The documentation test sets it to a path in a short temporary
-directory: a Unix socket path is limited to about 108 bytes, and `bind()` raises
+environment variable says otherwise. A Unix socket path is limited to about 108 bytes; `bind()` raises
 `OSError: AF_UNIX path too long` for a longer one.
 
 The muxws code is the same as over TCP. `unix_serve` performs the same HTTP GET + Upgrade as
