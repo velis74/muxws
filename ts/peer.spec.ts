@@ -2599,69 +2599,62 @@ describe('the final close - WSM-RCN-046/047', () => {
 });
 
 describe('header interceptors', () => {
-  it(
-    'applies open interceptors in registration order to a copy of the headers of every open - WSM-API-026/027',
-    async () => {
-      const pair = makePair();
-      const received: Record<string, unknown>[] = [];
-      pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
-        received.push({ ...stream.headers });
-        await stream.reply({ ok: true });
-      });
-      const calls: [string, unknown][] = [];
-      const kept: Record<string, unknown>[] = [];
-      const unregisterFirst = pair.dialer.interceptOpen((headers, payload) => {
-        calls.push(['first', payload]);
-        headers.trace = 't-1';
-        headers.attempt = 2;
-        kept.push(headers);
-      });
-      const unregisterSecond = pair.dialer.interceptOpen((headers) => {
-        calls.push(['second', { ...headers }]);
-        delete headers['drop-me'];
-      });
-      pair.start();
+  it('applies open interceptors in order to a copy of the headers of every open - WSM-API-026/027', async () => {
+    const pair = makePair();
+    const received: Record<string, unknown>[] = [];
+    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+      received.push({ ...stream.headers });
+      await stream.reply({ ok: true });
+    });
+    const calls: [string, unknown][] = [];
+    const kept: Record<string, unknown>[] = [];
+    const unregisterFirst = pair.dialer.interceptOpen((headers, payload) => {
+      calls.push(['first', payload]);
+      headers.trace = 't-1';
+      headers.attempt = 2;
+      kept.push(headers);
+    });
+    const unregisterSecond = pair.dialer.interceptOpen((headers) => {
+      calls.push(['second', { ...headers }]);
+      delete headers['drop-me'];
+    });
+    pair.start();
 
-      const callers = { attempt: 1, 'drop-me': true, own: 'x' };
-      const stream = pair.dialer.open({ n: 1 }, { headers: callers, end: true });
-      kept[0].late = 'after return';
-      await stream;
+    const callers = { attempt: 1, 'drop-me': true, own: 'x' };
+    const stream = pair.dialer.open({ n: 1 }, { headers: callers, end: true });
+    kept[0].late = 'after return';
+    await stream;
 
-      expect(callers, "the caller's object is untouched").toEqual({ attempt: 1, 'drop-me': true, own: 'x' });
-      expect(calls).toEqual([
-        ['first', { n: 1 }],
-        ['second', { attempt: 2, 'drop-me': true, own: 'x', trace: 't-1' }],
-      ]);
-      expect(stream.headers).toEqual({ attempt: 2, own: 'x', trace: 't-1' });
-      expect(received, 'a change after return never reaches the frame').toEqual([
-        { attempt: 2, own: 'x', trace: 't-1' },
-      ]);
+    expect(callers, "the caller's object is untouched").toEqual({ attempt: 1, 'drop-me': true, own: 'x' });
+    expect(calls).toEqual([
+      ['first', { n: 1 }],
+      ['second', { attempt: 2, 'drop-me': true, own: 'x', trace: 't-1' }],
+    ]);
+    expect(stream.headers).toEqual({ attempt: 2, own: 'x', trace: 't-1' });
+    expect(received, 'a change after return never reaches the frame').toEqual([{ attempt: 2, own: 'x', trace: 't-1' }]);
 
-      await pair.dialer.request('r');
-      await pair.dialer.notify('n');
-      await pair.settle();
-      expect(
-        received.map((headers) => headers.trace),
-        'request() and notify() headers pass the interceptors too',
-      ).toEqual(['t-1', 't-1', 't-1']);
+    await pair.dialer.request('r');
+    await pair.dialer.notify('n');
+    await pair.settle();
+    expect(
+      received.map((headers) => headers.trace),
+      'request() and notify() headers pass the interceptors too',
+    ).toEqual(['t-1', 't-1', 't-1']);
 
-      unregisterFirst();
-      unregisterFirst();
-      unregisterSecond();
-      let before = pair.dialerSocket.sent.length;
-      await pair.dialer.request('bare');
-      expect(String(pair.dialerSocket.sent[before]), 'no interceptor left, no headers field').not.toContain(
-        '"headers"',
-      );
+    unregisterFirst();
+    unregisterFirst();
+    unregisterSecond();
+    let before = pair.dialerSocket.sent.length;
+    await pair.dialer.request('bare');
+    expect(String(pair.dialerSocket.sent[before]), 'no interceptor left, no headers field').not.toContain('"headers"');
 
-      pair.dialer.interceptOpen(() => undefined);
-      before = pair.dialerSocket.sent.length;
-      await pair.dialer.request('bare');
-      expect(String(pair.dialerSocket.sent[before]), 'an interceptor that adds nothing changes no byte').not.toContain(
-        '"headers"',
-      );
-    },
-  );
+    pair.dialer.interceptOpen(() => undefined);
+    before = pair.dialerSocket.sent.length;
+    await pair.dialer.request('bare');
+    expect(String(pair.dialerSocket.sent[before]), 'an interceptor that adds nothing changes no byte').not.toContain(
+      '"headers"',
+    );
+  });
 
   it('fails the open with the interceptor error, allocates no stream id and sends nothing - WSM-API-027', async () => {
     const pair = makePair();
@@ -2761,39 +2754,36 @@ describe('header interceptors', () => {
     },
   );
 
-  it(
-    'fails the sending call with the interceptor error and lets a later call send the first frame - WSM-API-028',
-    async () => {
-      const pair = makePair();
-      const sentBeforeAnswer: number[] = [];
-      const refuse = (): void => {
-        throw new RangeError('no tenant');
-      };
-      pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
-        if (payload === 'implicit') return;
-        let unregister = pair.acceptor.interceptReplyHeaders(refuse);
-        await expect(stream.sendHeaders({ a: 1 })).rejects.toThrow('no tenant');
-        unregister();
-        unregister = pair.acceptor.interceptReplyHeaders(async (headers) => {
-          headers.late = true;
-        });
-        await expect(stream.send('x')).rejects.toThrow(/thenable/);
-        unregister();
-        sentBeforeAnswer.push(pair.acceptorSocket.sent.length);
-        await stream.reply('ok', { headers: { a: 1 } });
+  it('a failed interceptor fails the sending call; a later call sends the first frame - WSM-API-028', async () => {
+    const pair = makePair();
+    const sentBeforeAnswer: number[] = [];
+    const refuse = (): void => {
+      throw new RangeError('no tenant');
+    };
+    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+      if (payload === 'implicit') return;
+      let unregister = pair.acceptor.interceptReplyHeaders(refuse);
+      await expect(stream.sendHeaders({ a: 1 })).rejects.toThrow('no tenant');
+      unregister();
+      unregister = pair.acceptor.interceptReplyHeaders(async (headers) => {
+        headers.late = true;
       });
-      pair.start();
+      await expect(stream.send('x')).rejects.toThrow(/thenable/);
+      unregister();
+      sentBeforeAnswer.push(pair.acceptorSocket.sent.length);
+      await stream.reply('ok', { headers: { a: 1 } });
+    });
+    pair.start();
 
-      const stream = pair.dialer.open('explicit', { end: true });
-      expect(await stream).toBe('ok');
-      expect(sentBeforeAnswer, 'a failed call put nothing on the wire').toEqual([0]);
-      expect(stream.replyHeaders, 'and left the first frame for the next call').toEqual({ a: 1 });
+    const stream = pair.dialer.open('explicit', { end: true });
+    expect(await stream).toBe('ok');
+    expect(sentBeforeAnswer, 'a failed call put nothing on the wire').toEqual([0]);
+    expect(stream.replyHeaders, 'and left the first frame for the next call').toEqual({ a: 1 });
 
-      pair.acceptor.interceptReplyHeaders(refuse);
-      await expect(pair.dialer.request('implicit', { timeoutMs: 5000 })).rejects.toBeInstanceOf(RemoteError);
-      expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
-    },
-  );
+    pair.acceptor.interceptReplyHeaders(refuse);
+    await expect(pair.dialer.request('implicit', { timeoutMs: 5000 })).rejects.toBeInstanceOf(RemoteError);
+    expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
+  });
 
   it(
     "passes each stream's leading headers to incoming interceptors " + 'once, as a frozen object - WSM-API-029',

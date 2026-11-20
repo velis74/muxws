@@ -405,74 +405,71 @@ describe('serve() reports a refused handshake by returning, not by rejecting', (
 });
 
 describe('accept() and serve() register the interceptor arrays they are given - WSM-API-026', () => {
-  it(
-    'registers the interceptor arrays in order on the peer accept() or serve() builds, before its first frame',
-    async () => {
-      const seen: unknown[] = [];
-      const server = new WebSocketServer({ port: 0, handleProtocols });
-      server.on('connection', (socket, request) => {
-        if (request.url === '/accept') {
-          void accept(socket, {
-            openInterceptors: [
-              (headers) => {
-                headers.by = 'acceptor';
-              },
-            ],
+  it('registers the interceptor arrays in order on the accept() or serve() peer before its first frame', async () => {
+    const seen: unknown[] = [];
+    const server = new WebSocketServer({ port: 0, handleProtocols });
+    server.on('connection', (socket, request) => {
+      if (request.url === '/accept') {
+        void accept(socket, {
+          openInterceptors: [
+            (headers) => {
+              headers.by = 'acceptor';
+            },
+          ],
+        })
+          .then(async (peer) => {
+            peer.onStream(async (_payload, stream) => {
+              peer.open('pushed', { end: true });
+              await stream.reply('ok');
+            });
+            await peer.serve();
           })
-            .then(async (peer) => {
-              peer.onStream(async (_payload, stream) => {
-                peer.open('pushed', { end: true });
-                await stream.reply('ok');
-              });
-              await peer.serve();
-            })
-            .catch(() => undefined);
-          return;
-        }
-        void serve(socket, {
-          handler: (_payload, stream) => stream.reply({ ...stream.headers }),
-          replyHeadersInterceptors: [
-            (headers) => {
-              headers.served = 'yes';
-            },
-          ],
-          incomingHeadersInterceptors: [
-            (headers) => {
-              seen.push({ ...headers });
-            },
-            () => {
-              seen.push('second');
-            },
-          ],
-        }).catch(() => undefined);
-      });
-      await new Promise<void>((resolve) => server.once('listening', resolve));
-      const base = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
-      const dialers: Peer[] = [];
-      try {
-        const served = await connect(`${base}/serve`, { pingIntervalMs: 0 });
-        dialers.push(served);
-        const stream = served.open('q', { headers: { trace: 't-1' }, end: true });
-        expect(await stream).toEqual({ trace: 't-1' });
-        expect(stream.replyHeaders).toEqual({ served: 'yes' });
-        expect(seen).toEqual([{ trace: 't-1' }, 'second']);
-
-        const pushedHeaders: Record<string, unknown>[] = [];
-        const accepted = await connect(`${base}/accept`, {
-          pingIntervalMs: 0,
-          onStream: (_payload, pushed) => {
-            pushedHeaders.push({ ...pushed.headers });
-          },
-        });
-        dialers.push(accepted);
-        expect(await accepted.request('q', { timeoutMs: 3000 })).toBe('ok');
-        await vi.waitFor(() => expect(pushedHeaders).toEqual([{ by: 'acceptor' }]));
-      } finally {
-        await Promise.all(dialers.map((dialer) => dialer.close({ drainMs: 50 })));
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+          .catch(() => undefined);
+        return;
       }
-    },
-  );
+      void serve(socket, {
+        handler: (_payload, stream) => stream.reply({ ...stream.headers }),
+        replyHeadersInterceptors: [
+          (headers) => {
+            headers.served = 'yes';
+          },
+        ],
+        incomingHeadersInterceptors: [
+          (headers) => {
+            seen.push({ ...headers });
+          },
+          () => {
+            seen.push('second');
+          },
+        ],
+      }).catch(() => undefined);
+    });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const base = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const dialers: Peer[] = [];
+    try {
+      const served = await connect(`${base}/serve`, { pingIntervalMs: 0 });
+      dialers.push(served);
+      const stream = served.open('q', { headers: { trace: 't-1' }, end: true });
+      expect(await stream).toEqual({ trace: 't-1' });
+      expect(stream.replyHeaders).toEqual({ served: 'yes' });
+      expect(seen).toEqual([{ trace: 't-1' }, 'second']);
+
+      const pushedHeaders: Record<string, unknown>[] = [];
+      const accepted = await connect(`${base}/accept`, {
+        pingIntervalMs: 0,
+        onStream: (_payload, pushed) => {
+          pushedHeaders.push({ ...pushed.headers });
+        },
+      });
+      dialers.push(accepted);
+      expect(await accepted.request('q', { timeoutMs: 3000 })).toBe('ok');
+      await vi.waitFor(() => expect(pushedHeaders).toEqual([{ by: 'acceptor' }]));
+    } finally {
+      await Promise.all(dialers.map((dialer) => dialer.close({ drainMs: 50 })));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
 
 describe('a codec mismatch on an open socket is logged on both sides - WSM-CDC-028/029', () => {

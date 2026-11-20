@@ -390,8 +390,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   `peer_test.py::test_serve_registers_the_interceptors_it_is_given`;
   `ts/reconnect.spec.ts` *"keeps both interceptor registrations on the Peer across a reconnect and
   does not pass the hello through them"* and *"registers connect()'s interceptor arrays before the
-  first hello goes out"*; `ts/node.spec.ts` *"registers the interceptor arrays in order on the peer
-  accept() or serve() builds, before its first frame"*.
+  first hello goes out"*; `ts/node.spec.ts` *"registers the interceptor arrays in order on the accept() or
+  serve() peer before its first frame"*.
 - **WSM-API-027** `open()`, and through it `notify()` and `request()`, MUST call every open
   interceptor synchronously, after the checks of WSM-API-004 and before a stream id is allocated, as
   `(headers, payload)`. `headers` is a fresh mutable mapping holding a shallow copy of the caller's
@@ -415,8 +415,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   it.
   Test: `peer_test.py::test_open_interceptors_modify_a_copy_of_the_headers_of_every_open`;
   `peer_test.py::test_an_open_interceptor_that_raises_fails_the_open_allocates_no_id_and_sends_nothing`;
-  `ts/peer.spec.ts` *"applies open interceptors in registration order to a copy of the headers of
-  every open"* and *"fails the open with the interceptor error, allocates no stream id and sends
+  `ts/peer.spec.ts` *"applies open interceptors in order to a copy of the headers of every
+  open"* and *"fails the open with the interceptor error, allocates no stream id and sends
   nothing"*.
 - **WSM-API-028** Reply headers interceptors MUST be called once per stream the remote opened,
   synchronously, by the call that sends this peer's first frame on that stream (WSM-FRM-016):
@@ -432,8 +432,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   Test: `peer_test.py::test_reply_headers_interceptors_get_a_copy_of_each_answers_first_frame`;
   `peer_test.py::test_a_reply_headers_interceptor_that_raises_fails_the_call_and_sends_nothing`;
   `ts/peer.spec.ts` *"applies reply headers interceptors to a copy of the first frame of each
-  answer, for every sending call"* and *"fails the sending call with the interceptor error and lets
-  a later call send the first frame"*.
+  answer, for every sending call"* and *"a failed interceptor fails the sending call; a later call sends
+  the first frame"*.
 - **WSM-API-029** Incoming interceptors MUST be called exactly once per stream, synchronously inside
   the read loop, when the remote's first stream-level frame on that stream is accepted. For a stream
   the remote opened that frame is the `open` (the first fragment of a fragmented one), and the call
