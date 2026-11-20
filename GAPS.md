@@ -1,7 +1,7 @@
 # Gaps
 
-Open gaps between `SPEC.md`, the briefs under `docs/design/briefs/`, the implementations and their
-tests, and known deviations of v1 from `SPEC.md`. A gap is deleted when it is closed.
+Open gaps between `SPEC.md`, the implementations and their tests, and known deviations of v1 from
+`SPEC.md`. A gap is deleted when it is closed.
 
 ## Known deviations
 

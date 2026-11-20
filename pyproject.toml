@@ -98,8 +98,8 @@ asyncio_mode = "auto"
 # library, including S101 (no bare `assert` outside a test).
 #
 # `*.md` is excluded because ruff formats fenced Python inside Markdown. `docs/` contains illustrative
-# fragments in the guide, and design briefs and the specification under `docs/design/`, which a
-# formatter must not rewrite. Executed Python lives in `docs/examples/*.py`, which this exclusion does
+# fragments in the guide and the design rationale under `docs/design/`, which a formatter must not
+# rewrite. Executed Python lives in `docs/examples/*.py`, which this exclusion does
 # not affect.
 exclude = ['ts', '*.md', 'dist', 'build', 'node_modules', '.git', '.idea', '.vscode',
     '.pytest_cache', '.ruff_cache', '.venv']

@@ -23,9 +23,8 @@ they refer to (§2–§4).
 spec revision number, no `protocol_version` field and no settings frame announcing capabilities.
 The packages' semver versions the *packages*, never the wire.
 
-A disagreement between this document and a brief under `docs/design/briefs/` is a defect and is
-recorded in `GAPS.md`. `docs/design/muxws-websocket-transport.md` contains the design rationale for
-these rules; it is not normative.
+`docs/design/muxws-websocket-transport.md` contains the design rationale for these rules; it is not
+normative.
 
 ---
 
