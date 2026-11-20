@@ -15,7 +15,10 @@ async function backendListening(timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const accepted = await new Promise<boolean>((resolve) => {
-      const socket = createConnection({ host: BACKEND_HOST, port: BACKEND_PORT });
+      const socket = createConnection({
+        host: BACKEND_HOST,
+        port: BACKEND_PORT,
+      });
       socket.once('connect', () => {
         socket.destroy();
         resolve(true);
@@ -92,14 +95,22 @@ test('uses every control of the browser demo once and asserts the visible result
 
     await expect(page.getByText('Click a row. The quote arrives as one payload')).toBeVisible();
     await rows.nth(0).click();
-    await expect(page.locator('.v-card-title > span', { hasText: new RegExp(`^${first}$`, 'u') })).toBeVisible();
+    await expect(
+      page.locator('.v-card-title > span', {
+        hasText: new RegExp(`^${first}$`, 'u'),
+      }),
+    ).toBeVisible();
     await expect(metric(page, 'bid')).toHaveText(/^\d+\.\d{2}$/u);
     await expect(page.getByText(/^loading$/u)).toBeVisible();
     await expect(stopped).toHaveText(/^\d+$/u);
     const stoppedBefore = await numberIn(stopped);
 
     await rows.nth(1).click();
-    await expect(page.locator('.v-card-title > span', { hasText: new RegExp(`^${second}$`, 'u') })).toBeVisible();
+    await expect(
+      page.locator('.v-card-title > span', {
+        hasText: new RegExp(`^${second}$`, 'u'),
+      }),
+    ).toBeVisible();
     await expect.poll(async () => numberIn(stopped)).toBeGreaterThan(stoppedBefore);
 
     await expect(page.getByText(/^120 points$/u)).toBeVisible();
@@ -115,7 +126,10 @@ test('uses every control of the browser demo once and asserts the visible result
 
   await test.step('the tick interval toggle changes the backend rate', async () => {
     for (const interval of [50, 10, 250]) {
-      const button = page.getByRole('button', { name: `${interval} ms`, exact: true });
+      const button = page.getByRole('button', {
+        name: `${interval} ms`,
+        exact: true,
+      });
       await button.click();
       await expect(button).toHaveClass(/v-btn--active/u);
       await expect(page.getByText(`how much later than ${interval} ms`)).toBeVisible();
@@ -123,10 +137,17 @@ test('uses every control of the browser demo once and asserts the visible result
     }
   });
 
-  await test.step('the 1 MB export reports its fragments', async () => {
+  await test.step('the 1 MB export interleaves tick frames between its fragments', async () => {
+    // At 10 ms ticks are due while the export runs; at 250 ms it can finish between two ticks.
+    await page.getByRole('button', { name: '10 ms', exact: true }).click();
+    await expect(page.getByText('the backend now pushes every 10 ms per symbol')).toHaveCount(2);
     await page.getByRole('button', { name: '1 MB export' }).click();
     await expect(page.getByText(/ in \d+ fragments over \d+ ms/u)).toBeVisible();
-    await expect(page.getByText(/ {2}export of \d+ rows: \d+ fragments/u)).toBeVisible();
+    await expect(
+      page.getByText(/ {2}export of \d+ rows: \d+ fragments, [1-9]\d* tick frames interleaved/u),
+    ).toBeVisible();
+    await page.getByRole('button', { name: '250 ms', exact: true }).click();
+    await expect(page.getByText('the backend now pushes every 250 ms per symbol')).toHaveCount(2);
   });
 
   await test.step('reset clears the worst tick lateness', async () => {
@@ -154,9 +175,7 @@ test('uses every control of the browser demo once and asserts the visible result
     await expect(metric(page, 'state')).toHaveText('live');
     await expect(metric(page, 'peer.id')).not.toHaveText(peerBefore);
     await expect(page.getByText(/ {2}reconnected on attempt 1:/u)).toBeVisible();
-    // Only the live count: with the Node backend the new board streams can arrive before
-    // `onReconnected` resets the opened count.
-    await expect(metric(page, 'board streams')).toHaveText(/^20 live \//u);
+    await expect(metric(page, 'board streams')).toHaveText('20 live / 20 opened');
     await expect(page.locator('tbody.stale')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'kill the backend' })).toBeEnabled();
   });

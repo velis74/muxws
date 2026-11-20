@@ -31,8 +31,8 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: 'pipe',
-    // Ctrl-C: `demo.py` stops the dev server's and the backend's process groups; SIGKILL would leave
-    // them running.
-    gracefulShutdown: { signal: 'SIGINT', timeout: 10_000 },
+    // SIGTERM, as an IDE's stop button sends: `demo.py` stops the dev server's and the backend's process
+    // groups; SIGKILL would leave them running.
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 10_000 },
   },
 });

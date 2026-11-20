@@ -50,7 +50,9 @@
           reports how many tick frames arrived <em>between</em> the export's first and last fragment.
         </p>
         <p class="text-body-2 text-medium-emphasis mb-0">
-          If the fragments were sent consecutively, the count would be zero and the line would spike.
+          If the fragments were sent consecutively, the count would be zero and the line would spike. At the 250 ms
+          interval the export can finish between two ticks and also report zero; at 10 ms or 50 ms ticks are due while
+          it runs.
         </p>
       </v-card-text>
 

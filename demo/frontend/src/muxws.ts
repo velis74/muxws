@@ -291,6 +291,10 @@ function onConnectionClose(reason: CloseReason): void {
   store.stale = true;
   store.rttMs = null;
   store.liveStreams = 0;
+  // `boardOpened` counts the streams of the current connection. The reset is here and not in
+  // `onReconnected`: the backend opens the new board streams on the replayed hello, before
+  // `onReconnect` is called, and no stream is resumed (WSM-RCN-030).
+  store.boardOpened = 0;
   say(
     `socket closed: code ${reason.code}, "${reason.reason || 'no reason given'}", clean=${reason.wasClean}, ` +
       `willRetry=${reason.willRetry}`,
@@ -301,10 +305,6 @@ function onReconnected(attempt: number, reconnected: Peer): void {
   store.reconnects = attempt;
   store.peerId = reconnected.id;
   store.connection = 'live';
-  // Reset, so `boardOpened` counts the streams of this connection only. No stream is resumed
-  // (WSM-RCN-030): the board consists of twenty new streams the backend opens after the replayed
-  // hello.
-  store.boardOpened = 0;
   lossReported = false;
   lastTickAt.clear();
   say(`reconnected on attempt ${attempt}: hello replayed, peer.id is now ${reconnected.id}, no stream survived`);
@@ -602,7 +602,13 @@ async function streamHistory(symbol: string): Promise<void> {
 async function fragmented<T>(action: string, symbol: string): Promise<{ payload: T; report: FragmentReport }> {
   if (peer === null) throw new ConnectionLost('there is no peer');
   const stream = peer.open<T>({ action, symbol }, { end: true });
-  probe = { streamId: stream.id, bytes: 0, fragments: 0, interleaved: 0, worstLatencyMs: 0 };
+  probe = {
+    streamId: stream.id,
+    bytes: 0,
+    fragments: 0,
+    interleaved: 0,
+    worstLatencyMs: 0,
+  };
   const startedAt = performance.now();
   try {
     // The peer reassembles the fragments and resolves with the whole payload (WSM-FRG-010).

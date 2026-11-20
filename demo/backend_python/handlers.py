@@ -18,6 +18,7 @@ its own `on_stream` handler; both directions use the same `Peer` type and correl
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from dataclasses import asdict, dataclass
@@ -83,6 +84,8 @@ class MarketService:
         self.registry = registry
         self.counters = Counters()
         self._tick_interval = tick_interval
+        #: Set and replaced on every rate change; wakes the sleeping tick streams.
+        self._rate_changed = asyncio.Event()
         self._history_delay = history_delay
         self._kill_delay = kill_delay
         #: One list of pushing tasks per peer, referenced so the tasks are not garbage-collected.
@@ -167,7 +170,7 @@ class MarketService:
     async def _rate(self, peer: Peer, payload: dict[str, Any], stream: Stream) -> None:
         """Change how often each pushed stream carries a price.
 
-        The tick interval is a `sleep` in the generator below and does not reflect the transport's
+        The tick interval is a wait in `_push_ticks` and does not reflect the transport's
         capacity; `muxws/throughput_test.py` measures throughput. The board's default sends eighty
         frames per second.
 
@@ -179,6 +182,9 @@ class MarketService:
         if not isinstance(requested, (int, float)) or not 1 <= requested <= 5_000:
             raise ValueError(f"interval_ms must be between 1 and 5000; got {requested!r}")
         self._tick_interval = float(requested) / 1000.0
+        # The streams sleeping on the old interval send now and then sleep the new one.
+        changed, self._rate_changed = self._rate_changed, asyncio.Event()
+        changed.set()
         await stream.reply({"ok": True, "interval_ms": requested, "symbols": len(self.market.symbols)})
 
     # ------------------------------------------------------------------ server push
@@ -217,7 +223,8 @@ class MarketService:
             # holds no seed data.
             await stream.send(self.market.snapshot(symbol))
             while True:
-                await asyncio.sleep(self._tick_interval)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._rate_changed.wait(), self._tick_interval)
                 await stream.send(self.market.tick(symbol))
         except (StreamReset, StreamClosed):
             # `ConnectionLost` is a `StreamReset`, so this covers the normal end: the socket closed

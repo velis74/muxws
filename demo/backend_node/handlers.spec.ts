@@ -9,6 +9,8 @@
  * promise, and an abort signal replaces task cancellation), the tests assert the TypeScript behaviour.
  */
 
+import { vi } from 'vitest';
+
 import {
   type CloseReason,
   type Frame,
@@ -216,7 +218,10 @@ class Wire {
 
   /** Sends the hello that `connect({hello})` would send, directly, so the reply can be read. */
   async hello(tags?: Record<string, unknown>): Promise<HelloAck> {
-    return this.dialer.request<HelloAck>({ action: 'hello', tags: tags ?? { topic: 'board' } });
+    return this.dialer.request<HelloAck>({
+      action: 'hello',
+      tags: tags ?? { topic: 'board' },
+    });
   }
 
   received(direction: 'tx' | 'rx' = 'rx'): Frame[] {
@@ -342,7 +347,10 @@ it('answers every action the frontend can name', async () => {
     // same eight.
     expect(wire.service.actions).toEqual(['hello', 'quote', 'history', 'depth', 'export', 'stats', 'rate', 'kill']);
 
-    const acknowledgement = await wire.hello({ topic: 'board', session: 'demo' });
+    const acknowledgement = await wire.hello({
+      topic: 'board',
+      session: 'demo',
+    });
     expect(acknowledgement.ok).toBe(true);
     expect(acknowledgement.symbols).toBe(SYMBOLS.length);
     // The peer is registered under the tags the frontend sent, and under no tags added by muxws.
@@ -357,7 +365,10 @@ it('answers every action the frontend can name', async () => {
     // immediately after the hello instead of one tick interval later.
     expect([...wire.first.values()].map((row) => row.ticks)).toEqual(SYMBOLS.map(() => 0));
 
-    const quote = await wire.dialer.request<Quote>({ action: 'quote', symbol: 'ACME' });
+    const quote = await wire.dialer.request<Quote>({
+      action: 'quote',
+      symbol: 'ACME',
+    });
     expect(quote.symbol).toBe('ACME');
     expect(quote.bid).toBeLessThan(quote.last);
     expect(quote.last).toBeLessThan(quote.ask);
@@ -368,10 +379,16 @@ it('answers every action the frontend can name', async () => {
     expect(points).toHaveLength(HISTORY_POINTS);
     expect(points.map((point) => point.t)).toEqual([...Array(HISTORY_POINTS).keys()]);
     // Trailers are carried on the `end` frame and are readable after the iteration completes.
-    expect(history.trailers).toEqual({ symbol: 'ACME', points: HISTORY_POINTS });
+    expect(history.trailers).toEqual({
+      symbol: 'ACME',
+      points: HISTORY_POINTS,
+    });
 
     const before = wire.seen.length;
-    const depth = await wire.dialer.request<DepthBook>({ action: 'depth', symbol: 'ACME' });
+    const depth = await wire.dialer.request<DepthBook>({
+      action: 'depth',
+      symbol: 'ACME',
+    });
     expect(depth.bids).toHaveLength(depth.levels);
     expect(depth.asks).toHaveLength(depth.levels);
     expect(depth.bids[0].px).toBeLessThan(depth.asks[0].px);
@@ -387,7 +404,10 @@ it('answers every action the frontend can name', async () => {
     expect(pieces.length).toBeGreaterThan(1);
     expect(bytes).toBeGreaterThan(MAX_FRAME_BYTES);
 
-    const exported = await wire.dialer.request<ExportPayload>({ action: 'export', symbol: 'ACME' });
+    const exported = await wire.dialer.request<ExportPayload>({
+      action: 'export',
+      symbol: 'ACME',
+    });
     expect(exported.trades).toHaveLength(EXPORT_ROWS);
 
     const stats = await wire.dialer.request<Stats>({ action: 'stats' });
@@ -403,10 +423,13 @@ it('answers every action the frontend can name', async () => {
 }, 30_000);
 
 it('changes the tick interval on a rate request', async () => {
-  // The tick interval is a `sleep` in the demo's generator, not a library limit. This asserts that
+  // The tick interval is a wait in the demo's tick loop, not a library limit. This asserts that
   // `rate` changes it and rejects values outside 1..5000 ms.
   await marketWire({}, async (wire) => {
-    const answer = await wire.dialer.request<RateAck>({ action: 'rate', interval_ms: 10 });
+    const answer = await wire.dialer.request<RateAck>({
+      action: 'rate',
+      interval_ms: 10,
+    });
     expect(answer.ok).toBe(true);
     expect(answer.interval_ms).toBe(10);
     expect(wire.service.tickIntervalMs).toBe(10);
@@ -420,6 +443,31 @@ it('changes the tick interval on a rate request', async () => {
       await expect(wire.dialer.request({ action: 'rate', interval_ms: refused })).rejects.toBeInstanceOf(RemoteError);
     }
     expect(wire.service.tickIntervalMs).toBe(10);
+  });
+});
+
+it('wakes the tick streams waiting on the old interval on a rate request', async () => {
+  await marketWire({ tickIntervalMs: 30_000 }, async (wire) => {
+    await wire.hello();
+    await wire.untilTheBoardIsLive();
+    const ticks = wire.tickStreams();
+    const sentPerStream = (): Map<number, number> => {
+      const counts = new Map(ticks.map((id) => [id, 0]));
+      for (const frame of wire.received()) {
+        const count = counts.get(frame.stream ?? -1);
+        if (count !== undefined && frame.type === 'data') counts.set(frame.stream as number, count + 1);
+      }
+      return counts;
+    };
+
+    const before = sentPerStream();
+    await wire.dialer.request({ action: 'rate', interval_ms: 10 });
+    await vi.waitFor(
+      () => {
+        for (const [id, count] of sentPerStream()) expect(count, `stream ${id}`).toBeGreaterThan(before.get(id) ?? 0);
+      },
+      { timeout: 5_000 },
+    );
   });
 });
 
@@ -541,7 +589,9 @@ it('closes every peer on a kill request', async () => {
     await wire.untilTheBoardIsLive();
     const watching = [...wire.dialer.streams.values()][0];
 
-    const answer = await wire.dialer.request<{ closing: number }>({ action: 'kill' });
+    const answer = await wire.dialer.request<{ closing: number }>({
+      action: 'kill',
+    });
     expect(answer.closing).toBe(1);
 
     const deadline = Date.now() + 2_000;

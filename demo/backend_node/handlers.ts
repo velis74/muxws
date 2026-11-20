@@ -153,6 +153,9 @@ export class MarketService {
 
   private tickInterval: number;
 
+  /** Aborted and replaced on every rate change; wakes the sleeping tick streams. */
+  private rateChanged = new AbortController();
+
   private readonly historyDelay: number;
 
   private readonly killDelay: number;
@@ -278,7 +281,14 @@ export class MarketService {
       throw new Error(`interval_ms must be between 1 and 5000; got ${JSON.stringify(requested)}`);
     }
     this.tickInterval = requested;
-    await stream.reply({ ok: true, interval_ms: requested, symbols: this.market.symbols.length });
+    // The streams sleeping on the old interval send now and then sleep the new one.
+    this.rateChanged.abort();
+    this.rateChanged = new AbortController();
+    await stream.reply({
+      ok: true,
+      interval_ms: requested,
+      symbols: this.market.symbols.length,
+    });
   }
 
   // ------------------------------------------------------------------ server push
@@ -335,7 +345,7 @@ export class MarketService {
       // the frontend holds no symbol data of its own.
       await stream.send(this.market.snapshot(symbol));
       for (;;) {
-        await sleep(this.tickInterval, board.stop.signal);
+        await sleep(this.tickInterval, AbortSignal.any([board.stop.signal, this.rateChanged.signal]));
         if (board.stop.signal.aborted) return;
         await stream.send(this.market.tick(symbol));
       }
@@ -443,7 +453,10 @@ export class MarketService {
       // for its full window.
       this.forget(peer);
       try {
-        await peer.close({ code: ResetCode.NO_ERROR, reason: "the demo's kill switch" });
+        await peer.close({
+          code: ResetCode.NO_ERROR,
+          reason: "the demo's kill switch",
+        });
       } catch (error) {
         logger.debug(`muxws demo: peer ${peer.id} was already gone when the kill switch reached it`, error);
       }
