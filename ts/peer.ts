@@ -573,7 +573,7 @@ export class Peer {
     this.lastActivityMs = this.clock();
   }
 
-  /** Live streams, read-only. */
+  /** A snapshot of the live streams, by id. */
   get streams(): ReadonlyMap<number, Stream> {
     return new Map(this.liveStreams);
   }

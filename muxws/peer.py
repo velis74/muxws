@@ -202,7 +202,7 @@ class Peer:
 
     @property
     def streams(self) -> Mapping[int, Stream]:
-        """Live streams, read-only."""
+        """A snapshot of the live streams, by id."""
         return dict(self._streams)
 
     @property
@@ -1097,8 +1097,8 @@ class Peer:
         """Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
 
         Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset
-        this stream with PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the
-        peers still agree about every other stream and the connection stays open (WSM-STM-020/024).
+        this stream with PROTOCOL_ERROR and return `ABSENT`. Each message is decoded on its own, so
+        the peers still agree about every other stream and the connection stays open (WSM-STM-020/024).
         """
         try:
             return stream._assembler.feed(frame, self._codec)

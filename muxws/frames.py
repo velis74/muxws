@@ -98,8 +98,7 @@ def to_mapping(frame: Frame) -> dict[str, Any]:
 def from_mapping(mapping: Mapping[str, Any]) -> Frame:
     """Build a `Frame` from a decoded envelope.
 
-    Unknown keys are dropped rather than preserved (WSM-FRM-001); preserving them would make
-    `decode(encode(frame)) == frame` hold for frames carrying unknown keys. An unrecognised `type` is
+    Unknown keys are dropped (WSM-FRM-001); `Frame` has no field for them. An unrecognised `type` is
     decoded as an ordinary `Frame`; the peer, not the codec, ignores it (WSM-FRM-002).
 
     Raises `ProtocolError` when `type` is missing, when both `payload` and `fragment` are present, or

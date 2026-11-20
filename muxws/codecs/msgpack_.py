@@ -54,7 +54,6 @@ class MsgpackCodec:
     name = "msgpack"
     #: Declared, not inferred (WSM-CDC-002). The peer reads this to choose `send_bytes`, not the type
     #: `encode` returned.
-
     binary = True
 
     def encode(self, frame: Frame) -> bytes:

@@ -25,5 +25,4 @@ class Settings:
 
 #: `codec` is read when a connection is made, not at import, so an application may set it during
 #: bootstrap after importing muxws (WSM-CDC-011).
-
 settings = Settings()
