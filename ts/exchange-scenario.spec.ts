@@ -508,14 +508,14 @@ describe('a stream that does not end normally', () => {
       started = true;
       try {
         for await (const _item of stream) {
-          // never ends
+          // the client never ends the stream
         }
       } catch {
         // the connection loss ends the iteration
       }
     });
 
-    const stream = pair.client.open('stay', { end: true });
+    const stream = pair.client.open('stay');
     stream.result().catch(() => undefined);
     await until(() => started, 'the handler to start');
     pair.dropSockets();
@@ -527,7 +527,7 @@ describe('a stream that does not end normally', () => {
       expect(exchange.code).toBeNull();
       expect(exchange.reason).toBeNull();
       expect(exchange.request.payloads).toEqual(['stay']);
-      expect(exchange.request.ended).toBe(true);
+      expect(exchange.request.ended).toBe(false);
       expect(exchange.response.ended).toBe(false);
       expect(exchange.firstResponseMs).toBeNull();
     });

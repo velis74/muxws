@@ -283,6 +283,10 @@ class Stream:
             self._queue.put_nowait(_END)
             self._settle_future_if_empty()
 
+    def _opened_with_end(self) -> None:
+        """End the iteration of a stream the remote opened and ended in its `open` (WSM-API-030)."""
+        self._queue.put_nowait(_END)
+
     def _local_end(self) -> None:
         if self._exchange is not None:
             self._exchange.side(self.local).ended = True

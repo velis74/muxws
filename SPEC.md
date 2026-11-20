@@ -447,6 +447,13 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   `peer_test.py::test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing`;
   `ts/peer.spec.ts` *"hands each stream's leading headers to incoming interceptors once, frozen"* and
   *"logs an incoming interceptor that throws and changes nothing else"*.
+- **WSM-API-030** Iterating a stream the remote opened MUST yield the payloads the remote sends after
+  its `open` (the opening payload is the handler's argument) and MUST end when the remote ends the
+  stream, also when the `end` is on the `open` itself, on the last fragment of a fragmented `open`, or
+  implied by `oneway` (WSM-FRM-020). An iteration of a stream opened by `request()` or `notify()`
+  therefore yields nothing and ends at once.
+  Test: `stream_test.py::test_iterating_a_request_in_the_handler_ends_at_once`;
+  `ts/stream.spec.ts` *"ends the handler's iteration of a stream opened with end"*.
 
 **Call shapes.** Unary is `open(end)` → `data(end)`; a streaming response is `open(end)` → `data`…
 `data(end)`, optionally led by a payload-less `data(headers)` announcing what is coming

@@ -520,6 +520,11 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     }
   }
 
+  /** @internal The remote ended the stream in its `open`: the iteration ends (WSM-API-030). */
+  openedWithEnd(): void {
+    this.queue.put(END);
+  }
+
   /** @internal Close because of a local or remote reset, or a lost socket; `resetBy` names who reset it. */
   fail(error: StreamReset, resetBy: ExchangeParty = 'local'): void {
     if (this.state === StreamState.CLOSED) return;
