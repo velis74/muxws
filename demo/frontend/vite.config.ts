@@ -25,11 +25,11 @@ export default defineConfig({
     // printed 5173, so the reader would open a port this run does not serve, possibly a dev server left
     // over from an earlier run. `strictPort` makes Vite exit instead.
     strictPort: true,
-    // In the dev container: listen on all interfaces, since `localhost` resolves to `::1` only there and
-    // `demo.py` prints `127.0.0.1`. In Codespaces: also allow the forwarded host, which Vite otherwise
-    // answers with 403. Elsewhere Vite's defaults apply. The HMR client connects to the page's own host
-    // and port.
-    ...((listenOnAllInterfaces || codespacesDomain) && { host: true }),
+    // `127.0.0.1`, the address `demo.py` prints: Vite's default `localhost` resolves to `::1` only on some
+    // hosts (GitHub runners, the dev container). The dev container and Codespaces listen on all
+    // interfaces; Codespaces also allows the forwarded host, which Vite otherwise answers with 403. The
+    // HMR client connects to the page's own host and port.
+    host: listenOnAllInterfaces || codespacesDomain ? true : '127.0.0.1',
     ...(codespacesDomain && { allowedHosts: [`.${codespacesDomain}`] }),
     proxy: {
       // `ws: true` makes Vite proxy the WebSocket upgrade. Without it Vite proxies the upgrade request as

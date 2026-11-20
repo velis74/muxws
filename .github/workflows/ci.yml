@@ -120,6 +120,8 @@ jobs:
             demo.py
             docs/**
             interop/**
+            scripts/**
+            ts/index.ts
           log-level: INFO
           base-ref: ${{ github.base_ref }}
           head-ref: HEAD
