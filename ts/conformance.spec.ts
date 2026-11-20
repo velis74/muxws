@@ -308,7 +308,7 @@ class Replay {
         this.byId[who].set(stream.id, stream);
         // The `{"handler": "raise"}` payload is the only way a script of ordinary API calls reaches the
         // handler-failure path of WSM-STM-034. `stream.reset(APPLICATION_ERROR)` sends the same code but no
-        // serialized error object, which is what the fixture asserts. `Error` and not a subclass: the serializer
+        // serialised error object, which is what the fixture asserts. `Error` and not a subclass: the serialiser
         // sends the class name, and Python raises a class named `Error` too, so the asserted payload is the same
         // value in both ports.
         const asked = payload as { handler?: string; message?: string } | null;
@@ -690,7 +690,7 @@ class Replay {
       throw new Error(`${String(spec.ref)} failed with ${String(caught)}, expected ${String(spec.error)}`);
     }
     if (spec.code !== undefined) expect((caught as StreamReset).code).toBe(spec.code);
-    // `deepEqual` for the same reason as in `expect_result`: a serialized error payload may contain bytes under a
+    // `deepEqual` for the same reason as in `expect_result`: a serialised error payload may contain bytes under a
     // binary codec, and `toEqual` does not distinguish two `ArrayBuffer`s of the same length.
     if (spec.payload !== undefined) {
       const carried = (caught as RemoteError).payload;

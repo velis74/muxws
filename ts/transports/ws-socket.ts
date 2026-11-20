@@ -24,7 +24,7 @@ export class WsSocket implements SocketAdapter {
     socket.binaryType = 'arraybuffer';
 
     socket.on('message', (data: unknown, isBinary: boolean) => {
-      this.deliver(normalise(data, isBinary));
+      this.deliver(normalize(data, isBinary));
     });
     socket.on('close', (code: number, reason: Buffer) => {
       this.die(new ConnectionClosed('websocket closed', { code, reason: reason.toString(), wasClean: code === 1000 }));
@@ -80,12 +80,12 @@ export class WsSocket implements SocketAdapter {
   }
 }
 
-function normalise(data: unknown, isBinary: boolean): string | ArrayBuffer {
+function normalize(data: unknown, isBinary: boolean): string | ArrayBuffer {
   if (!isBinary) return data instanceof Buffer ? data.toString('utf8') : String(data);
   if (data instanceof ArrayBuffer) return data;
   if (data instanceof Buffer) {
     return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
   }
-  if (Array.isArray(data)) return normalise(Buffer.concat(data as Buffer[]), true);
+  if (Array.isArray(data)) return normalize(Buffer.concat(data as Buffer[]), true);
   return new Uint8Array(0).buffer;
 }

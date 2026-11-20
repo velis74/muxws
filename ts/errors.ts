@@ -153,7 +153,7 @@ export class StreamReset extends MuxwsError {
   }
 }
 
-/** The remote handler threw. Carries the serialized error object, if the remote sent one. */
+/** The remote handler threw. Carries the serialised error object, if the remote sent one. */
 export class RemoteError extends StreamReset {
   readonly payload: unknown;
 

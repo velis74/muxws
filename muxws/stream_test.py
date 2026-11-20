@@ -321,7 +321,7 @@ async def test_open_with_timeout_is_a_type_error(pair: Pair):
 
 
 async def test_await_twice_returns_same_value(make_pair):
-    """WSM-API-010/011: one memoized future, resolved once."""
+    """WSM-API-010/011: one memoised future, resolved once."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -746,7 +746,7 @@ async def test_a_second_failure_on_a_closed_stream_is_ignored(make_pair):
 
 
 async def test_awaiting_after_the_stream_was_already_reset(make_pair):
-    """The memoized future is created on first await, and the answer may already be queued."""
+    """The memoised future is created on first await, and the answer may already be queued."""
     pair = make_pair()
     pair.acceptor.on_stream(_echo_handler)
     pair.start()

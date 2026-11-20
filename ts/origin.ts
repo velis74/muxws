@@ -9,7 +9,7 @@
  * `muxws/origin.py` implements the same parsing and the same decision.
  */
 
-/** The default port of each scheme a serialized origin may carry. */
+/** The default port of each scheme a serialised origin may carry. */
 const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443 };
 
 /** Every value of one request header, looked up by lower-case name, in order. */
@@ -19,7 +19,7 @@ export type HeaderValues = (name: string) => readonly string[];
 export type OriginCheck = (headers: HeaderValues) => boolean;
 
 /**
- * `[scheme, host, port]` of a serialized origin, or `null` when `value` is not one.
+ * `[scheme, host, port]` of a serialised origin, or `null` when `value` is not one.
  *
  * An origin is `scheme://host[:port]` with the scheme `http` or `https`, surrounding whitespace and
  * one trailing `/` ignored. Scheme and host are lower-cased, and a missing port is the scheme's

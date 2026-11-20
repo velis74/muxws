@@ -83,7 +83,7 @@ def test_round_trip_over_the_whole_frame_corpus(case: dict[str, Any], codec: Msg
 
 
 def test_the_corpus_covers_every_v1_frame_type():
-    """Every v1 frame type is in the corpus, so the parametrized test above covers all of them.
+    """Every v1 frame type is in the corpus, so the parametrised test above covers all of them.
 
     Asserted here as well as in the JSON tests, because this file runs the corpus through the second
     codec, and the round-trip test above passes for a corpus of any size.

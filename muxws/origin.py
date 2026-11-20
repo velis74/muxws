@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-#: The default port of each scheme a serialized origin may carry.
+#: The default port of each scheme a serialised origin may carry.
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
 #: Every value of one request header, looked up by lower-case name, in order.
@@ -24,7 +24,7 @@ OriginCheck = Callable[[HeaderValues], bool]
 
 
 def parse_origin(value: str) -> tuple[str, str, int] | None:
-    """`(scheme, host, port)` of a serialized origin, or None when `value` is not one.
+    """`(scheme, host, port)` of a serialised origin, or None when `value` is not one.
 
     An origin is `scheme://host[:port]` with the scheme `http` or `https`, surrounding whitespace and
     one trailing `/` ignored. Scheme and host are lower-cased, and a missing port is the scheme's

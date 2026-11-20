@@ -107,7 +107,7 @@ FORBIDDEN_FRAME_TYPES = frozenset({"settings", "window_update"})
 class Error(Exception):
     """The exception the receiving handler raises for a fixture's `{"handler": "raise"}` payload.
 
-    The class name appears on the wire: the default error serializer sends `type(exc).__name__`
+    The class name appears on the wire: the default error serialiser sends `type(exc).__name__`
     (Python) and `error.name` (TypeScript), so the `reset(APPLICATION_ERROR)` payload a fixture
     asserts is the same in both languages only if the class name is. `Error` is the JavaScript
     built-in name.
@@ -201,7 +201,7 @@ class Replay:
         inbound stream would close before the script could `reply` on it.
 
         The `{"handler": "raise"}` payload makes the handler raise, which reaches the handler-failure
-        path of WSM-STM-034. `stream.reset(APPLICATION_ERROR)` sends the same code but no serialized
+        path of WSM-STM-034. `stream.reset(APPLICATION_ERROR)` sends the same code but no serialised
         error object, which the fixture asserts. The `{"handler": "return"}` payload makes it return at
         once, which ends a oneway stream (WSM-STM-040).
         """
@@ -585,7 +585,7 @@ async def test_sequence_corpus_replays_under_msgpack(path: Path, swapped: bool):
 def test_every_codec_specific_fixture_is_run_by_some_pass():
     """The fixture the JSON pass skips must be a fixture some pass runs (WSM-CDC-007).
 
-    Asserted over the corpus, not left to the parametrization above: a `requires_codec` naming a
+    Asserted over the corpus, not left to the parametrisation above: a `requires_codec` naming a
     codec no pass is configured with produces a fixture every configuration skips, which the report
     does not flag as a failure.
     """

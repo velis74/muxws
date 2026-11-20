@@ -789,7 +789,7 @@ async def test_socket_death_fails_every_shape(make_pair):
             else:
                 assert isinstance(outcome, expected), f"{name} ended with {outcome!r}, not {expected.__name__}"
 
-        # The memoized future was resolved once, so a second await gets the same error (WSM-API-010).
+        # The memoised future was resolved once, so a second await gets the same error (WSM-API-010).
         with pytest.raises(ConnectionLost):
             await rigs["await stream"].stream
     finally:
@@ -1684,7 +1684,7 @@ async def test_mixed_text_and_binary_fragments_reset_only_that_stream():
 async def test_an_unencodable_frame_for_a_removed_stream_closes_the_socket(make_pair):
     """A frame that cannot be encoded and has no live stream closes the socket and reports code 1011.
 
-    The error serializer returns a payload the codec cannot encode; the stream is already removed when
+    The error serialiser returns a payload the codec cannot encode; the stream is already removed when
     the writer encodes its reset.
     """
     pair = make_pair(error_serializer=lambda _exc: {"blob": object()})
@@ -1820,10 +1820,10 @@ async def test_an_open_that_fails_to_encode_fails_its_stream_and_sends_nothing(m
 
 
 async def test_an_error_serializer_that_raises_still_produces_the_reset(make_pair):
-    """WSM-STM-034: the reset is sent even when the error serializer raises."""
+    """WSM-STM-034: the reset is sent even when the error serialiser raises."""
 
     def exploding(_exc: BaseException) -> Any:
-        raise RuntimeError("the serializer itself is broken")
+        raise RuntimeError("the serialiser itself is broken")
 
     pair = make_pair(error_serializer=exploding)
 

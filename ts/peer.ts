@@ -1086,7 +1086,7 @@ export class Peer {
     const stream = this.liveStreams.get(frame.stream);
     const continuesOpen = stream !== undefined && stream.opening && hasFragment(frame);
     if (frame.type === 'open' && !continuesOpen) {
-      // The id of an over-cap `open` is validated and counts toward the high-water mark, so a later
+      // The id of an over-cap `open` is validated and counts towards the high-water mark, so a later
       // `data` or `reset` on it is ignored (WSM-STM-002) and is not above the mark (WSM-STM-003).
       if (!(await this.admitRemoteOpen(frame.stream))) return false;
     } else if (stream === undefined && (frame.type === 'data' || frame.type === 'reset')) {
@@ -1492,7 +1492,7 @@ export class Peer {
     try {
       payload = this.errorSerializer(error);
     } catch (serializerError) {
-      // WSM-STM-034 is unconditional: if the serializer throws, the reset is sent without a payload,
+      // WSM-STM-034 is unconditional: if the serialiser throws, the reset is sent without a payload,
       // so the opener still receives the failure.
       logger.error(`muxws conn=${this.id} errorSerializer threw; sending the reset without a payload`, serializerError);
       payload = null;

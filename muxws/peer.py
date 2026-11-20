@@ -945,7 +945,7 @@ class Peer:
         try:
             payload = self._error_serializer(exc)
         except Exception:  # noqa: BLE001
-            # The reset is sent even when the serializer raises (WSM-STM-034); without it the opener
+            # The reset is sent even when the serialiser raises (WSM-STM-034); without it the opener
             # would wait indefinitely.
             logger.exception("muxws conn=%s error_serializer raised; sending the reset without a payload", self.id)
             payload = None

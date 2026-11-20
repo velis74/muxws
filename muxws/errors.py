@@ -154,7 +154,7 @@ class StreamReset(MuxwsError):
 
 
 class RemoteError(StreamReset):
-    """The remote handler raised. Carries the serialized error object, if the remote sent one."""
+    """The remote handler raised. Carries the serialised error object, if the remote sent one."""
 
     code = ResetCode.APPLICATION_ERROR
 

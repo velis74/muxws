@@ -317,7 +317,7 @@ class Stream:
         self._fail_future(ProtocolError(f"stream {self.id} ended without producing a payload"))
 
     def _fail_future(self, error: BaseException) -> None:
-        """Resolve the memoized future with an error, and mark the exception as retrieved.
+        """Resolve the memoised future with an error, and mark the exception as retrieved.
 
         The awaiter that created the future may have been cancelled, and asyncio would then log the
         exception as never retrieved. This corresponds to the TypeScript requirement in WSM-API-016.
@@ -397,7 +397,7 @@ class Stream:
     async def result(self, timeout: float | None = None) -> Any:
         """Await the stream's first payload, with an optional deadline in seconds (WSM-API-012).
 
-        Uses the same memoized future as `await stream`, so a second read returns the first payload,
+        Uses the same memoised future as `await stream`, so a second read returns the first payload,
         not the next one. On expiry the stream is reset with TIMEOUT and `StreamTimeout` is raised.
         """
         self._claim_for("await")
@@ -406,7 +406,7 @@ class Stream:
     async def _wait(self, timeout: float | None) -> Any:
         """The wait shared by `await stream` and `result()`.
 
-        Shielded, so cancelling one awaiter does not cancel the memoized future, and a later await gets
+        Shielded, so cancelling one awaiter does not cancel the memoised future, and a later await gets
         the same answer (WSM-API-011). When the awaiter is cancelled, the stream is reset with
         CANCELLED and the `CancelledError` propagates (WSM-ERR-014).
         """

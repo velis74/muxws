@@ -17,7 +17,7 @@ from muxws.transports.memory import memory_pair
 
 
 async def test_second_await_after_death_returns_the_same_error(make_pair):
-    """WSM-RCN-041/WSM-API-010: the memoized future is resolved **once**.
+    """WSM-RCN-041/WSM-API-010: the memoised future is resolved **once**.
 
     A second await raises the same exception immediately; the failure is stored on the future, not
     delivered once.

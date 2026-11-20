@@ -254,7 +254,7 @@ async function replayIntoLonePeer(
 /**
  * The handler failure the tests raise.
  *
- * Python raises `ValueError`, whose class name reaches the wire through the default serializer. The
+ * Python raises `ValueError`, whose class name reaches the wire through the default serialiser. The
  * JavaScript equivalent of "a named application exception" is a subclass that sets `name`.
  */
 class HandlerFailure extends Error {
@@ -632,7 +632,7 @@ describe('dispatch', () => {
     expect(JSON.stringify(pair.lastFrameOfType('acceptor', 'reset').payload)).not.toContain('secret detail');
   });
 
-  // JavaScript has two values for "nothing" where Python has one. A serializer written as `(error) => { if
+  // JavaScript has two values for "nothing" where Python has one. A serialiser written as `(error) => { if
   // (isPublic(error)) return describe(error); }` returns `undefined` on the redacting path, so `undefined` and
   // `null` must both mean "no payload", otherwise the redacted data is sent.
   (
@@ -941,7 +941,7 @@ describe('socket death', () => {
         expect(stream.signal.aborted).toBe(true);
       });
 
-      // The memoized future was resolved once, so a second await gets the same error (WSM-API-010).
+      // The memoised future was resolved once, so a second await gets the same error (WSM-API-010).
       const awaited = rigs.get('await stream')?.stream as Stream;
       expect(await within('second await', settled((async () => awaited)()))).toBeInstanceOf(ConnectionLost);
     };
@@ -993,7 +993,7 @@ describe('socket death', () => {
     pair.dialerSocket.drop();
     await pair.settle();
 
-    // The memoized future is resolved **once**. A second await that hung, or that raised a different error, would
+    // The memoised future is resolved **once**. A second await that hung, or that raised a different error, would
     // mean the failure was delivered to one awaiter instead of being stored.
     const first = await within('await', rejection((async () => stream)()));
     const second = await within('second await', rejection((async () => stream)()));
@@ -1847,7 +1847,7 @@ describe('hostile frames and failing hooks', () => {
   });
 
   it('closes the socket when an unencodable frame has no live stream', async () => {
-    // The error serializer returns a payload the codec cannot encode; the stream is already removed when the writer
+    // The error serialiser returns a payload the codec cannot encode; the stream is already removed when the writer
     // encodes its reset.
     const pair = makePair({ errorSerializer: () => ({ blob: new Uint8Array([0]).buffer }) });
     const closes: CloseReason[] = [];
@@ -2036,10 +2036,10 @@ describe("open()'s overloads", () => {
     expect(opens.map((frame) => frame.stream)).toEqual([1, 3, 5]);
 
     // The three forms differ only in the id they were allocated.
-    const normalised = opens.map((frame) => ({ ...frame, stream: 0 }));
-    expect(framesEqual(normalised[0], normalised[1])).toBe(true);
-    expect(framesEqual(normalised[0], normalised[2])).toBe(true);
-    expect(normalised[0].payload).toEqual({ q: 1 });
+    const normalized = opens.map((frame) => ({ ...frame, stream: 0 }));
+    expect(framesEqual(normalized[0], normalized[1])).toBe(true);
+    expect(framesEqual(normalized[0], normalized[2])).toBe(true);
+    expect(normalized[0].payload).toEqual({ q: 1 });
   });
 
   it('carries headers and end through the options-only form', async () => {

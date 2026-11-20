@@ -278,7 +278,7 @@ def test_nothing_in_the_error_hierarchy_carries_a_status_code():
     status numbers below are not `ResetCode` values: the two sets do not overlap, and 5
     (WSM-STM-022) is the only unassigned value in the reset table.
 
-    The error serializer turns a local exception into a structured wire value, so it is also checked:
+    The error serialiser turns a local exception into a structured wire value, so it is also checked:
     WSM-ERR-006 fixes its two keys.
     """
     import muxws

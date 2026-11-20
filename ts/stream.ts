@@ -287,10 +287,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   /** True once `replyHeadersArrived` has been resolved. */
   private headersSettled = false;
 
-  /** True once the memoized promise has been resolved or rejected. */
+  /** True once the memoised promise has been resolved or rejected. */
   private answerSettled = false;
 
-  /** True once the memoized promise has been requested; corresponds to Python's lazily created future. */
+  /** True once the memoised promise has been requested; corresponds to Python's lazily created future. */
   private answerRequested = false;
 
   /** How the stream ended: `null` while live, `'normal'` when both ends ended, else the failure. */
@@ -592,7 +592,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * Reject the memoized promise, if there is one to reject.
+   * Reject the memoised promise, if there is one to reject.
    *
    * Only if the promise has been requested, as Python checks whether the future exists. A rejection
    * that nobody retrieves would produce a warning. A later await still receives the failure:
@@ -643,7 +643,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * Settle the memoized promise from the stream's current state.
+   * Settle the memoised promise from the stream's current state.
    *
    * The first await may come after a payload, a reset, or an end without payload has arrived; in each
    * case the promise settles immediately instead of staying pending (WSM-INV-011).
@@ -704,9 +704,9 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
   }
 
   /**
-   * Race the memoized promise against the caller's deadline and signal.
+   * Race the memoised promise against the caller's deadline and signal.
    *
-   * Losing the `Promise.race` does not settle the memoized promise, so a second await still receives
+   * Losing the `Promise.race` does not settle the memoised promise, so a second await still receives
    * the same answer (WSM-API-011).
    */
   private async waitGuarded(answer: Promise<T>, options: ResultOptions): Promise<T> {
