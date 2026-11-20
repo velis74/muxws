@@ -31,6 +31,7 @@ from muxws.errors import (
     TransportUnsupportedError,
     TransportUrlError,
 )
+from muxws.exchange import Exchange, ExchangeSide
 from muxws.fragment import Assembler, encoded_length, MAX_FRAME_BYTES, split_frame
 from muxws.frames import ABSENT, Frame, from_mapping, to_mapping
 from muxws.observability import CloseReason
@@ -66,6 +67,8 @@ __all__ = [
     "ConnectionGoingAway",
     "ConnectionLost",
     "ErrorSerializer",
+    "Exchange",
+    "ExchangeSide",
     "Frame",
     "Hello",
     "IncomingHeadersInterceptor",

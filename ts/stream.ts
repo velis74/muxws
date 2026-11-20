@@ -22,6 +22,7 @@ import {
   StreamReset,
   StreamTimeout,
 } from './errors';
+import type { ExchangeParty, ExchangeRecorder } from './exchange';
 import { Assembler } from './fragment';
 import { ABSENT, type Frame } from './frames';
 
@@ -270,6 +271,9 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
    */
   receivedAFrame = false;
 
+  /** @internal Records the stream for `onExchange` handlers; `null` when none was registered at creation. */
+  recorder: ExchangeRecorder | null = null;
+
   private readonly peer: StreamPeer;
   private readonly queue = new PayloadQueue();
   private readonly answer = deferred<T>();
@@ -338,6 +342,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     }
     const headers = this.leadingHeaders(options.headers);
     this.peer.enqueue({ type: 'data', stream: this.id, payload, headers, end });
+    if (this.recorder !== null) {
+      if (payload !== ABSENT && payload !== undefined) this.recorder.local.payload(payload);
+      if (end) this.recorder.local.end(null);
+    }
     if (end) this.localEnd();
   }
 
@@ -372,6 +380,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
       end: true,
       trailers: options.trailers ?? null,
     });
+    if (this.recorder !== null) {
+      if (payload !== ABSENT) this.recorder.local.payload(payload);
+      this.recorder.local.end(options.trailers);
+    }
     this.localEnd();
   }
 
@@ -401,6 +413,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
       // Runs before `sentAFrame` is set, so if an interceptor throws, the first frame is still unsent
       // (WSM-API-028).
       leading = this.peer.replyHeadersFor(leading, this);
+    }
+    if (!this.sentAFrame && this.recorder !== null) {
+      this.recorder.local.headers = leading;
+      this.recorder.answered();
     }
     this.sentAFrame = true;
     // On the answering side `replyHeaders` holds the headers this peer sent, matching what the opener
@@ -458,6 +474,10 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     const first = !this.receivedAFrame;
     this.receivedAFrame = true;
     if (!first) return headers === null || headers === undefined;
+    if (this.recorder !== null) {
+      this.recorder.remote.headers = headers ?? null;
+      this.recorder.answered();
+    }
     // On a stream this peer opened, the remote's first frame is the answer and carries the reply
     // headers. On a stream the remote opened, its first frame was the `open`, whose headers were set
     // as `headers` at construction.
@@ -480,12 +500,14 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
 
   /** @internal Deliver one reassembled payload to the stream's consumer. */
   acceptPayload(payload: unknown): void {
+    this.recorder?.remote.payload(payload);
     if (this.answerRequested) this.settleAnswer(payload as T);
     this.queue.put(payload);
   }
 
   /** @internal The remote sent `end: true`. */
   remoteEnd(trailers: Record<string, unknown> | null): void {
+    this.recorder?.remote.end(trailers);
     if (trailers !== null && trailers !== undefined) this.trailers = trailers;
     if (this.state === StreamState.HALF_CLOSED_LOCAL) {
       this.closeNormally();
@@ -498,11 +520,12 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
     }
   }
 
-  /** @internal Close because of a local or remote reset, or a lost socket. */
-  fail(error: StreamReset): void {
+  /** @internal Close because of a local or remote reset, or a lost socket; `resetBy` names who reset it. */
+  fail(error: StreamReset, resetBy: ExchangeParty = 'local'): void {
     if (this.state === StreamState.CLOSED) return;
     this.state = StreamState.CLOSED;
     this.closeCause = error;
+    this.recorder?.settle(error, resetBy);
     this.assembler.reset();
     this.failAnswer(error);
     this.queue.put(error);

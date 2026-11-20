@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "muxws"
-version = "0.4.5"
+version = "0.4.6"
 description = "Multiplexed, cancellable, bidirectional streams over one WebSocket - protocol and reference implementation."
 readme = "README.md"
 license = "MIT"

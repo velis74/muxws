@@ -1125,6 +1125,135 @@ await dialer.request('hi', { timeoutMs: 5000 });
 await dialer.close({ drainMs: 100 });
 ```
 
+## `peer.on_exchange()` (Python)
+
+Register an exchange observer. It is called once for every stream of the peer when the stream ends,
+with an [`Exchange`](/api/types#exchange): what each side sent, how the stream ended and
+how long it took. Payloads are the logical values, reassembled and decoded, never fragments.
+
+It fires on every close path: both sides ended (`"ok"`), either side reset the stream, a refusal and a
+handler error included (`"reset"`), or the connection ended first (`"lost"`). A `notify()` stream fires
+when its `open` is enqueued; a remote `oneway` stream fires when its handler returns or raises, or at
+once when it is dropped for a missing handler or a sent `goaway`. An `open` that gets no stream fires
+nothing: an `open` refused, or a `oneway` open dropped, at the concurrency limit.
+
+A stream is recorded only if at least one exchange handler is registered when the stream is created;
+with none registered the peer records nothing. A recorded stream fires to every handler registered when
+it ends. Registrations persist across reconnects. muxws itself never logs payloads; the handler
+receives them, and whether it logs them is up to the application.
+
+### Signature
+
+```python
+def on_exchange(
+    self, handler: Callable[[Exchange], Any], *, max_payloads: int | None = 100
+) -> Callable[[Exchange], Any]:
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `handler` | `Callable[[Exchange], Any]` | required | Called `(exchange)`, synchronously on the event loop, once per finished stream, in registration order. Its return value is ignored; a coroutine it returns (an `async def` handler) is closed without running and logged as an error under `muxws.frames`. Isolated: an exception from it is logged under `muxws.frames` like an `on_frame` handler error, the remaining handlers run, and the stream and the connection are not affected. |
+| `max_payloads` | `int \| None` | `100` | Payloads per side this handler receives: the first `max_payloads`. `None` is unlimited, `0` timing and outcome only. The peer records per side up to the largest limit among the handlers registered when a stream is created, so a handler registered later with a larger limit receives what was recorded. `payload_count` counts every payload regardless. |
+
+### Return
+
+`Callable[[Exchange], Any]` — the handler itself, so `@peer.on_exchange` works as a decorator.
+
+### Raises
+
+`ValueError` when `max_payloads` is negative or not an integer.
+
+### Example
+
+```python
+import asyncio
+
+from muxws import Exchange, Peer, Stream
+from muxws.codecs.json_ import JsonCodec
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    dialer_socket, acceptor_socket = memory_pair()
+    dialer = Peer(dialer_socket, codec=JsonCodec(), is_dialer=True)
+    acceptor = Peer(acceptor_socket, codec=JsonCodec(), is_dialer=False)
+
+    @dialer.on_exchange
+    def observe(exchange: Exchange) -> None:
+        print(exchange.stream, exchange.opened_by, exchange.outcome)
+        print("request:", exchange.request.payloads, "response:", exchange.response.payloads)
+        print("duration >= 0:", exchange.duration >= 0)
+
+    async def handler(payload: object, stream: Stream) -> None:
+        await stream.reply({"echo": payload})
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    await dialer.request("hi", timeout=5.0)
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+## `peer.onExchange()` (TypeScript)
+
+The TypeScript counterpart of [`peer.on_exchange()`](#peer-on-exchange-python): the same firing
+rules, with durations in milliseconds.
+
+### Signature
+
+```ts
+onExchange(handler: (exchange: Exchange) => void, options?: ExchangeOptions): void;
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `handler` | `(exchange: Exchange) => void` | required | Called once per finished stream, synchronously, in registration order. A returned promise is not awaited; its rejection is logged like a thrown exception. Isolated: an exception from it is logged like an `onFrame` handler error, the remaining handlers run, and the stream and the connection are not affected. |
+| `options` | [`ExchangeOptions`](/api/types#exchangeoptions-and-exchangedictoptions-typescript) | `{}` | Its one field, `maxPayloads`, is described in the next row. |
+| `options.maxPayloads` | `number \| null` | `100` | Payloads per side this handler receives: the first `maxPayloads`. `null` is unlimited, `0` timing and outcome only. Same recording rule as `max_payloads` in Python. |
+
+### Return
+
+`void`.
+
+### Raises
+
+`RangeError` when `maxPayloads` is negative or not an integer.
+
+### Example
+
+```ts
+import { type Exchange, JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+
+dialer.onExchange((exchange: Exchange) => {
+  console.log(exchange.stream, exchange.openedBy, exchange.outcome);
+  console.log('request:', exchange.request.payloads, 'response:', exchange.response.payloads);
+  console.log('duration >= 0:', exchange.durationMs >= 0);
+});
+
+acceptor.onStream(async (payload: unknown, stream: Stream) => stream.reply({ echo: payload }));
+
+void dialer.serve();
+void acceptor.serve();
+
+await dialer.request('hi', { timeoutMs: 5000 });
+await dialer.close({ drainMs: 100 });
+```
+
 ## `peer.onError()` (TypeScript)
 
 Register a handler for a stream failure that has **no consumer**: a stream that was never awaited or
@@ -2808,5 +2937,5 @@ console.log('our own opens do not consume it:', peer.open('a').id, peer.open('b'
 - [`Reconnect`](./reconnect.md) — the schedule behind `on_reconnect`.
 - [Errors](./errors.md) — `ConnectionLost`, `ConnectionGoingAway`, `RemoteError` and the rest.
 - [Registry](./registry.md) — finding a peer by its `tags`.
-- [Types](./types.md) — `CloseReason`, `StreamHandler`, `ErrorSerializer`, `OpenInterceptor`,
-  `ReplyHeadersInterceptor`, `IncomingHeadersInterceptor`, `Frame`.
+- [Types](./types.md) — `CloseReason`, `Exchange`, `ExchangeSide`, `StreamHandler`, `ErrorSerializer`,
+  `OpenInterceptor`, `ReplyHeadersInterceptor`, `IncomingHeadersInterceptor`, `Frame`.

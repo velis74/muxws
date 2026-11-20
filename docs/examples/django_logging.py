@@ -1,4 +1,4 @@
-"""Django `LOGGING` that writes the muxws loggers and the exchange log to their own files."""
+"""Django `LOGGING` that writes the muxws loggers and the exchange log (`exchange_logging.py`) to their own files."""
 
 import os
 
@@ -19,8 +19,9 @@ LOGGING = {
             "filename": str(LOG_DIR / "muxws.log"),
             "formatter": "timestamped",
         },
+        # One JSON object per line: the formatter writes the message alone.
         "exchanges_file": {
-            "()": "queued_file.QueuedFileHandler",
+            "class": "logging.FileHandler",
             "filename": str(LOG_DIR / "exchanges.jsonl"),
             "formatter": "message",
         },

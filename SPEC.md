@@ -978,6 +978,45 @@ of `reason`: Python uses `repr()`, TypeScript `JSON.stringify` (`GAPS.md`).
   contains secrets.
 - **WSM-OBS-003** `peer.on_frame(handler)` MUST receive `(direction, frame, byte_length)` before
   encode and after decode.
+- **WSM-OBS-004** `peer.on_exchange(handler, max_payloads=100)` (TypeScript
+  `onExchange(handler, { maxPayloads })`) MUST call every registered handler, in registration order, exactly
+  once per `Stream` object the peer creates (local `open`, `request`, `notify`, or an accepted remote `open`),
+  when the stream leaves the peer's stream table, on every close path. A stream is recorded only if at least
+  one handler is registered when its `Stream` object is created; a stream created with none registered MUST
+  NOT fire. An `open` that gets no `Stream` object (an `open` refused or a `oneway` open dropped at the
+  concurrency limit, WSM-STM-036, WSM-STM-040) MUST NOT fire. Registrations persist across reconnects.
+- **WSM-OBS-005** The handler MUST receive an immutable `Exchange` with two `ExchangeSide`s: `request`, what
+  the side that opened the stream sent, and `response`, what the other side sent, whichever peer reports.
+  Each side holds its leading headers, its payloads in order, the count of all its payloads, its trailers and
+  whether it sent `end`. A payload is the logical value after reassembly and decoding, never a fragment; a
+  frame without a payload adds none.
+- **WSM-OBS-006** `outcome` MUST be `"ok"` when the stream closes without a reset (both sides ended, or a
+  `oneway` stream closed), `"reset"` when either side reset it, a refusal and a handler error included, and
+  `"lost"` when the connection ended first (`ConnectionLost`). For `"reset"`, `reset_by` is `"local"` or
+  `"remote"` and `code` and `reason` are those of the `reset`; for the other outcomes all three are null.
+- **WSM-OBS-007** `started_at` MUST be the wall-clock time at which the `Stream` object was created.
+  `first_response` (from creation to the answering side's first `data` frame, a `reset` not counted; null when it
+  sent none) and
+  `duration` (from creation to the call) MUST be measured with a monotonic clock, in seconds in Python and in
+  milliseconds in TypeScript (`firstResponseMs`, `durationMs`).
+- **WSM-OBS-008** `max_payloads` MUST be a non-negative integer or null (unlimited); any other value is
+  rejected at registration. The peer records per side up to the largest limit among the handlers registered
+  when the stream is created; each handler receives the first `max_payloads` of them. `payload_count` counts
+  every payload regardless of the limit.
+- **WSM-OBS-009** A handler MUST be called synchronously. An exception from it MUST be logged as an
+  `on_frame` handler error is (WSM-OBS-003), the remaining handlers MUST run, and the stream and the
+  connection MUST be unaffected. A returned value, a coroutine or promise included, is ignored.
+- **WSM-OBS-010** `Exchange.as_dict(trim_payload_size=None)` (TypeScript `asDict({ trimPayloadSize })`) MUST
+  return a new JSON-ready structure with the keys, in order, `ts`, `conn`, `stream`, `opened_by`, `oneway`,
+  `request`, `response`, `outcome`, `reset_by`, `code`, `reason`, `first_response_ms`, `duration_ms`, and per
+  side `headers`, `payloads`, `payload_count`, `trailers`, `ended`. `ts` is `started_at` in ISO 8601 UTC with
+  milliseconds and `Z`; the two durations are milliseconds rounded to three decimals. Binary values in
+  headers, payloads and trailers become base64 strings. With a `trim_payload_size`, a payload whose compact
+  JSON text exceeds that many UTF-8 bytes is replaced by a string: its first `trim_payload_size` bytes cut
+  back to a character boundary, followed by `…(trimmed N bytes)…`, where `N` is the number of bytes cut off.
+  Headers and trailers are never trimmed; a negative or non-integer limit is rejected.
+- **WSM-OBS-011** Both reference implementations MUST produce the same `as_dict` output for the same
+  exchange. `on_exchange` hands payloads to application code; the peer itself still logs none (WSM-OBS-002).
 
 ### 5.11 `WSM-PKG-` — packaging
 

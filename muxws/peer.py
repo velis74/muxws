@@ -7,6 +7,7 @@ import inspect
 import itertools
 import logging
 import random
+import time
 
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
@@ -24,6 +25,7 @@ from muxws.errors import (
     StreamReset,
     StreamTimeout,
 )
+from muxws.exchange import checked_max_payloads, Exchange, ExchangeHandler, ExchangeRecorder
 from muxws.fragment import encoded_length, MAX_FRAME_BYTES
 from muxws.frames import ABSENT, Frame
 from muxws.lifecycle import GoawayState, MAX_STREAM_ID, new_nonce, PingRegistry
@@ -125,6 +127,11 @@ class Peer:
         #: reads it, and `on_close` hands it to a handler registered after it (WSM-RCN-047).
         self._final_close: CloseReason | None = None
         self._frame_handlers: list[Callable[[str, Frame, int], None]] = []
+        #: `(handler, max_payloads)` per `on_exchange` registration. Like `_frame_handlers`, they belong
+        #: to the `Peer` and survive `_adopt_socket`.
+        self._exchange_handlers: list[tuple[ExchangeHandler, int | None]] = []
+        #: The largest `max_payloads` among `_exchange_handlers`; None when one of them is unlimited.
+        self._exchange_limit: int | None = 0
         #: Keyed by one token per registration: a function registered twice is two registrations, and
         #: each unregister function removes only its own. `_adopt_socket` does not clear them; they
         #: belong to the `Peer`, not to its connection (WSM-API-026).
@@ -257,6 +264,27 @@ class Peer:
         self._frame_handlers.append(handler)
         return handler
 
+    def on_exchange(
+        self, handler: Callable[[Exchange], Any], *, max_payloads: int | None = 100
+    ) -> Callable[[Exchange], Any]:
+        """Register a handler called with an `Exchange` once per finished stream (WSM-OBS-004).
+
+        Only streams created while at least one handler is registered are recorded. `max_payloads`
+        (an integer >= 0, or None for no limit) is how many payloads per side this handler receives;
+        the peer records up to the largest limit among its handlers. Raises `ValueError` for any other
+        value. The handler runs synchronously when the stream leaves the peer's stream table; its
+        return value is ignored; a coroutine it returns is closed without running and logged as an error.
+        An exception from it is logged and the remaining handlers still run. Returns the handler, so it
+        works as a decorator.
+        """
+        limit = checked_max_payloads(max_payloads)
+        self._exchange_handlers.append((handler, limit))
+        if limit is None or self._exchange_limit is None:
+            self._exchange_limit = None
+        else:
+            self._exchange_limit = max(self._exchange_limit, limit)
+        return handler
+
     def intercept_open(self, interceptor: OpenInterceptor) -> Callable[[], None]:
         """Register an interceptor for the headers of every stream this peer opens (WSM-API-026/027).
 
@@ -334,6 +362,12 @@ class Peer:
         stream = Stream(self, stream_id, headers=headers, payload=payload, local=True)
         stream.oneway = oneway
         end = end or oneway
+        if self._exchange_handlers:
+            record = stream._exchange = ExchangeRecorder(self.id, self._exchange_limit)
+            record.request.headers = headers
+            record.request.ended = end
+            if payload is not ABSENT:
+                record.request.add(payload)
         stream.state = StreamState.HALF_CLOSED_LOCAL if end else StreamState.OPEN
         if not oneway:
             self._streams[stream_id] = stream
@@ -721,6 +755,7 @@ class Peer:
                         stream_id=stream.id,
                     ),
                     notify_remote=False,
+                    reset_by="remote",
                 )
         return True
 
@@ -792,6 +827,10 @@ class Peer:
         stream.oneway = frame.oneway
         # A oneway open carries `end` whether or not the frame says so (WSM-FRM-020).
         stream.state = StreamState.HALF_CLOSED_REMOTE if frame.end or frame.oneway else StreamState.OPEN
+        if self._exchange_handlers:
+            record = stream._exchange = ExchangeRecorder(self.id, self._exchange_limit)
+            record.request.headers = frame.headers
+            record.request.ended = stream.state is StreamState.HALF_CLOSED_REMOTE
         self._streams[stream_id] = stream
         self._intercept_incoming(stream, stream.headers)
 
@@ -805,8 +844,12 @@ class Peer:
                 return True
             stream._opening = False
             stream.payload = payload
+            if stream._exchange is not None:
+                stream._exchange.request.add(payload)
         else:
             stream.payload = frame.payload if frame.payload is not ABSENT else None
+            if stream._exchange is not None and frame.payload is not ABSENT:
+                stream._exchange.request.add(frame.payload)
 
         self._start_handler(stream)
         return True
@@ -822,6 +865,9 @@ class Peer:
         stream.payload = payload
         if frame.end:
             stream.state = StreamState.HALF_CLOSED_REMOTE
+        if stream._exchange is not None:
+            stream._exchange.request.add(payload)
+            stream._exchange.request.ended = stream.state is StreamState.HALF_CLOSED_REMOTE
         self._start_handler(stream)
         return True
 
@@ -843,6 +889,11 @@ class Peer:
         self._highest_remote_open = stream_id
         return True
 
+    def _refuse(self, stream: Stream, reason: str) -> None:
+        """Send `reset(REFUSED)` for a remote open and fail the stream locally with the same reason."""
+        self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.REFUSED), reason=reason))
+        stream._fail(exception_for_reset(ResetCode.REFUSED, reason, stream_id=stream.id), notify_remote=False)
+
     def _start_handler(self, stream: Stream) -> None:
         """Dispatch to the one handler, or refuse when there is none (WSM-STM-033)."""
         if stream.oneway and (self._goaway.sent or self._handler is None):
@@ -854,17 +905,10 @@ class Peer:
         if self._goaway.sent:
             # This peer sent goaway and starts no new handler. REFUSED tells the opener the stream
             # was not processed, so it may retry it elsewhere (WSM-CON-021).
-            self._enqueue(
-                Frame("reset", stream=stream.id, code=int(ResetCode.REFUSED), reason="this peer is going away")
-            )
-            stream._fail(
-                exception_for_reset(ResetCode.REFUSED, "peer is going away", stream_id=stream.id),
-                notify_remote=False,
-            )
+            self._refuse(stream, "this peer is going away")
             return
         if self._handler is None:
-            self._enqueue(Frame("reset", stream=stream.id, code=int(ResetCode.REFUSED), reason="no on_stream handler"))
-            stream._fail(exception_for_reset(ResetCode.REFUSED, "no handler", stream_id=stream.id), notify_remote=False)
+            self._refuse(stream, "no on_stream handler")
             return
         # Held on the stream so an incoming reset(CANCELLED) can cancel it (WSM-ERR-013).
         stream.handler_task = asyncio.create_task(self._run_handler(stream))
@@ -956,6 +1000,7 @@ class Peer:
                     payload=frame.payload if frame.payload is not ABSENT else None,
                 ),
                 notify_remote=False,
+                reset_by="remote",
             )
             return True
         return await self._on_data(stream, frame)
@@ -1173,6 +1218,7 @@ class Peer:
             stream._fail(
                 ConnectionLost(f"connection closed: {cause.reason or cause}", stream_id=stream.id),
                 notify_remote=False,
+                reset_by=None,
             )
         self._streams.clear()
 
@@ -1254,8 +1300,36 @@ class Peer:
             logger.debug("muxws conn=%s closing a locally-declared-dead socket failed", self.id)
 
     def _forget(self, stream: Stream) -> None:
-        """Remove a closed stream from the live map. No state is kept per closed stream (WSM-STM-001)."""
+        """Remove a closed stream from the live map and report its exchange (WSM-STM-001, WSM-OBS-004).
+
+        No state is kept per closed stream.
+        """
         self._streams.pop(stream.id, None)
+        record = stream._exchange
+        if record is not None:
+            stream._exchange = None
+            self._fire_exchange(stream, record)
+
+    def _fire_exchange(self, stream: Stream, record: ExchangeRecorder) -> None:
+        """Call every `on_exchange` handler with the stream's exchange, cut to the handler's `max_payloads`."""
+        ended_at = time.monotonic()
+        built: dict[int | None, Exchange] = {}
+        for handler, limit in list(self._exchange_handlers):
+            exchange = built.get(limit)
+            if exchange is None:
+                exchange = built[limit] = record.exchange(stream, limit, ended_at)
+            try:
+                result = handler(exchange)
+            except Exception:  # noqa: BLE001 - a raising exchange handler must not affect the stream or connection
+                logger.exception("muxws conn=%s an on_exchange handler raised", record.conn)
+                continue
+            if inspect.iscoroutine(result):
+                result.close()
+                logger.error(
+                    "muxws conn=%s stream=%s an on_exchange handler returned a coroutine; it is not run",
+                    record.conn,
+                    exchange.stream,
+                )
 
     def __repr__(self) -> str:
         role = "dialer" if self._is_dialer else "acceptor"

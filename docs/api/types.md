@@ -931,6 +931,374 @@ async function main(): Promise<void> {
 void main();
 ```
 
+## `Exchange`
+
+One finished stream, as handed to every [`on_exchange`](/api/peer#peer-on-exchange-python) /
+[`onExchange`](/api/peer#peer-onexchange-typescript) handler: what each side sent, how the stream ended
+and how long it took. `request` is what the side that opened the stream sent and `response` what the
+other side sent, whichever peer reports it.
+
+Python's is a frozen slotted dataclass, TypeScript's a frozen class instance. Payloads are held by
+reference, not copied.
+
+### Signature
+
+```python
+@dataclass(frozen=True, slots=True)
+class Exchange:
+    conn: str
+    stream: int
+    opened_by: Literal["local", "remote"]
+    oneway: bool
+    request: ExchangeSide
+    response: ExchangeSide
+    outcome: Literal["ok", "reset", "lost"]
+    reset_by: Literal["local", "remote"] | None
+    code: int | None
+    reason: str | None
+    started_at: datetime
+    first_response: float | None
+    duration: float
+
+    def as_dict(self, trim_payload_size: int | None = None) -> dict[str, Any]: ...
+```
+
+```ts
+export class Exchange {
+  readonly conn: string;
+  readonly stream: number;
+  readonly openedBy: ExchangeParty;
+  readonly oneway: boolean;
+  readonly request: ExchangeSide;
+  readonly response: ExchangeSide;
+  readonly outcome: ExchangeOutcome;
+  readonly resetBy: ExchangeParty | null;
+  readonly code: number | null;
+  readonly reason: string | null;
+  readonly startedAt: Date;
+  readonly firstResponseMs: number | null;
+  readonly durationMs: number;
+  asDict(options?: ExchangeDictOptions): ExchangeDict;
+}
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `conn` | `str` / `string` | required | [`peer.id`](/api/peer#peer-id-python) of the connection the stream lived on. |
+| `stream` | `int` / `number` | required | The stream id. |
+| `opened_by` / `openedBy` | `"local"` / `"remote"` | required | `"local"` when the reporting peer opened the stream, `"remote"` when the other end did. |
+| `oneway` | `bool` / `boolean` | required | True for a `notify()` stream (WSM-STM-040). |
+| `request` | `ExchangeSide` | required | What the side that opened the stream sent. |
+| `response` | `ExchangeSide` | required | What the other side sent. Empty for a `oneway` stream. |
+| `outcome` | `str` / `string` | required | `"ok"` when the stream closed without a reset, `"reset"` when either side reset it (a refusal and a handler error included), `"lost"` when the connection ended first (`ConnectionLost`). |
+| `reset_by` / `resetBy` | `str \| None` / `string \| null` | required | For `"reset"`: `"local"` when this peer sent the `reset`, `"remote"` when it received it or a received `goaway` refused the stream. `None` / `null` otherwise. |
+| `code` | `int \| None` / `number \| null` | required | For `"reset"`: the [`ResetCode`](/api/errors) value. `None` / `null` otherwise. |
+| `reason` | `str \| None` / `string \| null` | required | For `"reset"`: the reason text of the `reset`. `None` / `null` otherwise. |
+| `started_at` / `startedAt` | `datetime` / `Date` | required | Wall-clock time at which the stream was created; timezone-aware UTC in Python. |
+| `first_response` / `firstResponseMs` | `float \| None` / `number \| null` | required | From the creation of the stream to the answering side's first `data` frame (a `reset` does not count), in **seconds** in Python and **milliseconds** in TypeScript, on a monotonic clock. For a stream this peer opened the answering side is the remote; for a remote stream it is this peer. `None` / `null` when the answering side sent no `data` frame. |
+| `duration` / `durationMs` | `float` / `number` | required | From the creation of the stream to the call of the handlers, in **seconds** in Python and **milliseconds** in TypeScript, on a monotonic clock. |
+| `as_dict(trim_payload_size=None)` / `asDict({ trimPayloadSize })` | `int \| None` / `number \| null` | `None` / `null` | Builds the JSON-ready record described under Return. `trim_payload_size` is a size in UTF-8 bytes; `None` / `null` trims nothing. |
+
+### Return
+
+`as_dict()` / `asDict()` returns a new plain dict / object (`ExchangeDict` in TypeScript); changing it,
+for example to redact a value, does not change the `Exchange`. The keys appear in this order and are the same in both languages:
+
+| Key | Value |
+|---|---|
+| `ts` | `started_at` in ISO 8601 UTC with milliseconds and `Z`: `2026-11-19T09:32:22.359Z`. |
+| `conn`, `stream`, `opened_by`, `oneway` | As the fields. |
+| `request`, `response` | Each side as `{"headers", "payloads", "payload_count", "trailers", "ended"}` (see [`ExchangeSide`](#exchangeside)). |
+| `outcome`, `reset_by`, `code`, `reason` | As the fields; `null` for `None`. |
+| `first_response_ms`, `duration_ms` | The two durations in milliseconds, rounded to three decimals; `first_response_ms` is `null` when the answering side sent no `data` frame. |
+
+Binary values (`bytes`, `bytearray`, `memoryview` in Python; `Uint8Array` and other `ArrayBuffer` views
+in TypeScript) anywhere in headers, payloads or trailers become base64 strings.
+
+With `trim_payload_size` set, each payload is serialised to compact JSON text; if its UTF-8 length
+exceeds the limit, the payload is replaced by a string: its first `trim_payload_size` bytes, cut back to
+a character boundary, followed by `…(trimmed N bytes)…`, where `N` is the number of bytes cut off. A
+payload within the limit stays a value. Headers and trailers are never trimmed.
+
+### Raises
+
+`as_dict()` raises `ValueError` and `asDict()` `RangeError` when the trim size is negative or not an
+integer. The `Exchange` itself raises nothing; in Python, assigning to a field raises
+`dataclasses.FrozenInstanceError`.
+
+### Example
+
+```python
+import asyncio
+import json
+
+from muxws import Exchange, Peer, Stream
+from muxws.codecs.json_ import JsonCodec
+from muxws.transports.memory import memory_pair
+
+
+async def main() -> None:
+    dialer_socket, acceptor_socket = memory_pair()
+    dialer = Peer(dialer_socket, codec=JsonCodec(), is_dialer=True)
+    acceptor = Peer(acceptor_socket, codec=JsonCodec(), is_dialer=False)
+    seen: list[Exchange] = []
+    dialer.on_exchange(seen.append)
+
+    async def handler(payload: object, stream: Stream) -> None:
+        await stream.reply({"text": "z" * 40})
+
+    acceptor.on_stream(handler)
+    loops = [asyncio.create_task(dialer.serve()), asyncio.create_task(acceptor.serve())]
+
+    await dialer.request({"action": "get"}, timeout=5.0)
+    record = seen[0].as_dict(trim_payload_size=16)
+    print(list(record))
+    print(json.dumps(record["request"]))
+    print(json.dumps(record["response"]["payloads"], ensure_ascii=False))
+
+    await dialer.close(drain=0.1)
+    for loop in loops:
+        loop.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
+asyncio.run(main())
+```
+
+```ts
+import { type Exchange, JsonCodec, memoryPair, Peer, type Stream } from 'muxws';
+
+const [dialerSocket, acceptorSocket] = memoryPair();
+const dialer = new Peer(dialerSocket, { codec: new JsonCodec(), isDialer: true });
+const acceptor = new Peer(acceptorSocket, { codec: new JsonCodec(), isDialer: false });
+const seen: Exchange[] = [];
+dialer.onExchange((exchange: Exchange) => seen.push(exchange));
+
+acceptor.onStream(async (_payload: unknown, stream: Stream) => stream.reply({ text: 'z'.repeat(40) }));
+
+void dialer.serve();
+void acceptor.serve();
+
+await dialer.request({ action: 'get' }, { timeoutMs: 5000 });
+const record = seen[0].asDict({ trimPayloadSize: 16 });
+console.log(Object.keys(record));
+console.log(JSON.stringify(record.request));
+console.log(JSON.stringify(record.response.payloads));
+await dialer.close({ drainMs: 100 });
+```
+
+## `ExchangeSide`
+
+What one side of a stream sent, as held by [`Exchange.request`](#exchange) and `Exchange.response`.
+Python's is a frozen slotted dataclass; TypeScript's is a readonly interface.
+
+### Signature
+
+```python
+@dataclass(frozen=True, slots=True)
+class ExchangeSide:
+    headers: dict[str, Any] | None
+    payloads: tuple[Any, ...]
+    payload_count: int
+    trailers: dict[str, Any] | None
+    ended: bool
+```
+
+```ts
+export interface ExchangeSide {
+  readonly headers: Record<string, unknown> | null;
+  readonly payloads: readonly unknown[];
+  readonly payloadCount: number;
+  readonly trailers: Record<string, unknown> | null;
+  readonly ended: boolean;
+}
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `headers` | `dict \| None` / `Record<string, unknown> \| null` | required | The side's leading headers: the `open` frame's for the opening side, the reply headers for the other. `None` / `null` when the side sent none. |
+| `payloads` | `tuple` / `readonly unknown[]` | required | The side's payloads in order: the opening payload, then every payload sent or received after reassembly and decoding, cut to the handler's `max_payloads` / `maxPayloads`. A frame without a payload (`send_headers`, `end()` without a payload) adds none. |
+| `payload_count` / `payloadCount` | `int` / `number` | required | How many payloads the side sent on the stream, including those not in `payloads`. |
+| `trailers` | `dict \| None` / `Record<string, unknown> \| null` | required | The trailers the side sent with its `end`, or `None` / `null`. |
+| `ended` | `bool` / `boolean` | required | Whether the side sent `end`. |
+
+### Return
+
+Python: a frozen `ExchangeSide`. TypeScript: a frozen object. In `as_dict()` / `asDict()` output a side is
+`{"headers", "payloads", "payload_count", "trailers", "ended"}`, in that order.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```python
+from muxws import ExchangeSide
+
+side = ExchangeSide(headers={"status": 200}, payloads=({"id": 7},), payload_count=3, trailers=None, ended=True)
+print(side.payloads, "of", side.payload_count, "| ended:", side.ended)
+```
+
+```ts
+import type { ExchangeSide } from 'muxws';
+
+const side: ExchangeSide = {
+  headers: { status: 200 },
+  payloads: [{ id: 7 }],
+  payloadCount: 3,
+  trailers: null,
+  ended: true,
+};
+console.log(side.payloads, 'of', side.payloadCount, '| ended:', side.ended);
+```
+
+## `ExchangeOutcome` and `ExchangeParty` (TypeScript)
+
+The two string unions of [`Exchange`](#exchange): `outcome` is an `ExchangeOutcome`; `openedBy` and
+`resetBy` are `ExchangeParty` values. Python annotates the same fields with `Literal` types.
+
+### Signature
+
+```ts
+export type ExchangeOutcome = 'ok' | 'reset' | 'lost';
+export type ExchangeParty = 'local' | 'remote';
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| *(none)* | — | — | String-literal unions, not callables. The meaning of each value is under [`Exchange`](#exchange). |
+
+### Return
+
+Nothing — they are types, absent from the emitted JavaScript.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import type { ExchangeOutcome, ExchangeParty } from 'muxws';
+
+const outcome: ExchangeOutcome = 'reset';
+const resetBy: ExchangeParty = 'remote';
+console.log(outcome, 'by', resetBy);
+```
+
+## `ExchangeOptions` and `ExchangeDictOptions` (TypeScript)
+
+The options objects of [`peer.onExchange()`](/api/peer#peer-onexchange-typescript) and
+[`Exchange.asDict()`](#exchange). Python takes the same options as keyword arguments: `max_payloads`
+and `trim_payload_size`.
+
+### Signature
+
+```ts
+export interface ExchangeOptions {
+  maxPayloads?: number | null;
+}
+
+export interface ExchangeDictOptions {
+  trimPayloadSize?: number | null;
+}
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| `maxPayloads` | `number \| null` | `100` | Payloads per side the handler receives; `null` for all. |
+| `trimPayloadSize` | `number \| null` | `null` | UTF-8 byte length above which a payload's JSON text is trimmed; `null` trims nothing. |
+
+### Return
+
+Nothing — they are types, absent from the emitted JavaScript.
+
+### Raises
+
+Raises: nothing. The methods that take them throw `RangeError` for a negative or non-integer value.
+
+### Example
+
+```ts
+import type { ExchangeDictOptions, ExchangeOptions } from 'muxws';
+
+const timingOnly: ExchangeOptions = { maxPayloads: 0 };
+const trimmed: ExchangeDictOptions = { trimPayloadSize: 4096 };
+console.log(timingOnly, trimmed);
+```
+
+## `ExchangeDict` and `ExchangeSideDict` (TypeScript)
+
+The result of [`Exchange.asDict()`](#exchange): plain, mutable, JSON-ready objects whose keys are the
+same, in the same order, as those of Python's `Exchange.as_dict()`. Both are type aliases, not
+interfaces, so they are assignable to `Record<string, unknown>`.
+
+### Signature
+
+```ts
+export type ExchangeSideDict = {
+  headers: Record<string, unknown> | null;
+  payloads: unknown[];
+  payload_count: number;
+  trailers: Record<string, unknown> | null;
+  ended: boolean;
+};
+
+export type ExchangeDict = {
+  ts: string;
+  conn: string;
+  stream: number;
+  opened_by: ExchangeParty;
+  oneway: boolean;
+  request: ExchangeSideDict;
+  response: ExchangeSideDict;
+  outcome: ExchangeOutcome;
+  reset_by: ExchangeParty | null;
+  code: number | null;
+  reason: string | null;
+  first_response_ms: number | null;
+  duration_ms: number;
+};
+```
+
+### Parameters
+
+| Name | Type | Default | What it does |
+|---|---|---|---|
+| *(all keys)* | — | — | Described under [`Exchange`](#exchange), Return. Binary values are base64 strings; a trimmed payload is a string. |
+
+### Return
+
+Nothing — they are types, absent from the emitted JavaScript.
+
+### Raises
+
+Raises: nothing.
+
+### Example
+
+```ts
+import type { ExchangeDict } from 'muxws';
+
+function redacted(record: ExchangeDict): ExchangeDict {
+  for (const side of [record.request, record.response]) {
+    if (side.headers && 'cookie' in side.headers) side.headers.cookie = '***';
+  }
+  return record;
+}
+
+console.log(typeof redacted);
+```
+
 ## `StreamHandler`
 
 The type of a peer's incoming-stream handler (one per peer): the argument of `peer.on_stream(...)` /
@@ -1631,5 +1999,6 @@ console.log('the only version on the wire is the generation:', PREFIX.split('.')
 - [Codec](./codec.md) — what turns a `Frame` into bytes, and `Codec.encode_payload`, whose output
   `split_frame` slices.
 - [Errors](./errors.md) — `default_error_serializer`, the `ErrorSerializer` you get if you pass none.
-- [Peer](./peer.md) — `on_stream`, `on_close`, `on_frame` and the `intercept_*` methods, which take these types.
+- [Peer](./peer.md) — `on_stream`, `on_close`, `on_frame`, `on_exchange` and the `intercept_*` methods, which take
+  these types.
 - [Stream](./stream.md) — what a `StreamHandler` is handed.
