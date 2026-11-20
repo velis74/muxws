@@ -63,6 +63,32 @@ jobs:
           path: coverage/coverage-final.json
         if: github.event_name == 'pull_request'
 
+  # The browser demo in Chromium, once per backend: `demo/e2e/demo.e2e.ts` starts `demo.py --browser`
+  # and uses every control on the page.
+  demo-e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [python, node]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv sync --locked
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+        env:
+          MUXWS_DEMO_BACKEND: ${{ matrix.backend }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: demo-e2e-${{ matrix.backend }}
+          path: demo/e2e/test-results
+        if: failure()
+
   coverage:
     name: Incremental coverage check
     runs-on: ubuntu-latest

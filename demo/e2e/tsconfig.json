@@ -1,0 +1,12 @@
+{
+  // Node ESM run by Playwright; the root config compiles to CommonJS. `npm run lint` runs `tsc -p`
+  // against this config, and `eslint.config.js` uses it for the typed lint rules.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["./**/*.ts"]
+}

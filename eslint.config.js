@@ -77,6 +77,14 @@ export default [
     },
   },
   {
+    // The demo's Playwright test and its config, Node ESM with their own tsconfig.
+    files: ['demo/e2e/**/*.ts'],
+    languageOptions: {
+      parserOptions: { project: './demo/e2e/tsconfig.json' },
+      globals: { performance: 'readonly', process: 'readonly', setTimeout: 'readonly' },
+    },
+  },
+  {
     // The TypeScript documentation examples, type-checked against the package sources.
     files: ['docs/examples/**/*.ts'],
     languageOptions: { parserOptions: { project: './docs/examples/tsconfig.json' } },
