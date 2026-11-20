@@ -118,9 +118,8 @@ export {
   defaultErrorSerializer,
 } from './peer';
 // The reconnect configuration types and the backoff schedule functions. `ConnectionLoop`,
-// `Heartbeat`, `AttemptCounter` and `dialAndEstablish` are internal: `connect()` constructs them and
-// `peer.close()` stops them. Every name exported from the package root is covered by v1
-// compatibility. Defaults are parameter defaults, as in Python.
+// `Heartbeat`, `AttemptCounter` and `dialAndEstablish` are internal. Every name exported from the package
+// root is covered by v1 compatibility. Defaults are parameter defaults, as in Python.
 export {
   type ConnectOptions,
   Hello,
@@ -141,8 +140,8 @@ export {
   Stream,
   StreamState,
 } from './stream';
-// `PREFIX` and `select` only. `offer`, `findOffer`, `generationOf` and `mismatchError` are internal to
-// the dialer and acceptor handshake code; Python does not export them either.
+// `PREFIX` and `select` only. `offer`, `findOffer`, `generationOf` and `mismatchError` are internal;
+// Python does not export them either.
 export { PREFIX, select } from './subprotocol';
 // `UnixSocketsUnsupportedError` is defined in the transport module that throws it and re-exported
 // only here (WSM-ERR-016: a concrete transport error is reachable only from the entry point that

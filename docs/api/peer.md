@@ -343,7 +343,8 @@ console.log(stream.id, options.end, Object.keys(stream.headers ?? {}).length);
 
 One-way push: send one `open` carrying the payload with `end` and `oneway` set, and return `None`.
 The stream is closed once the `open` is enqueued, and the remote sends nothing on it: no end, and no
-reset when its handler raises.
+reset when its handler raises. A remote that does not accept the `open` (no handler, after its
+`goaway`, or at its concurrency limit) drops it without a frame and logs it.
 
 ### Signature
 
@@ -425,7 +426,9 @@ async notify(payload?: unknown, options?: { headers?: Record<string, unknown> })
 ### Return
 
 `Promise<void>`. No stream handle is returned: the stream is closed once the `open` is enqueued, and
-the remote sends nothing on it.
+the remote sends nothing on it: no end, and no reset when its handler throws. A remote that does not
+accept the `open` (no handler, after its `goaway`, or at its concurrency limit) drops it without a
+frame and logs it.
 
 ### Raises
 
@@ -677,7 +680,8 @@ await dialer.close({ drainMs: 100 });
 Register the incoming-stream handler. A peer has at most one; a second call replaces the first and
 logs a warning.
 
-A peer with no handler answers every incoming `open` with `reset(REFUSED, "no on_stream handler")`.
+A peer with no handler answers every incoming `open` with `reset(REFUSED, "no on_stream handler")`,
+except a `oneway` one, which it drops and logs.
 `connect(on_stream=...)` registers the handler before the hello is sent, so a stream the acceptor
 opens as soon as it receives the hello is not refused.
 
@@ -691,7 +695,7 @@ def on_stream(self, handler: StreamHandler) -> StreamHandler:
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async. The payload is the opening payload, already reassembled. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`, never with `REFUSED`, which states that no work was done. |
+| `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async. The payload is the opening payload, already reassembled. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`, never with `REFUSED`, which states that no work was done. On a `oneway` stream nothing is sent: returning closes it without a frame, and raising is logged. |
 
 ### Return
 
@@ -746,7 +750,7 @@ onStream(handler: StreamHandler): void;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `handler` | `StreamHandler` | required | `(payload, stream) => void \| Promise<void>`. One per peer; a second call replaces the first and logs a warning. Returning without ending the stream ends it implicitly; throwing resets it with `APPLICATION_ERROR`. |
+| `handler` | `StreamHandler` | required | `(payload, stream) => void \| Promise<void>`. One per peer; a second call replaces the first and logs a warning. Returning without ending the stream ends it implicitly; throwing resets it with `APPLICATION_ERROR`. On a `oneway` stream nothing is sent: returning closes it without a frame, and throwing is logged. |
 
 ### Return
 
@@ -2908,7 +2912,8 @@ None — it is a constant.
 
 `number` — 100: how many streams the **remote** may hold open on a peer at once. Counted over the
 remote's opens alone; this peer's own streams do not count against it. Never sent to the remote; the
-remote observes it only as the `reset(REFUSED)` it receives when it exceeds the limit.
+remote observes it only as the `reset(REFUSED)` it receives when it exceeds the limit; a `oneway` open
+beyond the limit is dropped without a frame.
 
 ### Raises
 

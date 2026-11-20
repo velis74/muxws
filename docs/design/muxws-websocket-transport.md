@@ -7,17 +7,12 @@ outline: deep
 
 # muxws
 
-> **Status: Design - not implemented.** This document is the implementation brief for a *separate*
-> library (`muxws` on PyPI, `muxws` on npm, its own repository). It lives
-> in this repo only because muxws was designed while working on fastapi-viewsets, and because two
-> types in this library (`Context`, `ViewSetResult`) were shaped in anticipation of it. It is
-> deliberately **not** in the VitePress nav: it is not user documentation for fastapi-viewsets.
-> The audience is the coding agent (or person) who will implement muxws from scratch.
+> Design rationale for the rules in `SPEC.md`. Not normative: where the two differ, `SPEC.md` applies.
 
 muxws is a WebSocket protocol and reference implementation that mimics the *semantics* of HTTP/3:
 many independent, concurrently interleaved streams over one socket, either peer able to open a
 stream, per-stream cancellation, request/response and streaming-response shapes - plus unsolicited
-pushes from the acceptor, which fall out of the symmetry for free.
+pushes from the acceptor, which follow from the symmetry without a separate mechanism.
 
 muxws knows nothing about viewsets, progress reporting, dialogs, tasks or Celery. The dependency
 direction is strict and never inverted:
@@ -234,7 +229,7 @@ awaitable" is where that obligation is discharged.
 
 ---
 
-## Honest about what is and is not mimicked
+## What is and is not mimicked
 
 "Mimics HTTP/3" is a claim about the *semantic* model only, and the difference matters enough to
 state plainly rather than let a reader assume otherwise.
@@ -257,7 +252,7 @@ per-stream cancellation that does not disturb other streams; connection-level gr
 `goaway`. Not the capability negotiation: HTTP/2 and HTTP/3 open with a `SETTINGS` exchange and muxws
 has none at all, for reasons "Limits are local, and the frame cap is a constant" gives in full.
 
-**The engineering rule this honesty produces.** Because ordering is global and there is one send
+**The resulting engineering rule.** Because ordering is global and there is one send
 queue, *a single large frame blocks every other stream for as long as it takes to transmit*. A 1 MB
 DATA frame on a stream doing a bulk export, on a link with 1 MB/s of usable uplink, adds a full
 second of latency to a 200-byte progress update on another stream. That is not a theoretical concern;
@@ -400,7 +395,7 @@ So, normatively:
   text for a text codec, byte boundaries for a binary one. Under JSON in TypeScript that additionally
   means never splitting a surrogate pair, since a lone surrogate is not a codepoint. A splitter that
   would land mid-sequence moves the boundary backwards.
-- **The sender budgets for the envelope and for expansion, then verifies.** The honest, boring rule:
+- **The sender budgets for the envelope and for expansion, then verifies.** The rule:
   slice to `MAX_FRAME_BYTES - 512` bytes of encoded payload, encode the frame, and if the encoded
   message is still over the cap (under JSON, a payload of nothing but control characters can triple in
   size), re-split that slice and try again. The 512-byte reservation covers the envelope keys, the
@@ -421,8 +416,8 @@ who picks a bad hint pays in wasted encodes rather than in over-cap frames on th
 
 The remaining rules are about ordering. Fragments of one logical payload must be contiguous *on that
 stream* - frames of *other* streams may and should interleave between them, which is the entire
-point, and at most one unsent fragment may be queued at a time (see "The engineering rule this
-honesty produces"). Receiving a non-fragment frame on a stream with a fragment assembly in progress
+point, and at most one unsent fragment may be queued at a time (see "The resulting
+engineering rule"). Receiving a non-fragment frame on a stream with a fragment assembly in progress
 is a stream-level protocol error. `end: true` may appear only on the final fragment. `headers` are
 never fragmented: an `open` whose headers alone push the frame over the cap is a `PAYLOAD_TOO_LARGE`
 reset - headers are metadata, and if they are 64 KiB they are a body.
@@ -541,7 +536,7 @@ eventually be wrong in a log.
 The one thing the counter *could* have supported, and the reason `extensions` had a row, is a
 capability gate: a frame type that must be acted on rather than tolerated needs the sender to know, in
 advance, that the other side understands it. `window_update` was the named candidate. muxws does not
-have that gate any more, and the honest consequence is that **the day flow control is built, it is a
+have that gate any more, and the consequence is that **the day flow control is built, it is a
 new generation** - `muxws.v2.<codec>` - rather than an extension advertised inside v1. That is a real
 cost, paid deliberately: an advertisement mechanism with one hypothetical consumer is exactly the kind
 of machinery this design keeps deleting, and a generation bump on a protocol whose two peers are
@@ -663,8 +658,8 @@ places, and which encoding it uses is a fact about the deployment, exactly like 
 also stops being a per-call decision, which it never was: two connections in one process encoding
 differently is not a feature anybody asked for.
 
-**Python** reads it into a `settings` singleton, mirroring `fastapi_viewsets/conf.py` in this
-repository - same shape, same reason, and an application that already knows one knows the other:
+**Python** reads it into a `settings` singleton, mirroring `fastapi_viewsets/conf.py` in
+fastapi-viewsets - same shape, same reason, and an application that already knows one knows the other:
 
 ```python
 # muxws/conf.py
@@ -765,8 +760,7 @@ exports are used. muxws can guarantee its half of the graph and nothing past it,
 reason open question 2 asks for the claim to be checked against a real production build rather than
 believed because it is written here.
 
-**The honest counterpoint**, which the user raised and which the reasoning above should not be allowed
-to obscure: bundle size on its own would be a weak argument for any of this. A JSON codec is trivial,
+**The counterpoint**: bundle size on its own would be a weak argument for any of this. A JSON codec is trivial,
 and three registered codecs are noise next to any real application. The reason the heavy codecs are
 opt-in is that they are **separate dependencies that may simply not be installed** - the library cannot
 register what is not there, and must not pretend otherwise. The `if` is what additionally buys the lean
@@ -1069,7 +1063,7 @@ forever on a consumed awaitable. `result(timeout=...)` is the same future with a
 around the wait, not a second source of the value, so the two can never disagree about what the
 stream produced.
 
-This repository already establishes exactly that idiom, for exactly that reason:
+fastapi-viewsets uses the same idiom for the same reason:
 `LazyObject._ensure_future()` in `fastapi_viewsets/context/__init__.py` creates the future on first
 `__await__` and hands the same one to every subsequent await, so `await context.user` works from any
 number of places. The underlying rule is the same in both cases: an awaitable that is a *value holder*
@@ -1079,7 +1073,7 @@ of code from holding the same handle. Implement `Stream.__await__` against the s
 Iteration takes the other route deliberately: `__aiter__` reads payloads off the stream's own queue as
 they arrive and never touches that future, which is why the two shapes cannot be mixed and why the
 claim is recorded on the stream rather than on the future. Creating the future lazily is what keeps
-the claim honest - a stream nobody ever awaits has no future to resolve, and a stream nobody ever
+the claim accurate - a stream nobody ever awaits has no future to resolve, and a stream nobody ever
 iterates has no queue consumer to starve.
 
 A pleasant side effect of `open()` not being a coroutine: the entire "coroutine was never awaited"
@@ -1225,8 +1219,8 @@ async def main():
         await asyncio.Future()
 ```
 
-The extra argument is where the two transports genuinely differ, and it is worth one honest sentence
-rather than a silent inconsistency. Starlette hands over a socket that has *not* been accepted, so
+The extra argument is where the two transports genuinely differ, and the difference is stated here
+rather than left implicit. Starlette hands over a socket that has *not* been accepted, so
 `muxws.accept()` can do the whole handshake including the subprotocol decision. `websockets` completes
 the handshake before it ever calls the handler, so the decision has to be handed to it up front -
 hence `muxws.select_subprotocol`, a plain callable it can install. Where a transport offers neither
@@ -1275,7 +1269,7 @@ Everything else is the same names in the same order.
 
 ### TypeScript
 
-The same shape. Naming rule, following how `route_rest` mirrors `route_viewset` in this repo's
+The same shape. Naming rule, following how `route_rest` mirrors `route_viewset` in fastapi-viewsets'
 `vue/rest-proxy.ts`: **module-level factories keep the Python name verbatim** (`connect`, `accept`,
 `serve`), **classes are PascalCase in both** (`Peer`, `Stream`, `PeerRegistry`), and **methods and
 options-object keys are camelCase** (`onStream`, `maxPayloadBytes`). Wire field names stay snake_case
@@ -1833,7 +1827,7 @@ Three rules keep it that way:
   and not a callback. Identity that changes is not a reconnect, it is a different connection: an
   application whose identity changes closes the peer and connects a new one. Note that a *credential*
   is not identity and does not belong in the hello - authentication is a handshake concern, so a
-  reconnect re-authenticates for free by dialling again, and an expired token surfaces as a rejected
+  reconnect re-authenticates by dialling again, and an expired token surfaces as a rejected
   handshake rather than as a stale value replayed forever.
 - **`on_reconnect` fires after the hello is acknowledged, never before.** The ordering is the whole
   point: an application that re-subscribes from `on_reconnect` while the hello is still in flight
@@ -1991,7 +1985,7 @@ as best-effort and why backchannel's transport swallows it.
 
 ---
 
-## Backpressure, honestly
+## Backpressure
 
 v1 has **no per-stream flow control.** The only backpressure is the WebSocket send buffer, and that is
 connection-wide: a peer that stops reading eventually stalls *every* stream, and a producer that
@@ -2083,7 +2077,7 @@ either `clone_for_command()` grows an `action_configuration` parameter, or the a
 **Context processors receive a `viewset` argument that does not exist at handshake time.**
 `build_context(request, viewset, ...)` passes it to every processor, and a processor that branches on
 the viewset or the action would get it wrong once per connection rather than right once per command.
-Two honest options, and the adapter must pick one explicitly rather than by accident: rebuild the
+Two options, and the adapter must pick one explicitly rather than by accident: rebuild the
 whole Context per stream once the opening payload has named the viewset (correct, and pays the
 processor cost per command), or keep the per-connection Context but restrict it to
 viewset-independent processors, documenting that constraint for anyone deploying over WS.
@@ -2104,7 +2098,7 @@ out of the existing pipeline at all - it would have to fabricate a `Response`-sh
 harvest, or re-implement the runner. Note that `ViewSetResult`'s own docstring already promises the
 WS mapping ("a future WS adapter would fold all three into the outgoing message payload as plain JSON
 keys"), so the docstring and the runner currently disagree about whether that is reachable. **This is
-a prerequisite in this repository, not work inside the adapter**: `lifecycle_runner` needs an explicit
+a prerequisite in fastapi-viewsets, not work inside the adapter**: `lifecycle_runner` needs an explicit
 transport sink - an object the chain's result is handed to, with `route_viewset` supplying the HTTP
 one that writes headers/cookies/status onto the `Response` and the WS adapter supplying one that
 folds `body` / `headers` / `cookies` / `status_code` into a single JSON payload. Once that exists,
@@ -2247,7 +2241,7 @@ two calls" and "the client also talks" are not read as a disagreement between th
 
 ## Repository and package layout
 
-One repository shipping two packages on a single version stream, mirroring how this repo ships
+One repository shipping two packages on a single version stream, mirroring how fastapi-viewsets ships
 `fastapi_viewsets/` to PyPI and `vue/` to npm and bumps both together.
 
 ```
@@ -2266,7 +2260,7 @@ muxws/
 │   ├── registry.py            # PeerRegistry
 │   ├── reconnect.py           # backoff policy, heartbeat, hello replay, reconnecting client peer
 │   ├── transports/            # starlette.py, websockets_.py, memory.py (tests)
-│   └── *_test.py              # pytest, colocated - same convention as this repo
+│   └── *_test.py              # pytest, colocated
 ├── ts/                        # npm: muxws
 │   ├── index.ts               # browser entry: connect, Peer, Stream, errors, registerCodec
 │   ├── codec.ts               # Codec interface, registry, JsonCodec
@@ -2453,7 +2447,7 @@ means touching all of them in both languages, in a codebase that by then has a s
 transports layered on top - and it means rewriting the corpus M1 produced, because a corpus written
 against "the JSON bytes" rather than against "a logical frame plus what a named codec makes of it" has
 the assumption baked into its shape. Building the seam now costs an interface and an indirection;
-building it at M5 costs a rewrite of the only artefact that keeps the two ports honest.
+building it at M5 costs a rewrite of the only artefact that keeps the two ports in agreement.
 
 **M2 - Python peer core over an in-memory transport.** `Peer`, `Stream`, the state machine, id
 allocation with parity in the same synchronous step as the enqueue, `on_stream`,
@@ -2485,8 +2479,8 @@ belongs with the other receive-side caps in M5 and is built there. What is left 
 and the shutdown handshake, and those two stay together and stay separate from M3 for one reason:
 `goaway` drain ordering against in-flight streams is the part of this protocol most likely to be
 subtly wrong, and it needs a milestone where it is the thing being tested rather than a detail
-alongside two transports. It is now the smallest of the middle milestones, and that is the honest
-shape of it rather than a gap to be filled.
+alongside two transports. It is now the smallest of the middle milestones, and that is its
+intended size rather than a gap to be filled.
 
 **M5 - Robustness and convenience.** Fragmentation wired into the send path with the one-unsent-
 fragment rule and round-robin writer selection, the receive-side caps together - the frame cap, the
@@ -2507,7 +2501,7 @@ against - its three contract items are symmetric `open` (M2), `notify` (M2), and
 **M6 - Conformance, documentation, wire freeze.** The full `conformance/sequences/` corpus, the
 live Python↔TS matrix in CI in both role assignments, `SPEC.md` promoted to normative under the v1
 generation, and an explicit test that the forward-compatibility rule holds (an unknown frame type is
-ignored and logged once, and the connection survives it). A second codec is the honest proof that the seam
+ignored and logged once, and the connection survives it). A second codec is the proof that the seam
 built in M1 is a seam: ship `msgpack` as an optional extra in both languages, run the whole sequence
 corpus through it by round-trip, and add the cross-language pair (Python peer and TS peer, both on
 msgpack) to the CI matrix. If the seam is real this costs a codec module and a matrix row; if it is
@@ -2624,7 +2618,7 @@ asserting the acceptor selected no subprotocol and answered 400, that the dialer
 `CodecMismatch` rather than a decode failure after connect or a bare connection error, that its
 message names both `VITE_MUXWS_CODEC` and `MUXWS_CODEC`, that the acceptor logged both values, and
 that *no* frame was exchanged. A peer offering `muxws.v2.json` against a v1 acceptor,
-asserting the same rejection. And the negative test that keeps the guard honest: a dialer and acceptor
+asserting the same rejection. And the negative test that keeps the guard from over-rejecting: a dialer and acceptor
 on the same non-default codec, asserting they interoperate normally.
 
 **Cross-language conformance - mandatory, not optional.** Two implementations of one protocol diverge
@@ -2675,7 +2669,7 @@ in-memory transport:
 ```
 
 Note `stream_ref`, not a raw id: the *fixture* refers to streams by ordinal, and the runner resolves
-it - which keeps the corpus honest about the rule that callers never invent ids. The top-level
+it - which keeps the corpus within the rule that callers never invent ids. The top-level
 `max_frame_bytes` is not a wire value and never was one on this connection: the cap is a protocol
 constant, and the fixture is telling the *runner* to construct both peers with a lowered one, which is
 a test-only construction argument and the only reason any value other than 65536 exists.
@@ -2738,7 +2732,7 @@ of them blocks M1.
    `headers` has exactly one justification that survives scrutiny: a dispatcher can read routing
    metadata before a possibly-fragmented body has fully arrived. **Recommendation: keep it, justified
    solely by that, and delete it at M4 if no consumer uses it** - the wire freezes at M6, so M4 is the
-   last honest moment to remove a field. Note that the one plausible consumer is the fastapi-viewsets
+   last moment to remove a field. Note that the one plausible consumer is the fastapi-viewsets
    dispatcher reading the viewset name off `headers` to pick a handler while the command payload is
    still being reassembled, which is why the samples above use `headers={"viewset": "item"}` rather
    than an invented `topic`. backchannel does not use headers at all, and neither does the reconnect
@@ -2755,7 +2749,7 @@ of them blocks M1.
    **Recommendation: verify it at M3 with an actual production build** (a JSON build and a msgpack
    build of the same app, comparing bundle contents, not just sizes) before either subpath becomes
    public API surface. The failure mode if it does not hold is mild - a few unused kilobytes, since
-   the honest counterpoint in "Registration is explicit" already concedes bundle size is the weaker
+   the counterpoint in "Registration is explicit" already concedes bundle size is the weaker
    half of the argument - but the packaging shape should be settled before the API is.
 
 3. **Should `request()` grow a configurable default timeout at the peer level?** Fixed decision today

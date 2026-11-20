@@ -135,14 +135,16 @@ streams into two sets:
 
 - Streams **at or below** `last_stream` were received. Each one runs until it ends or the drain
   deadline passes, or has been answered with its own `reset`: an open refused for the concurrency
-  limit or for a missing handler gets `REFUSED` and can be retried like the streams above.
+  limit or for a missing handler gets `REFUSED` and can be retried like the streams above. A `oneway`
+  open in either case is dropped without a frame.
 - Streams **above** it were not processed. On receiving the `goaway`, the peer resets those of its
   own streams locally with `REFUSED`, so their awaits raise `StreamRefused`, and sends no frame for
   them, because the remote has stopped reading them. `REFUSED` means the handler did not run, so those
   requests can be retried on a new connection.
 
 After **sending** `goaway`, a peer opens no new streams (`open()` raises `ConnectionGoingAway`) and
-answers each new incoming `open` with `reset(REFUSED)` without invoking the handler.
+answers each new incoming `open` with `reset(REFUSED)` without invoking the handler; it drops a
+`oneway` open without a frame.
 
 After **receiving** `goaway`, `open()` raises `ConnectionGoingAway` synchronously at the call site.
 Existing streams continue, but no new stream can be opened on the connection. Dial a new connection

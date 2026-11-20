@@ -1,5 +1,5 @@
 /**
- * The Node acceptor's socket adapter, over the `ws` package.
+ * `SocketAdapter` over a `ws` connection, for both the dialer and the acceptor in `muxws/node`.
  *
  * Imported only by ts/node.ts. No module reachable from ts/index.ts may import it, because the
  * browser bundle must not contain `ws` (WSM-API-022), which does not run in a browser.

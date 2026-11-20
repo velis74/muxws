@@ -169,7 +169,8 @@ well. The two limits are independent.
 
 `max_concurrent_streams` (default `100`) is local in the same way: it bounds how many streams the
 **remote** may have open on this peer at once, it is not announced, and an `open` over the limit is
-answered with `REFUSED` without running the handler.
+answered with `REFUSED` without running the handler; a `oneway` `open` over the limit is dropped
+without a frame.
 
 ## See also
 

@@ -1316,8 +1316,8 @@ handler receives a server push, with the same signature and semantics.
 
 A handler that raises produces `reset(APPLICATION_ERROR)` on that stream, with the reason text and
 the `error_serializer`'s payload. It never produces `REFUSED`, which is reserved for streams that were
-definitively not processed. Only one handler is registered per peer; registering a second replaces
-the first and logs a warning.
+definitively not processed. On a `oneway` stream it produces no frame and is logged. Only one
+handler is registered per peer; registering a second replaces the first and logs a warning.
 
 ### Signature
 

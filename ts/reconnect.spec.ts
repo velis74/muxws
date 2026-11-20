@@ -267,7 +267,7 @@ describe('connect() is wired to the reconnect driver', () => {
     // The server side has no muxws peer: `serve()` echoes a `ping` verbatim (WSM-CON-010), and the heartbeat cannot
     // detect a loss when the server answers.
     //
-    // Unlike `muxws/reconnect_test.py::test_a_swallowed_pong_on_a_real_socket_re_dials`, this test cannot also
+    // Unlike `muxws/reconnect_test.py::test_an_unanswered_ping_on_a_real_socket_redials`, this test cannot also
     // check the close *code*: `ws.close(1006)` throws, but has already moved the socket to CLOSING, so the loss is
     // still reported and the re-dial still happens. Python's adapter leaves the socket open in that case, so the
     // rule is asserted there and only stated here.

@@ -1,5 +1,5 @@
 /**
- * Subpath export `muxws/node`: the acceptor side, over the `ws` package.
+ * Subpath export `muxws/node`: the dialer and the acceptor over the `ws` package.
  *
  * The peer implementation is shared with the browser entry point; only the socket adapter differs
  * (WSM-API-022). `ws` is an optional peer dependency and is reached only from here.

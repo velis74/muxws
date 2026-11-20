@@ -463,12 +463,8 @@ def run_uds():
 
 
 def run_bench(full=False):
-    """The throughput matrix, measured and then printed as one report.
-
-    `demo/bench/` is imported inside the function so the other demos do not load it.
-    `demo.bench` performs the measurement; this function only passes `--full`.
-    """
-    from demo.bench import format_report, run_matrix
+    """Measure the throughput matrix and print it as one report; `full` widens the matrix."""
+    from demo.bench import format_report, run_matrix  # Imported here so the other demos do not load it.
 
     # On stderr, so `python demo.py --bench > report.txt` writes only the report to the file. Each cell
     # runs a pair of processes for a fixed time and prints nothing until the matrix is finished.

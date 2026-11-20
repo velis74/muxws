@@ -1,7 +1,7 @@
 """Random legal API sequences against a live pair, asserting the invariants that hold for all of them.
 
 `stream_test.py` covers the forty-five cells of the state table one at a time, and
-`conformance/sequences/` scripts thirteen fixed exchanges. Neither covers orderings outside those
+`conformance/sequences/` scripts a fixed set of exchanges. Neither covers orderings outside those
 cases, and a sequence can be legal in every step and still violate an invariant as a whole.
 
 This module drives random sequences of ordinary calls and asserts only what holds for every sequence.

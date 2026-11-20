@@ -423,7 +423,7 @@ describe('the awaitable handle', () => {
 });
 
 describe('reset stream nobody consumed', () => {
-  it('reaches the error hook and raises no unhandled rejection', async () => {
+  it('reaches the error hook and raises no unhandled rejection - WSM-API-016', async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (event: PromiseRejectionEvent): void => {
       unhandled.push(event.reason);

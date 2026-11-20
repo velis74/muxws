@@ -89,8 +89,9 @@ would raise in the read loop, after which the peer would report itself open whil
 - **No action**: `NO_ERROR` (0).
 
 A handler that raises **always** produces `APPLICATION_ERROR`, never `REFUSED`, even when it raises
-immediately. `REFUSED` guarantees that the operation did not run; a handler that debits an account and
-then raises has run, and a `REFUSED` would cause the client to retry the debit.
+immediately; on a `oneway` stream it produces no frame and is only logged. `REFUSED` guarantees that
+the operation did not run; a handler that debits an account and then raises has run, and a `REFUSED`
+would cause the client to retry the debit.
 
 ## Three ways a send can fail
 
@@ -168,8 +169,9 @@ refused them with their own `reset`; streams above it were not processed and are
 
 ## `error_serializer` is per peer
 
-When an `on_stream` handler raises, muxws resets the stream with `APPLICATION_ERROR` and calls the
-peer's `error_serializer` to build the optional structured payload sent with the reset. The default:
+When an `on_stream` handler raises on a stream that is not `oneway`, muxws resets the stream with
+`APPLICATION_ERROR` and calls the peer's `error_serializer` to build the optional structured payload
+sent with the reset. The default:
 
 ```python
 # fragment
@@ -247,8 +249,10 @@ Change the environment, not the URL. A class raised for a missing package **name
 command** (`pip install muxws[websockets]`, `npm install ws`) in its message. In Python it is also a
 `RuntimeError`. A retry does not help.
 
-Neither base class is raised directly. The raised class is a concrete subclass defined by the
-transport that failed, and these subclasses are **not** exported from `muxws`:
+Neither base class is raised directly. The raised class is a concrete subclass defined in the module
+of the transport that failed. In Python none of them is exported from `muxws`; in TypeScript each is
+exported from the entry point that ships its transport (`UnixSocketsUnsupportedError` from `muxws`,
+`UnixUrlError`, `WsUrlError` and `WsNotInstalledError` from `muxws/node`):
 
 ```python
 # fragment

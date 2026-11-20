@@ -15,8 +15,8 @@ layer.
 
 muxws mirrors **HTTP/2**: the five-state stream machine, `PING` with an opaque nonce, one frame per
 message, `GOAWAY` carrying the last stream the sender will finish, and headers, then body, then
-trailers. The state table in [Architecture](/guide/architecture) is HTTP/2's without the two
-`reserved` states, which exist only for `PUSH_PROMISE`.
+trailers. The state table in [Streams & cancellation](/guide/streams-and-cancellation#the-five-states)
+is HTTP/2's without the two `reserved` states, which exist only for `PUSH_PROMISE`.
 
 HTTP/3 uses the same stream model as HTTP/2, which is why muxws names both. Per-stream loss recovery is
 a QUIC feature that muxws does not provide; see

@@ -136,7 +136,7 @@ describe('number forms', () => {
    * The TypeScript side of the pinned WSM-FRG-016 divergence. Python encodes these numbers
    * differently, so the two ports fragment a payload containing one at different boundaries. This is
    * not visible on the wire, because the sender chooses the boundaries and the receiver only
-   * concatenates, but the shared boundary corpus must not contain such payloads. See GAPS.md.
+   * concatenates, but the shared boundary corpus must not contain such payloads (SPEC.md §3).
    */
   it('encodes 1.0, -0.0, 100.0, 1e16, 1e-7 and 1e-6 differently from Python - WSM-FRG-016', () => {
     const cases: [number, string, string][] = [

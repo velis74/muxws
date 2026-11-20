@@ -428,7 +428,7 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   interceptor, and neither does a `reset`, which carries no headers.
   Test: `peer_test.py::test_reply_headers_interceptors_shape_the_first_frame_of_every_answer`;
   `peer_test.py::test_a_reply_headers_interceptor_that_raises_fails_the_call_and_sends_nothing`;
-  `ts/peer.spec.ts` *"shapes the first frame of every answer, on a copy, whichever call sends it"* and
+  `ts/peer.spec.ts` *"shapes the first frame of every answer on a copy, for each sending call"* and
   *"fails the call that sends the answer and leaves its first frame unspent"*.
 - **WSM-API-029** Incoming interceptors MUST be called exactly once per stream, synchronously inside
   the read loop, when the remote's first stream-level frame on that stream is accepted. For a stream
