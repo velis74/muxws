@@ -726,7 +726,7 @@ class Peer:
         self._die(ConnectionClosed(reason or "closed", code=1000, reason=reason or "", was_clean=True))
 
     def _send_goaway(self, code: ResetCode, reason: str | None) -> None:
-        """Enqueue `goaway` once. `last_stream` is the highest id the remote opened on this peer.
+        """Enqueue `goaway` once. `last_stream` is the remote's highest admitted open, refused ones included.
 
         The id has the remote's parity. With this peer's own highest id instead, the remote would
         treat its streams as unprocessed and fail them all.
@@ -1264,8 +1264,7 @@ class Peer:
         `Peer` survives; `Stream` objects do not (WSM-RCN-032). The id space starts empty and the
         high-water marks reset.
 
-        `tags` is not cleared. WSM-RCN-033 applies to the acceptor, where a reconnect creates a new
-        `Peer`; only a dialer adopts a socket. WSM-INV-014 states the rule without that qualification.
+        `tags` is kept (WSM-INV-014).
 
         The connection id advances, so the reconnect appears in logs under a new `conn=` (WSM-API-009).
         """

@@ -128,12 +128,14 @@ carries three fields:
 |---|---|
 | `code` | a reset code - `NO_ERROR` for an orderly shutdown, `PROTOCOL_ERROR` when the connection is being ended because the remote broke the rules |
 | `reason` | free text for a human reading a log |
-| `last_stream` | the highest id **the other peer opened** that this peer has processed and will still complete |
+| `last_stream` | the highest id **the other peer opened** that this peer has received when it sends the `goaway` |
 
 `last_stream` is an id of the other peer's parity, not this peer's. It divides the other peer's
 streams into two sets:
 
-- Streams **at or below** `last_stream` were accepted and are completed if possible.
+- Streams **at or below** `last_stream` were received. Each one runs until it ends or the drain
+  deadline passes, or has been answered with its own `reset`: an open refused for the concurrency
+  limit or for a missing handler gets `REFUSED` and can be retried like the streams above.
 - Streams **above** it were not processed. On receiving the `goaway`, the peer resets those of its
   own streams locally with `REFUSED`, so their awaits raise `StreamRefused`, and sends no frame for
   them, because the remote has stopped reading them. `REFUSED` means the handler did not run, so those

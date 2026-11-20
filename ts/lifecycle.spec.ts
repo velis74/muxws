@@ -96,12 +96,12 @@ class Pair {
 const built: Pair[] = [];
 
 /** Build a peer pair without starting it, so a test can register handlers first. */
-function makePair(): Pair {
+function makePair(options: { maxConcurrentStreams?: number } = {}): Pair {
   const [left, right] = memoryPair();
   const codec = new JsonCodec();
   const pair = new Pair(
-    new Peer(left, { codec, isDialer: true }),
-    new Peer(right, { codec, isDialer: false }),
+    new Peer(left, { ...options, codec, isDialer: true }),
+    new Peer(right, { ...options, codec, isDialer: false }),
     left,
     right,
     codec,
@@ -407,6 +407,26 @@ describe('goaway', () => {
     // The acceptor allocates even ids; the streams it promises to finish are the dialer's odd ones.
     expect(goaway.last_stream).toBe(3);
     expect((goaway.last_stream as number) % 2).toBe(1);
+  });
+
+  it('counts an open refused over the concurrency limit in last_stream', async () => {
+    // WSM-CON-020: the refused open is at or below `last_stream`; its own reset refuses it.
+    const pair = makePair({ maxConcurrentStreams: 1 });
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    const held = pair.dialer.open({ q: 1 });
+    const refused = pair.dialer.open({ q: 2 });
+    await pair.settle();
+
+    await pair.acceptor.close({ code: ResetCode.NO_ERROR, reason: 'shutting down', drainMs: 20 });
+    await pair.settle();
+
+    const goawayFrames = pair.framesOfType('acceptor', 'goaway');
+    const goaway = goawayFrames[goawayFrames.length - 1];
+    expect([held.id, refused.id]).toEqual([1, 3]);
+    expect(goaway.last_stream).toBe(refused.id);
+    expect(await rejection(refused)).toBeInstanceOf(StreamRefused);
   });
 
   it('refuses incoming opens after sending goaway', async () => {

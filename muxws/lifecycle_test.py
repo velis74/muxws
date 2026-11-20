@@ -265,6 +265,28 @@ async def test_goaway_carries_code_reason_and_last_stream(make_pair):
         await pair.stop()
 
 
+async def test_goaway_last_stream_counts_a_refused_open(make_pair):
+    """WSM-CON-020: `last_stream` includes an open refused over the concurrency limit; its own reset refuses it."""
+    pair = make_pair(max_concurrent_streams=1)
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        held = pair.dialer.open({"q": 1})
+        refused = pair.dialer.open({"q": 2})
+        await pair.settle()
+
+        await pair.acceptor.close(ResetCode.NO_ERROR, "shutting down", drain=0.02)
+        await pair.settle()
+
+        goaway = pair.frames_of_type("acceptor", "goaway")[-1]
+        assert (held.id, refused.id) == (1, 3)
+        assert goaway.last_stream == refused.id
+        with pytest.raises(StreamRefused):
+            await refused
+    finally:
+        await pair.stop()
+
+
 async def test_after_sending_goaway_incoming_opens_are_refused():
     """WSM-CON-021: nothing new runs here, and this peer opens nothing either.
 

@@ -257,8 +257,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
 | Level | Cases | Answer |
 |---|---|---|
 | stream | `data` after receiving `end`; a non-fragment frame mid-reassembly (WSM-FRG-033); an over-size frame the receiver declines (WSM-FRG-031); a payload over `max_payload_bytes` (WSM-FRG-032); an `open` beyond the receiver's concurrency limit (WSM-STM-036) | `reset` that stream: `PROTOCOL_ERROR`, except `PAYLOAD_TOO_LARGE` for the size cases and `REFUSED` for the concurrency case |
-| connection | a message the codec cannot decode; a missing `type`; a wrong-parity stream id; an `open` whose id is not greater than that peer's highest previous open; any stream-level frame naming an id **above** the high-water mark | `goaway(PROTOCOL_ERROR)`, then close the socket |
-| neither | a stream-level frame for an id that is not live but is **at or below** the high-water mark | ignore silently — no reset, no connection error, at most a counter |
+| connection | a message the codec cannot decode; a missing `type`; a wrong-parity stream id; an `open` whose id is not greater than that peer's highest previous open; a `data` or `reset` naming an id **above** the high-water mark | `goaway(PROTOCOL_ERROR)`, then close the socket |
+| neither | a `data` or `reset` for an id that is not live (closed, or never opened) but is **at or below** the high-water mark | ignore silently — no reset, no connection error, at most a counter |
 
 ---
 
@@ -270,11 +270,15 @@ every *other* stream, the connection is kept** (WSM-STM-024).
 - **WSM-API-002** `Stream` MUST be simultaneously awaitable (resolving with the remote's **first**
   payload) and async-iterable (yielding every reassembled payload until the remote ends).
 - **WSM-API-003** `open()` MUST take zero mandatory arguments; `payload` defaults to `null` / `None`.
-- **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly two connection-state
-  cases: `ConnectionGoingAway` after a received `goaway`, and `ConnectionLost` while the peer is
-  between sockets. The only other synchronous failures are those of the peer's open interceptors
-  (WSM-API-027). It MUST NOT queue, and `open()` MUST NOT fail for concurrency: that limit is the
-  receiver's (WSM-STM-036) and surfaces asynchronously as `StreamRefused` on the pending await.
+- **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly these connection-state
+  cases, checked in this order: `ConnectionLost` while the connection is not established (between
+  sockets, before the hello acknowledgement of WSM-RCN-043, after the final close);
+  `ConnectionGoingAway` after a received `goaway` (WSM-CON-022); `ConnectionGoingAway` after a sent
+  `goaway` (WSM-CON-021); and, after the open interceptors have run, `ConnectionGoingAway` when the
+  stream ids are exhausted (WSM-SID-007). The only other synchronous failures are those of the
+  peer's open interceptors (WSM-API-027). It MUST NOT queue, and `open()` MUST NOT fail for
+  concurrency: that limit is the receiver's (WSM-STM-036) and surfaces asynchronously as
+  `StreamRefused` on the pending await.
 - **WSM-API-005** `notify()` MUST be async and MUST return nothing. It MUST NOT return a `Stream` or
   any awaitable handle. It MUST send its `open` with `end: true` and `oneway: true` (WSM-FRM-020).
   Test: `conformance/sequences/notify-is-a-oneway-open-nobody-answers.json`.
@@ -600,8 +604,11 @@ in every language.
   do not expose them to JavaScript.
 - **WSM-CON-012** The application MAY call `peer.ping()` to measure round-trip time; it returns
   seconds (Python) / milliseconds (TypeScript).
-- **WSM-CON-020** `goaway` carries `code`, `reason` and `last_stream` — the highest stream id from
-  the *other* peer that this peer has processed and will still complete.
+- **WSM-CON-020** `goaway` carries `code`, `reason` and `last_stream` — the highest id of an `open`
+  from the *other* peer that this peer has admitted under WSM-SID-005 when it sends the `goaway`, `0`
+  if none. Each stream at or below it that is not `oneway` either runs until it ends or the drain
+  deadline passes (WSM-CON-024), or is answered with its own `reset`, `REFUSED` for an open refused
+  under WSM-STM-033 or WSM-STM-036. No stream above it is processed.
 - **WSM-CON-021** After **sending** `goaway`, a peer MUST refuse new incoming opens with
   `reset(REFUSED)` and MUST open no new streams itself.
 - **WSM-CON-022** After **receiving** `goaway`, `peer.open()` MUST raise `ConnectionGoingAway`
@@ -947,8 +954,9 @@ Each invariant is followed, after the dash, by the failure it prevents.
 - **WSM-INV-013** The hello MUST be replayed by the helper, not by the application (WSM-RCN-020) —
   otherwise an application that does not replay it holds a connected socket that the server cannot
   associate with any client, with no subscriptions and no error reported.
-- **WSM-INV-014** `tags` MUST NOT survive a reconnect (WSM-RCN-033) — otherwise a tag such as a mute
-  flag, set for one connection, applies to the next connection, which never set it.
+- **WSM-INV-014** On the acceptor `tags` MUST NOT survive a reconnect (WSM-RCN-033) — otherwise a tag
+  such as a mute flag, set for one connection, applies to the next connection, which never set it. A
+  dialer's `Peer` survives a reconnect (WSM-RCN-032) and keeps its `tags`.
 - **WSM-INV-015** An unregistered codec name MUST be a loud startup failure, never a silent JSON
   fallback (WSM-CDC-016) — otherwise a deployment configured for msgpack runs JSON with no error,
   because both ends fall back.
@@ -1219,7 +1227,7 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   with no suspension point between them, so that wire order is allocation order by construction.
   Test: `peer_test.py::test_concurrent_opens_produce_increasing_ids_on_the_wire`.
 - **WSM-SID-007** On exhaustion at 2^31−1, the exhausting peer MUST send `goaway` with `last_stream`
-  set to the highest id it has processed, MUST stop opening new streams, MUST let in-flight streams
+  as WSM-CON-020 defines it, MUST stop opening new streams, MUST let in-flight streams
   drain, and MUST then close. All four clauses apply. The trigger is the allocation of the last id,
   not a later call failing; this keeps `open()` synchronous (WSM-API-001) and lets the stream that
   took the last id drain.
@@ -1231,12 +1239,13 @@ delay = delay * (1 + uniform(-jitter, +jitter))
 - **WSM-STM-001** A peer MUST retain exactly **`highest_open_seen` per parity plus the map of live
   streams**. It MUST NOT keep per-closed-stream bookkeeping, which grows without bound over the life
   of a connection.
-- **WSM-STM-002** Any stream-level frame naming an id that is not currently live but does not exceed
-  that peer's high-water mark MUST be **silently ignored** — no reset, no connection error, at most a
-  counter. Test: `conformance/invalid/data-for-closed-id.json` (connection survives, nothing goes
-  out).
-- **WSM-STM-003** Any stream-level frame other than a valid `open` naming an id **above** that peer's
-  high-water mark MUST be a **connection-level** protocol error.
+- **WSM-STM-002** A `data` or `reset` naming an id that is not currently live (the stream is closed,
+  or the id was never opened) but does not exceed that peer's high-water mark MUST be **silently
+  ignored** — no reset, no connection error, at most a counter. An `open` at or below the mark is a
+  connection-level error (WSM-SID-005). Test: `conformance/invalid/data-for-closed-id.json`
+  (connection survives, nothing goes out).
+- **WSM-STM-003** A `data` or `reset` naming an id **above** that peer's high-water mark MUST be a
+  **connection-level** protocol error.
   Test: `conformance/invalid/data-above-high-water-mark.json` (connection dies).
 - **WSM-STM-010** Every row of the §4.2 table, including every illegal cell, MUST have a test — one
   case per cell.
@@ -1250,8 +1259,9 @@ delay = delay * (1 + uniform(-jitter, +jitter))
 - **WSM-STM-014** On socket death every live stream MUST transition to `closed` and be failed locally
   with a synthesised `reset(CONNECTION_CLOSED)` **before** `on_close` fires (WSM-RCN-041). That
   synthesised reset MUST NOT go on the wire (§2.4, code 9).
-- **WSM-STM-015** A `reset` for a stream that is already closed or was never opened MUST be ignored
-  under WSM-STM-002.
+- **WSM-STM-015** A `reset` for an id that is not live MUST be ignored when the id is at or below that
+  peer's high-water mark, whether the stream is closed or the id was never opened (WSM-STM-002), and
+  is a connection-level error above it (WSM-STM-003).
 - **WSM-STM-020** A frame illegal *for a stream* MUST reset **that stream** and leave the connection
   alone. The cases are listed in §4.3.
 - **WSM-STM-021** The code for a stream-level violation MUST be `PROTOCOL_ERROR`, except that size

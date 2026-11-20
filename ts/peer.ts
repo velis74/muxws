@@ -1244,8 +1244,8 @@ export class Peer {
   }
 
   /**
-   * Send `goaway` once. `last_stream` is the highest stream id the remote opened and this peer
-   * dispatched, so it has the remote's parity.
+   * Send `goaway` once. `last_stream` is the remote's highest admitted open, refused ones included
+   * (WSM-CON-020), so it has the remote's parity.
    */
   private sendGoaway(code: ResetCode, reason: string | null): void {
     if (this.goaway.sent) return;

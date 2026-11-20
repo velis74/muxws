@@ -160,10 +160,11 @@ different hello and in a different id space. To open a stream on the next connec
 `on_reconnect`.
 
 `ConnectionGoingAway` is also raised synchronously, under a different condition: the socket is open,
-but `goaway` has been received (the remote is stopping) or sent (this peer is stopping), so no new
-stream can be opened on this connection. Streams at or below the `goaway`'s `last_stream` run to
-completion; streams above it were not processed and are failed with `REFUSED`, so they can be retried
-on a new connection. Dial again to open new streams.
+but `goaway` has been received (the remote is stopping) or sent (this peer is stopping), or the
+connection's stream ids are exhausted, so no new stream can be opened on this connection. Streams at
+or below the `goaway`'s `last_stream` run until they end or the drain deadline passes, unless the remote
+refused them with their own `reset`; streams above it were not processed and are failed with
+`REFUSED`, so they can be retried on a new connection. Dial again to open new streams.
 
 ## `error_serializer` is per peer
 

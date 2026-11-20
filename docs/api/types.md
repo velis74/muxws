@@ -34,7 +34,7 @@ bytes and two keys.
 | `code` | `int \| None` / `number \| null` | `None` / `null` | A `ResetCode` value, on `reset` and `goaway`. Carried as an integer, so a code this generation does not define is preserved. |
 | `reason` | `str \| None` / `string \| null` | `None` / `null` | Human-readable text accompanying `code`. Never parsed for meaning. |
 | `nonce` | `str \| None` / `string \| null` | `None` / `null` | Correlates a `pong` with the `ping` it answers. Echoed back verbatim. |
-| `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has dispatched. Streams above it were not processed and can be retried elsewhere. |
+| `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has received. Streams above it were not processed and can be retried elsewhere; a stream at or below it that this peer refused gets its own `reset(REFUSED)`. |
 | `oneway` | `bool` / `boolean` | `False` / `false` | On `open`: the opener reads nothing on the stream, and the receiver sends no frame on it. Set by `notify()`, always with `end`. Carried on the first fragment. |
 
 Envelope keys are emitted in a fixed order — `type`, then `stream`, then the rest alphabetically —

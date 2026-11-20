@@ -148,10 +148,11 @@ as a protocol error.
 
 This has two consequences:
 
-- **`open()` never queues.** It raises synchronously at the call site in exactly two
-  connection-state cases: `ConnectionGoingAway` when the remote has sent `goaway` (or this peer has),
-  and `ConnectionLost` while a reconnecting peer has no socket (nothing is buffered for the next
-  one). An [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the
+- **`open()` never queues.** It raises synchronously at the call site when no stream can be
+  opened on the connection: `ConnectionLost` while the connection is not established (between sockets,
+  before the hello is acknowledged, after the final close; nothing is buffered for the next one), and
+  `ConnectionGoingAway` when either peer has sent `goaway` or the connection's stream ids are
+  exhausted. An [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the
   same way. It does *not* raise when the receiver's concurrent-stream limit is reached: that limit is
   enforced by the receiver, and the rejection arrives asynchronously as `StreamRefused` on the pending
   await. See [Connection lifecycle](/guide/connection-lifecycle).
