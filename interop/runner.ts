@@ -65,7 +65,7 @@ const EXPORT_ROWS = 5;
  * handler is scheduled, and the interleaving assertion below would depend on scheduling order.
  */
 const EXPORT_GAP_MS = 10;
-/** The cancelled-mid-flight producer's cadence. */
+/** Interval between rows of the producer that is cancelled mid-flight, in milliseconds. */
 const DRIP_GAP_MS = 20;
 /** Rows the `slow` stream produces; this stream must complete during the goaway drain. */
 const SLOW_ROWS = 3;
@@ -550,7 +550,7 @@ async function runTst005(url: string, label: string): Promise<void> {
 
   check(
     JSON.stringify(reconnects) === JSON.stringify([[1, 1]]),
-    `${label}: onReconnect fired ${JSON.stringify(reconnects)}; WSM-TST-005 wants exactly one, ` +
+    `${label}: onReconnect fired ${JSON.stringify(reconnects)}; WSM-TST-005 requires exactly one, ` +
       'after the replayed hello was acknowledged',
   );
   const expected = encodingOf({ type: 'open', stream: 1, payload: HELLO_PAYLOAD, headers: HELLO_HEADERS, end: true });
@@ -619,7 +619,7 @@ const FIXTURE_COUNT_SOURCE = join(ROOT, 'ts', 'conformance.spec.ts');
 /**
  * Mirrors `runs every fixture under some configured codec, skipping none everywhere`. The corpus's
  * `requires_codec` declarations must equal this list, so a fixture that gains a declaration fails the
- * run instead of being skipped silently under the other codec.
+ * run instead of being skipped under the other codec.
  */
 const CODEC_SPECIFIC_FIXTURES: Record<string, string> = { 'bytes-payload-under-binary-codec': 'msgpack' };
 
@@ -835,8 +835,8 @@ class Side {
   /**
    * Run one step **as this side**, and return the stream id it allocated, if any.
    *
-   * Routing has already happened by the time a step arrives here, so `step.peer` is not read: the
-   * conductor decides who runs what, and for `inject` that decision is inverted (see `ownerOf`).
+   * `step.peer` is not read: the conductor routes each step to the side that executes it, and inverts
+   * the owner for `inject` (see `ownerOf`).
    */
   async execute(step: Step, ordinals: number[]): Promise<number | null> {
     this.ordinals = [...ordinals];
@@ -1264,9 +1264,9 @@ class Control {
   }
 
   /**
-   * Send a command and go straight on to the next step, collecting the answer later. Lets a `close`
-   * step start without being awaited, so the next step's `open()` is sent before the goaway arrives
-   * (WSM-CON-021/023).
+   * Send a command without waiting for its acknowledgement; the acknowledgement is read before the
+   * next command. Lets a `close` step start without being awaited, so the next step's `open()` is
+   * sent before the goaway arrives (WSM-CON-021/023).
    */
   async dispatch(message: Record<string, unknown>): Promise<void> {
     await this.collect();

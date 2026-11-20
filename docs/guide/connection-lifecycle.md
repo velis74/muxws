@@ -199,7 +199,7 @@ shutdown described above (`goaway`, drain, close), and the stream that received 
 window like any other stream. Further `open()` calls on that connection raise `ConnectionGoingAway`.
 An application that keeps one connection open for a long time sees this as an ordinary reconnect.
 
-## The end: `on_close`
+## `on_close`
 
 Each socket death fires `on_close` once with a `CloseReason` that has four fields: `code`, `reason`,
 `was_clean` / `wasClean`, and `will_retry` / `willRetry`. Before it fires, every live stream has been

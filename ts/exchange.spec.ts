@@ -271,7 +271,7 @@ describe('peer.onExchange recording', () => {
     expect(late[0]?.request).toMatchObject({ payloads: ['a'], payloadCount: 2 });
   });
 
-  it('logs a handler that throws, runs the rest and leaves the stream and connection alone', async () => {
+  it('logs a handler that throws, runs the other handlers and does not affect the stream or connection', async () => {
     pair = startPair();
     const { dialer } = pair;
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);

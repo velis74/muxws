@@ -69,7 +69,7 @@ describe('the v1 frame set', () => {
     expect(V1_FRAME_TYPES.has(closing.type)).toBe(true);
     expect(codec.encode(closing)).toBe('{"type":"data","stream":7,"end":true,"trailers":{"checksum":"deadbeef"}}');
     expect(framesEqual(codec.decode(codec.encode(closing)), closing)).toBe(true);
-    // And `end` carries no payload of its own: the key is absent, not null.
+    // A `data` frame with `end: true` carries no payload of its own: the key is absent, not null.
     expect('payload' in toMapping(closing)).toBe(false);
   });
 

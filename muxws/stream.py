@@ -129,7 +129,7 @@ class Stream:
     async def send_headers(self, headers: dict[str, Any]) -> None:
         """Announce this side's leading headers with no payload at all (WSM-API-024).
 
-        The headers travel on a `data` frame with no payload, so an answering peer can send them
+        The headers are sent on a `data` frame with no payload, so an answering peer can send them
         before it has a payload. This is this side's first frame, so a later `send(headers=)` on the
         same stream raises.
         """
@@ -167,7 +167,7 @@ class Stream:
         trailers: dict[str, Any] | None = None,
         headers: dict[str, Any] | None = None,
     ) -> None:
-        """`send` plus `end`, which is what a unary handler wants."""
+        """`send` plus `end`: sends a last payload and ends this side."""
         await self.end(payload, trailers=trailers, headers=headers)
 
     def _leading_headers(self, headers: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -733,7 +733,7 @@ async function replay(fileName: string, swapped: boolean, codec?: Codec): Promis
 }
 
 /**
- * A fixture written for another codec is **skipped with a reason**, never passed silently.
+ * A fixture written for another codec is **skipped with a reason**, never reported as passed.
  *
  * `bytes-payload-under-binary-codec` is that fixture: bytes are a payload type only under a binary codec
  * (WSM-CDC-008), and a JSON-configured pass has nothing to assert about it. The reason is in the test's name, the
@@ -773,9 +773,9 @@ describe('conformance/sequences', () => {
   });
 
   it('runs every fixture under at least one configured codec', () => {
-    // WSM-CDC-007. Asserted over the corpus rather than left to the two suites, because the failure is silent: a
-    // `requires_codec` naming a codec no suite is configured with produces a fixture that every configuration
-    // skips, which the report shows as covered although no library code runs it.
+    // WSM-CDC-007. Asserted over the corpus rather than left to the two suites, because no suite reports this
+    // failure: a `requires_codec` naming a codec no suite is configured with produces a fixture that every
+    // configuration skips, which the report shows as covered although no library code runs it.
     const configured = [CODEC_NAME, BINARY_CODEC_NAME];
     SEQUENCE_FILES.forEach((fileName) => {
       const required = loadSequence(fileName).requires_codec;

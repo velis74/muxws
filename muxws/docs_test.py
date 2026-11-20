@@ -1,7 +1,7 @@
 """The Python half of the documentation checker.
 
 `docs/check-docs.mjs` enumerates the TypeScript surface, which node can import. This module is the
-mirror for Python, and it does the one thing node cannot: it resolves each documented signature to
+Python counterpart; unlike the node checker, it also resolves each documented signature to
 the real callable and compares them parameter by parameter, so a renamed argument or a changed
 default fails this test.
 
@@ -62,7 +62,8 @@ SEARCH_MODULES = [
 ]
 
 #: Modules behind an optional extra. A signature block that needs one of these and cannot have it is
-#: skipped rather than failed - but see `MINIMUM_SIGNATURES_COMPARED`.
+#: skipped, not failed; `MINIMUM_SIGNATURES_COMPARED` sets the minimum number of comparisons the test must
+#: make.
 OPTIONAL_MODULES = {
     "muxws.codecs.msgpack_": "msgpack",
     "muxws.transports.starlette": "starlette",
@@ -214,8 +215,8 @@ def test_every_public_python_symbol_is_documented() -> None:
                 continue
             if not _is_documented(member, documented):
                 missing.append(f"`{cls.__name__}.{member}` is public but has no entry in docs/api/")
-        # The dunders these classes define are part of how they are used - `await stream`,
-        # `async for`, `len(registry)` - so the site must name each of them somewhere.
+        # Each dunder these classes define (`await stream`, `async for`, `len(registry)`) must be named on
+        # the site.
         for member in vars(cls):
             if not (member.startswith("__") and member.endswith("__")):
                 continue
@@ -244,7 +245,7 @@ def test_every_public_python_symbol_is_documented() -> None:
             if member not in errors_page:
                 missing.append(f"`{cls.__name__}.{member}` is public but is never mentioned in docs/api/errors.md")
 
-    # `ResetCode`'s members are the reader's decision table; each of the nine must be on the page.
+    # docs/api/errors.md must mention each of the nine `ResetCode` members.
     for member in muxws.ResetCode:
         if member.name not in errors_page:
             missing.append(f"`ResetCode.{member.name}` is never mentioned in docs/api/errors.md")
@@ -375,7 +376,7 @@ def _defaults_agree(documented: str | None, actual: Any, namespace: dict[str, An
     try:
         evaluated = eval(documented, dict(namespace))  # noqa: S307 - the input is this repository's own docs
     except Exception:
-        # Not evaluable here (a private helper in another module, say); fall back on the text.
+        # Not evaluable here, e.g. a private helper in another module; the text is compared instead.
         return documented.replace("_", "") == repr(actual).replace("_", "")
     if evaluated is actual:
         return True
@@ -389,7 +390,7 @@ def _compare_function(entry: Entry, node: ast.AST, target: Any, problems: list[s
     where = f"{entry.page.name}:{entry.line} {entry.heading} -> {getattr(target, '__qualname__', target)}"
     try:
         actual = inspect.signature(target)
-    except (TypeError, ValueError) as exc:  # pragma: no cover - a builtin would land here
+    except (TypeError, ValueError) as exc:  # pragma: no cover - reached for a builtin
         problems.append(f"{where}: cannot introspect ({exc})")
         return
 
@@ -410,7 +411,7 @@ def _compare_function(entry: Entry, node: ast.AST, target: Any, problems: list[s
             problems.append(f"{where}: `{name}` is documented `= {default}` but the source has {shown}")
 
     # Annotations are compared against the source text rather than against `inspect.signature`,
-    # because half these modules use `from __future__ import annotations` and half do not, so the
+    # because some of these modules use `from __future__ import annotations` and some do not, so the
     # objects `signature()` reports are strings in one module and types in the next.
     source_node = _source_def(target)
     if source_node is None:
@@ -435,7 +436,7 @@ def _source_def(target: Any) -> ast.AST | None:
     function = inspect.unwrap(target)
     try:
         source = inspect.getsource(function)
-    except (OSError, TypeError):  # pragma: no cover - a C function would land here
+    except (OSError, TypeError):  # pragma: no cover - reached for a C function
         return None
     tree = ast.parse(_dedent(source))
     for node in ast.walk(tree):
@@ -494,7 +495,7 @@ def _compare_constant(entry: Entry, node: ast.AnnAssign, target: Any, problems: 
 
 
 def _parse_signature(block: str) -> ast.Module:
-    """A signature block is a declaration, so it often ends at the colon with no body. Give it one."""
+    """Parse a signature block, appending a body when the block ends at the colon."""
     try:
         return ast.parse(block)
     except SyntaxError:

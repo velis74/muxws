@@ -168,7 +168,7 @@ describe('the writer', () => {
     expect(internals(writer).rotate()).toBeNull();
   });
 
-  it('leaves the other streams alone when one is discarded', () => {
+  it('keeps the frames of the other streams when one stream is discarded', () => {
     const writer = makeWriter();
     writer.enqueue({ type: 'data', stream: 1, payload: big() });
     writer.enqueue({ type: 'data', stream: 3, payload: { n: 1 } });
@@ -202,7 +202,7 @@ describe('the writer', () => {
     expect(drain(writer).map((frame) => frame.type)).toEqual(['open', 'reset']);
   });
 
-  it('retires a spent lane - WSM-STM-001', () => {
+  it('removes the queue of a stream whose frames are all sent - WSM-STM-001', () => {
     const writer = makeWriter();
     writer.enqueue({ type: 'data', stream: 1, payload: { n: 1 } });
     drain(writer);
@@ -288,7 +288,7 @@ describe('the peer sends through the writer', () => {
     served.forEach((task) => void task.catch(() => undefined));
 
     try {
-      // A megabyte-ish payload on one stream, then a 200-byte update on another.
+      // A 40 000-character payload on one stream, then a small payload on another.
       dialer.open({ body: 'x'.repeat(40_000) });
       dialer.open({ progress: 42 });
 

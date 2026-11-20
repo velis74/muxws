@@ -548,7 +548,7 @@ it('closes every peer on a kill request', async () => {
     while (wire.closes.length === 0 && Date.now() < deadline) await pause(5);
     // The browser receives a `CloseReason`, so the UI can report the closed connection.
     expect(wire.closes.length).toBeGreaterThan(0);
-    note(`the browser was told: code=${wire.closes[0].code} clean=${wire.closes[0].wasClean}`);
+    note(`the browser's close handler received: code=${wire.closes[0].code} clean=${wire.closes[0].wasClean}`);
     expect(wire.dialer.isOpen).toBe(false);
     expect(wire.dialer.streams.size).toBe(0);
     // WSM-REG-016: the registry installs its own `onClose` hook, so it is empty even without

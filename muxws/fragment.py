@@ -77,8 +77,8 @@ def _fragment_frame(
 ) -> Frame:
     """Build one fragment frame.
 
-    `headers` and `oneway` ride only the first fragment and `headers` are never split (WSM-FRG-021,
-    WSM-FRM-020); `end` and `trailers` ride only the last (WSM-FRG-020); `more` is true on every
+    `headers` and `oneway` are set only on the first fragment and `headers` are never split (WSM-FRG-021,
+    WSM-FRM-020); `end` and `trailers` are set only on the last (WSM-FRG-020); `more` is true on every
     fragment but the last.
     """
     return Frame(
@@ -109,7 +109,7 @@ def _floor_error(cap: int) -> ProtocolError:
 def _closing_floor_error(cap: int) -> ProtocolError:
     """The closing fragment does not fit even carrying no payload at all.
 
-    `end` and `trailers` travel on the final fragment and are not fragmented (WSM-FRG-020), as
+    `end` and `trailers` are carried on the final fragment and are not fragmented (WSM-FRG-020), as
     `headers` are not (WSM-FRG-021). If they do not fit, no valid split exists, and the splitter
     raises instead of emitting fragments without end.
     """
@@ -242,7 +242,7 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
 
 
 class Assembler:
-    """Receive side: concatenates `fragment` values and decodes once the last one lands.
+    """Receive side: concatenates `fragment` values and decodes the result when the last one arrives.
 
     `feed()` returns `ABSENT` while `more` is true, and the decoded payload on the frame that closes
     the sequence (WSM-FRG-030).
@@ -271,7 +271,7 @@ class Assembler:
         self._bytes = 0
 
     def feed(self, frame: Frame, codec: Codec) -> Any:
-        """Absorb one fragment frame; return `ABSENT` while more are expected, else the payload.
+        """Add one fragment frame; return `ABSENT` while more are expected, else the payload.
 
         Raises `ProtocolError` when the fragments mix text and binary values, or when the codec cannot
         decode the joined payload. The partial buffer is dropped in both cases.

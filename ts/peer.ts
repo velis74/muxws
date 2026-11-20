@@ -98,7 +98,7 @@ export interface PeerOptions {
   maxFrameBytes?: number;
   /**
    * The largest reassembled payload this peer accepts, in bytes. Local and not announced
-   * (WSM-FRG-035); a sender learns of it only from the resulting reset.
+   * (WSM-FRG-035); the reset sent for a payload above it is the only report of it to the sender.
    */
   maxPayloadBytes?: number;
   /**
@@ -473,7 +473,7 @@ export class Peer {
    *
    * At most one is reported per peer. When the attempt cap is reached through hello failures, the
    * last loss already carries `willRetry: false`, and the helper's own give-up call to `notifyClose`
-   * is then suppressed. `isClosed` reads it, and `onClose` hands it to a handler registered after it
+   * is then suppressed. `isClosed` reads it, and `onClose` passes it to a handler registered after it
    * (WSM-RCN-047).
    */
   private finalClose: CloseReason | null = null;
@@ -1101,8 +1101,8 @@ export class Peer {
         `an encoded message of ${size} bytes exceeds this receiver's cap (WSM-FRG-031)`,
       );
     } else {
-      // No live stream, typically an over-cap `open`. The reset is still sent, because it is the only
-      // way the sender learns of the unannounced limit.
+      // No live stream, typically an over-cap `open`. The reset is still sent: the limit is not
+      // announced, and the reset is the only report of it to the sender.
       this.enqueue({
         type: 'reset',
         stream: frame.stream,
@@ -1208,9 +1208,8 @@ export class Peer {
     this.willRetry = false;
     await this.connectionLoop?.stop();
     if (!this.open_) {
-      // Between two sockets the last loss reported `willRetry: true`; this is the close that tells the
-      // application no reconnection follows (WSM-RCN-040/046). On a peer already closed, `notifyClose`
-      // suppresses it.
+      // Between two sockets the last loss reported `willRetry: true`; this close reports
+      // `willRetry: false` (WSM-RCN-040/046). On a peer already closed, `notifyClose` suppresses it.
       this.notifyClose({ code: 1000, reason: reason ?? '', wasClean: true, willRetry: false });
       return;
     }
@@ -1318,7 +1317,7 @@ export class Peer {
         return true;
       }
       // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). The
-      // limit is not announced; the sender learns of it only from this reset.
+      // limit is not announced; this reset is the only report of it to the sender.
       this.enqueue({
         type: 'reset',
         stream: streamId,
@@ -1662,8 +1661,8 @@ export class Peer {
    * Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
    *
    * Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset this stream with
-   * PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the peers still agree about every other
-   * stream and the connection stays open (WSM-STM-020/024).
+   * PROTOCOL_ERROR and return `ABSENT`. Each message is decoded independently, so other streams are unaffected and
+   * the connection stays open (WSM-STM-020/024).
    */
   private reassemble(stream: Stream, frame: Frame): unknown {
     try {

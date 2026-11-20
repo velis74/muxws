@@ -57,7 +57,7 @@ class ExchangeSide:
 class Exchange:
     """One finished stream, as the reporting peer saw it. Durations are in seconds."""
 
-    #: `Peer.id` of the connection the stream lived on.
+    #: `Peer.id` of the connection that carried the stream.
     conn: str
     #: The stream id.
     stream: int

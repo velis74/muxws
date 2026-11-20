@@ -19,7 +19,7 @@ DEFAULT_PORTS = {"http": 80, "https": 443}
 #: Every value of one request header, looked up by lower-case name, in order.
 HeaderValues = Callable[[str], Sequence[str]]
 
-#: A compiled policy: the request headers of one handshake in, the decision out.
+#: A compiled policy: takes the request headers of one handshake and returns True when the handshake is allowed.
 OriginCheck = Callable[[HeaderValues], bool]
 
 

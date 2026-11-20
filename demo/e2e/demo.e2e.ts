@@ -40,7 +40,7 @@ async function numberIn(locator: Locator): Promise<number> {
   return match === null ? Number.NaN : Number(match[0]);
 }
 
-test('the browser demo: every control and its visible result', async ({ page }) => {
+test('uses every control of the browser demo once and asserts the visible result of each', async ({ page }) => {
   // The page dials once and does not retry a failed first connection (WSM-RCN-006), so it is opened
   // only after the backend listens; `webServer.url` covers the dev server only.
   await backendListening();

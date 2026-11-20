@@ -273,7 +273,7 @@ describe("the shipped build's externals (WSM-ERR-016)", () => {
     }
   }
 
-  it('leaves node:net a real import, so the unix dial has a socket to open', { timeout: 60_000 }, async () => {
+  it('keeps node:net as a real import in the build for the unix dial', { timeout: 60_000 }, async () => {
     const { code, failure } = await shippedNodeBundle();
     expect(failure, 'the node bundle build failed').toBe('');
     // Non-vacuity: an empty chunk would satisfy the `not.toContain` below without bundling anything.

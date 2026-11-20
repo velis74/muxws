@@ -188,7 +188,7 @@ def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, en
 ### Return
 
 `Stream` — live and already enqueued. It is both awaitable (the first payload) and async-iterable
-(every payload); whichever you use first claims it, and the other then raises
+(every payload); the first use claims it, and a use of the other kind then raises
 `StreamAlreadyConsumed`.
 
 ### Raises
@@ -1716,9 +1716,9 @@ interceptIncomingHeaders(interceptor: IncomingHeadersInterceptor): () => void;
 
 ### Raises
 
-Raises: nothing. An interceptor that throws, or returns a thenable (its rejection is silenced), is
-logged through `logger.error`; the remaining interceptors still run, and the frame, the stream and the
-connection are processed as if no interceptor had failed.
+Raises: nothing. An interceptor that throws, or returns a thenable (its rejection is caught and
+discarded), is logged through `logger.error`; the remaining interceptors still run, and the frame,
+the stream and the connection are processed as if no interceptor had failed.
 
 ### Example
 
@@ -2502,7 +2502,7 @@ console.log('after the socket dies:', dialer.isOpen);
 
 ## `peer.is_closed` (Python)
 
-Whether the peer has ended for good: true once it has reported its `will_retry=False` close, and
+Whether the peer has ended permanently: true once it has reported its `will_retry=False` close, and
 false before it.
 
 | State | `is_open` | `is_closed` |
@@ -2527,7 +2527,8 @@ None — read-only property.
 
 ### Return
 
-`bool` — true when the peer carries no further traffic and its reconnect helper, if any, dials no more.
+`bool` — true when the peer carries no further traffic and its reconnect helper, if any, does not
+dial again.
 
 ### Raises
 
@@ -2691,7 +2692,7 @@ console.log('even ids for the acceptor:', acceptor.open('y').id % 2 === 0);
 
 ## `peer.last_activity` (Python)
 
-When a frame last crossed this socket, in **either** direction, on the event loop's clock in seconds.
+The time of the last frame sent or received on this socket, on the event loop's clock in seconds.
 
 The heartbeat reads this value and sends a `ping` only after `ping_interval` seconds without a frame
 in either direction, so a connection that carries traffic sends no heartbeat pings.
@@ -2710,7 +2711,7 @@ None — read-only property.
 ### Return
 
 `float` — seconds on `asyncio.get_running_loop().time()`, the same clock the heartbeat compares it
-against. It is `0.0` on a peer across which no frame has yet passed.
+against. It is `0.0` on a peer that has not sent or received a frame.
 
 ### Raises
 
@@ -2761,8 +2762,8 @@ None — getter.
 
 ### Return
 
-`number` — **milliseconds** on `performance.now()`'s scale, the clock `peer.clock()` reads. `0` until
-the first frame crosses.
+`number` — **milliseconds** on `performance.now()`'s scale, the clock `peer.clock()` reads. `0`
+until the first frame is sent or received.
 
 ### Raises
 
@@ -2875,7 +2876,7 @@ None — it is a constant.
 
 ### Return
 
-`number` — 64 MiB in bytes: the largest reassembled payload a peer accepts unless told otherwise.
+`number` — 64 MiB in bytes: the largest reassembled payload a peer accepts by default.
 Local to the peer that holds it, never announced, and checked as fragments arrive rather than after
 reassembly.
 

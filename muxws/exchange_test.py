@@ -294,7 +294,7 @@ async def test_a_raising_handler_is_logged_and_the_others_still_run(make_pair, c
     seen: list[Exchange] = []
 
     def broken(_exchange):
-        raise RuntimeError("boom")
+        raise RuntimeError("handler failure")
 
     built.dialer.on_exchange(broken)
     built.dialer.on_exchange(seen.append)

@@ -116,7 +116,7 @@ class Lone:
 
 @pytest.fixture
 def make_lone() -> Callable[..., Lone]:
-    """An acceptor with no counterpart, so injected frames cannot confuse a real peer."""
+    """An acceptor with no peer on the other end: the test injects its inbound frames and reads the frames it sends."""
 
     def build(**peer_options: Any) -> Lone:
         _, socket = memory_pair()

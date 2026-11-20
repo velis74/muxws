@@ -536,7 +536,7 @@ export class ConnectionLoop {
   // ------------------------------------------------------------------ the supervisor
 
   /**
-   * Serve the current socket, then back off and re-dial until told to stop.
+   * Serve the current socket, then back off and re-dial until `stop()` is called or the attempt cap is exhausted.
    *
    * The numbered steps run in order: no dial starts before the previous socket's read loop has
    * finished, and `stop()` is checked before giving up.
@@ -652,7 +652,7 @@ export class ConnectionLoop {
    * (WSM-RCN-044).
    *
    * Uses `notifyClose`, not `die()`: there is no socket, and the last socket loss was already
-   * reported. This report tells the application that the helper has stopped retrying.
+   * reported. This report means the helper makes no further dial.
    */
   private giveUp(): void {
     this.peer.willRetry = false;

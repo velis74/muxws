@@ -296,7 +296,7 @@ describe.skipIf(process.platform === 'win32')('dialling ws+unix: from muxws/node
     }
   });
 
-  it('refuses a request target that is not an absolute path, by name', async () => {
+  it('refuses a request target that is not an absolute path with a UnixUrlError', async () => {
     // Counterpart of `test_a_request_target_that_is_not_an_absolute_path_is_refused`. Both ports
     // refuse the url before dialling: `ws://localhost` + `ws` is `ws://localhostws`, a valid url, so
     // the target becomes part of the authority and the dial requests `/` from the correct file with

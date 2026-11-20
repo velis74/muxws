@@ -157,10 +157,11 @@ them:
    then encode each fragment frame, check that it fits the cap, and re-split it if it does not. The
    reservation is an estimate; the check guarantees the cap. `frames/v1-fragment-boundaries.json`
    detects off-by-one errors in the cut points.
-3. **The state machine and the id rules.** Dialer ids are odd, acceptor ids are even, and each peer's
-   own opens are strictly increasing. A `data` or `reset` for an id that is no longer live (or was
-   never opened) at or below the high-water mark is silently ignored; one above the mark is a connection
-   error, and so is an `open` whose id is not above its opener's previous one. `sequences/` tests this.
+3. **The state machine and the id rules.** Dialer ids are odd, acceptor ids are even, and each
+   peer's own opens are strictly increasing. A `data` or `reset` for an id that is no longer live
+   (or was never opened) at or below the high-water mark is ignored without an error; one above the
+   mark is a connection error, and so is an `open` whose id is not above its opener's previous one.
+   `sequences/` tests this.
 4. **Misbehaviour.** `invalid/` specifies which failures reset one stream and which end the connection,
    in the `connection_survives` column.
 

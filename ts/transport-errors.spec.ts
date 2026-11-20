@@ -96,7 +96,7 @@ function probeWithoutWs(failure: string): Probe {
   }
 }
 
-/** The resolver's own words for a package that was never installed, `code` included. */
+/** The resolver's error for a package that is not installed, `code` included. */
 const ABSENT = [
   'const error = new Error("Cannot find package \'ws\' imported from /app/node_modules/muxws/dist/node.js");',
   "    error.code = 'ERR_MODULE_NOT_FOUND';",
@@ -107,7 +107,7 @@ const ABSENT = [
 const BROKEN = "throw new SyntaxError('Unexpected token in /node_modules/ws/lib/websocket.js');";
 
 describe('dialling with the ws peer dependency absent - WSM-ERR-016', () => {
-  it('names the install rather than the module the resolver could not find', { timeout: 60_000 }, () => {
+  it('throws a WsNotInstalledError that names `npm install ws` when ws is missing', { timeout: 60_000 }, () => {
     const probe = probeWithoutWs(ABSENT);
 
     expect(probe.name).toBe('WsNotInstalledError');
@@ -124,7 +124,7 @@ describe('dialling with the ws peer dependency absent - WSM-ERR-016', () => {
     expect(probe.causeCode).toBe('ERR_MODULE_NOT_FOUND');
   });
 
-  it('rethrows a broken install untouched, so it is never reported as an absent one', { timeout: 60_000 }, () => {
+  it('rethrows the import error of an installed but broken dependency unchanged', { timeout: 60_000 }, () => {
     // Control for the test above. `requireWs` reads `code` and does not translate every error: for a
     // corrupt `node_modules/ws`, `npm install ws` is the wrong remedy, and only the original message
     // names the fault. Without this test, a blanket `catch` in the translation would also pass.

@@ -16,8 +16,8 @@ from muxws.errors import ProtocolError
 class _Absent:
     """The sentinel distinguishing "no payload" from an explicit `null`.
 
-    Falsy, so `if frame.payload:` behaves the way a reader expects, and with a `repr` that names
-    itself rather than leaking a memory address into a test failure.
+    Falsy, so `if frame.payload:` is false for an absent payload. Its `repr` is `ABSENT`, not a memory
+    address.
     """
 
     __slots__ = ()

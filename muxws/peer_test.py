@@ -118,7 +118,7 @@ async def test_closing_a_peer_does_not_free_its_id(make_pair):
     assert min(int(i.split("-")[1]) for i in fresh_ids) > max(int(i.split("-")[1]) for i in closed_ids)
 
 
-#: Every spelling a caller might reach for if they wanted to name a stream themselves.
+#: Parameter names a caller could use to supply a stream id.
 _ID_ARGUMENT_NAMES = frozenset({"id", "sid", "stream", "stream_id", "streamid"})
 
 #: The public callables that take an argument by one of those names and are exempt from the rule.
@@ -207,7 +207,10 @@ def _signature_of(function: Any) -> inspect.Signature:
 
 
 async def test_frame_for_closed_id_is_ignored(make_pair):
-    """WSM-STM-002: expected during a normal race - no reset, no connection error, at most a counter."""
+    """WSM-STM-002: a frame for a closed id is a normal race outcome.
+
+    It causes no reset and no connection error, at most a counter increment.
+    """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -228,8 +231,8 @@ async def test_frame_for_closed_id_is_ignored(make_pair):
         await pair.stop()
 
 
-async def test_frame_above_high_water_mark_kills_connection(make_pair):
-    """WSM-STM-003/WSM-INV-006: a genuine id-space disagreement must not be swallowed."""
+async def test_frame_above_high_water_mark_fails_the_connection(make_pair):
+    """WSM-STM-003/WSM-INV-006: a frame on an id above the high-water mark is a connection error, not ignored."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -254,7 +257,7 @@ async def test_frame_above_high_water_mark_kills_connection(make_pair):
         ("not-monotonic", None),
     ],
 )
-async def test_wrong_parity_and_non_monotonic_open_kill_connection(name: str, frame: Frame | None, make_pair):
+async def test_wrong_parity_and_non_monotonic_open_fail_the_connection(name: str, frame: Frame | None, make_pair):
     """WSM-SID-005: both are connection-level."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -274,7 +277,7 @@ async def test_wrong_parity_and_non_monotonic_open_kill_connection(name: str, fr
 
 
 async def test_data_after_end_resets_only_that_stream(make_pair):
-    """WSM-STM-020/021: ILL-S resets that stream and leaves the connection - and others - alone."""
+    """WSM-STM-020/021: ILL-S resets that stream; the connection and the other streams stay open."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -299,7 +302,7 @@ async def test_data_after_end_resets_only_that_stream(make_pair):
 
 
 async def test_no_bookkeeping_survives_a_closed_stream(make_pair):
-    """WSM-STM-001: two high-water integers and the live map, and nothing else."""
+    """WSM-STM-001: the peer retains two high-water integers and the live-stream map, and nothing per closed stream."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -326,14 +329,14 @@ async def test_no_bookkeeping_survives_a_closed_stream(make_pair):
 
 
 async def test_unknown_frame_type_is_ignored(make_pair, caplog):
-    """WSM-FRM-002: dropped, logged once, connection alive, nothing goes out.
+    """WSM-FRM-002: the frame is dropped and logged once; the connection stays open and nothing is sent.
 
     The three conditions are asserted together: a peer that never received the frame is also alive
     and silent, and a peer that answered it with a `reset` also logs. `on_frame` fires after decode
     and before dispatch (WSM-OBS-003), so it confirms the frame arrived.
 
     `stream=1` is above this acceptor's high-water mark, so an implementation that passes an
-    unrecognised type to the stream-frame path kills the connection (WSM-STM-003).
+    unrecognised type to the stream-frame path fails the connection (WSM-STM-003).
     """
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -408,7 +411,7 @@ async def test_unknown_envelope_field_is_ignored(make_lone):
     two peers' whole wires. WSM-CON-009 (additive revisions are safe to receive) depends on this rule.
 
     The test uses a `Lone` peer: a real counterpart would receive the reply to a stream it never
-    opened and kill the connection.
+    opened and fail the connection.
     """
     with_field = '{"type":"open","stream":1,"payload":{"q":1},"end":true,"colour":"red"}'
     without = '{"type":"open","stream":1,"payload":{"q":1},"end":true}'
@@ -534,7 +537,7 @@ async def test_error_serializer_returning_none_sends_no_payload(make_pair):
 
 
 async def test_error_serializer_is_per_peer(make_pair):
-    """WSM-ERR-008: one process, two peers, two answers to the same exception."""
+    """WSM-ERR-008: two peers in one process serialise the same exception with their own `error_serializer`."""
     redacting = make_pair(error_serializer=lambda _exc: {"redacted": True})
     verbose = make_pair(error_serializer=default_error_serializer)
 
@@ -635,7 +638,7 @@ async def test_fragmented_open_reaches_handler_whole(make_pair):
 
 
 async def test_notify_returns_none_and_leaves_no_handle(make_pair):
-    """WSM-API-005: no `Stream`, no awaitable, nothing to consume."""
+    """WSM-API-005: `notify()` returns `None` and leaves no `Stream` or awaitable."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -718,7 +721,7 @@ async def _cancel_shape(rig: _Rig) -> None:
 
 
 #: Every shape WSM-RCN-041 names, with the required outcome when the socket dies. The shapes are
-#: listed only here: the runner below opens one stream per entry, waits until all are armed, kills
+#: listed only here: the runner below opens one stream per entry, waits until all are armed, drops
 #: the socket once, and checks each outcome against this map. Adding a shape is one entry (§6).
 _DEATH_SHAPES: dict[str, tuple[Callable[[_Rig], Awaitable[None]], type[BaseException] | None]] = {
     "await stream": (_await_shape, ConnectionLost),
@@ -954,7 +957,7 @@ async def test_an_on_frame_handler_that_raises_leaves_the_connection_open(make_p
 
 
 async def test_payload_contents_never_appear_in_a_log_record(make_pair, caplog):
-    """WSM-OBS-002: application data routinely contains secrets."""
+    """WSM-OBS-002: no log record contains payload contents, which may include secrets."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -1084,7 +1087,7 @@ async def test_a_binary_codec_uses_send_bytes():
 
 
 @pytest.mark.parametrize("frame_type", ["open", "data", "reset"])
-async def test_a_stream_frame_with_no_stream_id_kills_the_connection(frame_type: str, make_pair):
+async def test_a_stream_frame_with_no_stream_id_fails_the_connection(frame_type: str, make_pair):
     """A stream-level frame that names no stream cannot be attributed to anything."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
@@ -1164,7 +1167,7 @@ async def test_a_handler_return_after_resetting_its_stream_does_not_raise(make_p
         await pair.stop()
 
 
-async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(make_pair):
+async def test_an_unknown_reset_code_resets_the_stream_and_keeps_the_peer_open(make_pair):
     """A reset code this peer does not know, including the unassigned 5, resets the stream and keeps the peer open.
 
     Converting the wire value directly to `ResetCode` raises `ValueError` in the read loop, which
@@ -1185,7 +1188,7 @@ async def test_an_unknown_reset_code_resets_the_stream_without_killing_the_peer(
             )
             await pair.settle()
 
-            assert pair.dialer.is_open, f"code {wire_code} must not kill the connection"
+            assert pair.dialer.is_open, f"code {wire_code} must not close the connection"
             assert closes == []
             with pytest.raises(StreamReset) as info:
                 await stream
@@ -1408,7 +1411,7 @@ async def test_a_read_loop_failure_refuses_local_opens_while_it_drains(make_pair
 
 
 async def test_close_marks_the_peer_dead_when_the_adapter_close_raises(make_pair, caplog):
-    """WSM-CON-025/WSM-STM-014: an exception from the adapter's `close()` is logged; the peer still dies."""
+    """WSM-CON-025/WSM-STM-014: an exception from the adapter's `close()` is logged, and the peer is marked closed."""
     pair = make_pair()
     pair.acceptor._socket = _WrappedSocket(pair.acceptor_socket, failing_close=True)  # type: ignore[assignment]
     pair.acceptor.on_stream(_hold)
@@ -1433,7 +1436,7 @@ async def test_close_marks_the_peer_dead_when_the_adapter_close_raises(make_pair
 
 
 async def test_a_wrong_parity_open_during_reassembly_is_a_connection_error(make_pair):
-    """WSM-SID-005: parity is checked before anything else, whatever reassembly is in flight.
+    """WSM-SID-005: parity is checked first, also while a payload on that id is being reassembled.
 
     If continuation were inferred from an assembler running on that id, a stream this peer opened
     that is receiving fragmented `data` would accept an `open` with this peer's own parity as a
@@ -1765,7 +1768,7 @@ async def test_an_unencodable_frame_fails_its_stream_and_the_writer_keeps_runnin
             await stream
         assert info.value.code is ResetCode.INTERNAL_ERROR
 
-        # The writer is still alive: a later request still completes.
+        # The writer task is still running: a later request completes.
         assert await pair.dialer.request({"q": 2}) == {"ok": True}
     finally:
         await pair.stop()
@@ -2004,7 +2007,7 @@ async def test_per_stream_headers_arrive_unchanged_and_change_nothing(make_pair)
     assert seen[1] == {}, "a stream opened without headers gets an empty mapping, not the last one's"
     assert dialer_with[0].headers == _HEADERS_THAT_LOOK_LIKE_AUTHENTICATION, "verbatim on the wire"
 
-    # The headers change nothing else: same result, same frames, same order.
+    # Apart from the headers, the result, the frames and their order are identical.
     assert with_headers == without == {"ok": True}
     stripped = [dataclasses.replace(frame, headers=None) for frame in dialer_with]
     assert stripped == dialer_without, "the headers changed what this peer sent"
@@ -2155,7 +2158,7 @@ async def test_a_payload_spelled_like_an_envelope_is_carried_and_never_read(make
         await pair.stop()
 
 
-async def test_an_envelope_lookalike_payload_survives_being_fragmented(make_pair):
+async def test_an_envelope_lookalike_payload_is_delivered_unchanged_after_fragmentation(make_pair):
     """WSM-FRM-006 for a fragmented payload.
 
     The splitter cuts the codec's encoding of the payload into byte ranges (WSM-FRG-011), so a
@@ -2191,7 +2194,7 @@ async def test_an_envelope_lookalike_payload_survives_being_fragmented(make_pair
         await pair.stop()
 
 
-#: WSM-API-008's partition, spelled out. `connect`, `accept`, `serve`, `notify`, `request`, `ping`,
+#: The async callables of WSM-API-008. `connect`, `accept`, `serve`, `notify`, `request`, `ping`,
 #: `close` and every `Stream` send method are async; everything else must not be.
 #:
 #: Entries the rule does not name: `Stream.result` and `Stream.cancel`/`reset` wait or send, so they
@@ -2221,7 +2224,7 @@ _MUST_BE_ASYNC = frozenset(
 )
 
 
-def test_the_public_api_is_async_exactly_where_the_rule_says():
+def test_the_async_members_of_the_public_api_are_exactly_those_wsm_api_008_lists():
     """WSM-API-008: checked on the signatures.
 
     The set of async callables is compared for equality, so both an async callable that should be
@@ -2245,7 +2248,7 @@ def test_the_public_api_is_async_exactly_where_the_rule_says():
 
 
 async def test_the_opening_payload_is_never_looked_at_for_routing(make_pair):
-    """WSM-AUT-004 / WSM-STM-030: one handler, and it gets everything.
+    """WSM-AUT-004 / WSM-STM-030: one handler receives every incoming stream.
 
     The payloads contain routing-like content: two different paths and methods, a string with no
     keys, and a null. All four reach the same handler in the order they were opened, and none is
@@ -2282,7 +2285,7 @@ async def test_the_opening_payload_is_never_looked_at_for_routing(make_pair):
         await pair.stop()
 
 
-async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_pair):
+async def test_no_hook_intercepts_an_error_before_it_is_raised_at_the_call_site(make_pair):
     """WSM-ERR-003: errors are raised where they are awaited, and no hook receives them instead.
 
     `socket_death_test.py` checks that every shape raises. This test checks that no hook diverts the
@@ -2334,8 +2337,11 @@ async def test_no_hook_can_intercept_an_error_on_its_way_to_the_call_site(make_p
 # --------------------------------------------------------------------------- header interceptors
 
 
-async def test_open_interceptors_shape_the_headers_of_every_open(make_pair):
-    """WSM-API-026/027: in registration order, on a copy, before the frame is built, for every opening call."""
+async def test_open_interceptors_modify_a_copy_of_the_headers_of_every_open(make_pair):
+    """WSM-API-026/027: open interceptors run in registration order on a copy of the headers.
+
+    They run before the frame is built, for every opening call.
+    """
     pair = make_pair()
     received: list[dict[str, Any]] = []
 
@@ -2392,7 +2398,10 @@ async def test_open_interceptors_shape_the_headers_of_every_open(make_pair):
 
 
 async def test_an_open_interceptor_that_raises_fails_the_open_allocates_no_id_and_sends_nothing(make_pair):
-    """WSM-API-027: the interceptor's own exception at the call site, no id allocated, nothing enqueued."""
+    """WSM-API-027: the interceptor's exception is raised at the call site.
+
+    No id is allocated and nothing is enqueued.
+    """
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     later: list[str] = []
@@ -2435,8 +2444,11 @@ async def test_an_open_interceptor_that_raises_fails_the_open_allocates_no_id_an
         await pair.stop()
 
 
-async def test_reply_headers_interceptors_shape_the_first_frame_of_every_answer(make_pair):
-    """WSM-API-028: on a copy, once per stream the remote opened, whichever call sends the first frame."""
+async def test_reply_headers_interceptors_get_a_copy_of_each_answers_first_frame(make_pair):
+    """WSM-API-028: reply headers interceptors run on a copy of the headers.
+
+    They run once per stream the remote opened, on the first frame sent by any call.
+    """
     pair = make_pair()
     seen: list[tuple[dict[str, Any], str]] = []
     kept: list[dict[str, Any]] = []
@@ -2571,7 +2583,11 @@ async def test_serve_registers_the_interceptors_it_is_given():
 
 
 async def test_incoming_interceptors_see_each_streams_leading_headers_once(make_pair):
-    """WSM-API-029: the remote's open on one side, the remote's first data on the other, read-only."""
+    """WSM-API-029: incoming interceptors receive the leading headers read-only.
+
+    On the acceptor these are the headers of the remote's `open`, on the dialer those of the remote's
+    first `data`.
+    """
     pair = make_pair()
     order: list[str] = []
     seen_by_acceptor: list[tuple[dict[str, Any], bool]] = []
@@ -2615,7 +2631,7 @@ async def test_incoming_interceptors_see_each_streams_leading_headers_once(make_
 
 
 async def test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing(make_pair, caplog):
-    """WSM-API-029: logged, the next interceptor still runs, and the stream and the connection stay open."""
+    """WSM-API-029: the exception is logged, the next interceptor runs, and the stream and the connection stay open."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     after: list[Any] = []

@@ -58,7 +58,7 @@ def test_the_negotiated_subprotocol_is_the_muxws_entry():
 
 
 def test_extra_subprotocols_are_ignored():
-    """WSM-CDC-021: the application's own entries are left entirely alone."""
+    """WSM-CDC-021: the application's own entries are left unchanged."""
     with TestClient(_app()) as client:
         with client.websocket_connect("/ws", subprotocols=["bearer.abc123", "muxws.v1.json"]) as socket:
             assert socket.accepted_subprotocol == "muxws.v1.json"
@@ -104,7 +104,10 @@ def test_refusal_is_http_400_and_is_logged(offered: list[str], caplog):
 
 
 def test_application_accepting_first_is_an_error():
-    """WSM-CDC-026: a silent second accept would hide which subprotocol was selected."""
+    """WSM-CDC-026: `accept()` on a socket the application already accepted raises.
+
+    A second accept without an error would hide which subprotocol was selected.
+    """
     with TestClient(_app(accept_first=True)) as client:
         with pytest.raises(ProtocolError, match="already accepted"):
             with client.websocket_connect("/ws", subprotocols=["muxws.v1.json"]) as socket:

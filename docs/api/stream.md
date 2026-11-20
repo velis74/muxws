@@ -336,8 +336,8 @@ None — a plain instance attribute.
 
 ### Return
 
-`asyncio.Event` — `await stream.reply_headers_arrived.wait()`, or `.is_set()` for a look that does
-not wait.
+`asyncio.Event` — `await stream.reply_headers_arrived.wait()`, or `.is_set()` to check without
+waiting.
 
 ### Raises
 
@@ -758,7 +758,7 @@ A TypeScript handler observes it in place of Python's `asyncio.CancelledError`. 
 interrupt a running function, so the handler must check `stream.signal.aborted` between steps, or
 pass the signal to the functions it calls.
 
-There is no Python twin: Python cancels the handler's task instead.
+Python has no equivalent: it cancels the handler's task instead.
 
 ### Signature
 
@@ -1185,12 +1185,13 @@ async send(payload: unknown, options: SendOptions = {}): Promise<void>;
 
 ### Raises
 
-Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`, under the same conditions
-as in Python, and also with `ProtocolError` when `headers` rides a frame that is not this side's
-first on the stream, and whatever a reply headers interceptor throws (or `TypeError` for a thenable it
-returned or a symbol key it left) when this is this side's first frame on a stream the remote opened
-(see [`interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript)). Nothing is sent,
-and the next call may still carry headers.
+Rejects with `StreamClosed`, a `StreamReset` subclass, or `ConnectionLost`, under the same
+conditions as in Python, and also with `ProtocolError` when `headers` is passed for a frame that is
+not this side's first on the stream, and whatever a reply headers interceptor throws (or `TypeError`
+for a thenable it returned or a symbol key it left) when this is this side's first frame on a stream
+the remote opened (see
+[`interceptReplyHeaders()`](./peer.md#peer-interceptreplyheaders-typescript)). Nothing is sent, and
+the next call may still carry headers.
 
 ### Example
 
@@ -1224,7 +1225,7 @@ await dialer.close({ drainMs: 100 });
 
 ## `stream.send_headers()` (Python)
 
-Announce this side's leading headers with no payload at all.
+Send this side's leading headers on a frame without a payload.
 
 It sends a `data` frame that carries headers and no payload, so the opener can read `reply_headers`
 before the handler has produced the first payload. To send the headers on the same frame as the first
@@ -1418,7 +1419,7 @@ async def end(
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `Any` | `ABSENT` | A final payload. The default sentinel means "no payload": the `end` frame carries no `payload` field at all, which is different from sending `None`. |
-| `trailers` | `dict[str, Any] \| None` | `None` | Metadata riding the `end` frame, read by the other side as `stream.trailers` once the stream has finished. |
+| `trailers` | `dict[str, Any] \| None` | `None` | Metadata carried on the `end` frame, read by the other side as `stream.trailers` once the stream has finished. |
 | `headers` | `dict[str, Any] \| None` | `None` | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). Later ones raise; see [`stream.send_headers()`](#stream-send-headers-python). |
 
 ### Return
@@ -1503,10 +1504,10 @@ async end(options: EndOptions = {}): Promise<void>;
 ### Raises
 
 Rejects with `StreamClosed` (closed normally, or `end` already sent), a `StreamReset` subclass, or
-`ConnectionLost` — plus `ProtocolError` when `headers` rides a frame that is not this side's first on
-the stream, and a reply headers interceptor's failure as described under `send()`. In the implicit
-end of a handler that returns without ending, that failure is the handler's: the stream is reset with
-`APPLICATION_ERROR`.
+`ConnectionLost` — plus `ProtocolError` when `headers` is passed for a frame that is not this side's
+first on the stream, and a reply headers interceptor's failure as described under `send()`. In the
+implicit end of a handler that returns without ending, that failure is the handler's: the stream is
+reset with `APPLICATION_ERROR`.
 
 ### Example
 
@@ -1556,7 +1557,7 @@ export interface EndOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `unknown` | absent | The final payload. Leaving it out sends an `end` frame with no `payload` field, which is not the same as sending `null`. |
-| `trailers` | `Record<string, unknown>` | `null` | Metadata riding the `end` frame. |
+| `trailers` | `Record<string, unknown>` | `null` | Metadata carried on the `end` frame. |
 | `headers` | `Record<string, unknown>` | — | This side's leading headers, if this is the **first** frame it sends on the stream (WSM-FRM-016). |
 
 ### Return
@@ -1615,8 +1616,8 @@ async def reply(
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `payload` | `Any` | required | The response. Unlike `end()`, it is required here: a reply with nothing in it is `end()`. |
-| `trailers` | `dict[str, Any] \| None` | `None` | Metadata riding the same `end` frame. |
-| `headers` | `dict[str, Any] \| None` | `None` | The answer's leading headers, riding the same frame. Only legal when this is the handler's first frame on the stream (WSM-FRM-016); to announce them *before* the answer is ready, use [`stream.send_headers()`](#stream-send-headers-python). |
+| `trailers` | `dict[str, Any] \| None` | `None` | Metadata carried on the same `end` frame. |
+| `headers` | `dict[str, Any] \| None` | `None` | The answer's leading headers, carried on the same frame. Only legal when this is the handler's first frame on the stream (WSM-FRM-016); to announce them *before* the answer is ready, use [`stream.send_headers()`](#stream-send-headers-python). |
 
 ### Return
 
@@ -1683,8 +1684,8 @@ async reply(payload: unknown, options: ReplyOptions = {}): Promise<void>;
 ### Raises
 
 Rejects with `StreamClosed`, a `StreamReset` subclass, `ConnectionLost`, `ProtocolError` when
-`headers` rides a frame that is not this side's first on the stream, or a reply headers interceptor's
-failure as described under `send()`.
+`headers` is passed for a frame that is not this side's first on the stream, or a reply headers
+interceptor's failure as described under `send()`.
 
 ### Example
 
@@ -1723,8 +1724,8 @@ export interface ReplyOptions {
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `trailers` | `Record<string, unknown>` | `undefined` | Metadata riding the `end` frame the reply sends. |
-| `headers` | `Record<string, unknown>` | `undefined` | The answer's leading headers, riding the same frame (WSM-FRM-016). |
+| `trailers` | `Record<string, unknown>` | `undefined` | Metadata carried on the `end` frame the reply sends. |
+| `headers` | `Record<string, unknown>` | `undefined` | The answer's leading headers, carried on the same frame (WSM-FRM-016). |
 
 ### Return
 
@@ -2222,8 +2223,8 @@ await dialer.close({ drainMs: 100 });
 
 ## `stream.finally()` (TypeScript)
 
-`then().finally(onSettled)`, for cleanup that must run whichever way the stream ended. It claims the
-stream for the await shape.
+`then().finally(onSettled)`, for cleanup that runs whether the stream produced a payload or failed.
+It claims the stream for the await shape.
 
 ### Signature
 
@@ -2235,7 +2236,7 @@ finally(onSettled?: (() => void) | null): Promise<T>;
 
 | Name | Type | Default | What it does |
 |---|---|---|---|
-| `onSettled` | `(() => void) \| null` | `undefined` | Called once the stream has settled, either way, with no arguments. |
+| `onSettled` | `(() => void) \| null` | `undefined` | Called with no arguments once the stream has settled, fulfilled or rejected. |
 
 ### Return
 
@@ -2268,7 +2269,7 @@ await dialer.close({ drainMs: 100 });
 
 ## `stream.result()` (Python)
 
-The same memoized answer as `await stream`, with a deadline wrapped around the wait. A second read
+The same memoized answer as `await stream`, with a deadline on the wait. A second read
 returns the first read's value, not the next payload.
 
 ### Signature

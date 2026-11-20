@@ -91,7 +91,7 @@ const DECODER = new TextDecoder();
 
 /** One finished stream: what each side sent, how it ended and how long it took. Immutable. */
 export class Exchange {
-  /** `peer.id` of the connection the stream lived on. */
+  /** `peer.id` of the connection that carried the stream. */
   readonly conn: string;
   readonly stream: number;
   readonly openedBy: ExchangeParty;

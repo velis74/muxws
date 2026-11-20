@@ -160,7 +160,7 @@ export class BrowserSocket implements SocketAdapter {
     });
   }
 
-  /** Close the socket and resolve once it is actually closed. Idempotent. */
+  /** Close the socket and resolve once its `readyState` is `CLOSED`. Idempotent. */
   async close(code = 1000, reason = ''): Promise<void> {
     if (this.socket.readyState === CLOSED) {
       // No close event follows, so `wasClean` is derived from the code as in `websockets_`

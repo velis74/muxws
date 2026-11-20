@@ -287,7 +287,7 @@ describe('ping and pong', () => {
     pair.acceptor.onStream(replyNow);
     pair.start();
 
-    // Swallow every pong on the way back in.
+    // Drop every incoming pong before dispatch.
     const dialer = internals(pair.dialer);
     const original = dialer.dispatch.bind(pair.dialer);
     dialer.dispatch = async (frame: Frame): Promise<boolean> => (frame.type === 'pong' ? true : original(frame));
@@ -334,7 +334,7 @@ describe('ping and pong', () => {
   });
 
   it('keys pings by nonce and never by order', async () => {
-    // Matching by position would credit a late echo to the next ping and invent an RTT.
+    // Matching by position would assign a late echo to the next ping and report a wrong RTT.
     const registry = new PingRegistry();
     const first = registry.open('aaa');
     const second = registry.open('bbb');
@@ -533,13 +533,13 @@ describe('goaway', () => {
     await pair.settle();
 
     expect(pair.acceptor.isOpen).toBe(false);
-    // `signal.aborted` is the TypeScript witness of Python's `stream.closed.is_set()`; the two move
+    // `signal.aborted` is the TypeScript counterpart of Python's `stream.closed.is_set()`; the two change
     // together on every close path (WSM-API-023).
     expect(stream.signal.aborted).toBe(true);
   });
 
   it('sends goaway, then drains, then closes', async () => {
-    // WSM-CON-025: the rule is the order, so the order is asserted.
+    // WSM-CON-025 specifies the order of the three steps; the test asserts that order.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();

@@ -1,4 +1,4 @@
-"""The `ws+unix:` grammar, on every platform - including the ones that cannot dial one.
+"""The `ws+unix:` grammar, tested on every platform, including platforms without AF_UNIX.
 
 No test here opens a socket. CI runs on `ubuntu-latest` only, so the Windows behaviour is tested by a
 table of strings that runs on every platform. A grammar inside the `websockets` adapter would need a
@@ -122,7 +122,7 @@ def test_a_request_target_that_is_not_an_absolute_path_is_refused():
 
 
 def test_a_platform_without_af_unix_raises_unix_sockets_unsupported_error(monkeypatch: pytest.MonkeyPatch):
-    """Windows: a named error out of the parse, not an `AttributeError` out of the dial.
+    """Without AF_UNIX (Windows), parsing raises a named error instead of the dial raising `AttributeError`.
 
     `websockets`' `unix_connect` imports where AF_UNIX does not exist and fails at
     `loop.create_unix_connection`, which a Windows event loop does not define. The resulting

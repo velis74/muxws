@@ -11,7 +11,7 @@ from muxws.transports import SocketAdapter
 from muxws.transports.memory import memory_pair
 
 
-async def test_pair_delivers_and_drop_kills_both_directions():
+async def test_pair_delivers_and_drop_closes_both_directions():
     left, right = memory_pair()
     assert isinstance(left, SocketAdapter)
 

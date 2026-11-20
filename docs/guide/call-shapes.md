@@ -18,8 +18,8 @@ way a client calls it on a server.
 
 ### Unary
 
-One value out, one value back. The opener sends `end` with the opening payload, so the remote knows
-that no more payloads follow and can answer immediately.
+The opener sends one payload and receives one payload. The opener sends `end` with the opening
+payload, so the remote knows that no more payloads follow and can answer immediately.
 
 ```python
 # fragment
@@ -53,8 +53,8 @@ peer.onStream(async (payload, stream) => {
 
 ### Streaming response
 
-One value out, many values back. The opening frame is the same as for unary; only the handler's
-answer and the caller's consumption differ.
+The opener sends one payload and receives several. The opening frame is the same as for unary; only
+the handler's answer and the caller's consumption differ.
 
 ```python
 # fragment
@@ -105,8 +105,9 @@ The stream closes when both directions have ended; until then either end may sti
 
 ### One-shot push
 
-Fire and forget. `notify()` is async, returns `None` (`undefined` in TypeScript), and returns no
-`Stream`, so the caller has no stream that could be left pending.
+The opener sends one payload and receives nothing back. `notify()` is async, returns `None`
+(`undefined` in TypeScript), and returns no `Stream`, so the caller has no stream that could be left
+pending.
 
 ```python
 # fragment
@@ -213,7 +214,7 @@ Awaiting the *same* stream twice is allowed and is not a second claim: the value
 second await returns the same value as the first, not the next payload. `stream.result(...)` returns
 the same memoized value, with a deadline on the wait.
 
-## `request()` polices a second payload; `await stream` does not
+## `request()` rejects a second payload; `await stream` does not read it
 
 This is the only behavioural difference between the two calls that return one value.
 

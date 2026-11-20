@@ -32,9 +32,10 @@ npm pkg set type=module
 
 ## Quick Start
 
-Three files, one socket, two call shapes: a unary request that receives exactly one answer, and a
-streaming response that arrives in several payloads. The server is Python; the client is Python **or**
-TypeScript. Both clients print the same output, because both use the same wire protocol.
+The quick start consists of three files and uses one socket and two call shapes: a unary request
+that receives exactly one answer, and a streaming response that arrives in several payloads. The
+server is Python; the client is Python **or** TypeScript. Both clients print the same output,
+because both use the same wire protocol.
 
 ### 1. The server
 
@@ -58,10 +59,10 @@ It listens on `127.0.0.1:8000`. Set `MUXWS_PORT` to use another port.
 
 ### 2. The Python client
 
-`connect()` returns a peer that is already serving. `request()` is the unary shape: one payload out,
-exactly one payload back. `open()` is the general shape. It is **synchronous** and returns the
-`Stream` in the same call that allocates the stream id; `end=True` means this side sends nothing
-more.
+`connect()` returns a peer that is already serving. `request()` is the unary shape: it sends one
+payload and receives exactly one payload. `open()` is the general shape. It is **synchronous** and
+returns the `Stream` in the same call that allocates the stream id; `end=True` means this side sends
+nothing more.
 
 <<< @/examples/quickstart_client.py
 
@@ -119,17 +120,17 @@ muxws has no separate push API. `Peer` is a single symmetric type: the acceptor 
 in the same way as the dialer, on the existing socket, and the dialer receives the stream in its own
 `on_stream` handler. Correlation and cancellation work the same way in both directions.
 
-The acceptor side. `peer` is in scope in the route, and the handler uses it:
+On the acceptor, `peer` is in scope in the route, and the handler uses it:
 
 <<< @/examples/push_server.py
 
-The dialer side. The handler is passed to `connect()` rather than registered after `connect()`
+On the dialer, the handler is passed to `connect()` rather than registered after `connect()`
 returns. The acceptor may open a stream as soon as the connection is accepted, and a stream that
 arrives before a handler is registered is answered with `reset(REFUSED)`:
 
 <<< @/examples/push_client.py
 
-Or the same dialer in TypeScript:
+The same dialer in TypeScript:
 
 <<< @/examples/push-client.ts
 
@@ -158,9 +159,9 @@ in its `on_stream` handler and acknowledges it by returning, so the dialer's ide
 without reconnect-specific code on the acceptor.
 
 **No stream survives a reconnect.** Every stream that was open when the socket closed has failed,
-nothing is buffered while the peer has no socket, stream ids start again at 1, and `peer.id` changes,
-so the log shows a reconnected peer as a new connection. A reconnect restores a socket and the
-identity established by the hello, and nothing else.
+nothing is buffered while the peer has no socket, stream ids start again at 1, and `peer.id`
+changes, so the log shows a reconnected peer as a new connection. A reconnect restores only the
+socket and the identity established by the hello.
 
 If the **first** `connect()` fails, it raises regardless of `reconnect=`, so a wrong URL is reported
 immediately instead of being retried indefinitely.

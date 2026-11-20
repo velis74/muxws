@@ -193,7 +193,7 @@ const throughput = { framesIn: 0, framesOut: 0, bytesIn: 0, bytesOut: 0 };
 /**
  * Measurement state for one large payload: the fragments of the payload, and the data frames on other
  * streams received between its first and last fragment. This is the quantity that
- * `handlers_test.py::test_ticks_keep_flowing_during_an_export` asserts on. With a FIFO writer
+ * `handlers_test.py::test_tick_streams_send_a_frame_between_any_two_export_fragments` asserts on. With a FIFO writer
  * `interleaved` is zero; with the round-robin writer it is not (WSM-INV-004).
  */
 interface Probe {

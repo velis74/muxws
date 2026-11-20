@@ -3,9 +3,10 @@
 There are three demos with one flag each. `python demo.py` without a flag prints the help. An
 argument that belongs to one demo is rejected with the others instead of being ignored.
 
-Without the dependency check, missing dependencies fail late and away from the cause. A missing
-`fastapi` is an ImportError inside a child process. Without `websockets`, uvicorn serves the page and
-answers 404 to every upgrade request, so the browser shows a muxws handshake error.
+Without the dependency check, a missing dependency fails only after the demo has started, in a child
+process or in the browser. A missing `fastapi` is an ImportError inside a child process. Without
+`websockets`, uvicorn serves the page and answers 404 to every upgrade request, so the browser shows a
+muxws handshake error.
 
 `muxws/packaging_test.py::test_the_dev_group_includes_a_websocket_implementation` asserts that the
 `dev` dependency group declares `websockets`. The check tested here reports packages that are declared
@@ -54,7 +55,7 @@ def node_modules_present(entry_point: Any, monkeypatch: pytest.MonkeyPatch) -> N
 
 @pytest.mark.parametrize("backend", ["python", "node", None])
 def test_a_complete_environment_reports_nothing_missing(entry_point: Any, backend: str | None):
-    """With both backends' dependencies present, the check is silent.
+    """With both backends' dependencies present, the check reports nothing.
 
     This is the control for the tests below, which would also pass against a check that always
     reports problems. The `None` case is the no-argument call, whose default is the Python backend.
@@ -215,7 +216,7 @@ def test_each_flag_sets_only_its_own_demo_attribute(entry_point: Any, flag: str)
 def test_two_demos_in_one_command_are_refused(entry_point: Any, capsys: pytest.CaptureFixture[str], argv: list[str]):
     """Two demo flags in one command are rejected.
 
-    Rejected instead of resolved by precedence, so that no requested demo is silently dropped.
+    Rejected instead of resolved by precedence, so that no requested demo is dropped without an error.
     """
     with pytest.raises(SystemExit) as refusal:
         entry_point.parse_arguments(argv)

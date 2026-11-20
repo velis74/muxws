@@ -58,7 +58,7 @@ def _balanced(text: str) -> bool:
 
 
 def _tables(text: str) -> dict[str, dict[str, Any]]:
-    """`{table name: {key: value}}` for the handful of keys WSM-PKG-001/002 are about.
+    """`{table name: {key: value}}` for the keys WSM-PKG-001/002 check.
 
     Not `tomllib`: `requires-python` is `>=3.10` and CI runs the suite on 3.10, where `tomllib` does
     not exist and `tomli` is not a dev dependency. Skipping on 3.10 would leave both rules unchecked
@@ -120,7 +120,7 @@ def npm_manifest() -> dict[str, Any]:
 
 
 def test_python_and_typescript_versions_match(pyproject: dict[str, dict[str, Any]]):
-    """WSM-PKG-001: two manifests, one version stream.
+    """WSM-PKG-001: `pyproject.toml` and `package.json` declare the same version.
 
     The version is static in `pyproject.toml`; `muxws.__version__` reads it from the installed
     distribution's metadata.
@@ -136,7 +136,7 @@ def test_python_and_typescript_versions_match(pyproject: dict[str, dict[str, Any
 
 
 def test_the_version_appears_in_exactly_one_python_source(pyproject: dict[str, dict[str, Any]]):
-    """WSM-PKG-005: no second, finer version number anywhere - the generation is on the wire alone.
+    """WSM-PKG-005: the version is assigned in one Python source; the only version on the wire is the generation.
 
     A `__version__` assigned in a second module can diverge from the package metadata while neither
     manifest changes.

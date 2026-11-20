@@ -180,7 +180,7 @@ async def _assert_idle_cell(pair: Pair, event: str, outcome: str) -> None:
         await pair.settle()
         assert pair.dialer.is_open is False
         return
-    # ILL-C: a stream-level frame for an id nobody opened is above the high-water mark.
+    # ILL-C: a stream-level frame for an id neither peer opened is above the high-water mark.
     frame = {
         "recv_data": Frame("data", stream=7, payload={"a": 1}),
         "recv_data_end": Frame("data", stream=7, payload={"a": 1}, end=True),
@@ -321,7 +321,7 @@ async def test_open_with_timeout_is_a_type_error(pair: Pair):
 
 
 async def test_await_twice_returns_same_value(make_pair):
-    """WSM-API-010/011: one memoised future, resolved once."""
+    """WSM-API-010/011: every await reads one memoised future, resolved once."""
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -346,7 +346,7 @@ async def test_await_twice_returns_same_value(make_pair):
         await pair.stop()
 
 
-async def test_await_then_iterate_raises_and_first_consumer_got_everything(make_pair):
+async def test_iterating_after_an_await_raises_and_the_first_consumer_keeps_every_payload(make_pair):
     """WSM-API-014: the first shape claims the stream; the error names both uses."""
     pair = make_pair()
 
@@ -394,7 +394,10 @@ async def test_open_resolves_first_payload_while_request_raises(make_pair):
 
 
 async def test_result_timeout_uses_the_same_future(make_pair):
-    """WSM-API-012, WSM-ERR-011: one source of the value, plus a deadline that resets the stream."""
+    """WSM-API-012, WSM-ERR-011: `result(timeout=)` reads the same memoised future.
+
+    It adds a deadline that resets the stream.
+    """
     pair = make_pair()
 
     async def handler(payload: Any, stream: Stream) -> None:
@@ -437,7 +440,7 @@ async def test_result_timeout_expiry_sends_reset_timeout(make_pair):
 
 
 async def test_send_after_normal_close_raises_stream_closed(make_pair):
-    """WSM-ERR-009 **(spec)**: three outcomes, three classes.
+    """WSM-ERR-009 **(spec)**: a normal close, a reset and a protocol error each raise their own class.
 
     `StreamClosed` for a normal close is neither a `StreamReset` nor a `ProtocolError`: a last
     `send()` that coincides with an orderly end is an expected outcome.
@@ -1080,7 +1083,10 @@ async def test_the_acceptor_stream_exposes_the_open_headers_and_empty_reply_head
 
 
 async def _iterate_in_handler(make_pair, open_on, **peer_options: Any) -> list[Any]:
-    """Open a stream from the dialer with `open_on`, iterate it in the acceptor's handler, return what it saw."""
+    """Open a stream from the dialer with `open_on` and iterate it in the acceptor's handler.
+
+    Returns the payloads the handler received.
+    """
     pair = make_pair(**peer_options)
     seen: list[Any] = []
     done = asyncio.Event()

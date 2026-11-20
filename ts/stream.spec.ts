@@ -691,7 +691,7 @@ describe('cancellation', () => {
     }
   });
 
-  it('aborts the handler signal when a remote reset lands - WSM-ERR-013', async () => {
+  it('aborts the handler signal when a remote reset arrives - WSM-ERR-013', async () => {
     const pair = new Pair();
     let observed: AbortSignal | null = null;
     pair.acceptor.onStream(async (_p, stream) => {

@@ -1,7 +1,7 @@
 """Unix-domain-socket dialer: the ordinary public `connect()`, pointed at a socket file.
 
 Start `uds_server.py` first, then run `python uds_client.py`. The URL is
-`ws+unix://<tempdir>/muxws.sock:/ws` unless the `MUXWS_URL` environment variable says otherwise.
+`ws+unix://<tempdir>/muxws.sock:/ws` unless the `MUXWS_URL` environment variable is set.
 
 `connect()` selects the transport from the URL scheme; no extra argument or adapter is needed. The
 codec offer at the handshake, the `CodecMismatch` raised for HTTP 400, the heartbeat and the reconnect

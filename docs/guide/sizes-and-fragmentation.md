@@ -65,11 +65,11 @@ It is a protocol constant, not derived from any value the remote sends. A sender
 it; a receiver accepts any frame up to it, and may accept larger frames.
 
 **The constant bounds interleaving latency.** One muxws connection is one WebSocket, and a WebSocket
-sends messages in a single order. A frame being written occupies the socket until it is complete. The
-limit is therefore not a memory limit but a *bound on how long one stream can occupy the socket before
-another stream's frame is sent*. At 64 KiB, a stream sending 1 MiB releases the socket sixteen times,
-and a 200-byte progress update on another stream waits for at most one 64 KiB write. With a 1 MiB
-limit, the same update would wait for the whole 1 MiB.
+sends messages in a single order. A frame being written occupies the socket until it is complete.
+The limit therefore bounds how long one stream can occupy the socket before another stream's frame
+is sent; it is not a memory limit. At 64 KiB, a stream sending 1 MiB releases the socket sixteen
+times, and a 200-byte progress update on another stream waits for at most one 64 KiB write. With a 1
+MiB limit, the same update would wait for the whole 1 MiB.
 
 A larger frame size reduces envelope overhead slightly and increases the latency of other streams.
 There is no option to raise the constant; changing it is a protocol change, not a configuration
@@ -115,7 +115,7 @@ export sends one fragment per turn, and the update sends its whole frame on its 
 
 ## `PAYLOAD_TOO_LARGE`, from both sides
 
-Reset code `7`. Two checks produce it:
+`PAYLOAD_TOO_LARGE` is reset code `7`. Two checks produce it:
 
 **A single encoded message over the frame limit.** The receiver measures the *whole encoded message*
 read from the socket, not the `fragment` field inside it. If a stream frame exceeds the limit, that

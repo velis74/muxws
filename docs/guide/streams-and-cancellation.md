@@ -137,12 +137,12 @@ console.log(stream.replyHeaders);      // before the first row
 If the headers are not needed before the first payload, send them with it, as one frame:
 `send(payload, headers=...)`, `reply(payload, headers=...)`.
 
-`stream.headers` always holds the `open`'s headers and `stream.reply_headers` always the answer's, with
-the same values at both ends of the stream. Each peer sends **one** set per stream, on its first frame;
-the first frame uses up the opportunity whether or not it carries headers. A later attempt raises
-locally, and a peer that receives later headers on the wire resets that stream. muxws has no status
-field, and `headers` is not used as one: a failed exchange is a `reset` with a code. muxws does not
-read either set.
+`stream.headers` always holds the `open`'s headers and `stream.reply_headers` always the answer's,
+with the same values at both ends of the stream. Each peer sends **one** set per stream, on its
+first frame; after the first frame, whether or not it carried headers, the peer cannot send headers
+on that stream. A later attempt raises locally, and a peer that receives later headers on the wire
+resets that stream. muxws has no status field, and `headers` is not used as one: a failed exchange
+is a `reset` with a code. muxws does not read either set.
 
 ## Header interceptors apply to every stream a peer opens or answers
 
@@ -171,9 +171,8 @@ const unregister = peer.interceptOpen((headers, payload) => {
 ```
 
 A **reply headers interceptor** does the same for the answering side: it runs on the first frame
-this peer sends on a stream the remote opened, whichever call sends it (`send_headers()`, `send()`,
-`end()`, `reply()`, or the implicit end of a handler that returns), and modifies a copy of that call's
-headers:
+this peer sends on a stream the remote opened, from any of `send_headers()`, `send()`, `end()`,
+`reply()` or the implicit end of a handler that returns, and modifies a copy of that call's headers:
 
 ```python
 # fragment

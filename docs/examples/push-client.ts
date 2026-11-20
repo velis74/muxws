@@ -1,8 +1,7 @@
 /**
  * Server push, dialer half, in TypeScript on Node - the other end of `push_server.py`.
  *
- * Run it with `npx tsx push-client.ts`. The URL is `ws://127.0.0.1:8001/ws` unless `MUXWS_URL` says
- * otherwise.
+ * Run it with `npx tsx push-client.ts`. The URL is `ws://127.0.0.1:8001/ws` unless `MUXWS_URL` is set.
  *
  * `onStream` is passed to `connect()` rather than registered after it returns, because the acceptor
  * may push a stream as soon as the connection is established. A stream that arrives before a handler is

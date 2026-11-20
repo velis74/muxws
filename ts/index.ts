@@ -8,7 +8,7 @@ import { BrowserSocket, UnixSocketsUnsupportedError } from './transports/browser
 
 /**
  * Dial `url` and return a serving peer. The codec is resolved before any socket opens (WSM-CDC-016).
- * If the first attempt fails it throws the underlying error, whatever `reconnect` says
+ * If the first attempt fails it throws the underlying error, regardless of the `reconnect` option
  * (WSM-RCN-006/WSM-INV-018); only an established connection that is lost is reconnected.
  */
 export async function connect(url: string, options: ConnectOptions = {}): Promise<Peer> {

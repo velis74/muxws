@@ -100,7 +100,7 @@ class Peer:
         self._error_serializer = error_serializer or default_error_serializer
         self._max_frame_bytes = _checked_frame_cap(max_frame_bytes, codec)
         #: The largest reassembled payload this peer accepts. Local and never announced (WSM-FRG-035);
-        #: a sender learns of it only from the reset it receives.
+        #: the only indication to a sender is the reset it receives.
         self._max_payload_bytes = max_payload_bytes
         #: How many streams the remote may have open on this peer at once. Local, never announced, and
         #: not checked by the sender (WSM-STM-036).
@@ -383,7 +383,7 @@ class Peer:
         if self._goaway.received:
             raise ConnectionGoingAway(
                 f"the remote sent goaway (code {self._goaway.received_code}); no new stream can be "
-                f"opened on this connection. Dial again to get one that can."
+                f"opened on this connection. Open streams on a new connection."
             )
         if self._goaway.sent:
             raise ConnectionGoingAway("this peer sent goaway and opens no further streams (WSM-CON-021)")
@@ -679,7 +679,7 @@ class Peer:
             self._ping_started.pop(nonce, None)
 
     def _on_pong(self, frame: Frame) -> None:
-        """Settle the ping this nonce belongs to; a nonce nobody is waiting for is dropped."""
+        """Settle the ping this nonce belongs to; a nonce with no outstanding ping is dropped."""
         if frame.nonce is None:
             return
         elapsed = asyncio.get_running_loop().time() - self._ping_started.get(frame.nonce, 0.0)
@@ -729,7 +729,10 @@ class Peer:
         self._enqueue(Frame("goaway", code=int(code), reason=reason, last_stream=self._highest_remote_open))
 
     async def _on_goaway(self, frame: Frame) -> bool:
-        """The remote is stopping. Refuse what it never processed; let the rest finish."""
+        """Record a received `goaway` and fail local streams above its `last_stream` with REFUSED.
+
+        Other streams continue.
+        """
         self._goaway.received = True
         self._goaway.received_code = frame.code
         self._goaway.received_reason = frame.reason
@@ -803,7 +806,7 @@ class Peer:
                 logger.warning("muxws conn=%s dropped oneway stream %s: concurrency limit reached", self.id, stream_id)
                 return True
             # Refused without invoking the handler, so the opener may retry it elsewhere
-            # (WSM-STM-036). The limit is not announced; the sender learns of it from this reset.
+            # (WSM-STM-036). The limit is not announced; this reset is the only indication to the sender.
             self._enqueue(
                 Frame(
                     "reset",
@@ -940,7 +943,7 @@ class Peer:
         """Reset the stream with APPLICATION_ERROR, never REFUSED (WSM-STM-034/WSM-INV-008).
 
         REFUSED states that the operation did not happen. A handler that raises may already have had
-        side effects, so the opener must not be told it is safe to retry.
+        side effects, so the opener does not receive a code that marks the stream as safe to retry.
         """
         try:
             payload = self._error_serializer(exc)

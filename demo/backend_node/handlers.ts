@@ -102,7 +102,7 @@ interface Board {
  * Waits `ms` milliseconds, or until `signal` aborts.
  *
  * It resolves on abort instead of rejecting; the caller checks `signal.aborted` afterwards. The
- * callers' `try` blocks therefore see only real failures such as `StreamReset` and `StreamClosed`.
+ * callers' `try` blocks therefore catch no abort, only errors such as `StreamReset` and `StreamClosed`.
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return Promise.resolve();

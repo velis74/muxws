@@ -149,8 +149,8 @@ def _was_clean(exc: Any) -> bool:
 def select_subprotocol(connection: Any, subprotocols: list[str]) -> str:
     """Installable as `websockets.serve(..., select_subprotocol=muxws.select_subprotocol)`.
 
-    The `websockets` library completes the handshake before calling the handler, so the decision is
-    handed to it up front (WSM-CDC-027).
+    The `websockets` library completes the handshake before calling the handler, so the subprotocol is
+    selected in this hook, which `websockets.serve` calls during the handshake (WSM-CDC-027).
 
     A refusal raises `NegotiationError`. Returning None would answer 101 with no
     `Sec-WebSocket-Protocol` header and leave the mismatch to be detected on an open socket, which

@@ -34,7 +34,7 @@ async def test_tags_are_an_ordinary_dict(make_pair):
 
 
 async def test_register_indexes_every_key_present_at_call_time(registry: PeerRegistry, make_pair):
-    """WSM-REG-010: it has no notion of which keys matter."""
+    """WSM-REG-010: `register()` indexes every key present, not a configured subset."""
     pair = make_pair()
     pair.dialer.tags.update({"session": "abc", "tenant": 7, "role": "admin"})
     registry.register(pair.dialer)
@@ -54,7 +54,7 @@ async def test_register_skips_an_unhashable_tag_value(registry: PeerRegistry, ma
     assert registry.index_size == 1, "an unhashable value must not take an index entry"
 
 
-async def test_reregister_replaces_entries_wholesale(registry: PeerRegistry, make_pair):
+async def test_reregister_replaces_all_entries(registry: PeerRegistry, make_pair):
     """WSM-REG-012 **(spec)**: found under the new values and not under the old ones."""
     pair = make_pair()
     pair.dialer.tags["session"] = "old"
@@ -103,7 +103,7 @@ async def test_overwriting_an_unindexed_key_leaves_the_index_unchanged(registry:
 
 
 async def test_reconnect_starts_with_empty_tags(registry: PeerRegistry, dialable_server: DialableServer):
-    """WSM-RCN-033/WSM-INV-014 **(spec)**: a reconnect is a new acceptor-side peer, tagless.
+    """WSM-RCN-033/WSM-INV-014 **(spec)**: a reconnect is a new acceptor-side peer with empty tags.
 
     Uses the reconnect driver rather than two hand-built peers, because the assertion concerns the
     state after a reconnect. The acceptor cannot tell that a newly accepted socket belongs to a client
@@ -160,7 +160,7 @@ async def test_peers_for_returns_a_list_in_stable_order(registry: PeerRegistry, 
 
 
 async def test_peers_for_matches_all_given_keys(registry: PeerRegistry, make_pair):
-    """A partial match is not a match."""
+    """A peer that matches only some of the given keys is not returned."""
     both = make_pair().dialer
     both.tags.update({"room": "lobby", "role": "admin"})
     one = make_pair().dialer

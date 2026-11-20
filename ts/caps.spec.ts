@@ -485,7 +485,7 @@ describe('observability', () => {
   });
 
   it('never puts payload contents in any log record - WSM-OBS-002', async () => {
-    // Application data routinely contains secrets.
+    // Application data can contain secrets.
     const original = logger.level;
     const pair = makePair();
     pair.acceptor.onStream(replyNow);

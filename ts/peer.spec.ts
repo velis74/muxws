@@ -511,9 +511,10 @@ describe('retention', () => {
 // --------------------------------------------------------------------------- dispatch
 
 describe('dispatch', () => {
-  it('ignores an unknown frame type, staying quiet and alive - WSM-FRM-002', async () => {
+  it('ignores an unknown frame type: sends nothing, logs it once at info, stays open - WSM-FRM-002', async () => {
     // All three parts of the rule are asserted in one test. Each part alone also holds for a non-conforming peer: a
-    // peer that never received the frame is alive and quiet, and a peer that answered it with a `reset` also logs.
+    // peer that never received the frame stays open and sends nothing, and a peer that answered it with a `reset`
+    // also logs.
     const pair = makePair();
     pair.acceptor.onStream(hold);
     // Assert first that the frame arrived; otherwise every assertion below also holds for a peer that never
@@ -561,7 +562,7 @@ describe('dispatch', () => {
     const tainted = await replayIntoLonePeer('{"type":"open","stream":1,"payload":{"q":1},"end":true,"colour":"red"}');
     const clean = await replayIntoLonePeer('{"type":"open","stream":1,"payload":{"q":1},"end":true}');
 
-    // Two silent peers also have equal wires, so the handler must have run and answered.
+    // Two peers that send nothing also have equal wires, so the test asserts that the handler ran and answered.
     expect(clean.seen).toEqual([{ q: 1 }]);
     expect(clean.wire.length, 'the control exchange produced no frames at all').toBeGreaterThan(0);
     expect(tainted.alive).toBe(true);
@@ -656,7 +657,7 @@ describe('dispatch', () => {
   });
 
   it('keeps the errorSerializer per peer - WSM-ERR-008', async () => {
-    // One process, two peers, two answers to the same exception.
+    // Two peers in one process answer the same exception with different payloads.
     const redacting = makePair({ errorSerializer: () => ({ redacted: true }) });
     const verbose = makePair({ errorSerializer: defaultErrorSerializer });
 
@@ -890,7 +891,7 @@ describe('socket death', () => {
       closes.push(reason);
       worldAtClose.push({
         liveStreams: pair.dialer.streams.size,
-        // `closed` is a promise, so `signal.aborted` is the synchronous witness of "this stream has
+        // `closed` is a promise, so `signal.aborted` is the synchronous indicator that "this stream has
         // closed"; WSM-API-023 requires the two to move at the same instant.
         allClosed: watched.map((stream) => stream.signal.aborted),
         allFailed: watched.map((stream) => stream.state),
@@ -1063,7 +1064,7 @@ describe('socket death', () => {
     }
 
     // A queue flushed into the next socket would deliver work whose sender the server no longer knows, so a failure
-    // that would have reached the call site would become a silent misdelivery.
+    // that would have reached the call site would become a misdelivery that reports no error.
     const [fresh] = memoryPair();
     pair.dialer.adoptSocket(fresh);
     const serving = pair.dialer.serve();
@@ -1093,7 +1094,7 @@ describe('socket death', () => {
     await pair.settle();
 
     // Nothing is held for a next socket: a queue flushed into it would deliver work whose sender the server no
-    // longer knows, so a failure that would have reached the call site would become a silent misdelivery
+    // longer knows, so a failure that would have reached the call site would become a misdelivery that reports no error
     // (WSM-INV-010).
     expect(internals(pair.dialer).writer.depth, 'frames were kept for a socket that will never carry them').toBe(0);
     expect(internals(pair.dialer).writer.lanes).toBe(0);
@@ -1316,7 +1317,7 @@ describe('observability', () => {
 // --------------------------------------------------------------------------- edges
 
 describe('edges', () => {
-  it('reports its role readably', () => {
+  it('reports its role in isDialer and in its string form', () => {
     const pair = makePair();
     expect(pair.dialer.isDialer).toBe(true);
     expect(pair.acceptor.isDialer).toBe(false);
@@ -1654,7 +1655,7 @@ describe('shutdown', () => {
 // --------------------------------------------------------------------------- hostile frames and failing hooks
 
 describe('hostile frames and failing hooks', () => {
-  it('does not let a wrong-parity open pose as a fragment continuation - WSM-SID-005', async () => {
+  it("treats an open with this peer's parity mid-reassembly as a connection error - WSM-SID-005", async () => {
     // Whether a frame is a continuation must not be inferred from whether some assembler is active on that id.
     // Otherwise a stream this peer opened, and receives fragmented `data` on, would accept an `open` with this
     // peer's own parity as a continuation: it would dispatch a handler for a stream this peer opened and skip the
@@ -2203,7 +2204,7 @@ describe("open()'s overloads", () => {
       cookie: 'session=deleted',
       'x-api-key': '',
       'sec-websocket-protocol': 'muxws.v1.msgpack',
-      // Envelope field names as header keys: still just keys.
+      // Envelope field names used as header keys are ordinary keys.
       stream: 9999,
       end: true,
       code: 3,
@@ -2377,7 +2378,7 @@ describe("open()'s overloads", () => {
     });
     pair.start();
 
-    // `end: true` on the open: the dialer has nothing to say, so `close()` below has nothing to
+    // `end: true` on the open: the dialer sends nothing more, so `close()` below has nothing to
     // drain and the test is not waiting out a drain window.
     const stream = pair.dialer.open({ q: 1 }, { end: true });
     const received: unknown[] = [];
@@ -2542,7 +2543,7 @@ describe('the frame logger', () => {
     try {
       await pair.dialer.request({ password: 'hunter2-sentinel' });
       await pair.settle();
-      // Application data routinely contains secrets, and a frame line is emitted for every frame.
+      // Application data can contain secrets, and a frame line is emitted for every frame.
       expect(written.join('\n')).not.toContain('hunter2-sentinel');
       expect(written.length, 'the level was raised, so something must have been logged').toBeGreaterThan(0);
     } finally {
@@ -2598,64 +2599,71 @@ describe('the final close - WSM-RCN-046/047', () => {
 });
 
 describe('header interceptors', () => {
-  it('shapes the headers of every open in registration order, on a copy - WSM-API-026/027', async () => {
-    const pair = makePair();
-    const received: Record<string, unknown>[] = [];
-    pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
-      received.push({ ...stream.headers });
-      await stream.reply({ ok: true });
-    });
-    const calls: [string, unknown][] = [];
-    const kept: Record<string, unknown>[] = [];
-    const unregisterFirst = pair.dialer.interceptOpen((headers, payload) => {
-      calls.push(['first', payload]);
-      headers.trace = 't-1';
-      headers.attempt = 2;
-      kept.push(headers);
-    });
-    const unregisterSecond = pair.dialer.interceptOpen((headers) => {
-      calls.push(['second', { ...headers }]);
-      delete headers['drop-me'];
-    });
-    pair.start();
+  it(
+    'applies open interceptors in registration order to a copy of the headers of every open - WSM-API-026/027',
+    async () => {
+      const pair = makePair();
+      const received: Record<string, unknown>[] = [];
+      pair.acceptor.onStream(async (_payload: unknown, stream: Stream) => {
+        received.push({ ...stream.headers });
+        await stream.reply({ ok: true });
+      });
+      const calls: [string, unknown][] = [];
+      const kept: Record<string, unknown>[] = [];
+      const unregisterFirst = pair.dialer.interceptOpen((headers, payload) => {
+        calls.push(['first', payload]);
+        headers.trace = 't-1';
+        headers.attempt = 2;
+        kept.push(headers);
+      });
+      const unregisterSecond = pair.dialer.interceptOpen((headers) => {
+        calls.push(['second', { ...headers }]);
+        delete headers['drop-me'];
+      });
+      pair.start();
 
-    const callers = { attempt: 1, 'drop-me': true, own: 'x' };
-    const stream = pair.dialer.open({ n: 1 }, { headers: callers, end: true });
-    kept[0].late = 'after return';
-    await stream;
+      const callers = { attempt: 1, 'drop-me': true, own: 'x' };
+      const stream = pair.dialer.open({ n: 1 }, { headers: callers, end: true });
+      kept[0].late = 'after return';
+      await stream;
 
-    expect(callers, "the caller's object is untouched").toEqual({ attempt: 1, 'drop-me': true, own: 'x' });
-    expect(calls).toEqual([
-      ['first', { n: 1 }],
-      ['second', { attempt: 2, 'drop-me': true, own: 'x', trace: 't-1' }],
-    ]);
-    expect(stream.headers).toEqual({ attempt: 2, own: 'x', trace: 't-1' });
-    expect(received, 'a change after return never reaches the frame').toEqual([{ attempt: 2, own: 'x', trace: 't-1' }]);
+      expect(callers, "the caller's object is untouched").toEqual({ attempt: 1, 'drop-me': true, own: 'x' });
+      expect(calls).toEqual([
+        ['first', { n: 1 }],
+        ['second', { attempt: 2, 'drop-me': true, own: 'x', trace: 't-1' }],
+      ]);
+      expect(stream.headers).toEqual({ attempt: 2, own: 'x', trace: 't-1' });
+      expect(received, 'a change after return never reaches the frame').toEqual([
+        { attempt: 2, own: 'x', trace: 't-1' },
+      ]);
 
-    await pair.dialer.request('r');
-    await pair.dialer.notify('n');
-    await pair.settle();
-    expect(
-      received.map((headers) => headers.trace),
-      'request() and notify() headers pass the interceptors too',
-    ).toEqual(['t-1', 't-1', 't-1']);
+      await pair.dialer.request('r');
+      await pair.dialer.notify('n');
+      await pair.settle();
+      expect(
+        received.map((headers) => headers.trace),
+        'request() and notify() headers pass the interceptors too',
+      ).toEqual(['t-1', 't-1', 't-1']);
 
-    unregisterFirst();
-    unregisterFirst();
-    unregisterSecond();
-    let before = pair.dialerSocket.sent.length;
-    await pair.dialer.request('bare');
-    expect(String(pair.dialerSocket.sent[before]), 'no interceptor left, no headers field').not.toContain('"headers"');
+      unregisterFirst();
+      unregisterFirst();
+      unregisterSecond();
+      let before = pair.dialerSocket.sent.length;
+      await pair.dialer.request('bare');
+      expect(String(pair.dialerSocket.sent[before]), 'no interceptor left, no headers field').not.toContain(
+        '"headers"',
+      );
 
-    pair.dialer.interceptOpen(() => undefined);
-    before = pair.dialerSocket.sent.length;
-    await pair.dialer.request('bare');
-    expect(String(pair.dialerSocket.sent[before]), 'an interceptor that adds nothing changes no byte').not.toContain(
-      '"headers"',
-    );
-  });
+      pair.dialer.interceptOpen(() => undefined);
+      before = pair.dialerSocket.sent.length;
+      await pair.dialer.request('bare');
+      expect(String(pair.dialerSocket.sent[before]), 'an interceptor that adds nothing changes no byte').not.toContain(
+        '"headers"',
+      );
+    },
+  );
 
-  it('fails the open with the interceptor error and spends nothing - WSM-API-027', async () => {
+  it('fails the open with the interceptor error, allocates no stream id and sends nothing - WSM-API-027', async () => {
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     const later: string[] = [];
@@ -2690,136 +2698,146 @@ describe('header interceptors', () => {
     expect(pair.dialer.isOpen).toBe(true);
   });
 
-  it('shapes the first frame of every answer on a copy, for each sending call - WSM-API-028', async () => {
-    const pair = makePair();
-    const seen: [Record<string, unknown>, unknown][] = [];
-    const kept: Record<string, unknown>[] = [];
-    const announced = { 'content-type': 'text/csv' };
-    const onOwnStreams: number[] = [];
-    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
-      if (payload === 'announce') {
-        await stream.sendHeaders(announced);
-        kept[kept.length - 1].late = 'after return';
+  it(
+    'applies reply headers interceptors to a copy of the first ' +
+      'frame of each answer, for every sending call - WSM-API-028',
+    async () => {
+      const pair = makePair();
+      const seen: [Record<string, unknown>, unknown][] = [];
+      const kept: Record<string, unknown>[] = [];
+      const announced = { 'content-type': 'text/csv' };
+      const onOwnStreams: number[] = [];
+      pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+        if (payload === 'announce') {
+          await stream.sendHeaders(announced);
+          kept[kept.length - 1].late = 'after return';
+          await stream.send('row');
+          await stream.end({ payload: 'last' });
+        } else if (payload === 'reply') {
+          await stream.reply('done', { headers: { 'drop-me': 1 } });
+        }
+      });
+      const unregister = pair.acceptor.interceptReplyHeaders((headers, stream) => {
+        seen.push([{ ...headers }, stream.payload]);
+        headers['served-by'] = 'acceptor';
+        delete headers['drop-me'];
+        kept.push(headers);
+      });
+      pair.dialer.interceptReplyHeaders((_headers, stream) => {
+        onOwnStreams.push(stream.id);
+      });
+      pair.start();
+
+      let stream = pair.dialer.open('announce');
+      await stream.end();
+      await stream.closed;
+      expect(stream.replyHeaders).toEqual({ 'content-type': 'text/csv', 'served-by': 'acceptor' });
+      expect(announced, "the caller's object is untouched").toEqual({ 'content-type': 'text/csv' });
+
+      stream = pair.dialer.open('reply', { end: true });
+      expect(await stream).toBe('done');
+      expect(stream.replyHeaders).toEqual({ 'served-by': 'acceptor' });
+
+      stream = pair.dialer.open('implicit', { end: true });
+      await stream.closed;
+      expect(stream.replyHeaders, 'replyHeaders are set on the implicit end of a returning handler').toEqual({
+        'served-by': 'acceptor',
+      });
+
+      expect(seen).toEqual([
+        [{ 'content-type': 'text/csv' }, 'announce'],
+        [{ 'drop-me': 1 }, 'reply'],
+        [{}, 'implicit'],
+      ]);
+      expect(onOwnStreams, 'never on a stream this peer opened').toEqual([]);
+
+      unregister();
+      const before = pair.acceptorSocket.sent.length;
+      stream = pair.dialer.open('implicit', { end: true });
+      await stream.closed;
+      expect(String(pair.acceptorSocket.sent[before]), 'no interceptor left, no headers field').not.toContain(
+        '"headers"',
+      );
+    },
+  );
+
+  it(
+    'fails the sending call with the interceptor error and lets a later call send the first frame - WSM-API-028',
+    async () => {
+      const pair = makePair();
+      const sentBeforeAnswer: number[] = [];
+      const refuse = (): void => {
+        throw new RangeError('no tenant');
+      };
+      pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+        if (payload === 'implicit') return;
+        let unregister = pair.acceptor.interceptReplyHeaders(refuse);
+        await expect(stream.sendHeaders({ a: 1 })).rejects.toThrow('no tenant');
+        unregister();
+        unregister = pair.acceptor.interceptReplyHeaders(async (headers) => {
+          headers.late = true;
+        });
+        await expect(stream.send('x')).rejects.toThrow(/thenable/);
+        unregister();
+        sentBeforeAnswer.push(pair.acceptorSocket.sent.length);
+        await stream.reply('ok', { headers: { a: 1 } });
+      });
+      pair.start();
+
+      const stream = pair.dialer.open('explicit', { end: true });
+      expect(await stream).toBe('ok');
+      expect(sentBeforeAnswer, 'a failed call put nothing on the wire').toEqual([0]);
+      expect(stream.replyHeaders, 'and left the first frame for the next call').toEqual({ a: 1 });
+
+      pair.acceptor.interceptReplyHeaders(refuse);
+      await expect(pair.dialer.request('implicit', { timeoutMs: 5000 })).rejects.toBeInstanceOf(RemoteError);
+      expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
+    },
+  );
+
+  it(
+    "passes each stream's leading headers to incoming interceptors " + 'once, as a frozen object - WSM-API-029',
+    async () => {
+      const pair = makePair();
+      const order: string[] = [];
+      const seenByAcceptor: [Record<string, unknown>, boolean][] = [];
+      const seenByDialer: [Record<string, unknown>, number, boolean][] = [];
+      pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
+        order.push('handler');
+        if (payload === 'reset') {
+          await stream.reset(ResetCode.APPLICATION_ERROR, 'no answer');
+          return;
+        }
+        await stream.sendHeaders({ 'content-type': 'text/csv' });
         await stream.send('row');
         await stream.end({ payload: 'last' });
-      } else if (payload === 'reply') {
-        await stream.reply('done', { headers: { 'drop-me': 1 } });
-      }
-    });
-    const unregister = pair.acceptor.interceptReplyHeaders((headers, stream) => {
-      seen.push([{ ...headers }, stream.payload]);
-      headers['served-by'] = 'acceptor';
-      delete headers['drop-me'];
-      kept.push(headers);
-    });
-    pair.dialer.interceptReplyHeaders((_headers, stream) => {
-      onOwnStreams.push(stream.id);
-    });
-    pair.start();
-
-    let stream = pair.dialer.open('announce');
-    await stream.end();
-    await stream.closed;
-    expect(stream.replyHeaders).toEqual({ 'content-type': 'text/csv', 'served-by': 'acceptor' });
-    expect(announced, "the caller's object is untouched").toEqual({ 'content-type': 'text/csv' });
-
-    stream = pair.dialer.open('reply', { end: true });
-    expect(await stream).toBe('done');
-    expect(stream.replyHeaders).toEqual({ 'served-by': 'acceptor' });
-
-    stream = pair.dialer.open('implicit', { end: true });
-    await stream.closed;
-    expect(stream.replyHeaders, 'replyHeaders are set on the implicit end of a returning handler').toEqual({
-      'served-by': 'acceptor',
-    });
-
-    expect(seen).toEqual([
-      [{ 'content-type': 'text/csv' }, 'announce'],
-      [{ 'drop-me': 1 }, 'reply'],
-      [{}, 'implicit'],
-    ]);
-    expect(onOwnStreams, 'never on a stream this peer opened').toEqual([]);
-
-    unregister();
-    const before = pair.acceptorSocket.sent.length;
-    stream = pair.dialer.open('implicit', { end: true });
-    await stream.closed;
-    expect(String(pair.acceptorSocket.sent[before]), 'no interceptor left, no headers field').not.toContain(
-      '"headers"',
-    );
-  });
-
-  it('fails the call that sends the answer and leaves its first frame unspent - WSM-API-028', async () => {
-    const pair = makePair();
-    const sentBeforeAnswer: number[] = [];
-    const refuse = (): void => {
-      throw new RangeError('no tenant');
-    };
-    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
-      if (payload === 'implicit') return;
-      let unregister = pair.acceptor.interceptReplyHeaders(refuse);
-      await expect(stream.sendHeaders({ a: 1 })).rejects.toThrow('no tenant');
-      unregister();
-      unregister = pair.acceptor.interceptReplyHeaders(async (headers) => {
-        headers.late = true;
       });
-      await expect(stream.send('x')).rejects.toThrow(/thenable/);
-      unregister();
-      sentBeforeAnswer.push(pair.acceptorSocket.sent.length);
-      await stream.reply('ok', { headers: { a: 1 } });
-    });
-    pair.start();
+      pair.acceptor.interceptIncomingHeaders((headers, stream) => {
+        order.push('interceptor');
+        seenByAcceptor.push([{ ...headers }, stream.local]);
+        expect(() => {
+          (headers as Record<string, unknown>).x = 1;
+        }).toThrow(TypeError);
+      });
+      pair.dialer.interceptIncomingHeaders((headers, stream) => {
+        seenByDialer.push([{ ...headers }, stream.id, stream.local]);
+      });
+      pair.start();
 
-    const stream = pair.dialer.open('explicit', { end: true });
-    expect(await stream).toBe('ok');
-    expect(sentBeforeAnswer, 'a failed call put nothing on the wire').toEqual([0]);
-    expect(stream.replyHeaders, 'and left the first frame for the next call').toEqual({ a: 1 });
+      const stream = pair.dialer.open('go', { headers: { trace: 'abc' } });
+      const items: unknown[] = [];
+      for await (const item of stream) items.push(item);
+      expect(items).toEqual(['row', 'last']);
+      expect(order, 'before the handler runs').toEqual(['interceptor', 'handler']);
+      expect(seenByAcceptor).toEqual([[{ trace: 'abc' }, false]]);
+      expect(seenByDialer, 'once, on the answer').toEqual([[{ 'content-type': 'text/csv' }, stream.id, true]]);
 
-    pair.acceptor.interceptReplyHeaders(refuse);
-    await expect(pair.dialer.request('implicit', { timeoutMs: 5000 })).rejects.toBeInstanceOf(RemoteError);
-    expect(pair.dialer.isOpen && pair.acceptor.isOpen).toBe(true);
-  });
-
-  it("hands each stream's leading headers to incoming interceptors once, frozen - WSM-API-029", async () => {
-    const pair = makePair();
-    const order: string[] = [];
-    const seenByAcceptor: [Record<string, unknown>, boolean][] = [];
-    const seenByDialer: [Record<string, unknown>, number, boolean][] = [];
-    pair.acceptor.onStream(async (payload: unknown, stream: Stream) => {
-      order.push('handler');
-      if (payload === 'reset') {
-        await stream.reset(ResetCode.APPLICATION_ERROR, 'no answer');
-        return;
-      }
-      await stream.sendHeaders({ 'content-type': 'text/csv' });
-      await stream.send('row');
-      await stream.end({ payload: 'last' });
-    });
-    pair.acceptor.interceptIncomingHeaders((headers, stream) => {
-      order.push('interceptor');
-      seenByAcceptor.push([{ ...headers }, stream.local]);
-      expect(() => {
-        (headers as Record<string, unknown>).x = 1;
-      }).toThrow(TypeError);
-    });
-    pair.dialer.interceptIncomingHeaders((headers, stream) => {
-      seenByDialer.push([{ ...headers }, stream.id, stream.local]);
-    });
-    pair.start();
-
-    const stream = pair.dialer.open('go', { headers: { trace: 'abc' } });
-    const items: unknown[] = [];
-    for await (const item of stream) items.push(item);
-    expect(items).toEqual(['row', 'last']);
-    expect(order, 'before the handler runs').toEqual(['interceptor', 'handler']);
-    expect(seenByAcceptor).toEqual([[{ trace: 'abc' }, false]]);
-    expect(seenByDialer, 'once, on the answer').toEqual([[{ 'content-type': 'text/csv' }, stream.id, true]]);
-
-    await expect(pair.dialer.request('reset')).rejects.toBeInstanceOf(StreamReset);
-    await pair.settle();
-    expect(seenByDialer, 'a reset is not an answer').toHaveLength(1);
-    expect(seenByAcceptor.at(-1), 'an open without headers is seen with an empty object').toEqual([{}, false]);
-  });
+      await expect(pair.dialer.request('reset')).rejects.toBeInstanceOf(StreamReset);
+      await pair.settle();
+      expect(seenByDialer, 'a reset is not an answer').toHaveLength(1);
+      expect(seenByAcceptor.at(-1), 'an open without headers is seen with an empty object').toEqual([{}, false]);
+    },
+  );
 
   it('logs an incoming interceptor that throws and changes nothing else - WSM-API-029', async () => {
     const pair = makePair();

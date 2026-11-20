@@ -38,7 +38,7 @@ origin_logger = logging.getLogger("muxws.origin")
 
 
 def resolve_codec(override: Codec | None = None) -> Codec:
-    """An explicit `codec=` wins (WSM-CDC-012); otherwise the configured name (WSM-CDC-010/016).
+    """An explicit `codec=` takes precedence (WSM-CDC-012); otherwise the configured name (WSM-CDC-010/016).
 
     Never falls back to JSON (WSM-INV-015). Raises `CodecNotRegistered` for an unregistered name.
     """
@@ -202,7 +202,7 @@ def _websocket_dialer(
     return dial
 
 
-#: The status an acceptor answers for a codec it does not speak (WSM-CDC-022), and the only status
+#: The status an acceptor answers for a codec it is not configured for (WSM-CDC-022), and the only status
 #: treated as a codec refusal. Any other failure is raised as it is.
 _REFUSED = 400
 

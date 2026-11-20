@@ -250,7 +250,7 @@ class Heartbeat:
         await peer._close_socket_locally(reason="no pong")
 
 
-#: How the loop gets a socket. A closure, not a URL: the helper knows nothing about transports.
+#: How the loop gets a socket. A closure, not a URL: the helper does not depend on a transport.
 Dial = Callable[[], Awaitable["SocketAdapter"]]
 
 
@@ -275,8 +275,7 @@ class ConnectionLoop:
     ) -> None:
         if not peer.is_dialer:
             raise ValueError(
-                "an acceptor has no reconnect helper: it cannot dial, and a peer that tried to would "
-                "be dialling the client that dialled it (§3)"
+                "an acceptor has no reconnect helper: an acceptor does not dial; only the dialer reconnects (§3)"
             )
         self._peer = peer
         self._dial = dial
@@ -391,7 +390,7 @@ class ConnectionLoop:
         if task is not None:
             try:
                 await task
-            except Exception as exc:  # noqa: BLE001 - however serve() ended, the socket is gone
+            except Exception as exc:  # noqa: BLE001 - the socket is closed on every exit of serve()
                 logger.debug("muxws conn=%s serve() ended with %r", self._peer.id, exc)
         await self._stop_heartbeat()
 

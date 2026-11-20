@@ -164,7 +164,7 @@ async def test_dialer_offers_the_muxws_entry_first_on_a_real_socket(server: str)
 
 
 async def test_a_mismatched_codec_offer_is_answered_with_http_400(acceptor: Acceptor):
-    """WSM-CDC-022 **(spec)**: refuse the upgrade - no subprotocol, and status 400.
+    """WSM-CDC-022 **(spec)**: the upgrade is refused with status 400 and no subprotocol.
 
     Answering 101 with no `Sec-WebSocket-Protocol` and leaving the mismatch to the post-handshake
     check is the "complete the handshake and close afterwards" the rule forbids when the transport
@@ -629,8 +629,7 @@ async def test_a_mismatched_codec_over_a_unix_socket_reaches_the_caller_as_a_cod
 async def test_a_missing_socket_file_is_not_reported_as_a_codec_mismatch():
     """A missing socket file raises `FileNotFoundError` naming the path, not `CodecMismatch`.
 
-    A missing socket file is the most common failure of this transport: the service has not started,
-    or writes its socket to another path.
+    The socket file is missing when the service has not started or writes its socket to another path.
     """
     with tempfile.TemporaryDirectory(prefix="muxws-") as directory:
         url = f"ws+unix://{Path(directory) / 'absent.sock'}:/ws"
@@ -750,7 +749,9 @@ async def test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error(ur
     [("ws:/nohost", InvalidURI), ("ws://host:notaport/x", ValueError)],
     ids=["invalid-uri", "a-port-that-is-not-a-number"],
 )
-async def test_the_librarys_own_diagnostic_survives_the_translation(url: str, underlying: type[BaseException]):
+async def test_the_translated_error_chains_and_quotes_the_websockets_exception(
+    url: str, underlying: type[BaseException]
+):
     """The original exception is chained with `from exc`, so the traceback shows the specific cause.
 
     `WebsocketUrlError` reports that a URL was refused; the `websockets` exception says whether the
@@ -921,8 +922,8 @@ async def test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_er
     install as `WebsocketsNotInstalledError` with the remedy `pip install muxws[websockets]`, and hide
     the `ModuleNotFoundError` naming the missing module.
 
-    Corresponds to `ts/transport-errors.spec.ts` *"rethrows a broken install untouched, so it is never
-    reported as an absent one"*, which checks `ERR_MODULE_NOT_FOUND`.
+    Corresponds to `ts/transport-errors.spec.ts` *"rethrows the import error of an installed but broken
+    dependency unchanged"*, which checks `ERR_MODULE_NOT_FOUND`.
     """
     _ = websockets_installed_but_broken
 

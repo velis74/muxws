@@ -213,7 +213,7 @@ def test_corpus_covers_the_required_shapes():
 
 
 def test_absent_survives_copy_and_deepcopy():
-    """A frozen frame is routinely deep-copied; the sentinel must stay the same object."""
+    """`copy` and `deepcopy` keep `ABSENT` the same object, also inside a frame."""
     from copy import copy, deepcopy
 
     assert copy(ABSENT) is ABSENT

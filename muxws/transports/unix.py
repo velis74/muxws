@@ -92,7 +92,7 @@ def parse_unix_url(url: str) -> UnixTarget | None:
     if parts.scheme == _REFUSED_SCHEME:
         raise UnixUrlError(
             f"{_REFUSED_SCHEME}: is not a scheme muxws dials: there is no TLS over a Unix domain "
-            f"socket. Use {SCHEME}: and let the socket's file permissions be the access control"
+            f"socket. Use {SCHEME}: and control access with the socket file's permissions"
         )
     if parts.scheme != SCHEME:
         return None
@@ -122,7 +122,7 @@ def parse_unix_url(url: str) -> UnixTarget | None:
 
         raise UnixUrlError(
             f"the request target in {url!r} must begin with '/': the part after the ':' is an HTTP "
-            f"request target, not a path relative to anything"
+            f"request target and cannot be a relative path"
         )
 
     return UnixTarget(path=path, uri=f"ws://{parts.netloc or _DEFAULT_AUTHORITY}{route or '/'}")

@@ -1,7 +1,7 @@
 """Server push: the acceptor opens a stream of its own.
 
-Run it with `python push_server.py`; it listens on 127.0.0.1:8001 unless `MUXWS_PORT` says
-otherwise, and `push_client.py` (or `push-client.ts`) is the other half.
+Run it with `python push_server.py`; it listens on 127.0.0.1:8001 unless `MUXWS_PORT` is set, and
+`push_client.py` (or `push-client.ts`) is the other half.
 
 There is no separate push API. `peer.open()` here is the same call the dialer makes in
 `quickstart_client.py`, on the same socket, with the same correlation and cancellation: either peer

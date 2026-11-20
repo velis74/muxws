@@ -781,7 +781,7 @@ export class Assembler {
 | `in_progress` / `inProgress` | `bool` / `boolean` | `False` / `false` | True between the first fragment and the one that arrives without `more`. |
 | `byte_length` / `byteLength` | `int` / `number` | `0` | Bytes accumulated so far, measured the way `encoded_length` measures them. |
 | `reset()` | `() -> None` / `() => void` | — | Drops the partial buffer and releases the bytes with it. Called when the stream is reset. |
-| `feed(frame, codec)` | `frame: Frame`, `codec: Codec` | both required | Absorbs one fragment frame. `codec` is used only on the closing fragment, to decode the concatenation. |
+| `feed(frame, codec)` | `frame: Frame`, `codec: Codec` | both required | Adds one fragment frame to the buffer. `codec` is used only on the closing fragment, to decode the concatenation. |
 
 ### Return
 
@@ -934,9 +934,9 @@ void main();
 ## `Exchange`
 
 One finished stream, as handed to every [`on_exchange`](/api/peer#peer-on-exchange-python) /
-[`onExchange`](/api/peer#peer-onexchange-typescript) handler: what each side sent, how the stream ended
-and how long it took. `request` is what the side that opened the stream sent and `response` what the
-other side sent, whichever peer reports it.
+[`onExchange`](/api/peer#peer-onexchange-typescript) handler: what each side sent, how the stream
+ended and how long it took. `request` is what the side that opened the stream sent and `response`
+what the other side sent, in the records of both peers.
 
 Python's is a frozen slotted dataclass, TypeScript's a frozen class instance. Payloads are held by
 reference, not copied.
@@ -1542,7 +1542,7 @@ void main();
 
 The type of an interceptor registered with `peer.intercept_open(...)` / `peer.interceptOpen(...)`.
 It is called synchronously inside every `open()`, `notify()` and `request()` on that peer, before a
-stream id is allocated, and shapes the headers the `open` frame carries.
+stream id is allocated, and modifies the headers the `open` frame carries.
 
 It receives a fresh mapping holding a shallow copy of the caller's headers and mutates it in place:
 adding, replacing or deleting keys. It cannot touch the rest of the frame. The reconnect helper's
@@ -1638,7 +1638,8 @@ await dialer.close({ drainMs: 100 });
 
 The type of an interceptor registered with `peer.intercept_reply_headers(...)` /
 `peer.interceptReplyHeaders(...)`. It is called once per stream the remote opened, synchronously, by
-the call that sends this peer's first frame on it, and shapes the leading headers that frame carries.
+the call that sends this peer's first frame on it, and modifies the leading headers that frame
+carries.
 
 It receives a fresh mapping holding a shallow copy of the headers that call was given and mutates it
 in place. It cannot touch the rest of the frame.
@@ -1670,8 +1671,9 @@ The parameters of the callable itself:
 ### Raises
 
 The type raises nothing. An implementation that raises fails the call that sends the first frame
-with that exception: no later interceptor runs, nothing is sent, and the first frame stays unspent.
-In the implicit end of a handler that returns, the stream is reset with `APPLICATION_ERROR` instead.
+with that exception: no later interceptor runs, nothing is sent, and the stream's next frame still
+counts as its first. In the implicit end of a handler that returns, the stream is reset with
+`APPLICATION_ERROR` instead.
 
 ### Example
 
@@ -1891,7 +1893,7 @@ logger.level = 'warn';
 
 ## `FrameDirection` (TypeScript)
 
-Which way a frame was travelling, as handed to `peer.onFrame` (WSM-OBS-003).
+The direction of a frame, as passed to `peer.onFrame` (WSM-OBS-003).
 
 `'tx'` is reported **before** the codec encodes, `'rx'` **after** it decodes, so a handler receives a
 logical `Frame`, not bytes, in both directions. Python's `on_frame` takes the same two

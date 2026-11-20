@@ -147,7 +147,7 @@ def _load_sequence(path: Path) -> dict[str, Any]:
 
 
 class Replay:
-    """One fixture, one live pair, one pass over `steps` - in one of the two role assignments."""
+    """Runs one fixture's `steps` once over one live pair, in one of the two role assignments."""
 
     def __init__(self, fixture: dict[str, Any], *, swapped: bool = False, codec: Any = None) -> None:
         self.fixture = fixture

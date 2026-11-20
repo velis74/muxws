@@ -64,7 +64,7 @@ export interface ReplyOptions {
  * `result()`'s options object.
  *
  * `signal` replaces cancelling the awaiting task in Python. A promise cannot detect that nobody awaits
- * it any more, so a consumer that wants WSM-ERR-014's `reset(CANCELLED)` passes an `AbortSignal`.
+ * it any more; aborting the `AbortSignal` passed here sends WSM-ERR-014's `reset(CANCELLED)`.
  */
 export interface ResultOptions {
   timeoutMs?: number;
@@ -727,7 +727,7 @@ export class Stream<T = unknown> implements PromiseLike<T>, AsyncIterable<T> {
       return await Promise.race([answer, guard]);
     } catch (error) {
       if (error === EXPIRED) {
-        // WSM-ERR-011: the remote is told to stop working before the caller is told it timed out.
+        // WSM-ERR-011: `reset(TIMEOUT)` is sent before `StreamTimeout` is thrown to the caller.
         await this.reset(ResetCode.TIMEOUT, `deadline of ${timeoutMs}ms expired`);
         throw new StreamTimeout(`stream ${this.id} did not answer within ${timeoutMs}ms`, { streamId: this.id });
       }

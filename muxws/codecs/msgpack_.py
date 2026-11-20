@@ -1,7 +1,7 @@
 """The msgpack codec, a binary implementation of `Codec` (WSM-CDC-006/007/008).
 
 The module name carries a trailing underscore for the same reason `json_.py` does: a top-level
-`msgpack.py` inside the package would shadow the third-party module this very file imports.
+`msgpack.py` inside the package would shadow the third-party module this file imports.
 
 `msgpack` is an optional extra (WSM-PKG-002). No other muxws module imports this one, so `msgpack`
 is imported only by an application that imports this module. The module does not register itself

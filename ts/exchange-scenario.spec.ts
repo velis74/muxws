@@ -189,7 +189,7 @@ describe('a unary request is reported by both peers', () => {
       expect(exchange.code).toBeNull();
       expect(exchange.reason).toBeNull();
 
-      // The request side is what the opener sent, whichever peer reports it.
+      // On both peers the request side is what the opener sent.
       expect(exchange.request.headers).toEqual({ 'x-trace': 't1' });
       expect(exchange.request.payloads).toEqual([{ ask: 1 }]);
       expect(exchange.request.payloadCount).toBe(1);

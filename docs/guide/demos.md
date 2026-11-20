@@ -8,7 +8,7 @@ published packages.
 in the environment `uv sync` creates (prefix them with `uv run`, or activate `.venv`):
 
 ```bash
-python demo.py                    # the help, and nothing else
+python demo.py                    # prints the help and exits
 python demo.py --browser          # the Vue application and the Python backend under uvicorn
 python demo.py --browser node     # the same frontend, the TypeScript backend under tsx
 python demo.py --browser --no-fe  # either backend alone
@@ -82,10 +82,10 @@ listens on `:5173`. `MUXWS_DEMO_PORT` changes the backend port from 8020; the Vi
 python demo.py --uds
 ```
 
-No browser and no TCP port: an acceptor bound to a socket file in a temporary directory, and a client
-that dials it as `ws+unix:///…/muxws.sock:/ws`. The demo runs `docs/examples/uds_server.py` and
-`docs/examples/uds_client.py` as subprocesses, so it runs exactly the files the guide documents. It
-needs `uv sync` and a platform that has `AF_UNIX`.
+The demo uses neither a browser nor a TCP port: it runs an acceptor bound to a socket file in a
+temporary directory, and a client that dials it as `ws+unix:///…/muxws.sock:/ws`. The demo runs
+`docs/examples/uds_server.py` and `docs/examples/uds_client.py` as subprocesses, so it runs exactly
+the files the guide documents. It needs `uv sync` and a platform that has `AF_UNIX`.
 
 The demo shows two properties of this transport that involve nothing on the wire (see
 [Transports](/guide/transports#unix-domain-sockets)):

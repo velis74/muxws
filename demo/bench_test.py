@@ -50,7 +50,7 @@ def smoke() -> tuple[list[Result], list[RoundTrip], list[str]]:
 def test_every_mode_produces_a_result_for_the_cell_it_was_asked_for(
     smoke: tuple[list[Result], list[RoundTrip], list[str]],
 ):
-    """Three modes in, three results out, each labelled with the transport, codec and stream count."""
+    """Each of the three modes produces one result, labelled with the requested transport, codec and stream count."""
     results, _round_trips, _notes = smoke
 
     by_mode = {result.mode: result for result in results}

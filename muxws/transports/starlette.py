@@ -82,7 +82,7 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
     if not is_unaccepted(websocket):
         raise ProtocolError(
             "the websocket was already accepted; muxws.accept() performs the upgrade itself because "
-            "it is the only party that knows which subprotocol to select (WSM-CDC-026)"
+            "it selects the subprotocol (WSM-CDC-026)"
         )
 
     offered = list(websocket.scope.get("subprotocols") or [])
@@ -93,7 +93,7 @@ async def perform_upgrade(websocket: Any, configured: str) -> StarletteSocket:
         # `serve()` returns without raising on it, because the 400 has already been sent.
 
         raise CodecMismatch(
-            f"refused the upgrade: offered {offered!r}, this acceptor speaks {PREFIX}{configured}",
+            f"refused the upgrade: offered {offered!r}, this acceptor is configured for {PREFIX}{configured}",
             configured=configured,
         )
 

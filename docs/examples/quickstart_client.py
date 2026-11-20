@@ -1,7 +1,7 @@
 """Quick-start dialer: the `websockets` transport, two call shapes on one socket.
 
 Start `quickstart_server.py` first, then run `python quickstart_client.py`. The URL is
-`ws://127.0.0.1:8000/ws` unless the `MUXWS_URL` environment variable says otherwise.
+`ws://127.0.0.1:8000/ws` unless the `MUXWS_URL` environment variable is set.
 """
 
 import asyncio

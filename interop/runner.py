@@ -51,7 +51,7 @@ EXPORT_ROWS = 5
 EXPORT_GAP = 0.01
 #: Interval between rows of the producer that is cancelled mid-flight.
 DRIP_GAP = 0.02
-#: Rows the `slow` stream produces; it is the stream that must survive the goaway drain.
+#: Rows the `slow` stream produces; this stream must complete during the goaway drain.
 SLOW_ROWS = 3
 SLOW_GAP = 0.05
 
@@ -423,7 +423,7 @@ async def collect(stream: Stream, into: list[Any]) -> None:
 
 
 async def run_tst_005(url: str, *, label: str) -> None:
-    """Kill the acceptor process with streams open, restart it, and hold the peer to WSM-TST-005."""
+    """Kill the acceptor process with streams open, restart it, and check the peer against WSM-TST-005."""
     hellos: list[str] = []
     reconnects: list[tuple[int, int]] = []
     closes: list[Any] = []
@@ -482,7 +482,7 @@ async def run_tst_005(url: str, *, label: str) -> None:
 
     check(
         reconnects == [(1, 1)],
-        f"{label}: on_reconnect fired {reconnects!r}; WSM-TST-005 wants exactly one, after the "
+        f"{label}: on_reconnect fired {reconnects!r}; WSM-TST-005 requires exactly one, after the "
         f"replayed hello was acknowledged",
     )
     check(
@@ -1047,7 +1047,7 @@ class Control:
         return await self._answer(message)
 
     async def dispatch(self, message: dict[str, Any]) -> None:
-        """Send a command and go straight on to the next step, collecting the answer later.
+        """Send a command without waiting for its acknowledgement; the acknowledgement is read before the next command.
 
         Used only for `close`, which the corpus defines as "started and not awaited - `close()` sends
         `goaway` and then drains, and the steps after it are what the drain window exists to let

@@ -71,7 +71,7 @@ async def connect(
 | `url` | `str` | required | The WebSocket URL to dial: `ws://`, `wss://`, or `ws+unix://<socket path>:<request target>` for a Unix domain socket. In the `ws+unix:` form the URL's path and query are split on the **first** colon: what is in front is the file to open, what is behind is the HTTP request target, and the target is `/` both when there is no colon and when nothing follows it. The scheme is case-insensitive and `ws+unix:/run/api.sock:/ws` names the same file as `ws+unix:///run/api.sock:/ws`. The socket path is the URL's path as written, neither percent-encoded nor percent-decoded: `ws+unix:///tmp/my dir/a.sock` opens `/tmp/my dir/a.sock`, and `%20` in the path is three characters of the file name. An authority, if one is given, becomes the `Host` header and nothing else; with none, the header is `localhost`. There is no `wss+unix://`. Re-dialled unchanged on every reconnection. |
 | `headers` | `dict[str, str] \| None` | `None` | Extra HTTP headers for the upgrade request, passed to `websockets.connect(additional_headers=...)`. Credentials go here, not in the hello. |
 | `subprotocols` | `list[str] \| None` | `None` | Extra subprotocol entries appended **after** the `muxws.v1.<codec>` entry. A muxws acceptor never selects them; they are available to application-level handshake logic. |
-| `hello` | `Any` | `None` | The opening payload replayed verbatim on every connection this peer ever makes. Deep-copied at this call and never re-read; later changes to the passed object do not affect the replay. |
+| `hello` | `Any` | `None` | The opening payload replayed verbatim on every connection this peer makes. Deep-copied at this call and never re-read; later changes to the passed object do not affect the replay. |
 | `hello_headers` | `dict[str, Any] \| None` | `None` | Headers for the hello's `open` frame, captured by value alongside `hello`. Supplying either one makes the peer "hello-configured": it is not established until the acceptor's handler ends that stream. |
 | `reconnect` | `Reconnect \| None` | `None` | The backoff schedule. `None` means `Reconnect()` - the defaults, with unlimited attempts. Reconnection applies only after a connection has been established once. |
 | `ping_interval` | `float` — seconds | `20.0` | How long the socket may be **idle** before the heartbeat sends a `ping` frame. Idle means no frame in either direction. `0` or less disables the heartbeat. |
@@ -315,7 +315,7 @@ The same set as the browser `connect()`, plus:
   `ws://localhostws`, a valid URL, and the dial would open the socket file and request `/` instead of
   the given target. The Python class has the same name, `muxws.transports.unix.UnixUrlError`; both
   are `TransportUrlError`s.
-- `WsUrlError` — a URL `ws` itself cannot parse. A `TransportUrlError` framing `ws`'s own
+- `WsUrlError` — a URL `ws` itself cannot parse. A `TransportUrlError` wrapping `ws`'s own
   `SyntaxError: Invalid URL: …`, which is kept on `cause`.
 - `WsNotInstalledError` — the optional peer dependency `ws` is not installed. A
   `TransportUnsupportedError` whose message contains `npm install ws`, raised in place of Node's
@@ -398,7 +398,7 @@ export interface ConnectOptions {
 | `pingTimeoutMs` | `number` — milliseconds | `10_000` | How long the heartbeat waits for the `pong`. Detection is bounded by `pingIntervalMs + pingTimeoutMs` milliseconds. Distinct from `peer.ping()`'s own default of 5000 milliseconds. |
 | `helloTimeoutMs` | `number` — milliseconds | `10_000` | How long the hello may go unacknowledged before the attempt fails. |
 | `codec` | `Codec` | `getCodec(settings.codec)` | An explicit codec, which wins over the configured name. |
-| `onStream` | `StreamHandler` | none | Registered **before** the hello goes out, so an acceptor pushing a stream at the hello is not answered `reset(REFUSED)`. |
+| `onStream` | `StreamHandler` | none | Registered **before** the hello goes out, so a stream the acceptor opens while the hello is in flight is not answered `reset(REFUSED)`. |
 | `onClose` | `(reason: CloseReason) => void` | none | Registered **after** the first connection is established, so it is not called when `connect()` rejects. |
 | `onReconnect` | `(attempt: number, peer: Peer) => void` | none | Fires once per re-established connection, after the hello acknowledgement. |
 | `openInterceptors` | `readonly OpenInterceptor[]` | `[]` | Registered in order with [`peer.interceptOpen()`](./peer.md#peer-interceptopen-typescript) before the hello goes out. The hello itself does not pass through them. |

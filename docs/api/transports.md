@@ -873,7 +873,7 @@ neither `ws+unix:` nor `wss+unix:`, including malformed ones, which `websockets`
   `MuxwsError` and `except TransportUrlError` around `connect()` does not catch it. Every other
   unparseable URL is validated by `websockets` and raises `WebsocketUrlError`.
 - `UnixUrlError` — a `wss+unix:` URL, which is not a scheme muxws supports; a URL naming no socket
-  file; or a request target that does not begin with `/`. Such a target would be folded into the
+  file; or a request target that does not begin with `/`. Such a target would be appended to the
   authority (`…/a.sock:ws` becomes `ws://localhostws`, a valid URL), so the dial would open the right
   file, request `/`, and succeed against an acceptor that does not route on the target.
 - `UnixSocketsUnsupportedError` — the interpreter has no `socket.AF_UNIX` (Windows). The platform

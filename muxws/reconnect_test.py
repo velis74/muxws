@@ -62,7 +62,7 @@ def test_schedule_before_jitter_and_cap():
     assert schedule == [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0, 30.0, 30.0]
 
 
-def test_the_schedule_stays_at_the_cap_however_many_attempts_failed():
+def test_the_schedule_stays_at_the_cap_for_any_number_of_failed_attempts():
     """WSM-RCN-003: past the float range of `factor ** attempts` the delay is still the cap.
 
     At the default factor that is attempt 1024.
@@ -101,7 +101,7 @@ def test_jitter_disperses_n_simultaneous_reconnects():
 
 
 def test_a_delay_is_never_negative():
-    """A jitter of 1.0 with the worst draw lands exactly on zero, never below it."""
+    """With a jitter of 1.0 and the lowest random draw, the delay is exactly zero, not negative."""
     options = Reconnect(jitter=1.0)
     assert backoff_delay(0, options, draw=lambda: -1.0) == 0.0
 
@@ -247,7 +247,7 @@ async def test_acceptor_has_no_reconnect_helper(dialable_server: DialableServer)
 
 
 async def test_counter_does_not_reset_when_hello_never_completes(dialable_server: DialableServer):
-    """WSM-RCN-004/WSM-INV-012 **(spec)**: a server that accepts and drops before the hello.
+    """WSM-RCN-004/WSM-INV-012 **(spec)**: no counter reset on a socket dropped before the hello.
 
     Two attempts get a socket and lose it with the hello outstanding. Neither is established
     (WSM-RCN-004), so the counter increases and the delays grow. A helper that reset the counter when
@@ -559,7 +559,7 @@ async def test_the_dial_decision_is_the_helpers_arithmetic_not_the_peers_field(d
         await loop.stop()
 
 
-async def test_the_cap_exhausted_by_failed_hellos_reports_giving_up_once(dialable_server: DialableServer):
+async def test_the_cap_exhausted_by_failed_hellos_reports_the_final_close_once(dialable_server: DialableServer):
     """WSM-RCN-044: at most one `will_retry=False` close per peer.
 
     When the cap runs out on refused dials, the last loss reported `will_retry` true, and the helper
@@ -667,7 +667,8 @@ async def test_the_recorded_delays_do_not_grow_without_bound(dialable_server: Di
 
 
 async def test_three_drops_replay_byte_identical_hellos(dialable_server: DialableServer):
-    """WSM-RCN-027 **(spec)**: three drops, three identical hellos, no application involvement.
+    """WSM-RCN-027 **(spec)**: after each of three drops the helper sends a byte-identical hello without
+    application code.
 
     The comparison is on the encoded messages, not on decoded objects: a reordered key or a tuple
     decoded as a list compares equal after decoding but is a different hello on the wire.
@@ -983,7 +984,7 @@ async def test_mutating_the_hello_object_after_connect_does_not_change_the_wire(
 
 
 async def test_first_attempt_failure_raises_with_unlimited_retries_configured(dialable_server: DialableServer):
-    """WSM-RCN-006/WSM-INV-018 **(spec)**: the first attempt raises, whatever `reconnect` says.
+    """WSM-RCN-006/WSM-INV-018 **(spec)**: a failed first attempt raises for every `reconnect` setting.
 
     Both ways a first attempt fails raise instead of retrying: no answer to the dial, and an answer
     that never acknowledges the hello. Reconnection applies only to connections that were established
@@ -1028,7 +1029,7 @@ async def test_first_attempt_failure_raises_with_unlimited_retries_configured(di
 
 
 async def test_close_reason_shape_is_identical_in_both_languages(dialable_server: DialableServer):
-    """WSM-RCN-045: exactly four fields, the same four, one type per language, for every loss.
+    """WSM-RCN-045: every loss is reported with one type per language that has the same four fields in both.
 
     The TypeScript field list is read from its source, so a field added to one implementation and not
     the other fails this test.
@@ -1070,7 +1071,7 @@ def _camel(name: str) -> str:
 async def test_connect_wires_the_driver_to_a_real_socket():
     """`connect()` constructs the reconnect driver.
 
-    The test uses the public entry point against a real `websockets` server: the server kills the
+    The test uses the public entry point against a real `websockets` server: the server closes the
     connection, the peer dials again, replays the hello captured at `connect()` (WSM-RCN-020), and
     fires `on_reconnect` after the acknowledgement, not before (WSM-RCN-030).
     """
@@ -1508,7 +1509,7 @@ async def test_header_interceptors_persist_across_a_reconnect_and_do_not_run_on_
 
 
 async def test_close_during_a_dial_never_reconnects(dialable_server: DialableServer):
-    """WSM-RCN-040: a dial still in flight when `close()` runs does not bring the connection back."""
+    """WSM-RCN-040: a dial still in flight when `close()` runs does not re-establish the connection."""
     held = asyncio.Event()
     dialling = asyncio.Event()
 

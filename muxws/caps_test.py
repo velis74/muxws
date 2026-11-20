@@ -30,7 +30,7 @@ async def test_a_message_at_the_constant_is_accepted(make_pair):
     pair.start()
     try:
         codec = pair.acceptor._codec
-        # Sized so the whole encoded message lands just under the constant.
+        # Sized so the whole encoded message is slightly below the constant.
         payload = {"body": "x" * (MAX_FRAME_BYTES - 200)}
         assert encoded_length(codec.encode(Frame("open", stream=1, payload=payload))) <= MAX_FRAME_BYTES
 
@@ -60,13 +60,13 @@ async def test_an_over_cap_message_resets_that_stream_only(make_lone):
 
 
 async def test_the_fragment_field_alone_is_not_what_is_measured(make_lone):
-    """WSM-FRG-031 says the entire encoded message, envelope included - never the field."""
+    """WSM-FRG-031: the measured size is the entire encoded message, envelope included, not the fragment field."""
     lone = make_lone(max_frame_bytes=512)
     lone.peer.on_stream(_hold)
     lone.start()
     try:
         codec = lone.codec
-        # A fragment field comfortably under the cap, in an envelope that pushes the message over it.
+        # The fragment field is below the cap; with the envelope the message is above it.
         fragment = "y" * 400
         frame = Frame("open", stream=1, fragment=fragment, more=True, headers={"h": "z" * 300})
         assert len(fragment) < 512
@@ -155,7 +155,7 @@ async def test_open_beyond_receiver_limit_is_refused_and_opener_raises_nothing_l
         await pair.settle()
         assert len(handled) == 3
 
-        # One more. `open()` must not raise - the limit is the receiver's alone (WSM-API-004).
+        # One stream over the limit. `open()` does not raise: the limit is enforced only by the receiver (WSM-API-004).
         extra = pair.dialer.open({"n": 3})
         with pytest.raises(StreamRefused):
             await extra
@@ -278,7 +278,7 @@ async def test_the_frame_log_line_shape_at_debug(make_pair, caplog):
 
 
 async def test_payload_contents_never_appear_in_any_log_record(make_pair, caplog):
-    """WSM-OBS-002: application data routinely contains secrets."""
+    """WSM-OBS-002: no log record contains payload contents, which may include secrets."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()

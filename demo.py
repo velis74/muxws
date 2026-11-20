@@ -168,7 +168,7 @@ def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False, benc
 
 
 def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False, bench=False):
-    """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
+    """Exit with status 1 before starting anything, listing what is missing and the commands that install it."""
     problems = missing_dependencies(backend, frontend, uds=uds, bench=bench)
     if not problems:
         return
@@ -231,7 +231,7 @@ def build_parser():
             "  python demo.py --bench --full     msgpack and twenty concurrent streams as well\n"
             "\n"
             "Ctrl-C stops the backend and the dev server together. MUXWS_DEMO_PORT moves the\n"
-            "backend off 8020; the Vite proxy in demo/frontend/vite.config.ts has to be told too."
+            "backend off 8020; the proxy target in demo/frontend/vite.config.ts must be changed to match."
         ),
     )
     # At most one demo per run; argparse rejects combinations. No demo is the default: without a
@@ -286,7 +286,7 @@ def parse_arguments(argv=None):
     named_backend = arguments.backend or arguments.backend_option
 
     if arguments.backend and arguments.backend_option and arguments.backend != arguments.backend_option:
-        # Two different backends named; neither is chosen silently.
+        # Two different backends named: rejected with an error instead of choosing one.
         parser.error(f"asked for both '{arguments.backend}' and '--backend {arguments.backend_option}'; pick one")
 
     if arguments.uds or arguments.bench:
@@ -479,7 +479,7 @@ def run_bench(full=False):
 
 
 def run_backend(backend):
-    """Whichever backend was asked for: uvicorn in this process, or Node in a group under it."""
+    """Run the requested backend: uvicorn in this process, or Node in a child process group."""
     if backend == "node":
         run_node()
     else:

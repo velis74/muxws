@@ -284,7 +284,7 @@ async def test_max_payloads_zero_reports_timing_and_outcome_without_payloads(mak
     assert exchange.duration >= 0
 
 
-async def test_two_handlers_with_different_limits_each_get_their_own_cut(make_link):
+async def test_two_handlers_with_different_limits_each_receive_payloads_up_to_their_own_limit(make_link):
     """One stream, two handlers: each sees the first N of its own limit; `None` sees everything."""
     small, unlimited = Recorder(), Recorder()
 
@@ -563,7 +563,7 @@ async def test_as_dict_reports_a_reset_with_its_code_and_reason(make_link):
     assert record["first_response_ms"] is None or record["first_response_ms"] >= 0
 
 
-async def test_as_dict_trims_long_payloads_and_says_how_much_it_cut(make_link):
+async def test_as_dict_trims_long_payloads_and_records_the_number_of_bytes_cut(make_link):
     exchange = await _unary_exchange(make_link, {"text": "x" * 100}, headers={"long": "y" * 100})
 
     record = exchange.as_dict(trim_payload_size=20)
@@ -648,7 +648,7 @@ async def test_as_dict_turns_bytes_into_base64_under_a_binary_codec(make_link):
 # ---------------------------------------------------------------------------------------------- handler behaviour
 
 
-async def test_a_raising_handler_is_logged_and_does_not_disturb_others_or_the_connection(make_link, caplog):
+async def test_a_raising_handler_is_logged_and_other_handlers_and_the_connection_are_unaffected(make_link, caplog):
     recorder = Recorder()
 
     def explode(exchange: Exchange) -> None:

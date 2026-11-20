@@ -457,7 +457,7 @@ export async function accept(socket: NodeWebSocket, options: AcceptOptions = {})
   const check = compilePolicy(options.allowedOrigins);
   if (check !== null) {
     if (options.request === undefined) {
-      // The check cannot run, and the socket is not used unchecked.
+      // Without `request` the `Origin` check cannot run, so the socket is closed.
       socket.close(POLICY_VIOLATION, 'origin unknown');
       throw new ProtocolError(
         'allowedOrigins needs the upgrade request: pass the `request` ws emitted with the connection',

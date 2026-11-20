@@ -3,8 +3,8 @@
 The registry does not observe `tags`. `tags` is a plain dict; writing a tag does no registry work, and
 the index changes only when `register` or `deregister` is called (WSM-REG-013, WSM-REG-014).
 
-Usage rule: **look up on keys you do not mutate, and mutate keys you do not look up.** A consumer that
-needs both on one key calls `register(peer)` after each write.
+Usage rule: a key used in `peers_for` lookups is not changed after `register`. A consumer that changes
+a key it also looks up calls `register(peer)` after each write.
 """
 
 from __future__ import annotations

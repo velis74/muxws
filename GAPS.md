@@ -57,7 +57,8 @@ own form. `SPEC.md` does not state which form is correct.
   `interop/runner.ts` is satisfied by the handlers' sleeps and passes without round-robin selection.
   The rule's witnesses are `writer_test.py` and
   `conformance/sequences/small-frame-overtakes-a-fragmented-payload.json`.
-- **`WSM-FRM-006`, Python.** `peer_test.py::test_an_envelope_lookalike_payload_survives_being_fragmented`
+- **`WSM-FRM-006`, Python.**
+  `peer_test.py::test_an_envelope_lookalike_payload_is_delivered_unchanged_after_fragmentation`
   compares against the object passed to the library, so a library that deletes a reserved key from
   the caller's own dict passes it. The TypeScript counterpart snapshots the payload before the send.
 - **`WSM-AUT-002`, TypeScript.** `ts/peer.spec.ts` *"never interprets per-stream headers"* compares
@@ -91,7 +92,7 @@ own form. `SPEC.md` does not state which form is correct.
 - These rules have no citation and are held by a test that does not name them: `WSM-API-013`,
   `WSM-BPR-002`, `WSM-CDC-003`, `WSM-FRG-033`, `WSM-FRM-010`, `WSM-FRM-011`, `WSM-INV-003`,
   `WSM-INV-009`, `WSM-SID-003`, `WSM-STM-012`, `WSM-STM-013`, `WSM-STM-015`. Renaming or changing
-  such a test does not report that the rule lost its witness.
+  such a test gives no indication that the rule no longer has a witness.
 
 ## Platforms and environments not exercised
 

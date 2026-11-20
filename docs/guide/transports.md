@@ -492,7 +492,8 @@ the subprotocol accepted, and a memory pair is created in that state.
 
 ## Where authentication belongs
 
-**At the upgrade, before `accept()`.** muxws does not interpret credentials anywhere.
+Authentication happens at the upgrade, before `accept()`. muxws does not interpret credentials
+anywhere.
 
 The upgrade is an ordinary HTTP request, so use HTTP mechanisms: a cookie, an `Authorization` header,
 a signed query parameter, a mutual-TLS client certificate, or, for browsers, an extra subprotocol
@@ -547,14 +548,16 @@ A Starlette socket with a refused origin is answered with HTTP 403. A `websocket
 has completed its handshake when `accept()` runs, and is closed with 1008. `accept()` raises
 `OriginRefused` in both cases. See [`accept()`](/api/accept#accept-python).
 
-**Not in the hello.** The hello is an ordinary stream: it arrives after the socket is open and the
-acceptor has allocated resources for it, it is sent unchanged on every reconnection for the life of
-the process (so the credential cannot be rotated), and it is passed as an application payload to every
-frame observer on the connection. The hello identifies a client; it does not authorize the connection.
+**A credential does not belong in the hello.** The hello is an ordinary stream: it arrives after the
+socket is open and the acceptor has allocated resources for it, it is sent unchanged on every
+reconnection for the life of the process (so the credential cannot be rotated), and it is passed as
+an application payload to every frame observer on the connection. The hello identifies a client; it
+does not authorize the connection.
 
-**Not in per-stream `headers`.** muxws does not interpret them. They carry application metadata, such
-as a trace id, a content type or an idempotency key. muxws does not route on the opening payload
-either; see [What muxws does not do](/guide/rationale#what-muxws-does-not-do).
+**A credential does not belong in per-stream `headers`.** muxws does not interpret them. They carry
+application metadata, such as a trace id, a content type or an idempotency key. muxws does not route
+on the opening payload either; see [What muxws does not
+do](/guide/rationale#what-muxws-does-not-do).
 
 **When a credential expires during a connection**, close the connection with `goaway`. Streams at or
 below the cut-off finish, no new streams are accepted, and a dialer with a reconnect helper dials again

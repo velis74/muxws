@@ -59,7 +59,7 @@ async def test_unregistered_name_raises_before_socket(configured_codec, monkeypa
 
 
 async def test_an_unregistered_configured_codec_does_not_fall_back_to_json(configured_codec):
-    """WSM-INV-015: a deployment that believes it runs msgpack must never silently run JSON."""
+    """WSM-INV-015: a deployment configured for an unregistered codec raises instead of running JSON."""
     configured_codec("msgpack")
     with pytest.raises(CodecNotRegistered):
         resolve_codec()
@@ -82,7 +82,7 @@ def test_env_default_and_runtime_override(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_settings_is_read_at_call_time_not_import_time(configured_codec):
-    """An application setting `settings.codec` during bootstrap must be obeyed."""
+    """`settings.codec` is read at call time, so a value set during application bootstrap applies."""
     marker = JsonCodec()
     register_codec("bootstrap-set", marker)
     try:

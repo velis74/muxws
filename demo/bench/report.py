@@ -69,7 +69,7 @@ def _preamble() -> list[str]:
         "",
         "muxws/raw is the muxws rate over the raw-socket one. The two raw modes send a buffer the",
         "codec encoded once before the clock started; muxws is handed the payload object, encodes it",
-        "per message, and fragments it above 65,536 bytes - all of that is inside its column. The",
+        "per message, and fragments it above 65,536 bytes; its column includes these costs. The",
         "trimmed matrix measures the twenty-stream cell for muxws alone, so on that row the two raw",
         "columns and the ratio built on them are empty; --full runs every mode at both stream counts.",
         "",
