@@ -1355,6 +1355,7 @@ export class Peer {
       stream.recorder.remote.headers = frame.headers ?? null;
       if (stream.state === StreamState.HALF_CLOSED_REMOTE) stream.recorder.remote.end(null);
     }
+    if (stream.state === StreamState.HALF_CLOSED_REMOTE) stream.openedWithEnd();
     this.liveStreams.set(streamId, stream);
     this.interceptIncoming(stream, stream.headers);
 
@@ -1409,6 +1410,7 @@ export class Peer {
     if (frame.end === true) {
       stream.state = StreamState.HALF_CLOSED_REMOTE;
       stream.recorder?.remote.end(null);
+      stream.openedWithEnd();
     }
     this.startHandler(stream);
     return true;

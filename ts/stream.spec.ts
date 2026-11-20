@@ -976,3 +976,64 @@ describe('the answering side’s leading headers (WSM-FRM-016)', () => {
     }
   });
 });
+
+describe("the handler's iteration", () => {
+  async function iterateInHandler(
+    openOn: (peer: Peer) => Promise<void>,
+    options: { maxFrameBytes?: number } = {},
+  ): Promise<unknown[]> {
+    const pair = new Pair(options);
+    const seen: unknown[] = [];
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    pair.acceptor.onStream(async (payload, stream) => {
+      seen.push(['open', payload]);
+      for await (const item of stream) seen.push(item);
+      finish();
+      if (!stream.oneway) await stream.reply({ items: seen.length });
+    });
+    pair.start();
+    try {
+      await openOn(pair.dialer);
+      await done;
+    } finally {
+      await pair.stop();
+    }
+    return seen;
+  }
+
+  it("ends the handler's iteration of a stream opened with end - WSM-API-030", async () => {
+    const seen = await iterateInHandler(async (peer) => {
+      expect(await peer.request({ q: 1 })).toEqual({ items: 1 });
+    });
+    expect(seen).toEqual([['open', { q: 1 }]]);
+  });
+
+  it('ends it for a oneway stream - WSM-API-030', async () => {
+    const seen = await iterateInHandler(async (peer) => peer.notify({ n: 1 }));
+    expect(seen).toEqual([['open', { n: 1 }]]);
+  });
+
+  it('ends it when end is on the last fragment of the open - WSM-API-030', async () => {
+    const big = { blob: 'x'.repeat(2000) };
+    const seen = await iterateInHandler(
+      async (peer) => {
+        expect(await peer.request(big)).toEqual({ items: 1 });
+      },
+      { maxFrameBytes: 512 },
+    );
+    expect(seen).toEqual([['open', big]]);
+  });
+
+  it('yields the later payloads until the remote ends - WSM-API-030', async () => {
+    const seen = await iterateInHandler(async (peer) => {
+      const stream = peer.open({ q: 1 });
+      await stream.send(1);
+      await stream.send(2, { end: true });
+      expect(await stream).toEqual({ items: 3 });
+    });
+    expect(seen).toEqual([['open', { q: 1 }], 1, 2]);
+  });
+});

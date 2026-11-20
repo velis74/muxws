@@ -7,7 +7,7 @@ below.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.6] - 2026-11-19
+## [0.4.6] - 2026-11-20
 
 ### Added
 
@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `asDict({ trimPayloadSize })`) returns the same JSON-ready record in both languages, binary values as base64
   and long payloads trimmed. TypeScript also exports `ExchangeOutcome`, `ExchangeParty`, `ExchangeOptions`,
   `ExchangeDictOptions`, `ExchangeDict` and `ExchangeSideDict`.
+
+### Fixed
+
+- An `async for` over a stream the remote opened with `end` (`request()`, `notify()`, or a fragmented `open` whose
+  last fragment carries `end`) ends at once instead of waiting forever (WSM-API-030).
 
 ## [0.4.5] - 2026-11-17
 

@@ -831,6 +831,8 @@ class Peer:
             record = stream._exchange = ExchangeRecorder(self.id, self._exchange_limit)
             record.request.headers = frame.headers
             record.request.ended = stream.state is StreamState.HALF_CLOSED_REMOTE
+        if stream.state is StreamState.HALF_CLOSED_REMOTE:
+            stream._opened_with_end()
         self._streams[stream_id] = stream
         self._intercept_incoming(stream, stream.headers)
 
@@ -865,6 +867,7 @@ class Peer:
         stream.payload = payload
         if frame.end:
             stream.state = StreamState.HALF_CLOSED_REMOTE
+            stream._opened_with_end()
         if stream._exchange is not None:
             stream._exchange.request.add(payload)
             stream._exchange.request.ended = stream.state is StreamState.HALF_CLOSED_REMOTE

@@ -1077,3 +1077,66 @@ async def test_the_acceptor_stream_exposes_the_open_headers_and_empty_reply_head
         assert answered[0].reply_headers == {}
     finally:
         await pair.stop()
+
+
+async def _iterate_in_handler(make_pair, open_on, **peer_options: Any) -> list[Any]:
+    """Open a stream from the dialer with `open_on`, iterate it in the acceptor's handler, return what it saw."""
+    pair = make_pair(**peer_options)
+    seen: list[Any] = []
+    done = asyncio.Event()
+
+    async def handler(payload: Any, stream: Stream) -> None:
+        seen.append(("open", payload))
+        seen.extend([item async for item in stream])
+        done.set()
+        if not stream.oneway:
+            await stream.reply({"items": len(seen)})
+
+    pair.acceptor.on_stream(handler)
+    pair.start()
+    try:
+        await open_on(pair.dialer)
+        await asyncio.wait_for(done.wait(), 1)
+    finally:
+        await pair.stop()
+    return seen
+
+
+async def test_iterating_a_request_in_the_handler_ends_at_once(make_pair):
+    """WSM-API-030: a `request()` opens with `end`, so the handler's iteration yields nothing and ends."""
+
+    async def request(peer: Peer) -> None:
+        assert await peer.request({"q": 1}) == {"items": 1}
+
+    assert await _iterate_in_handler(make_pair, request) == [("open", {"q": 1})]
+
+
+async def test_iterating_a_notify_in_the_handler_ends_at_once(make_pair):
+    """WSM-API-030: a oneway open ends the stream on arrival."""
+
+    async def notify(peer: Peer) -> None:
+        await peer.notify({"n": 1})
+
+    assert await _iterate_in_handler(make_pair, notify) == [("open", {"n": 1})]
+
+
+async def test_iterating_a_fragmented_request_in_the_handler_ends_at_once(make_pair):
+    """WSM-API-030: `end` on the last fragment of a fragmented `open` ends the iteration too."""
+    big = {"blob": "x" * 2000}
+
+    async def request(peer: Peer) -> None:
+        assert await peer.request(big) == {"items": 1}
+
+    assert await _iterate_in_handler(make_pair, request, max_frame_bytes=512) == [("open", big)]
+
+
+async def test_iterating_an_open_stream_in_the_handler_yields_until_the_remote_ends(make_pair):
+    """WSM-API-030: without `end` on the `open`, the iteration yields the later payloads."""
+
+    async def open_and_send(peer: Peer) -> None:
+        stream = peer.open({"q": 1})
+        await stream.send(1)
+        await stream.send(2, end=True)
+        assert await stream == {"items": 3}
+
+    assert await _iterate_in_handler(make_pair, open_and_send) == [("open", {"q": 1}), 1, 2]
