@@ -205,12 +205,8 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
     total = len(data)
 
     while True:
-        # Try the whole remainder as the closing fragment. `end` and `trailers` travel only on this
-        # fragment, so it is measured separately from a middle fragment. Checked first on every pass,
-        # including when no payload is left: the sequence MUST end with a fragment carrying
-        # `more: false`, even an empty one. The encode is skipped when the raw remainder alone
-        # exceeds the cap, since the encoded frame is never shorter than the remainder; encoding it on
-        # every pass would make splitting quadratic in payload size.
+        # The closing fragment carries `end` and `trailers`, so it is measured on its own; the sequence
+        # MUST end with `more: false`, even when empty. A remainder already over the cap is not encoded.
         if total - position <= cap:
             tail = _fragment_frame(frame, _chunk(data, position, total, text=text), first=emitted == 0, last=True)
             if encoded_length(codec.encode(tail)) <= cap:

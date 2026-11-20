@@ -32,11 +32,8 @@ class PeerRegistry:
         #: The reverse map, so `register` can replace all of a peer's entries without scanning the
         #: index (WSM-REG-012).
         self._entries: dict[Peer, set[tuple[str, Hashable]]] = {}
-        #: Peers whose close hook is installed. A consumer may call `register(peer)` after every tag
-        #: write (WSM-REG-017); the hook is installed once per peer, not once per call (WSM-REG-001).
-        #: `Peer` calls its close handlers on every connection loss and keeps them across a reconnect
-        #: (WSM-RCN-032, WSM-RCN-040), so the hook stays installed and deregisters the peer on each loss.
-        #: A weak set, so the registry does not keep a peer alive.
+        #: Peers whose close hook is installed: one hook per peer however often `register` is called
+        #: (WSM-REG-001); weak, so the registry does not keep a peer alive.
         self._hooked: weakref.WeakSet[Peer] = weakref.WeakSet()
 
     def __len__(self) -> int:

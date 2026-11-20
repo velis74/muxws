@@ -322,17 +322,8 @@ async def run_tst_004(peer: muxws.Peer, journal: Journal, pushes: list[Any], *, 
         f"{label}: the server pushed {pushes!r}",
     )
 
-    # Between the export's first and last inbound frame there must be an inbound frame of another
-    # stream. Only inbound frames are counted: the six outbound opens are sent together regardless of
-    # how the acceptor answers.
-    #
-    # This assertion does not test the round-robin writer; the export handler's pauses satisfy it
-    # without one. WSM-FRG-019 is tested by
-    # `writer_test.py::test_round_robin_selects_across_streams_not_fifo` and the
-    # `small-frame-overtakes-a-fragmented-payload` fixture. This check asserts that neither
-    # implementation answers streams one at a time. Asserting that the `big` reply's fragments are
-    # non-contiguous would depend on another stream having data queued at that moment, and would be
-    # timing-dependent.
+    # Between the export's first and last inbound frame there is an inbound frame of another stream:
+    # neither implementation answers streams one at a time. Outbound frames are not counted.
     inbound = [entry for entry in journal.entries if entry[0] == "rx"]
     export_positions = [index for index, entry in enumerate(inbound) if entry[2] == export_id]
     check(bool(export_positions), f"{label}: no inbound frame for the export stream {export_id}")
@@ -540,19 +531,8 @@ def check_jitter_dispersed(delays: list[float], *, label: str) -> None:
 
 # --------------------------------------------------------------------------- WSM-CDC-007: the corpus
 #
-# The cross-language part of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
-# that codec, running the sequence corpus". `muxws/conformance_test.py` and `ts/conformance.spec.ts`
-# replay `conformance/sequences/` with both peers in one process; this runs the corpus with one peer
-# in each language.
-#
-# A sequence fixture scripts both peers as one ordered list of steps. The dialer process conducts: it
-# reads the script, executes the steps whose `peer` is its own role, and sends every other step over
-# a control channel to the acceptor process, which executes it through the same `Side` class and
-# replies. The steps run in fixture order, as in the in-process runners, and every fixture can run.
-#
-# The control channel carries only a step index and the ordinal -> stream id table. Both processes
-# load the fixture from disk, so each resolves `$bytes` placeholders (`conformance/README.md`) from
-# the same file and no JSON encoding of bytes is needed.
+# Replays `conformance/sequences/` with one peer in each language; the dialer conducts and sends the
+# acceptor's steps over a control channel (`conformance/README.md`, "Cross-process replay").
 
 #: Read from disk by both processes; not sent over the control channel.
 CONFORMANCE = Path(__file__).resolve().parent.parent / "conformance"

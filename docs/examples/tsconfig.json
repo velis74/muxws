@@ -1,8 +1,7 @@
 {
   // Only the examples need this file. A reader who ran `npm install muxws ws` resolves `muxws` and
   // `muxws/node` through the package's own exports map; inside this repository there is no installed
-  // copy, so the two specifiers are pointed at the sources the package is built from. Nothing else
-  // here differs from an ordinary Node ESM project.
+  // copy, so the two specifiers are pointed at the sources the package is built from.
   "compilerOptions": {
     "module": "esnext",
     "moduleResolution": "bundler",

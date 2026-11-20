@@ -7,14 +7,9 @@ import { type ConnectOptions, dialAndEstablish, type Dial } from './reconnect';
 import { BrowserSocket, UnixSocketsUnsupportedError } from './transports/browser-socket';
 
 /**
- * Dial `url` and return a serving peer.
- *
- * Throws if the **first** attempt fails, with the underlying error, whatever `reconnect` says
- * (WSM-RCN-006/WSM-INV-018). Reconnection applies only to connections that were established and then
- * lost, so a wrong URL is reported to the caller instead of being retried.
- *
- * The codec is resolved before any socket is opened (WSM-CDC-016), so an unregistered codec name
- * raises `CodecNotRegistered` at connect time instead of a decode error after the upgrade.
+ * Dial `url` and return a serving peer. The codec is resolved before any socket opens (WSM-CDC-016).
+ * If the first attempt fails it throws the underlying error, whatever `reconnect` says
+ * (WSM-RCN-006/WSM-INV-018); only an established connection that is lost is reconnected.
  */
 export async function connect(url: string, options: ConnectOptions = {}): Promise<Peer> {
   // Checked before the codec lookup: a url this entry point cannot dial raises
@@ -29,24 +24,10 @@ export async function connect(url: string, options: ConnectOptions = {}): Promis
 }
 
 /**
- * Throws `UnixSocketsUnsupportedError` for a `ws+unix:` url; every other url is passed to the
- * platform unchanged (WSM-API-022).
- *
- * `ws+unix:///run/app.sock:/route` dials a filesystem socket, which only the `ws` package supports.
- * The platform's global `WebSocket` (a browser's, and node's undici implementation) rejects the
- * scheme with a message that names neither muxws nor `muxws/node` (`expected a ws: or wss: url`
- * under node, `The URL's scheme must be either 'ws' or 'wss'` under jsdom). This error names the
- * entry point to use instead: `connect` from `muxws/node`. `unopenedError` in
- * `ts/transports/browser-socket.ts` composes its diagnostic on the dialer side for the same reason.
- *
- * `UnixSocketsUnsupportedError` extends `MuxwsError` (WSM-ERR-016), so an application's
- * `instanceof MuxwsError` handler catches it. `CodecMismatch` is used only for a handshake the
- * acceptor refused (WSM-CDC-024); no handshake takes place here.
- *
- * The check is a string prefix match, not `new URL()`, because `new URL()` throws `ERR_INVALID_URL`
- * for any malformed url and would replace the platform's diagnostic for every mistyped url. The url
- * is lowercased because a scheme is ASCII-case-insensitive (`new URL()` folds `WS+UNIX:` to
- * `ws+unix:`), and trimmed because the URL parser strips leading whitespace.
+ * Throws `UnixSocketsUnsupportedError` (WSM-ERR-016), naming `muxws/node`, for a `ws+unix:` url; every
+ * other url is left to the platform's `WebSocket` (WSM-API-022). The scheme is matched
+ * case-insensitively on the trimmed url, without `new URL()`, so a malformed url keeps the platform's
+ * own error.
  */
 function refuseUnixScheme(url: string): void {
   if (!url.trim().toLowerCase().startsWith('ws+unix:')) return;

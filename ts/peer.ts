@@ -147,17 +147,9 @@ export function defaultErrorSerializer(error: unknown): unknown {
 // --------------------------------------------------------------------------- small helpers
 
 /**
- * Wait one macrotask turn, so timer callbacks and socket events can run.
- *
- * WSM-INV-004 depends on this. `nextFrame()` resolves immediately when there is work, and a socket
- * with buffer space resolves its send immediately, so awaiting them only drains the microtask queue.
- * Producers driven by a timer or an inbound socket message run as macrotasks; without this yield the
- * write loop would send every fragment of a large payload before any of them could enqueue a frame,
- * and the round-robin would have only one lane.
- *
- * Uses `setImmediate` where available (Node), otherwise `MessageChannel`, and `setTimeout(0)` only as
- * a last resort: browsers clamp nested timers to 4 ms, which would limit a per-frame yield to a few
- * hundred frames per second.
+ * Wait one macrotask turn, so timer callbacks and socket events can enqueue frames between two writes
+ * (WSM-INV-004). Uses `setImmediate` (Node), otherwise `MessageChannel`, and `setTimeout(0)` last,
+ * because browsers clamp nested timers to 4 ms.
  */
 const yieldToOtherTasks: () => Promise<void> = (() => {
   const immediate = (globalThis as { setImmediate?: (callback: () => void) => unknown }).setImmediate;
@@ -768,18 +760,10 @@ export class Peer {
   }
 
   /**
-   * @internal `open()`'s body without the `isOpen` and `goaway` guard. The reconnect driver uses it to
-   * send the hello.
-   *
-   * `isOpen` is false between adopting a socket and the hello acknowledgement (WSM-RCN-043), so
-   * `open()` throws in that window and no application frame precedes the hello (WSM-RCN-023). The
-   * hello is sent in that window, so the driver calls this method. It is not a parameter of the
-   * public `open()`, so applications cannot bypass the guard.
-   *
-   * Allocation and enqueue are one indivisible step (WSM-SID-006): there is no `await` in this
-   * method. An `await` between the allocation and the `enqueue` would let two concurrent calls
-   * interleave and send stream ids out of order (WSM-INV-005). A `oneway` stream carries `end` and is closed once
-   * its `open` is enqueued (WSM-STM-041).
+   * @internal `open()` without the `isOpen` and `goaway` guard, for the hello, which is sent before
+   * `isOpen` is true (WSM-RCN-023/043). Allocation and enqueue contain no `await`, so concurrent calls
+   * cannot send stream ids out of order (WSM-SID-006, WSM-INV-005). A `oneway` stream carries `end` and
+   * is closed once its `open` is enqueued (WSM-STM-041).
    */
   allocateAndEnqueue<T = unknown>(first?: unknown, second?: OpenOptions, oneway = false): Stream<T> {
     if (this.exhausted()) {
@@ -1795,15 +1779,9 @@ export class Peer {
 
   /**
    * @internal Socket loss: every live stream fails with `ConnectionLost` before `onClose` handlers run.
-   *
-   * Also called by the reconnect helper (`ts/reconnect.ts`) when a missing pong or an incomplete
-   * hello shows the socket is dead without a socket error, so every loss is reported through this one
-   * path (WSM-RCN-011).
-   *
-   * `notify: false` suppresses `onClose`; it is used for a first connection that was never
-   * established, where `connect()` rejects instead (WSM-RCN-006) and the caller has no peer to attach
-   * handlers to. The peer is still marked dead, so `isOpen` is false immediately rather than after the
-   * read loop observes the close.
+   * Every loss, including one the heartbeat or the hello detects, is reported here (WSM-RCN-011).
+   * `notify: false` marks the peer dead without calling `onClose`, for a first connection that was
+   * never established (WSM-RCN-006).
    */
   die(cause: ConnectionClosed, options: { notify?: boolean } = {}): void {
     if (!this.open_) return;
@@ -1881,15 +1859,9 @@ export class Peer {
   }
 
   /**
-   * @internal Close the underlying socket; nothing else.
-   *
-   * When the heartbeat declares a socket dead, WSM-RCN-011 requires marking it dead and closing it
-   * locally; `die()` does only the first. Without the close, the read loop stays in
-   * `socket.receive()`, `serve()` does not settle, and the reconnect supervisor never redials.
-   *
-   * `code` defaults to 1000, not 1006: 1006 means "closed without a close frame" and MUST NOT be sent.
-   * `ws` throws for it, which would leave the socket open. The peer reports 1006 as the close code
-   * of the loss, but sends 1000.
+   * @internal Close the underlying socket; nothing else. `die()` does not close it, and the read loop
+   * ends only when it is closed (WSM-RCN-011). `code` defaults to 1000: 1006 must not be sent, and `ws`
+   * throws for it.
    */
   async closeSocketLocally(code = 1000, reason = ''): Promise<void> {
     try {

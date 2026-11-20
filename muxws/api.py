@@ -174,14 +174,10 @@ def _websocket_dialer(
                     additional_headers=headers,
                 )
             else:
-                # Imported only in this branch, so a TCP dial does not import it. `websockets.asyncio`
-                # is available at the minimum supported `websockets` version, since the top-level
-                # `connect` above resolves to it.
+                # Imported only for a Unix-socket dial.
                 from websockets.asyncio.client import unix_connect
 
-                # `uri=` is the logical URL: the HTTP handshake needs a request target and a `Host`,
-                # which a filesystem path does not provide. The other arguments are the same as in the
-                # TCP arm.
+                # `uri=` supplies the handshake's request target and `Host`, which a socket path lacks.
                 connection = await unix_connect(
                     unix.path,
                     uri=unix.uri,

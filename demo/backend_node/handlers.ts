@@ -243,15 +243,9 @@ export class MarketService {
   // ------------------------------------------------------------------ the hello
 
   /**
-   * Handles the hello (the subscription). It is an ordinary stream with no wire marking (WSM-RCN-021).
-   *
-   * The dialer sends it through `connect({hello})`, so it is replayed on every new socket
-   * (WSM-RCN-020) and this method runs on a new `Peer` after every reconnect. An acceptor's `tags` end
-   * with their connection (WSM-RCN-033), so the peer is tagged and registered here, on each connection.
-   *
-   * The frontend does not use the reply: `connect()`'s reconnect helper owns this stream and discards
-   * its replies, and the acknowledgement WSM-RCN-022 requires is this handler returning. The symbol
-   * data arrives on the pushed tick streams.
+   * Handles the hello (the subscription), an ordinary stream with no wire marking (WSM-RCN-021). Runs
+   * on every connection, including each reconnect (WSM-RCN-020), and tags and registers the peer there,
+   * because an acceptor's `tags` end with their connection (WSM-RCN-033).
    */
   private async hello(peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const tags = fieldOf(payload, 'tags');
@@ -366,15 +360,8 @@ export class MarketService {
   }
 
   /**
-   * Streaming and cancellable (WSM-ERR-012/013).
-   *
-   * In the Python port the browser's `cancel()` cancels the handler's task and `CancelledError` is
-   * raised at its pending `await`. TypeScript cannot interrupt a pending `await`, so the peer aborts
-   * `stream.signal` instead (WSM-API-023): the sleep below ends early and the loop checks
-   * `signal.aborted`. A handler that ignored the signal would keep producing points after the
-   * cancellation, which WSM-ERR-012 forbids.
-   *
-   * `history_cancelled` counts cancellations observed by this handler.
+   * Streaming and cancellable (WSM-ERR-012/013): a cancel aborts `stream.signal` (WSM-API-023), which
+   * ends the sleep and stops the loop. `history_cancelled` counts cancellations seen by this handler.
    */
   private async history(_peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const symbol = symbolOf(payload);

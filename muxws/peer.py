@@ -474,12 +474,8 @@ class Peer:
                     await self._socket.send_text(encoded)  # type: ignore[arg-type]
                 # Fragment n+1 is sliced after fragment n has reached the socket (WSM-FRG-018).
                 self._writer.advance(frame.stream if frame.stream is not None else CONNECTION_LANE)
-                # Yield one event-loop turn per frame (WSM-INV-004). `next_frame()` returns without
-                # suspending when there is work, and `send_text` on a socket with buffer space (uvicorn
-                # on loopback, `MemorySocket`) also completes without suspending. Without this yield
-                # the loop sends every queued frame and fragment in one run of this task, no other
-                # task can enqueue a frame in between, and frames of different streams do not
-                # interleave unless the socket applies backpressure.
+                # One event-loop turn per frame (WSM-INV-004): neither `next_frame()` nor a socket with
+                # buffer space suspends, so without it other streams' frames would not interleave.
                 await asyncio.sleep(0)
             except ConnectionClosed:
                 return

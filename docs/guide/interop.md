@@ -164,6 +164,31 @@ them:
 4. **Misbehaviour.** `invalid/` specifies which failures reset one stream and which end the connection,
    in the `connection_survives` column.
 
+## Live cross-language checks
+
+The workflow `.github/workflows/cross-language.yml` connects a Python peer and a TypeScript peer over a
+real socket through `interop/drive.sh`, in both role assignments and under every shipped codec. Each leg
+runs three scenarios:
+
+| Scenario | What it runs |
+|---|---|
+| `main` | The hand-written scenario (WSM-TST-004) over TCP. |
+| `unix` | The same scenario over a socket file. It tests the `ws+unix:` URL grammar, which each implementation parses with its own code: each acceptor reports the request target it received, and the driver compares it with the route in the URL, query string included. |
+| `corpus` | The sequence corpus (WSM-CDC-007), replayed with one peer in each language. |
+
+A separate leg kills the acceptor with streams open and starts a second one on the same port
+(WSM-TST-005); it runs over TCP only, because a killed acceptor does not unlink its socket file.
+
+The codec is set in both environment variables, `MUXWS_CODEC` and `VITE_MUXWS_CODEC` (WSM-CDC-010), and
+is also passed to the driver as an argument, so a process that did not receive the environment fails
+instead of running `json` under another codec's name.
+
+The last argument of a `corpus` call is the number of fixtures the leg must run: the whole corpus under
+`msgpack` and one fewer under `json`, which cannot carry `bytes-payload-under-binary-codec`
+(WSM-CDC-008). The number is fixed in the workflow, so a conductor that skips fixtures fails. Adding a
+sequence fixture requires raising these numbers and `EXPECTED_SEQUENCE_FIXTURES` in both conformance
+runners.
+
 ## See also
 
 - [`api/types`](/api/types) — `Frame` and every envelope field, `MAX_FRAME_BYTES`

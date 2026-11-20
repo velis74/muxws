@@ -163,16 +163,12 @@ export type OriginPolicy = Iterable<string> | SameOrigin | ((origin: string | un
 /**
  * The check `accept()` runs for `allowedOrigins`, or `null` when there is nothing to check.
  *
- * - A `SameOrigin` compares `Origin` with the request's host; see `SameOrigin`.
- * - A function is called with the request's single `Origin` value, or with `undefined` when the
- *   request has none; its truthiness is the decision. A request with more than one `Origin` header is
- *   refused without calling it.
- * - An iterable of origins allows a request whose single `Origin` value parses to one of them under
- *   `parseOrigin`. A request without `Origin`, with more than one, or with a value that is not an
- *   origin (`null` included) is refused.
+ * - `SameOrigin`: see `SameOrigin`.
+ * - A function: called with the request's single `Origin` value, or `undefined` when there is none;
+ *   truthy allows. A request with more than one `Origin` header is refused without calling it.
+ * - An iterable: allows a request whose single `Origin` value `parseOrigin` maps to one of its entries.
  *
- * Throws `TypeError` for a string (an iterable of its characters) and for an entry that is not an
- * origin.
+ * Throws `TypeError` for a string and for an entry that is not an origin.
  */
 export function compilePolicy(allowedOrigins: OriginPolicy | undefined): OriginCheck | null {
   if (allowedOrigins === undefined) return null;

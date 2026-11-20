@@ -16,15 +16,8 @@ from typing import Any
 from muxws.errors import ProtocolError
 from muxws.frames import Frame, from_mapping, to_mapping
 
-#: Compact separators and no ASCII escaping, so that `json.dumps` here and `JSON.stringify` in the
-#: TypeScript port emit the same bytes for strings, containers, booleans, null and integers up to
-#: 2**53. They differ for floats and larger integers: Python writes `1.0`, `-0.0`, `1e+16`, `1e-07`
-#: where JavaScript writes `1`, `0`, `10000000000000000`, `1e-7`, and JavaScript rounds an integer
-#: beyond 2**53 to the nearest double. Fragment boundaries are cut over this encoded form, so the two
-#: ports cut a payload containing a float at different offsets. Interoperability is unaffected,
-#: because the sender chooses the cuts and the receiver only concatenates; the shared boundary corpus
-#: contains no such payloads.
-
+#: Compact separators and no ASCII escaping, so that the output matches `JSON.stringify` except for
+#: floats and integers beyond 2**53.
 _DUMP_KWARGS: dict[str, Any] = {"separators": (",", ":"), "ensure_ascii": False, "allow_nan": False}
 
 

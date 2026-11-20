@@ -76,16 +76,9 @@ async function serveConnection(socket: NodeWebSocket): Promise<void> {
 }
 
 /**
- * Creates the `ws` server with both handshake hooks installed (WSM-CDC-022).
- *
- * `handleProtocols` only selects the subprotocol: `ws` answers 101 whatever it returns, including
- * `false`, so a mismatch would be detected only on an open socket. WSM-CDC-022 requires refusing the
- * handshake where the transport allows it. `refuseMismatchedUpgrade` answers HTTP 400 through
- * `shouldHandle`, the only `ws` 8 hook that can abort an upgrade with a status. Without it the server
- * completes handshakes it must refuse.
- *
- * `refuseMismatchedUpgrade` chains the inherited `shouldHandle`, so the `path` check still applies: the
- * server answers on `/ws` and refuses other paths, as the FastAPI route does.
+ * Creates the `ws` server with both handshake hooks installed. `refuseMismatchedUpgrade` answers a codec
+ * mismatch with HTTP 400 through `shouldHandle` (WSM-CDC-022), which `handleProtocols` cannot do, and
+ * keeps the `path` check: the server answers only on `/ws`.
  */
 export function startServer(port: number = PORT): WebSocketServer {
   const server = refuseMismatchedUpgrade(new WebSocketServer({ port, host: HOST, path: PATH, handleProtocols }));
@@ -94,13 +87,8 @@ export function startServer(port: number = PORT): WebSocketServer {
       logger.error('muxws demo: a connection ended badly', error);
     });
   });
-  // A failed `listen` is emitted as an `error` event. Unhandled, it terminates the process with a stack
-  // trace that names neither the port nor the cause. EADDRINUSE usually means another demo backend is
-  // still running; this handler logs one line naming the port, as uvicorn does.
-  //
-  // The handler sets `process.exitCode` instead of calling `process.exit()`: stderr is a pipe under the
-  // launcher, and an immediate exit can truncate the logged line. With no listening socket the event
-  // loop has no work left, so the process exits with that code.
+  // Logs a failed `listen` as one line naming the port. `exitCode` rather than `process.exit()`, which
+  // can truncate the line on a piped stderr; with no listening socket the process then exits.
   server.on('error', (error: Error) => {
     // `ws` types this as a plain `Error`; Node adds a `code` string at runtime. The cast reads it
     // without `NodeJS.ErrnoException`, a type-only global the lint config does not allow.

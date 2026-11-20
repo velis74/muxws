@@ -23,18 +23,9 @@ import { type Frame, fromMapping, toMapping } from './frames';
 export { VERSION } from './version';
 
 /**
- * - `rawStrings: false` decodes a msgpack string to a `string`, not a `Uint8Array`; it corresponds to
- *   Python's `raw=False`. With `true`, envelope keys and `type` values would decode as bytes,
- *   `fromMapping` would find no `type`, and every inbound frame would be a protocol error.
- * - `useBigInt64: false` decodes int64 to a `number`, as the JSON codec does for a large integer.
- *   With `true` the result would be a `bigint`, which compares unequal to the `number` Python
- *   produces and which `JSON.stringify` cannot serialize. Integers beyond ±(2^53 − 1) are excluded
- *   from the corpus, as for JSON; see `conformance/README.md`.
- *
- * `mapKeyConverter` keeps its default, which accepts string and number keys; Python's
- * `strict_map_key=False` accepts the same. The decoded results differ: a JavaScript object key is a
- * string, so `{1: 'a'}` decodes as `{'1': 'a'}` here and as `{1: "a"}` in Python. The corpus contains
- * no such payload.
+ * `rawStrings: false` decodes a msgpack string to a `string` (Python's `raw=False`); `useBigInt64:
+ * false` decodes int64 to a `number`, as the JSON codec does. Map keys decode as strings: `{1: 'a'}`
+ * becomes `{'1': 'a'}`, unlike in Python.
  */
 const DECODE_OPTIONS: DecoderOptions = { rawStrings: false, useBigInt64: false };
 
@@ -50,16 +41,9 @@ function toBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 /**
- * Re-type every `ArrayBuffer` as a view before encoding.
- *
- * `Encoder.encodeObject` writes `bin` only when `ArrayBuffer.isView(object)`; a bare `ArrayBuffer` is
- * passed to `encodeMap` and written as an empty map, losing its contents (WSM-CDC-008). Under a
- * binary codec every `fragment` is an `ArrayBuffer`, so every fragment of a bytes payload would be
- * affected.
- *
- * Subtrees containing no bytes are returned unchanged, not copied. WSM-FRG-014's binary search
- * encodes the same frame O(log n) times per fragment boundary, and copying the payload on every
- * encode would add that many copies.
+ * Re-type every `ArrayBuffer` as a `Uint8Array` before encoding: the encoder writes a bare
+ * `ArrayBuffer` as an empty map (WSM-CDC-008). Subtrees without bytes are returned as they are, not
+ * copied.
  */
 function asViews(value: unknown): unknown {
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -81,13 +65,8 @@ function asViews(value: unknown): unknown {
 }
 
 /**
- * Re-type every decoded `bin` as an `ArrayBuffer`.
- *
- * `Codec.encode` returns `string | ArrayBuffer`, `Frame.fragment` is `string | ArrayBuffer | null`,
- * and `Assembler` concatenates `ArrayBuffer`s: this implementation represents bytes as
- * `ArrayBuffer`, while `@msgpack/msgpack` decodes `bin` to `Uint8Array`. `framesEqual` compares
- * `ArrayBuffer`s, not views, so without the conversion a round-tripped bytes payload would compare
- * unequal to the original (WSM-CDC-008).
+ * Re-type every decoded `bin` (a `Uint8Array`) as an `ArrayBuffer`, this implementation's
+ * representation of bytes (WSM-CDC-008).
  */
 function asArrayBuffers(value: unknown): unknown {
   if (value instanceof Uint8Array) return toBuffer(value);

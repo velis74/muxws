@@ -334,14 +334,8 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
       applyTick(row);
     }
   } catch (error) {
-    // WSM-RCN-030: every stream open at a connection loss fails with an error. The UI reports it,
-    // because a board that stops updating looks the same as a market without price changes. Twenty
-    // streams fail together, so each is counted and one line is logged.
-    //
-    // `ConnectionLost` means the socket closed under a live stream. A plain `StreamReset` means the
-    // producer cancelled the stream first; the backend's kill switch does this before closing, because
-    // board streams do not end by themselves and `close()` would wait for its full drain window. The
-    // log line names which of the two occurred.
+    // A stream fails on a connection loss (WSM-RCN-030, `ConnectionLost`) or on the backend's reset
+    // before it closes (`StreamReset`). Every failure is counted; the first one is logged.
     store.streamsLost += 1;
     if (!lossReported) {
       lossReported = true;
@@ -358,15 +352,9 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
 }
 
 /**
- * Received rows not yet rendered, newest per symbol. Not reactive.
- *
- * Writing every tick directly into `store.rows` blocks the page at a 10 ms interval: twenty symbols at
- * a hundred ticks a second are two thousand reactive writes a second, each scheduling a re-render of
- * the grid, while the display repaints at most about sixty times a second. The main thread then cannot
- * process input, including the control that lowers the rate.
- *
- * No frame is dropped: every frame is received and counted and its lateness measured. Only rendering
- * is coalesced.
+ * Received rows not yet rendered, newest per symbol. Not reactive: rendering is coalesced to one
+ * write per symbol per animation frame, so a 10 ms tick interval does not block input. Every frame is
+ * still received, counted and timed.
  */
 const pending = new Map<string, BoardRow>();
 

@@ -24,18 +24,8 @@ from muxws.frames import Frame, from_mapping, to_mapping
 #: bytes as strings.
 _PACK_KWARGS: Final[dict[str, Any]] = {"use_bin_type": True}
 
-#: - `raw=False` decodes msgpack `str` to `str` rather than to `bytes`. Without it every envelope key
-#:   and every `type` value would decode as `bytes`, `from_mapping` would find no `"type"` key, and
-#:   every inbound frame would be a protocol error. It is the 1.x default and is stated explicitly
-#:   because msgpack 0.x defaulted to `raw=True`.
-#: - `strict_map_key=False` allows map keys other than `str`/`bytes`. With the default (True) an
-#:   integer key raises `ValueError`, and a payload containing one would fail to decode and end the
-#:   connection. `@msgpack/msgpack` accepts integer keys by default, so both ports decode the same
-#:   set of payloads. The results differ: JavaScript object keys are strings, so `{1: "a"}` decodes
-#:   as `{1: "a"}` here and as `{"1": "a"}` in TypeScript. The shared corpus contains no such payload.
-#: - `use_list=True` decodes a msgpack array to a `list`, not a `tuple`. It is the default. With
-#:   `use_list=False`, `decode(encode(frame)) == frame` fails for every payload containing an array,
-#:   and WSM-CDC-006 requires that equality.
+#: `str` decodes as `str` (envelope keys must be `str`), integer map keys are accepted as in
+#: `@msgpack/msgpack`, and arrays decode as lists so that a round-trip is equal (WSM-CDC-006).
 _UNPACK_KWARGS: Final[dict[str, Any]] = {"raw": False, "strict_map_key": False, "use_list": True}
 
 

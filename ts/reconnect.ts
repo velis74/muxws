@@ -227,18 +227,9 @@ function realSleep(ms: number): Promise<void> {
 }
 
 /**
- * The heartbeat's sleep: a `setTimeout` that is unref'd in Node.
- *
- * A pending `await` cannot be cancelled, so when `peer.close()` opens the stop gate the heartbeat
- * loop exits while its timer is still pending, and in Node a pending timer keeps the process alive.
- * Without `unref`, a program that closes its peer would wait for the rest of the ping interval (20 s
- * by default) before exiting; the Python implementation exits immediately.
- *
- * The backoff sleep is not unref'd. While a socket is open, its handle keeps the process alive; while
- * the peer is between sockets, the backoff timer is the only handle, and the process must stay alive
- * to reconnect (WSM-RCN-006). Unref'ing it would let a client exit on its first outage.
- *
- * `unref` exists only in Node; a browser's `setTimeout` returns a number, hence the optional call.
+ * The heartbeat's sleep: a `setTimeout` unref'd in Node, so a pending heartbeat timer does not keep the
+ * process alive after `peer.close()`. The backoff sleep stays ref'd: between sockets it is the only
+ * handle, and the process must stay alive to reconnect (WSM-RCN-006).
  */
 function heartbeatSleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -742,15 +733,8 @@ export class ConnectionLoop {
   }
 
   /**
-   * Close this socket and wait for its read loop to finish before the next attempt.
-   *
-   * `serve()` tears down the peer's write side in its `finally`. If the read loop is still unwinding
-   * after the next attempt has called `adoptSocket()`, it tears down the new socket's writer; the
-   * replayed hello is then never sent and every remaining attempt times out. `_abandon_socket` in
-   * `muxws/reconnect.py` waits for the same reason.
-   *
-   * The close code sent is 1000, not 1006 (see `peer.closeSocketLocally`); the peer reports 1006 for
-   * this loss, but 1006 is never sent.
+   * Close this socket with 1000 and wait for its read loop to finish before the next attempt; a read
+   * loop still unwinding would tear down the next socket's writer.
    */
   private async abandonSocket(): Promise<void> {
     // Closed through the peer, which holds the current socket; a separately stored handle could be
@@ -812,18 +796,9 @@ export interface ConnectOptions {
 }
 
 /**
- * @internal The transport-agnostic half of `connect()`.
- *
- * Both entry points call this: `ts/index.ts` with `BrowserSocket`, `ts/node.ts` with `WsSocket`. Only
- * the dial closure differs (WSM-API-021), so the reconnect driver redials without transport-specific
- * code.
- *
- * The first `dial()` happens here and is not retried (WSM-RCN-006): a hello that fails on it throws
- * instead of starting a background retry.
- *
- * The frame cap (WSM-FRG-034) and the hello copy (`structuredClone`) are checked before the dial, so
- * an unusable `maxFrameBytes` or an uncloneable hello rejects without opening a socket. Any other
- * failure after the dial closes the socket before it propagates.
+ * @internal The transport-agnostic half of `connect()`; only `dial` differs per entry point
+ * (WSM-API-021). The first `dial()` is not retried (WSM-RCN-006). The frame cap (WSM-FRG-034) and the
+ * hello copy are checked before the dial; a later failure closes the socket before it propagates.
  */
 export async function dialAndEstablish(dial: Dial, options: ConnectOptions, codec: Codec): Promise<Peer> {
   checkedFrameCap(options.maxFrameBytes ?? MAX_FRAME_BYTES, codec);
