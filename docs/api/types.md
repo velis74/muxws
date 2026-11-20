@@ -1017,10 +1017,13 @@ for example to redact a value, does not change the `Exchange`. The keys appear i
 Binary values (`bytes`, `bytearray`, `memoryview` in Python; `Uint8Array` and other `ArrayBuffer` views
 in TypeScript) anywhere in headers, payloads or trailers become base64 strings.
 
-With `trim_payload_size` set, each payload is serialised to compact JSON text; if its UTF-8 length
-exceeds the limit, the payload is replaced by a string: its first `trim_payload_size` bytes, cut back to
-a character boundary, followed by `…(trimmed N bytes)…`, where `N` is the number of bytes cut off. A
-payload within the limit stays a value. Headers and trailers are never trimmed.
+With `trim_payload_size` set, each payload is serialised to the compact JSON text `JSON.stringify` writes,
+in both languages: numbers in JavaScript's form (`1.0` is `1`, `NaN` and infinities are `null`), object keys
+in JavaScript's property order (integer keys ascending first), lone surrogates escaped, and a value JSON
+cannot represent (a Python `datetime`, a TypeScript `bigint`) as the string `str(value)` / `String(value)`.
+If its UTF-8 length exceeds the limit, the payload is replaced by a string: its first `trim_payload_size`
+bytes, cut back to a character boundary, followed by `…(trimmed N bytes)…`, where `N` is the number of
+bytes cut off. A payload within the limit stays a value. Headers and trailers are never trimmed.
 
 ### Raises
 

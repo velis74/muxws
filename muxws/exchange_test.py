@@ -6,6 +6,7 @@ import json
 import logging
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -153,6 +154,36 @@ def test_trim_serialises_unknown_values_with_str():
     result = _exchange(_side([when])).as_dict(trim_payload_size=5)
     text = json.dumps(str(when))
     assert result["request"]["payloads"] == [f"{text[:5]}…(trimmed {len(text) - 5} bytes)…"]
+
+
+# The same inputs and expected strings are in `ts/exchange.spec.ts` (WSM-OBS-011).
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            [1.0, -0.0, 1.5, 1e21, 1e-7, 1.2345678901234568e20, 0.000001, 2.5e-8, 1e300, -1e-300],
+            "[1,0,1.5,1e+21,1e-7,123456789012345680000,0.000001,2.5e-8,1e+300,-1e-300]",
+        ),
+        ([float("nan"), float("inf"), float("-inf"), 9007199254740991], "[null,null,null,9007199254740991]"),
+        ({"b": 1, "2": 2, "a": 3, "1": 4, "01": 5, "4294967295": 6}, '{"1":4,"2":2,"b":1,"a":3,"01":5,"4294967295":6}'),
+        ({2: "a", 1.5: "b", 1.0: "c"}, '{"1":"c","2":"a","1.5":"b"}'),
+        (["\ud800x", "\x00\x1f\x7f é"], '["\\ud800x","\\u0000\\u001f\x7f é"]'),
+        ({"bin": b"\x00\x01", "nested": [{"x": [True, None]}]}, '{"bin":"AAE=","nested":[{"x":[true,null]}]}'),
+    ],
+)
+def test_trim_text_is_the_same_in_both_ports(payload, expected):
+    limit = len(expected.encode("utf-8")) - 1
+    result = _exchange(_side([payload])).as_dict(trim_payload_size=limit)
+    assert result["request"]["payloads"] == [f"{expected[:-1]}…(trimmed 1 bytes)…"]
+
+
+def test_trim_measures_an_integral_float_as_an_integer():
+    assert _exchange(_side([1.0, 100.0])).as_dict(trim_payload_size=3)["request"]["payloads"] == [1.0, 100.0]
+
+
+def test_trim_serialises_a_value_json_cannot_write_with_str():
+    result = _exchange(_side([{"a": Decimal("150")}])).as_dict(trim_payload_size=10)
+    assert result["request"]["payloads"] == ['{"a":"150"…(trimmed 1 bytes)…']
 
 
 @pytest.mark.parametrize("limit", [-1, 1.5, "10", True])

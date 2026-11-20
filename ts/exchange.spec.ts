@@ -12,6 +12,7 @@ import { Peer } from './peer';
 import { StreamState } from './stream';
 import { memoryPair } from './transports/memory';
 
+const ENCODER = new TextEncoder();
 const EMPTY_SIDE: ExchangeSide = { headers: null, payloads: [], payloadCount: 0, trailers: null, ended: true };
 
 function exchangeWith(overrides: Partial<ExchangeInit> = {}): Exchange {
@@ -157,6 +158,34 @@ describe('Exchange.asDict', () => {
     (first.request.payloads[0] as Record<string, unknown>).password = '***';
     first.request.payloads.push('extra');
     expect(exchange.asDict().request).toMatchObject({ headers: { auth: 'secret' }, payloads: [{ password: 'p' }] });
+  });
+
+  // The same inputs and expected strings are in `muxws/exchange_test.py` (WSM-OBS-011).
+  it.each([
+    [
+      [1.0, -0.0, 1.5, 1e21, 1e-7, 1.2345678901234568e20, 0.000001, 2.5e-8, 1e300, -1e-300],
+      '[1,0,1.5,1e+21,1e-7,123456789012345680000,0.000001,2.5e-8,1e+300,-1e-300]',
+    ],
+    [[Number.NaN, Infinity, -Infinity, 9007199254740991], '[null,null,null,9007199254740991]'],
+    [{ b: 1, '2': 2, a: 3, '1': 4, '01': 5, '4294967295': 6 }, '{"1":4,"2":2,"b":1,"a":3,"01":5,"4294967295":6}'],
+    [{ 2: 'a', 1.5: 'b', 1.0: 'c' }, '{"1":"c","2":"a","1.5":"b"}'],
+    [['\ud800x', '\u0000\u001f\u007f\u2028é'], '["\\ud800x","\\u0000\\u001f\u007f\u2028é"]'],
+    [{ bin: new Uint8Array([0, 1]), nested: [{ x: [true, null] }] }, '{"bin":"AAE=","nested":[{"x":[true,null]}]}'],
+  ])('trims %j to the same text as the Python port', (payload, expected) => {
+    const limit = ENCODER.encode(expected).length - 1;
+    expect(withPayloads(payload).asDict({ trimPayloadSize: limit }).request.payloads).toEqual([
+      `${expected.slice(0, -1)}…(trimmed 1 bytes)…`,
+    ]);
+  });
+
+  it('measures an integral float as an integer', () => {
+    expect(withPayloads(1.0, 100.0).asDict({ trimPayloadSize: 3 }).request.payloads).toEqual([1, 100]);
+  });
+
+  it('writes a bigint as its decimal string, as Python writes a value json cannot serialise', () => {
+    expect(withPayloads({ a: 150n }).asDict({ trimPayloadSize: 10 }).request.payloads).toEqual([
+      '{"a":"150"…(trimmed 1 bytes)…',
+    ]);
   });
 
   it('throws RangeError for a negative or non-integer trimPayloadSize', () => {

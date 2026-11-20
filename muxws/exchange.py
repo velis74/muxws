@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import json
+import math
+import re
 import time
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Literal, TYPE_CHECKING
 
 from muxws.errors import StreamReset
@@ -18,6 +21,8 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to a type chec
 
 #: Called once per finished stream with its `Exchange`. The return value is ignored; a coroutine is not awaited.
 ExchangeHandler = Callable[["Exchange"], Any]
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,11 +213,91 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _json_text(value: Any, active: set[int]) -> str:
+    """Compact JSON of `value` as JavaScript's `JSON.stringify` writes the same decoded value.
+
+    Numbers take ECMAScript's form (`1.0` is `1`, non-finite floats are `null`), object keys
+    JavaScript's property order and lone surrogates `\\uXXXX` escapes. A value json cannot write
+    is written as the string `str(value)`, as `json.dumps(default=str)` does.
+    """
+    if value is None or isinstance(value, bool):
+        return json.dumps(value)
+    if isinstance(value, int):
+        return int.__repr__(value)
+    if isinstance(value, float):
+        return _js_number(value) if math.isfinite(value) else "null"
+    if isinstance(value, str):
+        return _js_string(value)
+    if isinstance(value, (Mapping, list, tuple)):
+        if id(value) in active:
+            raise ValueError("circular reference")
+        active.add(id(value))
+        if isinstance(value, Mapping):
+            text = "{" + ",".join(f"{_js_string(k)}:{_json_text(v, active)}" for k, v in _js_entries(value)) + "}"
+        else:
+            text = "[" + ",".join(_json_text(item, active) for item in value) + "]"
+        active.discard(id(value))
+        return text
+    return _js_string(str(value))
+
+
+def _js_entries(mapping: Mapping[Any, Any]) -> list[tuple[str, Any]]:
+    """The entries of a JavaScript object built from `mapping`: array-index keys ascending, then the rest."""
+    entries: dict[str, Any] = {}
+    for key, item in mapping.items():
+        entries[_js_key(key)] = item
+    indices = sorted((key for key in entries if _is_array_index(key)), key=int)
+    return [(key, entries[key]) for key in indices] + [(k, v) for k, v in entries.items() if not _is_array_index(k)]
+
+
+def _js_key(key: Any) -> str:
+    """`key` as a JavaScript property name; raise `TypeError` for a key json cannot write."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, bool):
+        return json.dumps(key)
+    if isinstance(key, int):
+        return int.__repr__(key)
+    if isinstance(key, float):
+        return _js_number(key)
+    raise TypeError(f"keys must be str, int, float, bool or None, not {type(key).__name__}")
+
+
+def _is_array_index(key: str) -> bool:
+    return key.isascii() and key.isdigit() and (key == "0" or key[0] != "0") and int(key) < 2**32 - 1
+
+
+def _js_string(text: str) -> str:
+    return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", json.dumps(text, ensure_ascii=False))
+
+
+def _js_number(value: float) -> str:
+    """`value` as ECMAScript's Number::toString writes it."""
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    _, digit_tuple, exponent = Decimal(repr(abs(value))).normalize().as_tuple()
+    digits = "".join(map(str, digit_tuple))
+    k, n = len(digits), int(exponent) + len(digits)
+    if k <= n <= 21:
+        return sign + digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return f"{sign}{digits[:n]}.{digits[n:]}"
+    if -6 < n <= 0:
+        return f"{sign}0.{'0' * -n}{digits}"
+    mantissa = digits if k == 1 else f"{digits[0]}.{digits[1:]}"
+    return f"{sign}{mantissa}e{'+' if n > 0 else '-'}{abs(n - 1)}"
+
+
 def _trimmed(payload: Any, limit: int) -> Any:
     """`payload`, or its compact JSON cut to `limit` UTF-8 bytes with a marker when longer."""
     try:
-        text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)
-    except (TypeError, ValueError):  # non-string keys json cannot write, or a circular reference
+        text = _json_text(payload, set())
+    except (TypeError, ValueError):  # a key json cannot write, or a circular reference
         text = str(payload)
     data = text.encode("utf-8", "replace")
     if len(data) <= limit:

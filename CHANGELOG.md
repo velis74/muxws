@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailers, end), the outcome (`ok`, `reset`, `lost`) with the reset's origin, code and reason, the start time,
   the time to the first response and the duration. `Exchange.as_dict(trim_payload_size=None)` (TypeScript
   `asDict({ trimPayloadSize })`) returns the same JSON-ready record in both languages, binary values as base64
-  and long payloads trimmed. TypeScript also exports `ExchangeOutcome`, `ExchangeParty`, `ExchangeOptions`,
+  and long payloads trimmed by the length of the JSON text `JSON.stringify` writes (Python writes numbers, key order
+  and lone surrogates the same way). TypeScript also exports `ExchangeOutcome`, `ExchangeParty`, `ExchangeOptions`,
   `ExchangeDictOptions`, `ExchangeDict` and `ExchangeSideDict`.
 
 ### Fixed
