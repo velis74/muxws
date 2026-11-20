@@ -43,7 +43,7 @@ const PYTHON = process.env.MUXWS_PYTHON ?? 'python3';
  * `docs/examples/` contains no package, so without this the example servers import `muxws` only if
  * it is installed. With it they import the checkout under test, not an installed copy.
  */
-const PYTHON_ENV: NodeJS.ProcessEnv = {
+const PYTHON_ENV: typeof process.env = {
   ...process.env,
   PYTHONPATH: [REPOSITORY, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
 };
@@ -143,7 +143,6 @@ async function startServer(script: string): Promise<RunningServer> {
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`${script} exited with ${child.exitCode}:\n${stderr}`);
-    // eslint-disable-next-line no-await-in-loop -- port polling is sequential
     if (await listening(port)) {
       return {
         url: `ws://127.0.0.1:${port}/ws`,
@@ -153,7 +152,6 @@ async function startServer(script: string): Promise<RunningServer> {
       };
     }
     // A refused connection returns immediately; the delay keeps the poll from busy-looping.
-    // eslint-disable-next-line no-await-in-loop -- see above
     await delay(POLL_INTERVAL_MS);
   }
   child.kill();
@@ -306,7 +304,6 @@ describe('every api example executes', () => {
           // `.mts` makes the block ESM, which a top-level `await` requires.
           const file = join(scratch, `${example.name.replace(/[^a-z0-9]+/gi, '-')}.mts`);
           writeFileSync(file, example.code, 'utf8');
-          // eslint-disable-next-line no-await-in-loop -- runs one subprocess at a time
           const run = await runTypescript(file);
           if (run.code !== 0) failures.push(`${example.name} exited with ${run.code}:\n${run.stderr}`);
         }

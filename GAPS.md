@@ -85,7 +85,7 @@ own form. `SPEC.md` does not state which form is correct.
 
 ## Rules held by something other than a citing test
 
-- `WSM-PKG-004` is enforced by `eslint` and `ruff` (`npm run lint:ci`, `ruff check .`), not by a test.
+- `WSM-PKG-004` is enforced by `eslint` and `ruff` (`npm run lint`, `ruff check .`), not by a test.
 - The "zero mandatory arguments" half of `WSM-API-003` is enforced in TypeScript by `tsc --noEmit`.
 - `WSM-TST-004` and `WSM-TST-005` are enforced by the `cross-language` workflow's steps.
 - These rules have no citation and are held by a test that does not name them: `WSM-API-013`,

@@ -4,8 +4,8 @@
   // root config in the same way, so the root config stays unchanged for the library.
   //
   // The root config includes only `ts/**/*`, so the root `tsc --noEmit` does not check this directory.
-  // `npm run lint:ci` runs `tsc -p` against this config, and `eslint.config.js` uses it for the typed
-  // lint rules; both must reference this file.
+  // `npm run lint` runs `tsc -p` against this config, and `eslint.config.js` uses it for the typed
+  // lint rules.
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "module": "esnext",
