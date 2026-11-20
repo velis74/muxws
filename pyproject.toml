@@ -16,7 +16,7 @@ requires-python = ">=3.10"
 keywords = ["websocket", "multiplexing", "streams", "asyncio"]
 classifiers = [
     # The wire version and the package version are independent. The subprotocol is `muxws.v1.<codec>`;
-    # `v1` changes only with a breaking wire change. The package is 0.1.0 and alpha: it has no confirmed
+    # `v1` changes only with a breaking wire change. The package is alpha (0.x): it has no confirmed
     # production deployment. 1.0 requires the first confirmed production use.
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -98,8 +98,8 @@ asyncio_mode = "auto"
 # library, including S101 (no bare `assert` outside a test).
 #
 # `*.md` is excluded because ruff formats fenced Python inside Markdown. `docs/` contains illustrative
-# fragments in the guide, and design briefs and the specification under `docs/design/`, which a
-# formatter must not rewrite. Executed Python lives in `docs/examples/*.py`, which this exclusion does
+# fragments in the guide and the design rationale under `docs/design/`, which a formatter must not
+# rewrite. Executed Python lives in `docs/examples/*.py`, which this exclusion does
 # not affect.
 exclude = ['ts', '*.md', 'dist', 'build', 'node_modules', '.git', '.idea', '.vscode',
     '.pytest_cache', '.ruff_cache', '.venv']

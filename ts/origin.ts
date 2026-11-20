@@ -9,7 +9,7 @@
  * `muxws/origin.py` implements the same parsing and the same decision.
  */
 
-/** The default port of each scheme a serialized origin may carry. */
+/** The default port of each scheme a serialised origin may carry. */
 const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443 };
 
 /** Every value of one request header, looked up by lower-case name, in order. */
@@ -19,7 +19,7 @@ export type HeaderValues = (name: string) => readonly string[];
 export type OriginCheck = (headers: HeaderValues) => boolean;
 
 /**
- * `[scheme, host, port]` of a serialized origin, or `null` when `value` is not one.
+ * `[scheme, host, port]` of a serialised origin, or `null` when `value` is not one.
  *
  * An origin is `scheme://host[:port]` with the scheme `http` or `https`, surrounding whitespace and
  * one trailing `/` ignored. Scheme and host are lower-cased, and a missing port is the scheme's
@@ -163,16 +163,12 @@ export type OriginPolicy = Iterable<string> | SameOrigin | ((origin: string | un
 /**
  * The check `accept()` runs for `allowedOrigins`, or `null` when there is nothing to check.
  *
- * - A `SameOrigin` compares `Origin` with the request's host; see `SameOrigin`.
- * - A function is called with the request's single `Origin` value, or with `undefined` when the
- *   request has none; its truthiness is the decision. A request with more than one `Origin` header is
- *   refused without calling it.
- * - An iterable of origins allows a request whose single `Origin` value parses to one of them under
- *   `parseOrigin`. A request without `Origin`, with more than one, or with a value that is not an
- *   origin (`null` included) is refused.
+ * - `SameOrigin`: see `SameOrigin`.
+ * - A function: called with the request's single `Origin` value, or `undefined` when there is none;
+ *   truthy allows. A request with more than one `Origin` header is refused without calling it.
+ * - An iterable: allows a request whose single `Origin` value `parseOrigin` maps to one of its entries.
  *
- * Throws `TypeError` for a string (an iterable of its characters) and for an entry that is not an
- * origin.
+ * Throws `TypeError` for a string and for an entry that is not an origin.
  */
 export function compilePolicy(allowedOrigins: OriginPolicy | undefined): OriginCheck | null {
   if (allowedOrigins === undefined) return null;

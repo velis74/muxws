@@ -63,7 +63,7 @@ async def accept(
 |---|---|---|---|
 | `socket` | `SocketAdapter \| Any` | required | One of three kinds: a Starlette/FastAPI `WebSocket`, which is **upgraded here** because `accept()` selects the subprotocol; a `websockets` connection, which has already handshaken and is only verified; or anything that already implements `SocketAdapter`, which is taken as it is. |
 | `max_payload_bytes` | `int` | `67_108_864` | The largest reassembled payload this peer accepts, in bytes of encoded output. Checked as fragments arrive, not after reassembly. Local and never announced. |
-| `max_concurrent_streams` | `int` | `100` | How many streams the **remote** may have open here at once. An `open` beyond the limit is answered `reset(REFUSED)` without the handler running, so the opener can retry it elsewhere. Local and never announced. |
+| `max_concurrent_streams` | `int` | `100` | How many streams the **remote** may have open here at once. An `open` beyond the limit is answered `reset(REFUSED)` without the handler running, so the opener can retry it elsewhere; a `oneway` open is dropped without a frame and logged. Local and never announced. |
 | `error_serializer` | `ErrorSerializer \| None` | `None` | Turns a handler's exception into the payload of the `reset(APPLICATION_ERROR)` frame. `None` means `default_error_serializer`, which puts the class name and `str(exc)` **on the wire**; a public-facing acceptor should replace it with a redacting one. |
 | `codec` | `Codec \| None` | `None` | An explicit codec, which wins over `settings.codec`. `None` looks the configured name up in the registry and never falls back to JSON. |
 | `max_frame_bytes` | `int` | `MAX_FRAME_BYTES` (65536) | For tests only. The frame cap is a protocol constant; a lower value makes small payloads fragment, which the conformance runner uses. A value too small to hold an envelope plus one indivisible unit raises `ProtocolError`. |
@@ -146,7 +146,7 @@ async def serve(socket: SocketAdapter | Any, *, handler: StreamHandler, **peer_o
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `socket` | `SocketAdapter \| Any` | required | The same three kinds `accept()` takes. |
-| `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async, called once per incoming stream. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`. |
+| `handler` | `StreamHandler` | required | `(payload, stream)`, sync or async, called once per incoming stream. Returning without ending the stream ends it implicitly; raising resets it with `APPLICATION_ERROR`. On a `oneway` stream nothing is sent: returning closes it without a frame, and raising is logged. |
 | `**peer_options` | `Any` | — | Passed straight to `accept()`: `max_payload_bytes`, `max_concurrent_streams`, `error_serializer`, `codec`, `max_frame_bytes`, `open_interceptors`, `reply_headers_interceptors`, `incoming_headers_interceptors`, `allowed_origins`. Interceptors for the peer `serve()` builds can be registered only here. An unknown name raises `TypeError` from `accept()`. |
 
 ### Return
@@ -382,7 +382,7 @@ export async function serve(socket: NodeWebSocket, options: AcceptOptions & { ha
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `socket` | `WebSocket` (from `ws`) | required | The connection `WebSocketServer` emitted. |
-| `options.handler` | `StreamHandler` | required | `(payload, stream)`, called once per incoming stream. Returning without ending the stream ends it implicitly; throwing resets it with `APPLICATION_ERROR`. |
+| `options.handler` | `StreamHandler` | required | `(payload, stream)`, called once per incoming stream. Returning without ending the stream ends it implicitly; throwing resets it with `APPLICATION_ERROR`. On a `oneway` stream nothing is sent: returning closes it without a frame, and throwing is logged. |
 | `options` (rest) | `AcceptOptions` | `{}` | `maxPayloadBytes`, `maxConcurrentStreams`, `errorSerializer`, `codec`, `maxFrameBytes`, `openInterceptors`, `replyHeadersInterceptors`, `incomingHeadersInterceptors`, `allowedOrigins`, `request`, passed through to `accept()`. |
 
 ### Return
@@ -462,7 +462,7 @@ export interface AcceptOptions {
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `maxPayloadBytes` | `number` | `67_108_864` | The largest reassembled payload this peer accepts, in bytes. Enforced on the fragment that exceeds it. Local, never announced. |
-| `maxConcurrentStreams` | `number` | `100` | How many streams the remote may hold open here at once. An `open` beyond the limit is refused without the handler running. Local, never announced. |
+| `maxConcurrentStreams` | `number` | `100` | How many streams the remote may hold open here at once. An `open` beyond the limit is refused without the handler running; a `oneway` open is dropped without a frame and logged. Local, never announced. |
 | `errorSerializer` | `ErrorSerializer` | `defaultErrorSerializer` | Turns a handler's failure into the `reset(APPLICATION_ERROR)` payload. The default puts the error's `name` and `message` **on the wire**; replace it with a redacting one on a public-facing acceptor. |
 | `codec` | `Codec` | `getCodec(settings.codec)` | An explicit codec, which wins over the configured name. |
 | `maxFrameBytes` | `number` | `MAX_FRAME_BYTES` (65536) | Lowers the protocol frame cap; for tests only. |

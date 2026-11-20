@@ -423,7 +423,7 @@ describe('the awaitable handle', () => {
 });
 
 describe('reset stream nobody consumed', () => {
-  it('reaches the error hook and raises no unhandled rejection', async () => {
+  it('reaches the error hook and raises no unhandled rejection - WSM-API-016', async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (event: PromiseRejectionEvent): void => {
       unhandled.push(event.reason);
@@ -691,7 +691,7 @@ describe('cancellation', () => {
     }
   });
 
-  it('aborts the handler signal when a remote reset lands - WSM-ERR-013', async () => {
+  it('aborts the handler signal when a remote reset arrives - WSM-ERR-013', async () => {
     const pair = new Pair();
     let observed: AbortSignal | null = null;
     pair.acceptor.onStream(async (_p, stream) => {

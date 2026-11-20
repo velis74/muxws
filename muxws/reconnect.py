@@ -66,7 +66,7 @@ def _uniform() -> float:
     """A draw in [-1, 1).
 
     Uses `random`; WSM-RCN-005 rules out `secrets`. Jitter spreads reconnects of many peers over
-    time and has no security function. The ping nonce in `lifecycle.py` uses `secrets`.
+    time and has no security function.
     """
     return random.uniform(-1.0, 1.0)  # noqa: S311 - reconnect jitter is not security-sensitive
 
@@ -128,7 +128,7 @@ class AttemptCounter:
         return self._attempts
 
     def established(self) -> None:
-        """Reset the counter. Called only from `ConnectionLoop._adopt` (WSM-INV-012)."""
+        """Reset the counter (WSM-INV-012)."""
         self._attempts = 0
 
 
@@ -250,7 +250,7 @@ class Heartbeat:
         await peer._close_socket_locally(reason="no pong")
 
 
-#: How the loop gets a socket. A closure, not a URL: the helper knows nothing about transports.
+#: How the loop gets a socket. A closure, not a URL: the helper does not depend on a transport.
 Dial = Callable[[], Awaitable["SocketAdapter"]]
 
 
@@ -275,8 +275,7 @@ class ConnectionLoop:
     ) -> None:
         if not peer.is_dialer:
             raise ValueError(
-                "an acceptor has no reconnect helper: it cannot dial, and a peer that tried to would "
-                "be dialling the client that dialled it (§3)"
+                "an acceptor has no reconnect helper: an acceptor does not dial; only the dialer reconnects (§3)"
             )
         self._peer = peer
         self._dial = dial
@@ -297,7 +296,7 @@ class ConnectionLoop:
         self._serving: asyncio.Task[None] | None = None
         self._heartbeat: asyncio.Task[None] | None = None
 
-    # ------------------------------------------------------------------ what tests read
+    # ------------------------------------------------------------------ counters
 
     @property
     def attempts(self) -> int:
@@ -346,7 +345,7 @@ class ConnectionLoop:
         self._peer._will_retry = should_retry(0, self._options)
 
     def start(self) -> None:
-        """Start the supervisor. Called only after `establish()` returned."""
+        """Start the supervisor. Requires an established first connection (`establish()` returned)."""
         if self._supervisor is None and not self._stopped:
             self._supervisor = asyncio.create_task(self._supervise())
 
@@ -369,12 +368,11 @@ class ConnectionLoop:
             # After `stop()`, which `peer.close()` calls, the helper does not dial again.
             if self._stopped:
                 return
-            # The dial decision uses `should_retry` on the helper's own counter, not `peer._will_retry`,
-            # which only `CloseReason` reads.
+            # The dial decision uses `should_retry` on the helper's own counter, not `peer._will_retry`.
             if not should_retry(self._counter.value, self._options):
                 # Reached only with `max_attempts=0`. `establish()` has already set `will_retry` false,
                 # so the socket loss reported WSM-RCN-044's single `will_retry=False` close and
-                # `_give_up()`'s report is suppressed. `ts/reconnect.ts` has the same branch.
+                # `_give_up()`'s report is suppressed.
                 self._give_up()
                 return
             if await self._redial():
@@ -392,7 +390,7 @@ class ConnectionLoop:
         if task is not None:
             try:
                 await task
-            except Exception as exc:  # noqa: BLE001 - however serve() ended, the socket is gone
+            except Exception as exc:  # noqa: BLE001 - the socket is closed on every exit of serve()
                 logger.debug("muxws conn=%s serve() ended with %r", self._peer.id, exc)
         await self._stop_heartbeat()
 

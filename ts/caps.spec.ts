@@ -485,7 +485,7 @@ describe('observability', () => {
   });
 
   it('never puts payload contents in any log record - WSM-OBS-002', async () => {
-    // Application data routinely contains secrets.
+    // Application data can contain secrets.
     const original = logger.level;
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
@@ -536,7 +536,7 @@ describe('the id of an over-cap open', () => {
   }
 
   // The Python name is `test_an_over_cap_open_counts_toward_the_high_water_mark`.
-  it('counts an over-cap open toward the high-water mark - WSM-FRG-031/WSM-STM-002', async () => {
+  it('counts an over-cap open towards the high-water mark - WSM-FRG-031/WSM-STM-002', async () => {
     // A later frame on the id of an over-cap `open` is ignored, not a WSM-STM-003 error.
     const lone = makeLone({ maxFrameBytes: 512 });
     lone.peer.onStream(replyNow);

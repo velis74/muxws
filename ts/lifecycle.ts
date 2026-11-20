@@ -22,9 +22,8 @@ export const MAX_STREAM_ID = 2 ** 31 - 1;
  * A ping nonce: sixteen lowercase hex characters, the format of Python's `secrets.token_hex(8)`.
  *
  * Uses `crypto.getRandomValues`, not `Math.random`, as Python uses `secrets`, not `random`, so the
- * nonce is not predictable. (The reconnect jitter and the connection id in `peer.ts` use
- * `Math.random`.) `crypto` is a Web Crypto global available in browsers and Node without a dependency
- * (WSM-PKG-003). It is accessed through `globalThis` because the shared eslint configuration does not
+ * nonce is not predictable. `crypto` is a Web Crypto global available in browsers and Node without a
+ * dependency (WSM-PKG-003). It is accessed through `globalThis` because the shared eslint configuration does not
  * declare it as a global, and a `no-undef` disable comment would cover more than this one name.
  */
 export function newNonce(): string {
@@ -86,7 +85,7 @@ export class PingRegistry {
     this.pending.delete(nonce);
   }
 
-  /** Reject every outstanding ping with `error`. Called when the socket is lost. */
+  /** Reject every outstanding ping with `error`. */
   failAll(error: Error): void {
     this.pending.forEach((entry) => {
       if (entry.settled) return;

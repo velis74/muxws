@@ -85,7 +85,7 @@ async def test_connection_level_frames_omit_stream(make_pair):
 
 
 async def test_ping_nonce_is_echoed_verbatim(make_pair):
-    """WSM-CON-010: the exact nonce string, promptly."""
+    """WSM-CON-010: the pong carries the ping's nonce string unchanged."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
     pair.start()
@@ -125,7 +125,7 @@ async def test_ping_returns_round_trip_time_in_seconds(make_pair):
         await pair.stop()
 
 
-async def test_ping_timeout_raises_and_does_not_kill_the_connection(make_pair):
+async def test_ping_timeout_raises_and_leaves_the_connection_open(make_pair):
     """The call raises; the connection stays open. A missing pong fails the ping only."""
     pair = make_pair()
     pair.acceptor.on_stream(_reply_now)
@@ -243,7 +243,7 @@ async def test_socket_death_fails_a_pending_ping(make_pair):
 
 
 async def test_goaway_carries_code_reason_and_last_stream(make_pair):
-    """WSM-CON-020: `last_stream` is the **remote's** parity, not ours."""
+    """WSM-CON-020: `last_stream` has the **remote's** parity, not this peer's."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -258,15 +258,37 @@ async def test_goaway_carries_code_reason_and_last_stream(make_pair):
         goaway = pair.frames_of_type("acceptor", "goaway")[-1]
         assert goaway.code == int(ResetCode.NO_ERROR)
         assert goaway.reason == "shutting down"
-        # The acceptor allocates even ids; the streams it promises to finish are the dialer's odd ones.
+        # The acceptor allocates even ids; `last_stream` refers to the dialer's streams, which have odd ids.
         assert goaway.last_stream == 3
         assert goaway.last_stream % 2 == 1, "last_stream must carry the *other* peer's parity"
     finally:
         await pair.stop()
 
 
+async def test_goaway_last_stream_counts_a_refused_open(make_pair):
+    """WSM-CON-020: `last_stream` includes an open refused over the concurrency limit; its own reset refuses it."""
+    pair = make_pair(max_concurrent_streams=1)
+    pair.acceptor.on_stream(_hold)
+    pair.start()
+    try:
+        held = pair.dialer.open({"q": 1})
+        refused = pair.dialer.open({"q": 2})
+        await pair.settle()
+
+        await pair.acceptor.close(ResetCode.NO_ERROR, "shutting down", drain=0.02)
+        await pair.settle()
+
+        goaway = pair.frames_of_type("acceptor", "goaway")[-1]
+        assert (held.id, refused.id) == (1, 3)
+        assert goaway.last_stream == refused.id
+        with pytest.raises(StreamRefused):
+            await refused
+    finally:
+        await pair.stop()
+
+
 async def test_after_sending_goaway_incoming_opens_are_refused():
-    """WSM-CON-021: nothing new runs here, and this peer opens nothing either.
+    """WSM-CON-021: after sending `goaway`, this peer refuses incoming opens and opens no stream.
 
     Uses a lone acceptor with injected frames. In a live pair, an `open` the dialer never sent leaves
     the two peers disagreeing about the id space, and the dialer closes the connection when it
@@ -309,7 +331,7 @@ async def test_after_sending_goaway_incoming_opens_are_refused():
 
 
 async def test_open_after_receiving_goaway_raises_synchronously(make_pair):
-    """WSM-CON-022/WSM-API-004: out of the call, not out of an await."""
+    """WSM-CON-022/WSM-API-004: `open()` raises synchronously, not from an await."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     pair.start()
@@ -428,7 +450,7 @@ async def test_id_exhaustion_sends_goaway_drains_and_closes(make_pair):
     pair.acceptor.on_stream(_reply_now)
     pair.start()
     try:
-        # One id left. Allocating it triggers the shutdown.
+        # One id remains; allocating it starts the shutdown.
         pair.dialer._next_id = MAX_STREAM_ID
         last = pair.dialer.open({"q": 1}, end=True)
         assert last.id == MAX_STREAM_ID

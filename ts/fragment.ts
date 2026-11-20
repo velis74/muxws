@@ -79,19 +79,9 @@ function isContinuation(byte: number): boolean {
 }
 
 /**
- * The largest cut at or before `start + limit` bytes that the codec can represent.
- *
- * Under a text codec the slice is a string value in the envelope (a JSON string), which cannot hold
- * part of a codepoint. WebSocket continuation frames could carry a split codepoint, but muxws does not
- * use them: a fragmented WebSocket message occupies the socket until it ends, which causes
- * head-of-line blocking (WSM-INV-004). A cut inside a multi-byte sequence therefore moves backwards to
- * the start of that sequence; UTF-8 is self-synchronising, so this takes at most three steps.
- *
- * Returns 0 when nothing fits: `limit` is narrower than the codepoint at `start`, or `start` is the
- * end of the encoding.
- *
- * Exported for the spec tests, which assert the boundary rule on this function directly, as the
- * Python tests do with `_floor_boundary`.
+ * The largest cut at or before `start + limit` bytes that the codec can represent: under a text codec a
+ * cut inside a multi-byte UTF-8 sequence moves back to the start of that sequence, because a JSON string
+ * cannot hold part of a codepoint. Returns 0 when nothing fits.
  */
 export function boundaryWithin(units: Encoded, start: number, limit: number): number {
   let cut = Math.min(start + limit, units.bytes.length);
@@ -161,15 +151,9 @@ function floorError(cap: number): ProtocolError {
 }
 
 /**
- * Largest slice at `position` whose non-final fragment frame still fits under `cap`, in bytes.
- *
- * The verify-and-re-split step of WSM-FRG-014, as a binary search. It performs at most
- * log2(ceiling) encodes and is deterministic, so both implementations cut at the same boundary
- * (WSM-FRG-016). The search bisects byte limits and floors each probe to a representable boundary,
- * so the slice width is monotonic in the byte limit.
- *
- * Returns 0 when not even one unit fits: probes narrower than the first unit floor to an empty slice,
- * which is not recorded.
+ * Largest slice at `position` whose non-final fragment frame still fits under `cap`, in bytes: the
+ * verify-and-re-split step of WSM-FRG-014 as a deterministic binary search over byte limits
+ * (WSM-FRG-016). Returns 0 when not even one unit fits.
  */
 function largestFittingCount(
   source: Frame,
@@ -195,30 +179,16 @@ function largestFittingCount(
   return best;
 }
 
-/**
- * All fragments as an array: `iterFragments` collected eagerly. Used by the pure-function tests and
- * the conformance corpus.
- */
+/** All fragments as an array: `iterFragments` collected eagerly. */
 export function splitFrame(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Frame[] {
   return [...iterFragments(frame, cap, codec)];
 }
 
 /**
- * Yield `frame` if it fits under `cap`, otherwise the fragment frames that replace it, lazily.
- *
- * The writer consumes one fragment at a time, because a stream holds at most one unsent fragment
- * (WSM-FRG-018): fragment n+1 is sliced only after fragment n has been passed to the socket. Slicing
- * all fragments up front would fix the wire order and prevent interleaving (WSM-FRG-019).
- *
- * `splitFrame` and the writer both use this generator, so they split at the same boundaries.
- *
- * A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads no other state and mutates neither
- * argument. `cap` defaults to the protocol constant; only tests and the conformance runner pass a
- * smaller value (WSM-FRG-005), and it is never read from the wire.
- *
- * The payload is encoded with the codec, the encoded form is sliced, and each slice is placed in a
- * frame that the codec encodes again (WSM-FRG-011). Each slice is sized with an envelope reservation
- * (WSM-FRG-013) and then verified and re-split if it exceeds the cap (WSM-FRG-014).
+ * Yield `frame` if it fits under `cap`, otherwise the fragment frames that replace it, lazily: fragment
+ * n+1 is sliced only after fragment n has been consumed (WSM-FRG-018/019). A pure function of
+ * `(frame, cap, codec)` (WSM-FRG-015). The codec's encoded payload is sliced, and each slice is sized
+ * with an envelope reservation and re-split if its frame exceeds `cap` (WSM-FRG-011/013/014).
  */
 export function* iterFragments(frame: Frame, cap: number = MAX_FRAME_BYTES, codec?: Codec): Generator<Frame> {
   if (codec === undefined) {
@@ -308,7 +278,7 @@ export class Assembler {
     return this.bytes;
   }
 
-  /** Drop the partial buffer. Called when the stream is reset. */
+  /** Drop the partial buffer. */
   reset(): void {
     this.parts = [];
     this.bytes = 0;

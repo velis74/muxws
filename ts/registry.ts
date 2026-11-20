@@ -6,8 +6,8 @@
  * writing a tag performs no bookkeeping, and the index changes only on `register`, `deregister` or
  * close.
  *
- * Usage rule: look up on keys that are not mutated, and mutate keys that are not looked up. For a key
- * that is both, call `register(peer)` after each write.
+ * A tag used for lookups is indexed with the value it had at the last `register`. After writing such a tag,
+ * call `register(peer)` again.
  */
 
 import type { Peer } from './peer';
@@ -121,7 +121,7 @@ export class PeerRegistry {
   }
 
   /**
-   * `register` plus an explicit deregister, for a consumer that wants the scope visible.
+   * `register`, run `body`, then `deregister`.
    *
    * Python uses `with registry.registered(peer):`. TypeScript's `using` requires `Symbol.dispose`,
    * which the package's ES2020 target lacks, so the scope is a callback. `deregister` runs also when

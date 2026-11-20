@@ -8,9 +8,9 @@ repository.
 The stream model is that of **HTTP/2 and HTTP/3**: many independent streams over one connection,
 either peer able to open one, headers then body then optional trailers, per-stream cancellation, and
 `goaway` for graceful shutdown. muxws differs from those protocols in two respects. A WebSocket runs
-over one stream-oriented connection — a TCP socket, or a Unix domain socket where both ends are on
-the same machine — so there is **one global message order** and no per-stream loss recovery; the
-frame cap is therefore a protocol constant (WSM-FRG-004), not a negotiated limit. And there is **no
+over one stream-oriented connection (a TCP socket, or a Unix domain socket where both ends are on
+the same machine), so there is **one global message order** and no per-stream loss recovery; the
+frame cap is therefore a protocol constant (WSM-FRG-004), not a negotiated limit. There is also **no
 `SETTINGS` exchange** (WSM-CON-031): every limit is either a protocol constant or a local defence of
 one peer.
 
@@ -21,11 +21,10 @@ they refer to (§2–§4).
 **The only version in this system is on the wire: the generation integer in the subprotocol name
 `muxws.v1.<codec>`** (WSM-CON-009, WSM-PKG-005). This document has no version of its own. There is no
 spec revision number, no `protocol_version` field and no settings frame announcing capabilities.
-The packages' semver versions the *packages*, never the wire.
+The packages' semver versions the packages, not the wire.
 
-A disagreement between this document and a brief under `docs/design/briefs/` is a defect and is
-recorded in `GAPS.md`. `docs/design/muxws-websocket-transport.md` contains the design rationale for
-these rules; it is not normative.
+`docs/design/muxws-websocket-transport.md` contains the design rationale for these rules; it is not
+normative.
 
 ---
 
@@ -258,8 +257,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
 | Level | Cases | Answer |
 |---|---|---|
 | stream | `data` after receiving `end`; a non-fragment frame mid-reassembly (WSM-FRG-033); an over-size frame the receiver declines (WSM-FRG-031); a payload over `max_payload_bytes` (WSM-FRG-032); an `open` beyond the receiver's concurrency limit (WSM-STM-036) | `reset` that stream: `PROTOCOL_ERROR`, except `PAYLOAD_TOO_LARGE` for the size cases and `REFUSED` for the concurrency case |
-| connection | a message the codec cannot decode; a missing `type`; a wrong-parity stream id; an `open` whose id is not greater than that peer's highest previous open; any stream-level frame naming an id **above** the high-water mark | `goaway(PROTOCOL_ERROR)`, then close the socket |
-| neither | a stream-level frame for an id that is not live but is **at or below** the high-water mark | ignore silently — no reset, no connection error, at most a counter |
+| connection | a message the codec cannot decode; a missing `type`; a wrong-parity stream id; an `open` whose id is not greater than that peer's highest previous open; a `data` or `reset` naming an id **above** the high-water mark | `goaway(PROTOCOL_ERROR)`, then close the socket |
+| neither | a `data` or `reset` for an id that is not live (closed, or never opened) but is **at or below** the high-water mark | ignore silently — no reset, no connection error, at most a counter |
 
 ---
 
@@ -271,11 +270,15 @@ every *other* stream, the connection is kept** (WSM-STM-024).
 - **WSM-API-002** `Stream` MUST be simultaneously awaitable (resolving with the remote's **first**
   payload) and async-iterable (yielding every reassembled payload until the remote ends).
 - **WSM-API-003** `open()` MUST take zero mandatory arguments; `payload` defaults to `null` / `None`.
-- **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly two connection-state
-  cases: `ConnectionGoingAway` after a received `goaway`, and `ConnectionLost` while the peer is
-  between sockets. The only other synchronous failures are those of the peer's open interceptors
-  (WSM-API-027). It MUST NOT queue, and `open()` MUST NOT fail for concurrency: that limit is the
-  receiver's (WSM-STM-036) and surfaces asynchronously as `StreamRefused` on the pending await.
+- **WSM-API-004** `open()` MUST raise synchronously at the call site in exactly these connection-state
+  cases, checked in this order: `ConnectionLost` while the connection is not established (between
+  sockets, before the hello acknowledgement of WSM-RCN-043, after the final close);
+  `ConnectionGoingAway` after a received `goaway` (WSM-CON-022); `ConnectionGoingAway` after a sent
+  `goaway` (WSM-CON-021); and, after the open interceptors have run, `ConnectionGoingAway` when the
+  stream ids are exhausted (WSM-SID-007). The only other synchronous failures are those of the
+  peer's open interceptors (WSM-API-027). It MUST NOT queue, and `open()` MUST NOT fail for
+  concurrency: that limit is the receiver's (WSM-STM-036) and surfaces asynchronously as
+  `StreamRefused` on the pending await.
 - **WSM-API-005** `notify()` MUST be async and MUST return nothing. It MUST NOT return a `Stream` or
   any awaitable handle. It MUST send its `open` with `end: true` and `oneway: true` (WSM-FRM-020).
   Test: `conformance/sequences/notify-is-a-oneway-open-nobody-answers.json`.
@@ -295,9 +298,10 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   `on_stream`/`on_frame`/`on_close`/`on_reconnect`: a registration that suspends lets a stream the
   acceptor pushes arrive before the handler is registered (WSM-STM-033). The three interceptor
   registrations of WSM-API-026 are synchronous as well.
-  Test: `peer_test.py::test_the_public_api_is_async_exactly_where_the_rule_says`, which compares the
-  partition by set equality in **both** directions, so the "everything else" clause is asserted as
-  well as the named members.
+  Test:
+  `peer_test.py::test_the_async_members_of_the_public_api_are_exactly_those_wsm_api_008_lists`,
+  which compares the partition by set equality in **both** directions, so the "everything else"
+  clause is asserted as well as the named members.
 - **WSM-API-009** `peer.id` MUST be a short random prefix minted **once per process** plus a
   monotonic **per-connection** counter, rendered `<prefix>-<counter>` (e.g. `a3f-17`). An id MUST NOT
   be reused or duplicated within a process; across processes only the prefix may coincide. Two
@@ -314,7 +318,7 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   future. The consumption claim MUST be recorded on the stream, not on the future.
 - **WSM-API-014** The first of the two shapes to be used claims the stream; the other MUST raise
   `StreamAlreadyConsumed`, with an error naming both uses. Two iterations over one stream is the same
-  error. Test: `stream_test.py::test_await_then_iterate_raises_and_first_consumer_got_everything`.
+  error. Test: `stream_test.py::test_iterating_after_an_await_raises_and_the_first_consumer_keeps_every_payload`.
 - **WSM-API-015** In TypeScript `Stream<T>` MUST implement `PromiseLike<T>` and MUST NOT subclass
   `Promise` (species semantics would make every derived promise a `Stream`).
   Consequence: `await` unwraps thenables recursively, so a `Stream` cannot be the resolution value of
@@ -338,8 +342,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   differs.
 - **WSM-API-023** `stream.closed` MUST be an `asyncio.Event` in Python and a **`Promise<void>`** in
   TypeScript, settling when the stream closes, including on socket death. That promise MUST resolve
-  and MUST NOT reject — a stream that closed by being reset still closed, and the reset reaches the
-  awaits and the iterator instead — so WSM-API-016's precaution does not apply to it.
+  and MUST NOT reject, also for a stream closed by a reset (the reset is delivered to the awaits and
+  the iterator), so WSM-API-016's precaution does not apply to it.
 - **WSM-API-024** Sending the leading headers of WSM-FRM-016 MUST be possible **without a payload**:
   `stream.send_headers()` / `stream.sendHeaders()`, which puts a payload-less `data` frame on the
   wire. Sending them on the same frame as the first payload MUST also be possible, as a `headers` argument to
@@ -384,9 +388,10 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   Test: `reconnect_test.py::test_header_interceptors_persist_across_a_reconnect_and_do_not_run_on_the_hello`;
   `reconnect_test.py::test_connect_and_accept_register_their_interceptors_before_any_frame`;
   `peer_test.py::test_serve_registers_the_interceptors_it_is_given`;
-  `ts/reconnect.spec.ts` *"keeps both registrations on the Peer and leaves the hello alone"* and
-  *"registers connect()'s interceptor arrays before the first hello goes out"*;
-  `ts/node.spec.ts` *"runs them on the peer each builds, in order, before its first frame"*.
+  `ts/reconnect.spec.ts` *"keeps both interceptor registrations on the Peer across a reconnect and
+  does not pass the hello through them"* and *"registers connect()'s interceptor arrays before the
+  first hello goes out"*; `ts/node.spec.ts` *"registers the interceptor arrays in order on the accept() or
+  serve() peer before its first frame"*.
 - **WSM-API-027** `open()`, and through it `notify()` and `request()`, MUST call every open
   interceptor synchronously, after the checks of WSM-API-004 and before a stream id is allocated, as
   `(headers, payload)`. `headers` is a fresh mutable mapping holding a shallow copy of the caller's
@@ -408,10 +413,11 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   keys (§2.2) — and a key that is not (a non-`str` key in Python, a symbol key in TypeScript) MUST
   fail the call the same way with a `TypeError`, rather than reach a codec that would drop or coerce
   it.
-  Test: `peer_test.py::test_open_interceptors_shape_the_headers_of_every_open`;
+  Test: `peer_test.py::test_open_interceptors_modify_a_copy_of_the_headers_of_every_open`;
   `peer_test.py::test_an_open_interceptor_that_raises_fails_the_open_allocates_no_id_and_sends_nothing`;
-  `ts/peer.spec.ts` *"shapes the headers of every open in registration order, on a copy"* and
-  *"fails the open with the interceptor error and spends nothing"*.
+  `ts/peer.spec.ts` *"applies open interceptors in order to a copy of the headers of every
+  open"* and *"fails the open with the interceptor error, allocates no stream id and sends
+  nothing"*.
 - **WSM-API-028** Reply headers interceptors MUST be called once per stream the remote opened,
   synchronously, by the call that sends this peer's first frame on that stream (WSM-FRM-016):
   `send_headers()` / `sendHeaders()`, `send()`, `end()`, `reply()`, or the implicit end of
@@ -419,14 +425,15 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   shallow copy of the headers that call was given, empty when it was given none. The mapping as the
   last interceptor left it is what the frame carries and what `stream.reply_headers` /
   `stream.replyHeaders` holds, under the copy, empty-mapping and failure rules of WSM-API-027, with
-  one addition: a failed call leaves the first frame unspent, so a later call on the stream may still
-  carry headers. A failure during the implicit end of WSM-STM-035 is the handler's, and resets the
-  stream as WSM-STM-034 requires. A frame on a stream this peer opened calls no reply headers
+  one addition: a failed call sends no frame, so the next call on the stream sends the first frame
+  and may carry headers. A failure during the implicit end of WSM-STM-035 is the handler's, and resets
+  the stream as WSM-STM-034 requires. A frame on a stream this peer opened calls no reply headers
   interceptor, and neither does a `reset`, which carries no headers.
-  Test: `peer_test.py::test_reply_headers_interceptors_shape_the_first_frame_of_every_answer`;
+  Test: `peer_test.py::test_reply_headers_interceptors_get_a_copy_of_each_answers_first_frame`;
   `peer_test.py::test_a_reply_headers_interceptor_that_raises_fails_the_call_and_sends_nothing`;
-  `ts/peer.spec.ts` *"shapes the first frame of every answer, on a copy, whichever call sends it"* and
-  *"fails the call that sends the answer and leaves its first frame unspent"*.
+  `ts/peer.spec.ts` *"applies reply headers interceptors to a copy of the first frame of each
+  answer, for every sending call"* and *"a failed interceptor fails the sending call; a later call sends
+  the first frame"*.
 - **WSM-API-029** Incoming interceptors MUST be called exactly once per stream, synchronously inside
   the read loop, when the remote's first stream-level frame on that stream is accepted. For a stream
   the remote opened that frame is the `open` (the first fragment of a fragmented one), and the call
@@ -445,7 +452,8 @@ every *other* stream, the connection is kept** (WSM-STM-024).
   coroutine, TypeScript attaches a rejection handler to a returned thenable.
   Test: `peer_test.py::test_incoming_interceptors_see_each_streams_leading_headers_once`;
   `peer_test.py::test_an_incoming_interceptor_that_raises_is_logged_and_changes_nothing`;
-  `ts/peer.spec.ts` *"hands each stream's leading headers to incoming interceptors once, frozen"* and
+  `ts/peer.spec.ts` *"passes each stream's leading headers to incoming interceptors once, as a frozen
+  object"* and
   *"logs an incoming interceptor that throws and changes nothing else"*.
 - **WSM-API-030** Iterating a stream the remote opened MUST yield the payloads the remote sends after
   its `open` (the opening payload is the handler's argument) and MUST end when the remote ends the
@@ -467,7 +475,7 @@ in every language.
 - **WSM-AUT-001** Two obligations with different subjects; only the second binds the library.
   **On the deploying application:** authentication MUST happen at the WebSocket upgrade, before
   `accept()` is called. muxws cannot enforce this, and no test of muxws can observe it. muxws
-  provides no other place for authentication, and that is tested: `accept()` takes no credential
+  provides no other place for authentication; tests assert that `accept()` takes no credential
   argument, `connect()` passes `headers=` to the upgrade and to nowhere else, and `Peer` has no
   post-upgrade authentication hook.
   **On the library:** muxws MUST NOT interpret credentials anywhere. Tested by
@@ -539,15 +547,15 @@ in every language.
   different codecs to configure each. No example outside the test suite may use it.
 - **WSM-CDC-013** Registration MUST be explicit: `register_codec(name, codec)` / `registerCodec(name,
   codec)`. There MUST NOT be dynamic imports, lazy auto-registration, entry-point scanning, or any
-  probing of whether a module happens to be installed.
+  probing of whether a module is installed.
 - **WSM-CDC-014** A codec module MUST NOT register itself at import time — a bundler cannot remove an
   import that has side effects.
 - **WSM-CDC-015** The npm package MUST declare `"sideEffects": false`, at minimum for the codec
   subpaths.
 - **WSM-CDC-016** A configured codec name that is not registered MUST raise `CodecNotRegistered` on
   the first connection attempt, **before any socket is opened**. The message MUST name the
-  environment variable, the value found, and the registered set. The peer MUST NOT fall back to JSON,
-  ever. Test: `codec_test.py::test_unregistered_name_raises_before_socket` (asserts no socket was
+  environment variable, the value found, and the registered set. The peer MUST NOT fall back to JSON.
+  Test: `codec_test.py::test_unregistered_name_raises_before_socket` (asserts no socket was
   opened).
 - **WSM-CDC-020** The dialer MUST offer `muxws.v1.<codec>` as its **first** WebSocket subprotocol
   entry, where `<codec>` is its configured codec name.
@@ -559,9 +567,9 @@ in every language.
   subprotocol. Otherwise it MUST refuse the upgrade: select **no** subprotocol and answer HTTP
   **400**. It MUST NOT complete the handshake and close afterwards where the transport gives it the
   choice (WSM-CDC-028 is the exception, and only for transports that give it none).
-- **WSM-CDC-023** This is an assertion, not a negotiation. There MUST NOT be a fallback encoding, a
-  list of acceptable alternatives, per-connection multi-codec support, or any runtime codec branching
-  in the peer.
+- **WSM-CDC-023** The codec check of WSM-CDC-022 is an equality test against one configured name.
+  There MUST NOT be a fallback encoding, a list of acceptable alternatives, per-connection
+  multi-codec support, or any runtime codec branching in the peer.
 - **WSM-CDC-024** A dialer whose handshake is refused MUST surface `CodecMismatch`, **composed by the
   dialer itself from the codec name it offered** — a browser cannot read the rejection body, so the
   diagnostic cannot come from the server. The message MUST name the offered codec and **both**
@@ -601,8 +609,11 @@ in every language.
   do not expose them to JavaScript.
 - **WSM-CON-012** The application MAY call `peer.ping()` to measure round-trip time; it returns
   seconds (Python) / milliseconds (TypeScript).
-- **WSM-CON-020** `goaway` carries `code`, `reason` and `last_stream` — the highest stream id from
-  the *other* peer that this peer has processed and will still complete.
+- **WSM-CON-020** `goaway` carries `code`, `reason` and `last_stream` — the highest id of an `open`
+  from the *other* peer that this peer has admitted under WSM-SID-005 when it sends the `goaway`, `0`
+  if none. Each stream at or below it that is not `oneway` either runs until it ends or the drain
+  deadline passes (WSM-CON-024), or is answered with its own `reset`, `REFUSED` for an open refused
+  under WSM-STM-033 or WSM-STM-036. No stream above it is processed.
 - **WSM-CON-021** After **sending** `goaway`, a peer MUST refuse new incoming opens with
   `reset(REFUSED)` and MUST open no new streams itself.
 - **WSM-CON-022** After **receiving** `goaway`, `peer.open()` MUST raise `ConnectionGoingAway`
@@ -611,7 +622,8 @@ in every language.
   `last_stream` MUST be reset locally with `REFUSED` — they were never processed and are safe to
   retry on a new connection.
 - **WSM-CON-024** Streams at or below `last_stream` MUST be allowed to finish until the drain timeout
-  (default 10 s) elapses; then the socket MUST be closed. Drain is a deadline, not a poll loop.
+  (default 10 s) elapses; then the socket MUST be closed. Drain ends at a deadline; it
+  does not poll.
 - **WSM-CON-025** `peer.close()` MUST send `goaway(NO_ERROR)`, drain, then close.
 - **WSM-CON-030** A connection is **established** when the socket is open and, for a codec-bearing
   subprotocol, that subprotocol was accepted. There MUST NOT be a post-socket handshake phase, a
@@ -710,12 +722,13 @@ not part of this tree.
   address it was given MUST raise a subclass of `TransportUrlError`; a transport this runtime cannot
   provide **at all** — no `AF_UNIX`, an optional dependency that is not installed, an entry point a
   bundling rule (WSM-API-022) keeps the dependency out of — MUST raise a subclass of
-  `TransportUnsupportedError`. `TransportUrlError` means *retype the address*;
-  `TransportUnsupportedError` means *the address is fine, change where or how you are running*, and a
-  port MUST NOT collapse the two. Both bases MUST live in the shared error module (`muxws/errors.py`,
-  `ts/errors.ts`), MUST be exported from the package root, and MUST NOT acquire a dependency of their
-  own — an application must be able to write `except TransportUrlError` without importing, and
-  possibly without being *able* to import, the transport that raised.
+  `TransportUnsupportedError`. `TransportUrlError` means the address is invalid for
+  the transport; `TransportUnsupportedError` means the address is valid and this runtime, installation
+  or entry point cannot provide the transport. A port MUST NOT merge the two. Both bases
+  MUST live in the shared error module (`muxws/errors.py`, `ts/errors.ts`), MUST be exported from the
+  package root, and MUST NOT have a dependency of their own, so an application can write
+  `except TransportUrlError` without importing the transport that raised, including when that
+  transport cannot be imported.
   In Python `TransportUrlError` MUST also be a `ValueError` and `TransportUnsupportedError` a
   `RuntimeError`, so that code catching the builtin around a URL or a platform check catches them,
   and so does a single `except MuxwsError` handler around every muxws call. A port with a single
@@ -733,13 +746,13 @@ not part of this tree.
   errors MUST be exported from the entry point that ships that transport and MUST NOT be reachable
   from any other. A transport module MUST stay importable when the dependency it adapts is absent;
   otherwise `except <Transport>NotInstalledError` itself raises the `ImportError` the class replaces.
-  **An error lives in the module whose contract requires it, not in the module that raises it.** The
-  `SocketAdapter` protocol requires every adapter to raise `ConnectionClosed` (WSM-API-021), so
-  `ConnectionClosed` is in the shared module. An error the adapter contract does not mention — a URL
-  grammar, a missing package, a missing kernel feature — belongs to the transport that raises it, and
-  MUST NOT be moved to the shared module because a second transport needs a similar error.
-  A missing optional dependency MUST NOT reach the caller as a bare `ImportError` or
-  `ERR_MODULE_NOT_FOUND`, and the message MUST name the install that fixes it —
+  An error class is defined in the module whose contract requires it, which need not be the module
+  that raises it. The `SocketAdapter` protocol requires every adapter to raise `ConnectionClosed`
+  (WSM-API-021), so `ConnectionClosed` is in the shared module. An error the adapter contract does
+  not mention — a URL grammar, a missing package, a missing kernel feature — belongs to the
+  transport that raises it, and MUST NOT be moved to the shared module because a second transport
+  needs a similar error. A missing optional dependency MUST NOT reach the caller as a bare
+  `ImportError` or `ERR_MODULE_NOT_FOUND`, and the message MUST name the install that fixes it —
   `pip install muxws[websockets]`, `npm install ws`. The failure is permanent and local and has one
   remedy, which the message states. A translated failure MUST chain the original — `raise ... from
   exc` in Python, `{ cause }` in TypeScript — and MUST include the underlying library's wording rather
@@ -759,7 +772,7 @@ not part of this tree.
   `::test_the_transport_bases_are_root_exported_and_their_subclasses_are_not`,
   `::test_the_two_transport_bases_carry_their_builtin_as_well_as_muxwserror`;
   `transports/websockets_test.py::test_a_url_websockets_cannot_parse_arrives_as_a_transport_url_error`,
-  `::test_the_librarys_own_diagnostic_survives_the_translation`,
+  `::test_the_translated_error_chains_and_quotes_the_websockets_exception`,
   `::test_a_url_containing_the_refusal_status_is_not_a_codec_mismatch`,
   `::test_a_missing_websockets_package_names_the_extra_that_installs_it`,
   `::test_a_websockets_that_is_installed_but_broken_keeps_its_own_import_error`,
@@ -768,15 +781,15 @@ not part of this tree.
   `transports/unix_test.py::test_both_refusals_are_catchable_as_muxws_errors_and_as_their_builtin_bases`,
   `::test_a_malformed_unix_url_is_a_transport_url_error_and_a_missing_af_unix_is_not`;
   `ts/errors.spec.ts` *"places the two transport bases under MuxwsError and outside StreamReset"*,
-  *"defines no concrete transport error, because each one belongs to its transport"*,
-  *"chains the original on a transport base, and invents no chain when there was none"*;
-  `ts/node.spec.ts` *"arrives as a WsUrlError wrapping the message of `ws`, not as ws's own SyntaxError"*;
-  `ts/unix.spec.ts` *"refuses a request target that is not an absolute path, by name"*,
+  *"defines no concrete transport error in the shared errors module"*,
+  *"sets cause on a transport base error when given one and defines no cause property otherwise"*;
+  `ts/node.spec.ts` *"throws a WsUrlError carrying the message of `ws` for a URL ws cannot parse"*;
+  `ts/unix.spec.ts` *"refuses a request target that is not an absolute path with a UnixUrlError"*,
   *"names muxws/node as the entry point that can dial a socket file"*;
-  `ts/transport-errors.spec.ts` *"names the install rather than the module the resolver could not
-  find"*, *"rethrows a broken install untouched, so it is never reported as an absent one"*;
+  `ts/transport-errors.spec.ts` *"throws a WsNotInstalledError that names `npm install ws` when ws is
+  missing"*, *"rethrows the import error of an installed but broken dependency unchanged"*;
   `ts/packaging.spec.ts` *"lets each entry point export only the concrete classes its own transports
-  own"*, *"leaves node:net a real import, so the unix dial has a socket to open"*.
+  own"*, *"keeps node:net as a real import in the build for the unix dial"*.
   **The platform-`WebSocket` entry point does not satisfy the first sentence; `GAPS.md` lists the
   deviation.**
 
@@ -875,9 +888,9 @@ not part of this tree.
 - **WSM-FRM-011** `data` carries a payload chunk on an existing stream. Fields: `stream`,
   `headers` (first one only, WSM-FRM-016), `payload`/`fragment`+`more`, `end`, `trailers`. A peer
   MUST NOT send `data` on a stream where its own side is already half-closed.
-- **WSM-FRM-012** End of stream MUST be a flag, never its own frame type. A peer with nothing left to
-  say sends `{"type": "data", "stream": N, "end": true}` with no payload. There MUST NOT be an `end`
-  frame type.
+- **WSM-FRM-012** End of stream MUST be a flag, never its own frame type. A peer that ends its side
+  without a further payload sends `{"type": "data", "stream": N, "end": true}` with no payload. There
+  MUST NOT be an `end` frame type.
 - **WSM-FRM-013** Trailers MUST be carried on the frame carrying `end: true`. There MUST NOT be a trailers
   frame type.
 - **WSM-FRM-014** `reset` terminates a stream immediately in both directions. Sender: either peer, in
@@ -891,11 +904,11 @@ not part of this tree.
   send headers once, and one peer's headers do not affect whether the other may send them. A
   receiver that sees `headers` on a later frame MUST reset that stream with `PROTOCOL_ERROR`; that is
   a stream-level error and MUST NOT take the connection down (§4.3).
-  Two consequences. `reset` never carries headers, however early it arrives: a reset is not an
-  answer, and the field table lists `headers` on `open` and `data` only. And "first frame" means the
-  first frame *sent*, not the first *carrying a payload*: a peer with headers to send and no payload
-  yet sends `{"type":"data","stream":N,"headers":{...}}`, a legal frame with no payload, and may send
-  no further headers on that stream.
+  `reset` never carries headers, also when it is the peer's first frame on the stream: the field
+  table lists `headers` on `open` and `data` only. "First frame" means the first frame sent,
+  including one without a payload: a peer with headers to send and no payload yet sends
+  `{"type":"data","stream":N,"headers":{...}}`, a legal frame with no payload, and may send no
+  further headers on that stream.
   Tests: `conformance/frames/v1-frames.json` (`data-with-headers`),
   `conformance/sequences/answering-side-announces-headers.json`,
   `conformance/invalid/headers-on-a-later-frame.json`.
@@ -937,8 +950,8 @@ Each invariant is followed, after the dash, by the failure it prevents.
   stream (WSM-API-010/013) — otherwise a stream's payloads are split between an await and an
   iteration without an error to either consumer.
 - **WSM-INV-010** Nothing MUST be queued while the peer is between sockets (WSM-RCN-042) — otherwise
-  queued frames are delivered to a server that holds no state for the sender, and an error that would
-  have reached the call site becomes a silent misdelivery.
+  queued frames are delivered to a server that holds no state for the sender, and the call site
+  receives no error.
 - **WSM-INV-011** Every stream live at socket death MUST fail with `ConnectionLost`, never hang
   (WSM-RCN-041) — otherwise a caller gets no error, no log and no timeout, and its await never
   completes.
@@ -948,10 +961,11 @@ Each invariant is followed, after the dash, by the failure it prevents.
 - **WSM-INV-013** The hello MUST be replayed by the helper, not by the application (WSM-RCN-020) —
   otherwise an application that does not replay it holds a connected socket that the server cannot
   associate with any client, with no subscriptions and no error reported.
-- **WSM-INV-014** `tags` MUST NOT survive a reconnect (WSM-RCN-033) — otherwise a tag such as a mute
-  flag, set for one connection, applies to the next connection, which never set it.
-- **WSM-INV-015** An unregistered codec name MUST be a loud startup failure, never a silent JSON
-  fallback (WSM-CDC-016) — otherwise a deployment configured for msgpack runs JSON with no error,
+- **WSM-INV-014** On the acceptor `tags` MUST NOT survive a reconnect (WSM-RCN-033) — otherwise a tag
+  such as a mute flag, set for one connection, applies to the next connection, which never set it. A
+  dialer's `Peer` survives a reconnect (WSM-RCN-032) and keeps its `tags`.
+- **WSM-INV-015** An unregistered codec name MUST raise at startup and MUST NOT fall back to JSON
+  (WSM-CDC-016) — otherwise a deployment configured for msgpack runs JSON with no error,
   because both ends fall back.
 - **WSM-INV-016** muxws MUST NOT define a message vocabulary (WSM-FRM-006) — otherwise two
   independent consumers sharing one socket must each nest their own vocabulary inside the muxws one,
@@ -993,10 +1007,10 @@ of `reason`: Python uses `repr()`, TypeScript `JSON.stringify` (`GAPS.md`).
   NOT fire. An `open` that gets no `Stream` object (an `open` refused or a `oneway` open dropped at the
   concurrency limit, WSM-STM-036, WSM-STM-040) MUST NOT fire. Registrations persist across reconnects.
 - **WSM-OBS-005** The handler MUST receive an immutable `Exchange` with two `ExchangeSide`s: `request`, what
-  the side that opened the stream sent, and `response`, what the other side sent, whichever peer reports.
-  Each side holds its leading headers, its payloads in order, the count of all its payloads, its trailers and
-  whether it sent `end`. A payload is the logical value after reassembly and decoding, never a fragment; a
-  frame without a payload adds none.
+  the side that opened the stream sent, and `response`, what the other side sent; both peers assign
+  the sides the same way. Each side holds its leading headers, its payloads in order, the count of
+  all its payloads, its trailers and whether it sent `end`. A payload is the logical value after
+  reassembly and decoding, never a fragment; a frame without a payload adds none.
 - **WSM-OBS-006** `outcome` MUST be `"ok"` when the stream closes without a reset (both sides ended, or a
   `oneway` stream closed), `"reset"` when either side reset it, a refusal and a handler error included, and
   `"lost"` when the connection ended first (`ConnectionLost`). For `"reset"`, `reset_by` is `"local"` or
@@ -1074,8 +1088,8 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   closed locally, and the backoff path MUST run exactly as after a clean close. Detection MUST
   therefore be bounded by `ping_interval + ping_timeout`. A locally-declared death closes with
   WebSocket code **1000**: 1006 means "closed abnormally" and a peer may never put it on the wire, so
-  a transport that validates it rejects the close and leaves the socket open — after which nothing
-  re-dials.
+  a transport that validates it rejects the close and leaves the socket open, and the reconnect
+  helper does not re-dial.
   Test: `reconnect_test.py::test_an_unanswered_ping_is_detected_within_interval_plus_timeout`.
 - **WSM-RCN-020** The hello MUST be captured once, at `connect()`, and replayed **verbatim** on every
   connection this peer ever makes. It MUST NOT be re-read, recomputed, or supplied as a callback.
@@ -1090,8 +1104,8 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   as WSM-CON-030 is satisfied.
 - **WSM-RCN-025** **On the deploying application:** a credential MUST NOT be carried in the hello —
   authentication is a handshake concern (§5.2), and the hello is application payload that is
-  *replayed verbatim on every reconnect*, so a credential put there is a credential that outlives its
-  own expiry. muxws cannot enforce this: it never creates hello content and cannot tell a credential
+  *replayed verbatim on every reconnect*, so a credential put there is replayed after it expires.
+  muxws cannot enforce this: it never creates hello content and cannot tell a credential
   from any other value in an opaque payload. The documentation states it: `docs/guide/reconnect.md`
   has a `danger` admonition.
   **On the library:** muxws MUST add nothing of its own to the hello and MUST NOT rewrite what it was
@@ -1132,8 +1146,8 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   Test: `registry_test.py::test_reconnect_starts_with_empty_tags`.
 - **WSM-RCN-040** `on_close(reason)` MUST fire on **every** socket loss, not only the final one, and
   exactly once per loss. `will_retry` MUST be `false` only when `max_attempts` is exhausted or
-  `close()` was called deliberately. At most one `will_retry: false` close may ever fire for one
-  peer; whichever path reaches it first wins and the other is suppressed.
+  `close()` was called deliberately. At most one `will_retry: false` close fires for one peer;
+  the first path to reach it reports it and the other path reports nothing.
 - **WSM-RCN-041** At socket death, before `on_close` fires:
   - a pending await on the stream's result MUST reject with `ConnectionLost`, resolving the memoized
     future once so a second await gets the same error rather than hanging;
@@ -1152,9 +1166,9 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   Test: `peer_test.py::test_nothing_attempted_while_disconnected_appears_on_the_new_socket`.
 - **WSM-RCN-043** `peer.is_open` MUST be `false` for the whole window between a socket loss and the
   next established connection — which, for a peer with a hello, includes the hello window. A peer
-  needs a *separate* internal predicate for "is there a wire I can put this frame on": a stream reset
-  during the hello window still has to reach the remote, and reading `is_open` for that question
-  leaves the remote holding a stream this side has closed.
+  uses a separate internal predicate for whether a socket is available to send a frame on: a reset
+  sent during the hello window must reach the remote, and a peer that checks `is_open` instead does
+  not send it, so the remote keeps a stream this side has closed.
 - **WSM-RCN-044** `max_attempts` exhausted MUST fire `on_close` once with `will_retry` false and MUST
   never dial again. `max_attempts = 0` means the first loss reports `will_retry: false` and no dial
   follows.
@@ -1188,14 +1202,14 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   Test: `registry_test.py::test_register_skips_an_unhashable_tag_value`.
 - **WSM-REG-012** `register(peer)` called again after `tags` changed MUST replace that peer's index
   entries **wholesale**: found under the new values, no longer under the old ones.
-  Test: `registry_test.py::test_reregister_replaces_entries_wholesale`.
+  Test: `registry_test.py::test_reregister_replaces_all_entries`.
 - **WSM-REG-013** The registry MUST NOT watch the dict or re-index on assignment. A peer whose tags
   changed stays findable under the values of its last `register()`.
   Test: `registry_test.py::test_tag_written_after_register_is_not_found_until_reregister`.
 - **WSM-REG-014** Test: `registry_test.py::test_overwriting_an_unindexed_key_leaves_the_index_unchanged` — register
   under one key, overwrite a different, never-looked-up map-valued key a hundred times without
-  re-registering; every read sees the newest value, the lookup returns the peer unchanged
-  throughout, and the registry's index does not grow by a single entry.
+  re-registering; every read sees the newest value, the lookup returns the peer throughout,
+  and the number of entries in the registry's index is unchanged.
 - **WSM-REG-015** `peers_for` MUST return a **list**, not a set, in a stable order. Callers MUST
   treat it as a snapshot: a peer in it may already be closing.
 - **WSM-REG-016** Removal on close MUST be automatic, via the peer's own close hook. A consumer MUST
@@ -1220,7 +1234,7 @@ delay = delay * (1 + uniform(-jitter, +jitter))
   with no suspension point between them, so that wire order is allocation order by construction.
   Test: `peer_test.py::test_concurrent_opens_produce_increasing_ids_on_the_wire`.
 - **WSM-SID-007** On exhaustion at 2^31−1, the exhausting peer MUST send `goaway` with `last_stream`
-  set to the highest id it has processed, MUST stop opening new streams, MUST let in-flight streams
+  as WSM-CON-020 defines it, MUST stop opening new streams, MUST let in-flight streams
   drain, and MUST then close. All four clauses apply. The trigger is the allocation of the last id,
   not a later call failing; this keeps `open()` synchronous (WSM-API-001) and lets the stream that
   took the last id drain.
@@ -1232,12 +1246,13 @@ delay = delay * (1 + uniform(-jitter, +jitter))
 - **WSM-STM-001** A peer MUST retain exactly **`highest_open_seen` per parity plus the map of live
   streams**. It MUST NOT keep per-closed-stream bookkeeping, which grows without bound over the life
   of a connection.
-- **WSM-STM-002** Any stream-level frame naming an id that is not currently live but does not exceed
-  that peer's high-water mark MUST be **silently ignored** — no reset, no connection error, at most a
-  counter. Test: `conformance/invalid/data-for-closed-id.json` (connection survives, nothing goes
-  out).
-- **WSM-STM-003** Any stream-level frame other than a valid `open` naming an id **above** that peer's
-  high-water mark MUST be a **connection-level** protocol error.
+- **WSM-STM-002** A `data` or `reset` naming an id that is not currently live (the stream is closed,
+  or the id was never opened) but does not exceed that peer's high-water mark MUST be **silently
+  ignored** — no reset, no connection error, at most a counter. An `open` at or below the mark is a
+  connection-level error (WSM-SID-005). Test: `conformance/invalid/data-for-closed-id.json`
+  (connection survives, nothing goes out).
+- **WSM-STM-003** A `data` or `reset` naming an id **above** that peer's high-water mark MUST be a
+  **connection-level** protocol error.
   Test: `conformance/invalid/data-above-high-water-mark.json` (connection dies).
 - **WSM-STM-010** Every row of the §4.2 table, including every illegal cell, MUST have a test — one
   case per cell.
@@ -1251,8 +1266,9 @@ delay = delay * (1 + uniform(-jitter, +jitter))
 - **WSM-STM-014** On socket death every live stream MUST transition to `closed` and be failed locally
   with a synthesised `reset(CONNECTION_CLOSED)` **before** `on_close` fires (WSM-RCN-041). That
   synthesised reset MUST NOT go on the wire (§2.4, code 9).
-- **WSM-STM-015** A `reset` for a stream that is already closed or was never opened MUST be ignored
-  under WSM-STM-002.
+- **WSM-STM-015** A `reset` for an id that is not live MUST be ignored when the id is at or below that
+  peer's high-water mark, whether the stream is closed or the id was never opened (WSM-STM-002), and
+  is a connection-level error above it (WSM-STM-003).
 - **WSM-STM-020** A frame illegal *for a stream* MUST reset **that stream** and leave the connection
   alone. The cases are listed in §4.3.
 - **WSM-STM-021** The code for a stream-level violation MUST be `PROTOCOL_ERROR`, except that size
@@ -1270,8 +1286,7 @@ delay = delay * (1 + uniform(-jitter, +jitter))
 - **WSM-STM-033** With no registered handler, an incoming `open` MUST be answered with
   `reset(REFUSED)` — nothing ran, so the opener may safely retry elsewhere.
 - **WSM-STM-034** A registered handler that raises MUST produce `reset(APPLICATION_ERROR)`,
-  **always**, regardless of whether it had already sent anything: `REFUSED` promises the operation
-  definitively did not happen.
+  also when it had already sent frames: `REFUSED` states that the operation did not run.
 - **WSM-STM-035** A handler that returns without having ended its stream MUST end it implicitly.
   Test: `peer_test.py::test_handler_returning_ends_stream_implicitly`.
 - **WSM-STM-036** A peer MUST enforce a **local, receiver-side** limit on how many streams the remote

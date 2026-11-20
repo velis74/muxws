@@ -257,8 +257,8 @@ describe('connect() is wired to the reconnect driver', () => {
     });
   });
 
-  it('re-dials on a real socket whose pong is swallowed - WSM-RCN-011', async () => {
-    // The whole heartbeat path over a real socket, through the real `connect()`: a swallowed pong is detected, the
+  it('re-dials on a real socket whose pong never arrives - WSM-RCN-011', async () => {
+    // The whole heartbeat path over a real socket, through the real `connect()`: a missing pong is detected, the
     // socket is closed locally so `serve()` settles, and the supervisor sees the loss and dials again. Every other
     // heartbeat test here drives `Heartbeat` or `ConnectionLoop` directly and passes with `startHeartbeat()`
     // removed from the supervisor; this test fails in that case, because a heartbeat that is never started detects
@@ -267,7 +267,7 @@ describe('connect() is wired to the reconnect driver', () => {
     // The server side has no muxws peer: `serve()` echoes a `ping` verbatim (WSM-CON-010), and the heartbeat cannot
     // detect a loss when the server answers.
     //
-    // Unlike `muxws/reconnect_test.py::test_a_swallowed_pong_on_a_real_socket_re_dials`, this test cannot also
+    // Unlike `muxws/reconnect_test.py::test_an_unanswered_ping_on_a_real_socket_redials`, this test cannot also
     // check the close *code*: `ws.close(1006)` throws, but has already moved the socket to CLOSING, so the loss is
     // still reported and the re-dial still happens. Python's adapter leaves the socket open in that case, so the
     // rule is asserted there and only stated here.
@@ -285,9 +285,9 @@ describe('connect() is wired to the reconnect driver', () => {
       onClose: (reason) => closes.push(reason),
     });
     // No wait here depends on TCP timeouts: the whole detection budget is interval + timeout.
-    await until(() => seen.length >= 2, 3000, 'the re-dial after the swallowed pong');
+    await until(() => seen.length >= 2, 3000, 'the re-dial after the missing pong');
 
-    expect(closes.length, 'a swallowed pong is a socket loss and is reported as one (WSM-RCN-040)').toBeGreaterThan(0);
+    expect(closes.length, 'a missing pong is a socket loss and is reported as one (WSM-RCN-040)').toBeGreaterThan(0);
     expect(closes[0].reason).toBe('no pong within 50ms');
     expect(closes[0].willRetry).toBe(true);
 
@@ -428,7 +428,7 @@ describe('the attempt counter', () => {
     expect(Object.getOwnPropertyNames(counter)).toEqual(['attempts']);
   });
 
-  it('resets only on established, so socket-open alone leaves it climbing - WSM-RCN-004/WSM-INV-012', () => {
+  it('resets only on established and not on socket-open - WSM-RCN-004/WSM-INV-012', () => {
     // If the counter reset on socket-open, a server that accepts sockets while its backend is down would turn
     // exponential backoff into a fixed-interval retry, with no visible fault on the peer.
     const options = new Reconnect();
@@ -486,7 +486,7 @@ describe('the hello', () => {
 // --------------------------------------------------------------------------- the heartbeat
 
 describe('the heartbeat', () => {
-  it('detects a swallowed pong within intervalMs plus timeoutMs - WSM-RCN-011', async () => {
+  it('detects a missing pong within intervalMs plus timeoutMs - WSM-RCN-011', async () => {
     // Nothing serves the other end, so no ping is answered. The clock is injected, so no TCP timeout is involved;
     // the real elapsed time asserted below is negligible next to the 30 s bound the rule states.
     const [dialerSide] = memoryPair();
@@ -503,7 +503,7 @@ describe('the heartbeat', () => {
     const intervalMs = DEFAULT_PING_INTERVAL_MS;
     const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS;
     // `peer.ping()`'s own deadline is a real timer, and waiting ten seconds for it is what WSM-RCN-011 rules out.
-    // The test covers the heartbeat's arithmetic, so the ping is replaced by the effect of a swallowed pong: the
+    // The test covers the heartbeat's arithmetic, so the ping is replaced by the effect of a missing pong: the
     // deadline passes on the injected clock and the ping throws.
     const ping = vi.spyOn(peer, 'ping').mockImplementation(async (deadlineMs?: number) => {
       now += deadlineMs ?? 0;
@@ -557,11 +557,11 @@ describe('the heartbeat', () => {
     await until(() => framesOn(left).some((frame) => frame.type === 'ping'), 2000, 'a ping on the idle socket');
   });
 
-  it('touches nothing when it is stopped while a ping is in flight - WSM-RCN-011/040', async () => {
+  it('neither reports a loss nor closes the socket when stopped during a ping - WSM-RCN-011/040', async () => {
     // Python cancels the heartbeat task, so a stopped heartbeat cannot act on a ping result; JavaScript cannot
     // interrupt the `await` inside `ping()`, so the flag is re-read after it settles. The two failures this
-    // prevents are both silent: a `peer.close()` whose drain window exceeds one ping deadline would be reported to
-    // the application as a swallowed pong rather than as the requested close, and a heartbeat stopped because its
+    // prevents raise no error: a `peer.close()` whose drain window exceeds one ping deadline would be reported to
+    // the application as a missing pong rather than as the requested close, and a heartbeat stopped because its
     // socket died would close whatever socket the peer holds by then, which after one backoff is the replacement.
     const [dialerSide] = memoryPair();
     const peer = dialerOver(dialerSide);
@@ -1110,7 +1110,7 @@ describe('the reconnect driver', () => {
       cleanups.push(() => void loop.stop());
       await loop.establish();
       loop.start();
-      await until(() => loop.reconnections === 1, 3000, 'the recovery after a swallowed pong');
+      await until(() => loop.reconnections === 1, 3000, 'the recovery after a missing pong');
       await settle(40);
       await loop.stop();
       return { delays: loop.delays, reconnections: loop.reconnections, closes };
@@ -1308,7 +1308,7 @@ describe('the reconnect driver', () => {
     await loop.stop();
   });
 
-  it('keeps going when an application callback throws - WSM-RCN-011/030', async () => {
+  it('keeps reconnecting when an application callback throws - WSM-RCN-011/030', async () => {
     // An application callback that throws must not stop the reconnect loop. `onClose` and `onReconnect` are called
     // from the supervisor, so an uncaught exception from one of them would unwind into it and stop it permanently:
     // no further dial, no further report, and no indication why.
@@ -1622,47 +1622,51 @@ function makeDeliberate(): [Promise<CloseReason>] {
 }
 
 describe('header interceptors across a reconnect', () => {
-  it('keeps both registrations on the Peer and leaves the hello alone - WSM-API-026/027', async () => {
-    // The hello comparison is on the encoded messages, as in WSM-RCN-027's own test: an interceptor applied to the
-    // hello would make the replay differ from the first one.
-    const server = new FakeServer();
-    server.handler = async (_payload, stream) => {
-      await stream.sendHeaders({ 'served-by': server.acceptors.length });
-    };
-    const peer = dialerOver(await server.dial());
-    const reconnects: number[] = [];
-    peer.onReconnect((attempt) => reconnects.push(attempt));
-    const answered: Record<string, unknown>[] = [];
+  it(
+    'keeps both interceptor registrations on the Peer across a reconnect ' +
+      'and does not pass the hello through them - WSM-API-026/027',
+    async () => {
+      // The hello comparison is on the encoded messages, as in WSM-RCN-027's own test: an interceptor applied to the
+      // hello would make the replay differ from the first one.
+      const server = new FakeServer();
+      server.handler = async (_payload, stream) => {
+        await stream.sendHeaders({ 'served-by': server.acceptors.length });
+      };
+      const peer = dialerOver(await server.dial());
+      const reconnects: number[] = [];
+      peer.onReconnect((attempt) => reconnects.push(attempt));
+      const answered: Record<string, unknown>[] = [];
 
-    const loop = new ConnectionLoop(peer, server.dial, {
-      options: new Reconnect({ initialDelayMs: 10, jitter: 0 }),
-      hello: new Hello({ payload: { session: 'abc' } }),
-      sleep: instantSleep([]),
-      draw: () => 0,
-      pingIntervalMs: 0,
-    });
-    cleanups.push(() => void loop.stop());
-    await loop.establish();
-    peer.interceptOpen((headers) => {
-      headers.conn = 'session-abc';
-    });
-    peer.interceptIncomingHeaders((headers) => {
-      answered.push({ ...headers });
-    });
-    loop.start();
+      const loop = new ConnectionLoop(peer, server.dial, {
+        options: new Reconnect({ initialDelayMs: 10, jitter: 0 }),
+        hello: new Hello({ payload: { session: 'abc' } }),
+        sleep: instantSleep([]),
+        draw: () => 0,
+        pingIntervalMs: 0,
+      });
+      cleanups.push(() => void loop.stop());
+      await loop.establish();
+      peer.interceptOpen((headers) => {
+        headers.conn = 'session-abc';
+      });
+      peer.interceptIncomingHeaders((headers) => {
+        answered.push({ ...headers });
+      });
+      loop.start();
 
-    server.drop();
-    await until(() => reconnects.length === 1, 3000, 'the reconnect');
-    const stream = peer.open({ after: 'reconnect' }, { end: true });
-    await stream.closed;
+      server.drop();
+      await until(() => reconnects.length === 1, 3000, 'the reconnect');
+      const stream = peer.open({ after: 'reconnect' }, { end: true });
+      await stream.closed;
 
-    expect(stream.headers).toEqual({ conn: 'session-abc' });
-    expect(framesOn(server.dialerSockets[1])[1].headers).toEqual({ conn: 'session-abc' });
-    expect(server.firstMessageOn(1), 'the hello replays byte for byte').toBe(server.firstMessageOn(0));
-    expect(framesOn(server.dialerSockets[1])[0].headers).toBeUndefined();
-    expect(answered.at(-1)).toEqual({ 'served-by': 2 });
-    await loop.stop();
-  });
+      expect(stream.headers).toEqual({ conn: 'session-abc' });
+      expect(framesOn(server.dialerSockets[1])[1].headers).toEqual({ conn: 'session-abc' });
+      expect(server.firstMessageOn(1), 'the hello replays byte for byte').toBe(server.firstMessageOn(0));
+      expect(framesOn(server.dialerSockets[1])[0].headers).toBeUndefined();
+      expect(answered.at(-1)).toEqual({ 'served-by': 2 });
+      await loop.stop();
+    },
+  );
 
   it("registers connect()'s interceptor arrays before the first hello goes out - WSM-API-026", async () => {
     const server = new FakeServer();

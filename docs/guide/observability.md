@@ -13,9 +13,11 @@ wire; see [What does leave the process](#what-does-leave-the-process).
 
 ## The `muxws.frames` logger
 
-The logger emits one line per frame, in both directions, at `DEBUG`. It emits nothing at any other
-level. When `DEBUG` is not enabled, the call returns after the level check, so the per-frame overhead
-of an unconfigured application is one level check.
+The logger emits one line per frame, in both directions, at `DEBUG`. At `INFO`, `WARNING` and `ERROR`
+it reports connection and stream problems (see
+[Writing the muxws logs to a file](#writing-the-muxws-logs-to-a-file)). When `DEBUG` is not enabled,
+the per-frame call returns after the level check, so the per-frame overhead of an unconfigured
+application is one level check.
 
 ```python
 import logging
@@ -156,8 +158,9 @@ text described in the next section.
 ## What *does* leave the process
 
 ::: danger `error_serializer` puts exception text on the wire
-When an `on_stream` handler raises, muxws resets the stream with `APPLICATION_ERROR` and calls the
-peer's `error_serializer` to build the structured payload sent with the reset. The default:
+When an `on_stream` handler raises on a stream that is not `oneway`, muxws resets the stream with
+`APPLICATION_ERROR` and calls the peer's `error_serializer` to build the structured payload sent
+with the reset. The default:
 
 ```python
 # fragment

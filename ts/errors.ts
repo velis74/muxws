@@ -153,7 +153,7 @@ export class StreamReset extends MuxwsError {
   }
 }
 
-/** The remote handler threw. Carries the serialized error object, if the remote sent one. */
+/** The remote handler threw. Carries the serialised error object, if the remote sent one. */
 export class RemoteError extends StreamReset {
   readonly payload: unknown;
 
@@ -164,7 +164,7 @@ export class RemoteError extends StreamReset {
   }
 }
 
-/** A local deadline expired; the remote was told to stop working. */
+/** A local deadline expired; a `reset(TIMEOUT)` was sent to the remote. */
 export class StreamTimeout extends StreamReset {
   constructor(reason?: string | null, options: { streamId?: number | null } = {}) {
     super(reason, { code: ResetCode.TIMEOUT, streamId: options.streamId });
@@ -172,7 +172,10 @@ export class StreamTimeout extends StreamReset {
   }
 }
 
-/** Not accepted and definitively not processed. Retry - elsewhere, or after a delay. */
+/**
+ * The remote refused the stream and did not process it; the request may be retried on another connection or after
+ * a delay.
+ */
 export class StreamRefused extends StreamReset {
   constructor(reason?: string | null, options: { streamId?: number | null } = {}) {
     super(reason, { code: ResetCode.REFUSED, streamId: options.streamId });

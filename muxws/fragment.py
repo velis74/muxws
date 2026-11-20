@@ -77,8 +77,8 @@ def _fragment_frame(
 ) -> Frame:
     """Build one fragment frame.
 
-    `headers` and `oneway` ride only the first fragment and `headers` are never split (WSM-FRG-021,
-    WSM-FRM-020); `end` and `trailers` ride only the last (WSM-FRG-020); `more` is true on every
+    `headers` and `oneway` are set only on the first fragment and `headers` are never split (WSM-FRG-021,
+    WSM-FRM-020); `end` and `trailers` are set only on the last (WSM-FRG-020); `more` is true on every
     fragment but the last.
     """
     return Frame(
@@ -109,7 +109,7 @@ def _floor_error(cap: int) -> ProtocolError:
 def _closing_floor_error(cap: int) -> ProtocolError:
     """The closing fragment does not fit even carrying no payload at all.
 
-    `end` and `trailers` travel on the final fragment and are not fragmented (WSM-FRG-020), as
+    `end` and `trailers` are carried on the final fragment and are not fragmented (WSM-FRG-020), as
     `headers` are not (WSM-FRG-021). If they do not fit, no valid split exists, and the splitter
     raises instead of emitting fragments without end.
     """
@@ -162,11 +162,8 @@ def split_frame(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = 
 def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None = None) -> Iterator[Frame]:
     """Yield `frame` when it already fits, else the fragment frames that replace it, **lazily**.
 
-    The writer consumes this one slice at a time, because a stream holds at most one unsent fragment
-    (WSM-FRG-018): fragment *n+1* is sliced after fragment *n* has been handed to the socket, so the
-    writer can interleave other streams' frames between them (WSM-FRG-019).
-
-    `split_frame` and the writer both use this function, so they cut at the same boundaries.
+    Fragment *n+1* is sliced only when it is requested, so a stream holds at most one unsent fragment
+    and other streams' frames can be interleaved between them (WSM-FRG-018/019).
 
     A pure function of `(frame, cap, codec)` (WSM-FRG-015): it reads nothing else and mutates neither
     argument. `cap` defaults to the protocol constant; a smaller value comes only from a test or the
@@ -208,12 +205,8 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
     total = len(data)
 
     while True:
-        # Try the whole remainder as the closing fragment. `end` and `trailers` travel only on this
-        # fragment, so it is measured separately from a middle fragment. Checked first on every pass,
-        # including when no payload is left: the sequence MUST end with a fragment carrying
-        # `more: false`, even an empty one. The encode is skipped when the raw remainder alone
-        # exceeds the cap, since the encoded frame is never shorter than the remainder; encoding it on
-        # every pass would make splitting quadratic in payload size.
+        # The closing fragment carries `end` and `trailers`, so it is measured on its own; the sequence
+        # MUST end with `more: false`, even when empty. A remainder already over the cap is not encoded.
         if total - position <= cap:
             tail = _fragment_frame(frame, _chunk(data, position, total, text=text), first=emitted == 0, last=True)
             if encoded_length(codec.encode(tail)) <= cap:
@@ -249,7 +242,7 @@ def iter_fragments(frame: Frame, cap: int = MAX_FRAME_BYTES, codec: Codec | None
 
 
 class Assembler:
-    """Receive side: concatenates `fragment` values and decodes once the last one lands.
+    """Receive side: concatenates `fragment` values and decodes the result when the last one arrives.
 
     `feed()` returns `ABSENT` while `more` is true, and the decoded payload on the frame that closes
     the sequence (WSM-FRG-030).
@@ -268,11 +261,7 @@ class Assembler:
 
     @property
     def byte_length(self) -> int:
-        """Bytes accumulated so far.
-
-        The peer checks `max_payload_bytes` against this as fragments arrive, before reassembly
-        (WSM-FRG-032).
-        """
+        """Bytes accumulated so far, counted as fragments arrive, before reassembly (WSM-FRG-032)."""
         return self._bytes
 
     def reset(self) -> None:
@@ -282,7 +271,7 @@ class Assembler:
         self._bytes = 0
 
     def feed(self, frame: Frame, codec: Codec) -> Any:
-        """Absorb one fragment frame; return `ABSENT` while more are expected, else the payload.
+        """Add one fragment frame; return `ABSENT` while more are expected, else the payload.
 
         Raises `ProtocolError` when the fragments mix text and binary values, or when the codec cannot
         decode the joined payload. The partial buffer is dropped in both cases.

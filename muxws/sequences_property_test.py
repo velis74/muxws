@@ -1,7 +1,7 @@
 """Random legal API sequences against a live pair, asserting the invariants that hold for all of them.
 
 `stream_test.py` covers the forty-five cells of the state table one at a time, and
-`conformance/sequences/` scripts thirteen fixed exchanges. Neither covers orderings outside those
+`conformance/sequences/` scripts a fixed set of exchanges. Neither covers orderings outside those
 cases, and a sequence can be legal in every step and still violate an invariant as a whole.
 
 This module drives random sequences of ordinary calls and asserts only what holds for every sequence.
@@ -52,7 +52,7 @@ async def _drive(seed: int, pair: Any) -> Recorder:
     pair.dialer.on_frame(recorder.frame)
 
     async def handler(payload: Any, stream: Stream) -> None:
-        # A handler that does something, so streams are not all trivially one-sided.
+        # The handler replies to payloads that carry `reply`, so some streams carry frames in both directions.
         if isinstance(payload, dict) and payload.get("reply"):
             await stream.reply({"echo": payload})
 
@@ -130,14 +130,14 @@ async def test_a_random_legal_sequence_upholds_every_invariant(seed: int, make_p
     # 5. The connection stays open after every legal sequence. A stream-level error fails only the
     #    stream; only a connection-level protocol error closes the connection, and these calls cause
     #    none.
-    assert pair.dialer.is_open, f"seed {seed}: an ordinary sequence of legal calls killed the connection"
+    assert pair.dialer.is_open, f"seed {seed}: a sequence of legal calls closed the connection"
 
     await pair.stop()
 
 
 @pytest.mark.parametrize("seed", SEEDS)
 async def test_a_random_sequence_then_socket_death_fails_everything_and_sends_nothing(seed: int, make_pair):
-    """The same sequences, ended by the socket dying under them.
+    """The same sequences, each followed by a socket loss.
 
     Reset code `CONNECTION_CLOSED` is synthesised locally when a socket dies, so the test above, in
     which the socket does not die, cannot distinguish a library that never sends code 9 from one that

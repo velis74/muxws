@@ -91,7 +91,7 @@ const DECODER = new TextDecoder();
 
 /** One finished stream: what each side sent, how it ended and how long it took. Immutable. */
 export class Exchange {
-  /** `peer.id` of the connection the stream lived on. */
+  /** `peer.id` of the connection that carried the stream. */
   readonly conn: string;
   readonly stream: number;
   readonly openedBy: ExchangeParty;
@@ -218,15 +218,23 @@ function trimmed(value: unknown, limit: number): unknown {
   return `${DECODER.decode(bytes.subarray(0, cut))}…(trimmed ${bytes.length - cut} bytes)…`;
 }
 
-/** `JSON.stringify(value)`, or `String(value)` for a value it cannot serialise. */
+/**
+ * `JSON.stringify(value)` with each `bigint` written as the string `String(value)`, as Python's
+ * `default=str` writes a value json cannot serialise; `String(value)` for a circular reference or a
+ * value `JSON.stringify` writes as nothing.
+ */
 function jsonText(value: unknown): string {
   try {
-    const text = JSON.stringify(value) as string | undefined;
+    const text = JSON.stringify(value, bigintAsString) as string | undefined;
     if (text !== undefined) return text;
   } catch {
-    // Falls through to `String(value)`, as Python's `default=str`.
+    // A circular reference: falls through to `String(value)`, as Python falls back to `str(payload)`.
   }
   return String(value);
+}
+
+function bigintAsString(_key: string, item: unknown): unknown {
+  return typeof item === 'bigint' ? item.toString() : item;
 }
 
 /** @internal `exchange` with each side's payloads cut to the first `maxPayloads`; `null` keeps all. */

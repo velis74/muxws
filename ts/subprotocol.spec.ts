@@ -105,7 +105,7 @@ describe('the generation prefix', () => {
 
 describe('the peer', () => {
   it('contains no codec branch; the subprotocol is an assertion - WSM-CDC-023', () => {
-    // The Python twin reads its own source with `inspect.getsource`; the TypeScript sources are on
+    // The Python counterpart reads its own source with `inspect.getsource`; the TypeScript sources are on
     // disk beside this file, and `process.cwd()` is the vitest root.
     ['peer.ts', 'stream.ts'].forEach((name) => {
       const source = readFileSync(join(process.cwd(), 'ts', name), 'utf8');

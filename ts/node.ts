@@ -1,5 +1,5 @@
 /**
- * Subpath export `muxws/node`: the acceptor side, over the `ws` package.
+ * Subpath export `muxws/node`: the dialer and the acceptor over the `ws` package.
  *
  * The peer implementation is shared with the browser entry point; only the socket adapter differs
  * (WSM-API-022). `ws` is an optional peer dependency and is reached only from here.
@@ -122,25 +122,12 @@ interface UnixTarget {
 }
 
 /**
- * The `ws+unix:` grammar: the path is split on the first colon into the socket file (before) and the
- * request target (after).
+ * Parse a `ws+unix:` url, splitting its path and query on the first colon into the socket file and the
+ * request target, as `muxws/transports/unix.py` does (`ws` splits on every colon).
  *
- * `ws` also parses this scheme, but uses `opts.path.split(':')` and keeps `parts[1]`, splitting on
- * every colon: `ws+unix:///a.sock:/ws:v2` requests `/ws`, and
- * `.../a.sock:/ws?since=2026-08-14T10:00:00Z` requests `/ws?since=2026-08-14T10`, without an error.
- * `muxws/transports/unix.py` splits on the first colon and keeps the remainder whole; splitting here,
- * before `ws` sees the url, makes both implementations request the same target. `ws` receives an
- * ordinary `ws:` url plus a `createConnection` that opens the file, so its `isIpcUrl` branch is not
- * used and the rest of the dial (the offer, the events, the 400) is the same as over TCP.
- *
- * Returns `null` for every other url, including one `new URL()` cannot parse. This runs on every
- * dial and only selects the unix branch; other urls are passed to `ws`, whose error is reported as a
- * `WsUrlError`.
- *
- * It throws `UnixUrlError` in three cases, the same three `parse_unix_url` rejects in Python
- * (WSM-ERR-016 requires a `MuxwsError`): a request target that does not start with `/`, a url naming
- * no socket file, and `wss+unix:`. These checks run before `ws` is imported and before anything is
- * opened, so an invalid `ws+unix:` url raises `UnixUrlError` even when `ws` is not installed.
+ * Returns `null` for any other url, including one `new URL()` cannot parse. Throws `UnixUrlError`
+ * (WSM-ERR-016) for a request target that does not start with `/`, a url naming no socket file, and
+ * `wss+unix:`.
  */
 function unixTarget(url: string): UnixTarget | null {
   let parsed: URL;
@@ -194,15 +181,9 @@ function unixTarget(url: string): UnixTarget | null {
 }
 
 /**
- * The path and query of a `ws+unix:` url as they are written in it, joined by `?` when the query is
- * not empty: the string Python's `urlsplit` returns as `path + "?" + query`.
- *
- * `URL.pathname` and `URL.search` are percent-encoded and have dot segments removed, so
- * `ws+unix:///tmp/my dir/a.sock` would name `/tmp/my%20dir/a.sock`. This function applies only the
- * preprocessing of `urlsplit`: leading C0 controls and spaces are removed, and so are tabs and
- * newlines anywhere. Trailing C0 controls and spaces are kept, as `urlsplit` keeps them, although
- * `new URL()` removes them. A space, a non-ASCII character and a `%XX` sequence are kept as written.
- * The caller has already parsed `url` with `new URL()`, so the scheme is present.
+ * The path and query of a `ws+unix:` url as written, joined by `?` when the query is not empty: Python
+ * `urlsplit`'s `path + "?" + query`. Nothing is percent-encoded and dot segments stay; only leading C0
+ * controls and spaces, and every tab and newline, are removed.
  */
 function rawPathAndQuery(url: string): string {
   // eslint-disable-next-line no-control-regex
@@ -234,17 +215,12 @@ async function unixConnector(socketPath: string): Promise<(options: NetConnectOp
 }
 
 /**
- * `import('ws')`, converting a missing package into `WsNotInstalledError`.
- *
- * WSM-ERR-016: a missing optional dependency must not reach the caller as a module-resolution error,
- * and the message must name the install command. The import is dynamic, so `accept()`, `serve()`,
- * `handleProtocols()` and `refuseMismatchedUpgrade()` work in a process that never dials and does not
- * have `ws` installed. A module-scope import would make importing `muxws/node` itself fail, before
- * any `instanceof WsNotInstalledError` check could run.
+ * `import('ws')`, converting a missing package into `WsNotInstalledError` (WSM-ERR-016). The import is
+ * dynamic, so `accept()`, `serve()`, `handleProtocols()` and `refuseMismatchedUpgrade()` work without
+ * `ws`.
  */
-// The return type is inferred, not written as `Promise<typeof import('ws')>`: under this project's
-// `module: commonjs` the written type is `ws`'s `export =` shape, while the inferred one is the
-// namespace a dynamic import produces.
+// The return type is inferred: under `module: commonjs` a written `Promise<typeof import('ws')>` is
+// `ws`'s `export =` shape, not the namespace a dynamic import produces.
 async function requireWs() {
   try {
     return await import('ws');
@@ -262,16 +238,9 @@ async function requireWs() {
 }
 
 /**
- * Rethrow a `ws` constructor error as a `WsUrlError` if it concerns the url, otherwise unchanged.
- *
- * `ws` throws a `SyntaxError` both for `Invalid URL: nonsense` and for `An invalid or duplicated
- * subprotocol was specified`, and the two errors cannot be told apart, so the url is parsed again: if
- * `new URL()` cannot parse `dialed`, or its scheme is not one `ws` accepts, the error concerns the
- * url; otherwise it is rethrown unchanged, so an invalid subprotocol is not reported as an invalid
- * address.
- *
- * `dialed` is the url passed to `ws` and `url` is the caller's url; they differ for `ws+unix:`, and
- * the message quotes the caller's url.
+ * Rethrow a `ws` constructor error as a `WsUrlError` quoting `url` when `dialed` (the url given to `ws`)
+ * does not parse or has a scheme `ws` does not accept; otherwise rethrow it unchanged. `ws` throws the
+ * same `SyntaxError` for an invalid url and for an invalid subprotocol.
  */
 function translateUrlThrow(url: string, dialed: string, error: unknown): never {
   let parsed: URL | null = null;
@@ -311,14 +280,8 @@ export interface NodeConnectOptions extends ConnectOptions {
 }
 
 /**
- * Dial `url` over the `ws` package and return a serving peer.
- *
- * The node counterpart of `connect()` in `ts/index.ts`, with the same contract: it throws the
- * underlying error if the first attempt fails, regardless of `reconnect` (WSM-RCN-006/WSM-INV-018).
- * Only the dial closure differs (WSM-API-021).
- *
- * `ws` is imported inside the closure, not at module scope: it is an optional peer dependency, and
- * `accept()` / `handleProtocols()` work in a server that never dials.
+ * Dial `url` over the `ws` package and return a serving peer (WSM-API-021). Throws the underlying error
+ * if the first attempt fails, regardless of `reconnect` (WSM-RCN-006/WSM-INV-018).
  */
 export async function connect(url: string, options: NodeConnectOptions = {}): Promise<Peer> {
   // Resolved before any socket is opened (WSM-CDC-016), as in the browser entry point.
@@ -328,38 +291,10 @@ export async function connect(url: string, options: NodeConnectOptions = {}): Pr
 }
 
 /**
- * Dial `url` with `ws` and return the adapter once the handshake is verified.
- *
- * `url` may be `ws:`, `wss:` or `ws+unix:///absolute/path.sock:/route`. `unixTarget` parses the unix
- * form, and `ws` receives a plain `ws://<authority><target>` url plus a `createConnection` that opens
- * the file; from there the code path is shared. The handshake bytes are the same as over TCP (an HTTP
- * GET with `Upgrade: websocket` and `Sec-WebSocket-Protocol: muxws.v1.<codec>`, answered 101 or 400),
- * so every branch below, including WSM-CDC-022/024/028, applies to unix sockets as to TCP.
- *
- * `unixTarget` splits on the first colon, as `muxws/transports/unix.py` does, so both languages derive
- * the same socket path and request target from a url. The authority is optional (`ws+unix://` is
- * usually followed directly by an absolute path); if present it becomes the `Host` header, and if
- * absent `Host: localhost` is sent, as in Python. `wss+unix:` is rejected by `unixTarget` with a
- * `UnixUrlError` before `ws` is imported.
- *
- * `createConnection` is used instead of `ws`'s `socketPath` option: `ws` (`initAsClient`) sets
- * `socketPath` to `undefined` after copying the caller's options, so passing it has no effect and the
- * dial goes to TCP port 80. `ws` keeps `createConnection` and uses it for every dial.
- *
- * `sun_path` limits a unix socket path to about 108 bytes on Linux (104 on macOS); exceeding it gives
- * a bind or connect error naming the path, not the length, so socket files belong in a short
- * directory. There is no `process.platform` check: on Windows `net.connect({ path })` opens a named
- * pipe, but no `ws+unix:` url can address one, because `new URL()` rejects the backslashes in
- * `\\.\pipe\name` on every platform. A Windows dial of a POSIX path fails with an error naming the
- * path, so this module has no equivalent of Python's `UnixSocketsUnsupportedError`; the browser entry
- * point has one for a different reason (see `UnixSocketsUnsupportedError` in `ts/index.ts`).
- *
- * Before a socket is opened, three checks run in this order (WSM-ERR-016): the `ws+unix:` grammar
- * (`unixTarget`, which does not use `ws`, so an invalid `ws+unix:` url raises `UnixUrlError` even
- * when `ws` is missing); the dependency (`requireWs`), because `ws` parses all other urls; and the
- * address, reported as a `WsUrlError`. All three precede the refusal handling below, which detects a
- * 400 in `ws`'s error message; otherwise a url containing a status number could be reported as a
- * `CodecMismatch`.
+ * Dial `url` (`ws:`, `wss:` or `ws+unix:`) with `ws` and return the adapter once the handshake is
+ * verified. A `ws+unix:` url is dialled as `ws://<authority><target>` over a connection to the socket
+ * file. Before anything is opened it throws `UnixUrlError`, `WsNotInstalledError` or `WsUrlError`, in
+ * that order (WSM-ERR-016); a refused codec throws `CodecMismatch` (WSM-CDC-024/028).
  */
 async function dialWs(url: string, codecName: string, options: NodeConnectOptions): Promise<WsSocket> {
   const unix = unixTarget(url);
@@ -372,6 +307,7 @@ async function dialWs(url: string, codecName: string, options: NodeConnectOption
       ? { headers: options.headers }
       : {
           headers: options.headers,
+          // `ws` ignores the `socketPath` option (`initAsClient` resets it), but keeps `createConnection`.
           // `createConnection` is typed as `net.connect`'s overload set (options, port+host, path); an
           // http agent calls only the options form, and a single-signature function needs a cast to
           // be assignable to the overload set.
@@ -494,18 +430,14 @@ function offeredProtocols(request: IncomingMessage): string[] {
 }
 
 /**
- * Make a `ws` server answer HTTP 400 to an upgrade offering an unsupported codec.
- *
- * `handleProtocols` only selects a value; whatever it returns, `ws` completes the handshake with
- * 101, and the mismatch would be detected only on the open socket, which WSM-CDC-022 forbids where
- * the transport allows a refusal. `shouldHandle` can abort an upgrade with a status (`ws` 8
- * deprecates the alternative, `verifyClient`), so an acceptor installs both hooks:
+ * Make a `ws` server answer HTTP 400 to an upgrade that offers no supported codec (WSM-CDC-022).
+ * `handleProtocols` only selects a subprotocol and never refuses, so an acceptor installs both:
  *
  * ```ts
  * const server = refuseMismatchedUpgrade(new WebSocketServer({ port, handleProtocols }));
  * ```
  *
- * The inherited `shouldHandle` runs first, so a server constructed with `path` keeps that check.
+ * The server's existing `shouldHandle` (e.g. its `path` check) runs first.
  */
 export function refuseMismatchedUpgrade(server: WebSocketServer): WebSocketServer {
   const inherited = server.shouldHandle.bind(server);
@@ -515,22 +447,17 @@ export function refuseMismatchedUpgrade(server: WebSocketServer): WebSocketServe
 }
 
 /**
- * Wrap an accepted `ws` connection in a peer.
- *
- * `ws` passes the connection after the handshake, so the subprotocol is verified on the open socket;
- * on a mismatch one error line naming the negotiated and the expected subprotocol is logged
- * (WSM-CDC-029), the socket is closed with the policy-violation code and `CodecMismatch` is thrown
- * (WSM-CDC-028).
- *
- * With `allowedOrigins`, the `Origin` header of `request` is checked first; a refused origin closes
- * the socket with the policy-violation code and throws `OriginRefused`.
+ * Wrap an accepted `ws` connection in a peer. With `allowedOrigins`, the `Origin` header of `request`
+ * is checked first: a refused origin closes the socket with 1008 and throws `OriginRefused`. A
+ * negotiated subprotocol other than the codec's is logged (WSM-CDC-029), closes the socket with 1008
+ * and throws `CodecMismatch` (WSM-CDC-028).
  */
 export async function accept(socket: NodeWebSocket, options: AcceptOptions = {}): Promise<Peer> {
   const codec = options.codec ?? getCodec(settings.codec);
   const check = compilePolicy(options.allowedOrigins);
   if (check !== null) {
     if (options.request === undefined) {
-      // The check cannot run, and the socket is not used unchecked.
+      // Without `request` the `Origin` check cannot run, so the socket is closed.
       socket.close(POLICY_VIOLATION, 'origin unknown');
       throw new ProtocolError(
         'allowedOrigins needs the upgrade request: pass the `request` ws emitted with the connection',

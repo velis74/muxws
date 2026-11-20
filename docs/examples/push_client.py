@@ -1,7 +1,7 @@
 """Server push, dialer side: a dialer with its own `on_stream` handler.
 
 Start `push_server.py` first, then run `python push_client.py`. The URL is `ws://127.0.0.1:8001/ws`
-unless `MUXWS_URL` says otherwise.
+unless `MUXWS_URL` is set.
 
 The handler is passed to `connect()` instead of being registered after it returns: the acceptor may
 push a stream as soon as the connection is up, and a stream that arrives before a handler is

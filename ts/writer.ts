@@ -63,12 +63,12 @@ function describeCause(cause: unknown): string {
  * `enqueue` between two iterations of the write loop is not missed.
  */
 class Gate {
-  private signalled = false;
+  private signaled = false;
 
   private waiters: (() => void)[] = [];
 
   set(): void {
-    this.signalled = true;
+    this.signaled = true;
     const pending = this.waiters;
     this.waiters = [];
     pending.forEach((resume) => {
@@ -77,11 +77,11 @@ class Gate {
   }
 
   clear(): void {
-    this.signalled = false;
+    this.signaled = false;
   }
 
   wait(): Promise<void> {
-    if (this.signalled) return Promise.resolve();
+    if (this.signaled) return Promise.resolve();
     return new Promise<void>((resume) => {
       this.waiters.push(resume);
     });
@@ -121,7 +121,7 @@ export class StreamQueue {
     return this.prepared !== null || this.waiting.length > 0 || this.fragments !== null;
   }
 
-  /** 0 or 1: whether a prepared fragment is held (WSM-FRG-018). Read by tests. */
+  /** 0 or 1: whether a prepared fragment is held (WSM-FRG-018). */
   get preparedDepth(): number {
     return this.prepared === null ? 0 : 1;
   }

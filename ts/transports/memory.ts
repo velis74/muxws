@@ -1,8 +1,7 @@
 /**
  * Two socket adapters connected to each other in memory, without a network socket.
  *
- * Mirrors `muxws/transports/memory.py`. Part of the package, not the test tree, because the reconnect
- * tests and the conformance sequence runner use it.
+ * Mirrors `muxws/transports/memory.py`.
  */
 
 import { ConnectionClosed } from '../errors';
@@ -19,7 +18,7 @@ type Inbound = Message | typeof END;
 
 /** One end of an in-memory pair. Implements `SocketAdapter`. */
 export class MemorySocket implements SocketAdapter {
-  /** Every message this side sent, in order. Read by the conformance runner. */
+  /** Every message this side sent, in order. */
   readonly sent: Message[] = [];
 
   private readonly inbox: Inbound[] = [];
@@ -67,15 +66,14 @@ export class MemorySocket implements SocketAdapter {
   }
 
   /**
-   * Push a raw message into this side's inbox, bypassing the other peer.
-   *
-   * The conformance runner uses it to deliver frames a conforming implementation does not send.
+   * Push a raw message into this side's inbox, bypassing the other peer. The message may be one a
+   * conforming implementation does not send.
    */
   inject(message: Message): void {
     this.put(message);
   }
 
-  /** @internal Connect this end to the other end of the pair. Called only by `memoryPair`. */
+  /** @internal Connect this end to the other end of the pair. */
   wireTo(twin: MemorySocket): void {
     this.peerSocket = twin;
   }

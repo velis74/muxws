@@ -185,7 +185,7 @@ try {
 
 The socket closed. Raised by `peer.ping()` when the pong deadline expires, and by a socket adapter's
 `receive` / `send_text` / `send_bytes` when the socket is already closed. `peer.serve()` catches it,
-kills the peer and **returns** without raising. A stream **never** raises it; a stream raises
+ends the peer and **returns** without raising. A stream **never** raises it; a stream raises
 `ConnectionLost` instead, so a per-stream `except StreamReset` covers socket loss and a handler for
 `ConnectionClosed` deals only with the connection.
 
@@ -1720,7 +1720,7 @@ Imported from the transport, not the package root: `from muxws.transports.unix i
 | Name | Type | Default | What it does |
 |---|---|---|---|
 | `message` | `str` / `string \| undefined` | required in Python, `undefined` in TypeScript | The exception text, inherited from the base. The library's own message quotes the URL and states the rule it broke. |
-| `options.cause` (TypeScript) | `unknown` | `undefined` | The parser error being framed, where there was one. |
+| `options.cause` (TypeScript) | `unknown` | `undefined` | The parser error it wraps, if any. |
 
 ### Return
 

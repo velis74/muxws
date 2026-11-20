@@ -288,6 +288,9 @@ msgpack output is not pinned as bytes in any fixture: Python's `msgpack` and `@m
 choose integer widths and map formats differently, and both encodings are valid. The tests of both
 ports assert round-trip only.
 
+Both ports accept maps with integer keys. Python decodes `{1: "a"}` with an `int` key, TypeScript
+with the string key `"1"`, because JavaScript object keys are strings.
+
 ### Signature
 
 ```python

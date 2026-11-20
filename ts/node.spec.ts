@@ -327,7 +327,7 @@ describe('a dialer whose upgrade is refused - WSM-CDC-024', () => {
 });
 
 describe('a url this transport cannot open - WSM-ERR-016', () => {
-  it("arrives as a WsUrlError wrapping the message of `ws`, not as ws's own SyntaxError", async () => {
+  it('throws a WsUrlError carrying the message of `ws` for a URL ws cannot parse', async () => {
     // Without translation, `ws`'s constructor throws a bare `SyntaxError: Invalid URL: nonsense`, which
     // an `instanceof MuxwsError` handler around a dial does not catch. The message of `ws` is kept,
     // because it names the invalid text; the wrapper adds which transport was asked to dial it.
@@ -405,7 +405,7 @@ describe('serve() reports a refused handshake by returning, not by rejecting', (
 });
 
 describe('accept() and serve() register the interceptor arrays they are given - WSM-API-026', () => {
-  it('runs them on the peer each builds, in order, before its first frame', async () => {
+  it('registers the interceptor arrays in order on the accept() or serve() peer before its first frame', async () => {
     const seen: unknown[] = [];
     const server = new WebSocketServer({ port: 0, handleProtocols });
     server.on('connection', (socket, request) => {

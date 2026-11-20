@@ -44,7 +44,7 @@ def test_encoding_is_compact_and_not_ascii_escaped(codec: JsonCodec):
 
 
 def test_payload_round_trip_is_independent_of_the_envelope(codec: JsonCodec):
-    """The payload-level half of the port: what fragmentation slices and reassembles."""
+    """The payload encoding round-trips without the envelope; fragmentation splits and reassembles this encoding."""
     for payload in ({"a": [1, 2]}, "plain", 17, None, [], {"non-bmp": "𝕄"}):
         assert codec.decode_payload(codec.encode_payload(payload)) == payload
 
@@ -102,9 +102,9 @@ def test_number_forms_that_the_two_ports_spell_differently(
     """Pins the known WSM-FRG-016 divergence, so any further divergence fails.
 
     Fragment boundaries are cut over the encoded payload, so any value the two ports spell
-    differently is cut differently by them. That is invisible on the wire - the sender chooses the
-    cuts and the receiver only concatenates - but such values cannot appear in the shared boundary
-    corpus.
+    differently is cut differently by them. This does not affect interoperability: the sender chooses
+    the cuts and the receiver only concatenates the fragments. Such values cannot appear in the shared
+    boundary corpus.
     """
     assert codec.encode_payload(value) == python_form
     assert python_form != javascript_form
@@ -112,7 +112,7 @@ def test_number_forms_that_the_two_ports_spell_differently(
 
 @pytest.mark.parametrize("value", [0, 1, -1, 42, 9007199254740992, 0.1, 1.5, 1e21, True, False, None, "text"])
 def test_number_and_scalar_forms_the_two_ports_agree_on(value: object, codec: JsonCodec):
-    """The complement of the list above: everything here is safe in the shared boundary corpus."""
+    """Number and scalar forms both ports encode identically; they may appear in the shared boundary corpus."""
     encoded = codec.encode_payload(value)
     assert encoded == encoded.strip()
     assert codec.decode_payload(encoded) == value

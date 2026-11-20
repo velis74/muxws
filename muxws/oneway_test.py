@@ -90,7 +90,7 @@ async def test_a_oneway_handler_that_raises_is_logged_and_not_answered(make_pair
 
     async def handler(payload: Any, stream: Stream) -> None:
         _ = (payload, stream)
-        raise ValueError("the handler blew up")
+        raise ValueError("handler failure")
 
     pair.acceptor.on_stream(handler)
     pair.start()
@@ -100,7 +100,7 @@ async def test_a_oneway_handler_that_raises_is_logged_and_not_answered(make_pair
             await pair.settle(24)
         assert pair.frames_of_type("acceptor", "reset") == []
         assert "handler of oneway stream" in caplog.text
-        assert "the handler blew up" in caplog.text
+        assert "handler failure" in caplog.text
     finally:
         await pair.stop()
 
@@ -166,7 +166,7 @@ async def test_a_oneway_open_without_end_is_taken_as_ending(make_lone):
 
 
 async def test_a_fragmented_notify_carries_oneway_on_its_first_fragment(make_pair):
-    """WSM-FRM-020: `oneway` rides the first fragment; the handler gets the whole payload."""
+    """WSM-FRM-020: `oneway` is carried on the first fragment; the handler receives the whole payload."""
     pair = make_pair(max_frame_bytes=96)
     seen: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 

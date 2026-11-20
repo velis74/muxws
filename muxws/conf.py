@@ -16,7 +16,7 @@ class Settings:
         self.codec: str = os.environ.get("MUXWS_CODEC", "json")
 
     def reload(self) -> None:
-        """Re-read the environment. For tests; an application sets `codec` directly."""
+        """Re-read `MUXWS_CODEC` from the environment."""
         self.codec = os.environ.get("MUXWS_CODEC", "json")
 
     def __repr__(self) -> str:
@@ -25,5 +25,4 @@ class Settings:
 
 #: `codec` is read when a connection is made, not at import, so an application may set it during
 #: bootstrap after importing muxws (WSM-CDC-011).
-
 settings = Settings()

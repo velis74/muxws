@@ -27,16 +27,9 @@ import { fileURLToPath } from 'node:url';
 
 import { WebSocket, WebSocketServer } from 'ws';
 
-// Imported through the public entry points, as an application imports them. `ts/index.ts` registers
-// the JSON codec (WSM-CDC-004), because a codec module must not register itself (WSM-CDC-014);
-// importing `ts/codec` directly gives an empty registry. The dialer comes from `ts/node`, so the
-// reconnect driver under test is the one a node application uses.
-// `offer` builds the subprotocol list and is internal, so it is not exported from the package root
-// (a consumer needs `PREFIX` only). The interop driver is in-repo and imports the module directly.
-// `deepEqual`, not `assert.deepStrictEqual` or a custom comparison: a payload under a binary codec
-// is an `ArrayBuffer` (WSM-CDC-008), and `conformance/README.md` names this comparison for that
-// case. A comparison by byte *length* would treat buffers of equal length as equal regardless of
-// content.
+// Imported through the public entry points; `ts/index.ts` registers the JSON codec (WSM-CDC-004).
+// `offer` is internal and imported from its module. `deepEqual` compares `ArrayBuffer` payloads by
+// content (WSM-CDC-008).
 import { deepEqual } from '../ts/frames';
 import {
   ABSENT,
@@ -72,7 +65,7 @@ const EXPORT_ROWS = 5;
  * handler is scheduled, and the interleaving assertion below would depend on scheduling order.
  */
 const EXPORT_GAP_MS = 10;
-/** The cancelled-mid-flight producer's cadence. */
+/** Interval between rows of the producer that is cancelled mid-flight, in milliseconds. */
 const DRIP_GAP_MS = 20;
 /** Rows the `slow` stream produces; this stream must complete during the goaway drain. */
 const SLOW_ROWS = 3;
@@ -110,16 +103,8 @@ function emit(fields: Record<string, unknown>): void {
 }
 
 /**
- * Select and register the configured codec. This is the application's responsibility, not the
- * library's.
- *
- * WSM-CDC-013 forbids the library from dynamically importing or probing for a codec; an application
- * chooses which codec module to import. An unknown name fails at startup and never falls back to
- * JSON (WSM-INV-015).
- *
- * `settings.codec` is assigned here: `ts/conf.ts` reads `import.meta.env`, which Vite replaces at
- * build time and which does not exist under `node`. Without the assignment the msgpack job would run
- * on JSON (WSM-INV-015).
+ * Select and register the configured codec; an unknown name exits the process (WSM-INV-015).
+ * `settings.codec` is assigned here because `import.meta.env` does not exist under `node`.
  */
 async function configureCodec(): Promise<void> {
   const name = process.env.VITE_MUXWS_CODEC ?? process.env.MUXWS_CODEC ?? 'json';
@@ -295,16 +280,9 @@ async function acceptForever(port: number): Promise<void> {
 }
 
 /**
- * The same acceptor on a socket **file**, for the Unix half of WSM-TST-004.
- *
- * `WebSocketServer({ port })` creates its own HTTP server and cannot listen on a path, so an HTTP
- * server is created here and attached with `{ server }`. `refuseMismatchedUpgrade` wraps
- * `shouldHandle`, which the attached form also calls, so a dialer offering an unsupported codec gets
- * the same HTTP 400 as over TCP and must raise `CodecMismatch` (WSM-CDC-022/024). The driver runs the
- * unmodified WSM-TST-004 script over this transport.
- *
- * The driver's readiness signal is the `path=` line below, not a `port=` line. A socket file exists
- * between `bind` and `listen`, so waiting for the file would race the listen.
+ * The acceptor on a socket file, for the Unix half of WSM-TST-004. A codec mismatch gets the same
+ * HTTP 400 as over TCP (WSM-CDC-022/024). The readiness signal is the `path=` line, emitted after
+ * `listen`.
  */
 async function acceptForeverOnSocketFile(path: string): Promise<void> {
   // Checked by `platform` before binding: on Windows `listen(path)` opens a named pipe for some path
@@ -572,7 +550,7 @@ async function runTst005(url: string, label: string): Promise<void> {
 
   check(
     JSON.stringify(reconnects) === JSON.stringify([[1, 1]]),
-    `${label}: onReconnect fired ${JSON.stringify(reconnects)}; WSM-TST-005 wants exactly one, ` +
+    `${label}: onReconnect fired ${JSON.stringify(reconnects)}; WSM-TST-005 requires exactly one, ` +
       'after the replayed hello was acknowledged',
   );
   const expected = encodingOf({ type: 'open', stream: 1, payload: HELLO_PAYLOAD, headers: HELLO_HEADERS, end: true });
@@ -624,23 +602,12 @@ function checkJitterDispersed(delays: readonly number[], label: string): void {
 
 // --------------------------------------------------------------------------- WSM-CDC-007: the corpus
 //
-// The cross-language part of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
-// that codec, running the sequence corpus". `ts/conformance.spec.ts` and `muxws/conformance_test.py`
-// replay `conformance/sequences/` with both peers in one process and one language.
-//
-// A sequence fixture scripts **both** peers as one ordered list of steps; here the peers are two
-// processes in two languages. The dialer process conducts: it reads the script, executes the steps
-// whose `peer` is its own role, and sends every other step over a control channel to the acceptor
-// process, which executes it through the same `Side` class and replies. The script stays one totally
-// ordered sequence, as in the in-process runners, and the whole corpus runs.
-//
-// The control channel carries only a step **index** and the ordinal -> stream id table. Both
-// processes load the fixture from disk, so a `$bytes` placeholder (`conformance/README.md`) is
-// resolved from the same file in each process and never needs a JSON encoding for bytes.
+// Replays `conformance/sequences/` with one peer in each language; the dialer conducts and sends the
+// acceptor's steps over a control channel (`conformance/README.md`, "Cross-process replay").
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Read from disk by both processes. Not sent over the control channel; see above. */
+/** Read from disk by both processes; not sent over the control channel. */
 const SEQUENCES_DIR = join(ROOT, 'conformance', 'sequences');
 
 /**
@@ -652,7 +619,7 @@ const FIXTURE_COUNT_SOURCE = join(ROOT, 'ts', 'conformance.spec.ts');
 /**
  * Mirrors `runs every fixture under some configured codec, skipping none everywhere`. The corpus's
  * `requires_codec` declarations must equal this list, so a fixture that gains a declaration fails the
- * run instead of being skipped silently under the other codec.
+ * run instead of being skipped under the other codec.
  */
 const CODEC_SPECIFIC_FIXTURES: Record<string, string> = { 'bytes-payload-under-binary-codec': 'msgpack' };
 
@@ -868,8 +835,8 @@ class Side {
   /**
    * Run one step **as this side**, and return the stream id it allocated, if any.
    *
-   * Routing has already happened by the time a step arrives here, so `step.peer` is not read: the
-   * conductor decides who runs what, and for `inject` that decision is inverted (see `ownerOf`).
+   * `step.peer` is not read: the conductor routes each step to the side that executes it, and inverts
+   * the owner for `inject` (see `ownerOf`).
    */
   async execute(step: Step, ordinals: number[]): Promise<number | null> {
     this.ordinals = [...ordinals];
@@ -1059,17 +1026,8 @@ class Side {
   }
 
   /**
-   * Put one hand-written envelope on this side's socket, bypassing the writer.
-   *
-   * This is `inject` executed by the sending side. In-process, a runner passes the message directly
-   * to the receiving peer's socket; across two processes only the remote can deliver a message *to*
-   * a peer, so this side sends it. The envelope does not pass through `fromMapping`, which drops
-   * unknown keys (WSM-FRM-001); the fixtures assert that an unknown field and an unknown frame type
-   * are tolerated.
-   *
-   * The writer is bypassed because the public API has no way to send an exact set of keys. Nothing
-   * else is in flight in the two fixtures that use this, and a WebSocket message is atomic, so it
-   * cannot interleave with a fragment.
+   * Put one hand-written envelope on this side's socket, bypassing the writer and `fromMapping`, so
+   * unknown keys reach the remote unchanged. Executes `inject` on the sending side.
    */
   private async writeRaw(envelope: Record<string, unknown>): Promise<void> {
     const message = this.codec.encodePayload(this.resolve(envelope));
@@ -1247,16 +1205,8 @@ function renderValue(value: unknown): string {
 }
 
 /**
- * `settle: n` means n turns of one event loop, which has no meaning across two processes.
- *
- * The corpus defines `settle` as "a lower bound on progress, never a duration"
- * (`conformance/README.md`), for a transport that delivers a message within the event loop that sent
- * it. Over a socket between two processes the count bounds nothing, so this driver implements
- * `settle` as **wait until both peers are quiet**: both sides watch their own frame counter across
- * one window, and the step returns only when neither saw a frame during it.
- *
- * This condition is at least as strong as the in-process one. A fixture whose next step needs a
- * reset to have arrived (`cancel-mid-stream-stops-the-producer`) waits here until it has.
+ * Execute `settle` as cross-process quiescence: return once neither peer saw a frame during one
+ * window.
  */
 async function settleAcross(side: Side, control: Control): Promise<void> {
   for (let round = 0; round < QUIET_ROUNDS; round += 1) {
@@ -1314,19 +1264,9 @@ class Control {
   }
 
   /**
-   * Send a command and go straight on to the next step, collecting the answer later.
-   *
-   * Used only for `close`, which the corpus defines as "**started and not awaited** - `close()`
-   * sends `goaway` and *then* drains, and the steps after it are what the drain window exists to let
-   * happen" (`conformance/README.md`). `goaway-drains-then-closes` then opens a stream "a moment too
-   * late", and that stream must be sent **before** its opener receives the goaway
-   * (WSM-CON-021/023).
-   *
-   * In one process turn ordering guarantees this. Across two processes, waiting for the
-   * acknowledgement would race: the goaway is written before the ack, so either can reach the dialer
-   * first. Not waiting lets the local `open()` go out a full round trip earlier, and the acceptor
-   * receives the control message one event-loop turn before the open it must exclude from
-   * `last_stream`.
+   * Send a command without waiting for its acknowledgement; the acknowledgement is read before the
+   * next command. Lets a `close` step start without being awaited, so the next step's `open()` is
+   * sent before the goaway arrives (WSM-CON-021/023).
    */
   async dispatch(message: Record<string, unknown>): Promise<void> {
     await this.collect();

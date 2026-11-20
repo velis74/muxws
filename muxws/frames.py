@@ -16,8 +16,8 @@ from muxws.errors import ProtocolError
 class _Absent:
     """The sentinel distinguishing "no payload" from an explicit `null`.
 
-    Falsy, so `if frame.payload:` behaves the way a reader expects, and with a `repr` that names
-    itself rather than leaking a memory address into a test failure.
+    Falsy, so `if frame.payload:` is false for an absent payload. Its `repr` is `ABSENT`, not a memory
+    address.
     """
 
     __slots__ = ()
@@ -98,8 +98,7 @@ def to_mapping(frame: Frame) -> dict[str, Any]:
 def from_mapping(mapping: Mapping[str, Any]) -> Frame:
     """Build a `Frame` from a decoded envelope.
 
-    Unknown keys are dropped rather than preserved (WSM-FRM-001); preserving them would make
-    `decode(encode(frame)) == frame` hold for frames carrying unknown keys. An unrecognised `type` is
+    Unknown keys are dropped (WSM-FRM-001); `Frame` has no field for them. An unrecognised `type` is
     decoded as an ordinary `Frame`; the peer, not the codec, ignores it (WSM-FRM-002).
 
     Raises `ProtocolError` when `type` is missing, when both `payload` and `fragment` are present, or

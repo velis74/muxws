@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive one interop pair: own the acceptor *process*, start it, run the dialer against it.
+# Run one interop pair: start and manage the acceptor process, then run the dialer against it.
 #
 #   interop/drive.sh python ts                     Python acceptor, TypeScript dialer, WSM-TST-004
 #   interop/drive.sh ts python                     the reverse

@@ -234,7 +234,7 @@ across reconnections supplies one, and the storage location determines its lifet
 
 ```ts
 // fragment
-// The application's job, not the library's.
+// The application stores the identity; muxws does not.
 let tab = sessionStorage.getItem('tab');
 if (tab === null) {
   tab = crypto.randomUUID();

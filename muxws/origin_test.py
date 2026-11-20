@@ -62,7 +62,7 @@ def test_an_origin_parses_to_scheme_host_and_explicit_port(value: str, expected:
         "https://exa mple.com",
     ],
 )
-def test_anything_else_is_not_an_origin(value: str):
+def test_values_that_are_not_origins_do_not_parse(value: str):
     assert parse_origin(value) is None
 
 

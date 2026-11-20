@@ -84,7 +84,7 @@ class StreamQueue:
     def prepare(self, cap: int, codec: Codec) -> None:
         """Slice the next fragment, and only that one.
 
-        Called after the previous fragment has reached the socket. Slicing further ahead would fix the
+        Requires the previous fragment to have reached the socket. Slicing further ahead would fix the
         order of frames before the writer chooses it (WSM-FRG-018).
         """
         self.failed_unsent_open = False
@@ -134,8 +134,8 @@ class Writer:
         self._codec = codec
         self._cap = max_frame_bytes
         self._queues: dict[int, StreamQueue] = {}
-        #: The rotation order of lanes; the lane at the front is asked next. A deque rather than an
-        #: index into a list, so removing a lane does not shift which lane is asked next.
+        #: The rotation order of lanes; the lane at the front is polled next. A deque rather than an
+        #: index into a list, so removing a lane does not change which lane is polled next.
         self._order: deque[int] = deque()
         self._wake = asyncio.Event()
         #: Set while the write loop has sent every frame handed to `enqueue`; cleared by `enqueue`.
@@ -193,8 +193,8 @@ class Writer:
     def _rotate(self) -> Frame | None:
         """One full turn of the rotation, at most.
 
-        Every lane is asked once before any lane is asked twice, so a stream sending a large payload
-        holds the wire for one fragment at a time.
+        Every lane is polled once before any lane is polled twice, so a stream sending a large payload
+        sends one fragment per turn, between the other lanes' frames.
         """
         for _ in range(len(self._order)):
             lane = self._order[0]

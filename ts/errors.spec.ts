@@ -78,7 +78,7 @@ describe('the exception hierarchy', () => {
     expect(new TransportUnsupportedError()).not.toBeInstanceOf(TransportUrlError);
   });
 
-  it('chains the original on a transport base, and invents no chain when there was none', () => {
+  it('sets cause on a transport base error when given one and defines no cause property otherwise', () => {
     // WSM-ERR-016 requires the underlying library's error to be kept as `cause`: `ws` names the
     // offending text, and jsdom and undici word the same refusal differently.
     const original = new SyntaxError('Invalid URL: nonsense');
@@ -113,7 +113,7 @@ describe('the exception hierarchy', () => {
     cases.forEach(([error, name]) => expect(error.name).toBe(name));
   });
 
-  it('defines no concrete transport error, because each one belongs to its transport - WSM-ERR-016', async () => {
+  it('defines no concrete transport error in the shared errors module - WSM-ERR-016', async () => {
     // Behavioural tests do not detect a concrete class defined in the shared module, because the
     // throw sites still pass. A third party writing an adapter against the public transport interface
     // (WSM-API-021) cannot add a class to `ts/errors.ts`, so concrete transport errors live in their

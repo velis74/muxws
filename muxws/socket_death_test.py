@@ -17,7 +17,7 @@ from muxws.transports.memory import memory_pair
 
 
 async def test_second_await_after_death_returns_the_same_error(make_pair):
-    """WSM-RCN-041/WSM-API-010: the memoized future is resolved **once**.
+    """WSM-RCN-041/WSM-API-010: the memoised future is resolved **once**.
 
     A second await raises the same exception immediately; the failure is stored on the future, not
     delivered once.
@@ -72,7 +72,7 @@ async def test_async_for_raises_rather_than_terminating_normally(make_pair):
 
 
 async def test_cancel_and_reset_are_noops_after_death(make_pair):
-    """WSM-RCN-041: no-ops, not errors, and not sends.
+    """WSM-RCN-041: after socket death `cancel()` and `reset()` do nothing; they neither raise nor send.
 
     After socket death the stream is already closed and the socket is gone. Raising here would turn
     cleanup code (a `finally` that cancels every stream it holds) into a second failure, and sending
@@ -122,7 +122,7 @@ async def test_is_open_false_for_the_whole_gap(make_pair):
 
 
 async def test_on_close_fires_once_per_loss_with_correct_will_retry(make_pair):
-    """WSM-RCN-040/045: every loss, exactly once, and four fields."""
+    """WSM-RCN-040/045: `on_close` is called exactly once per loss, with four fields."""
     pair = make_pair()
     pair.acceptor.on_stream(_hold)
     seen: list[CloseReason] = []
@@ -235,7 +235,7 @@ async def test_tags_do_not_survive_on_the_acceptor_side(make_pair):
 
 
 async def test_a_reconnect_clears_the_dead_sockets_exhaustion_shutdown(make_pair):
-    """WSM-SID-007/WSM-RCN-031: the new socket's id space starts empty, so its shutdown does too.
+    """WSM-SID-007/WSM-RCN-031: a reconnect clears the exhaustion shutdown stored for the previous socket.
 
     Running out of stream ids schedules an orderly shutdown and stores the task so a second `open()`
     does not schedule another. The stored task belongs to the socket that ran out, not to the `Peer`.

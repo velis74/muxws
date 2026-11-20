@@ -82,12 +82,7 @@ class UnixTarget:
 def parse_unix_url(url: str) -> UnixTarget | None:
     """Split a `ws+unix:` URL into a socket path and a logical `ws://` URI; `None` for `ws:`/`wss:`.
 
-    `connect()` calls this for every URL. Any scheme other than `ws+unix:` and `wss+unix:` returns
-    `None` and is left to `websockets.connect()` to accept or reject.
-
-    Called once, outside the dial closure, so a malformed URL and a platform without AF_UNIX raise
-    from `connect()` before any socket is opened, as `resolve_codec()` does for the codec
-    (WSM-CDC-016), and every reconnect dials the same target (WSM-CDC-020, WSM-AUT-003).
+    Any scheme other than `ws+unix:` and `wss+unix:` returns `None`.
 
     Raises `UnixUrlError` for `wss+unix:`, for a URL with no socket path, or for a request target not
     starting with `/`; raises `UnixSocketsUnsupportedError` when the platform has no AF_UNIX.
@@ -97,7 +92,7 @@ def parse_unix_url(url: str) -> UnixTarget | None:
     if parts.scheme == _REFUSED_SCHEME:
         raise UnixUrlError(
             f"{_REFUSED_SCHEME}: is not a scheme muxws dials: there is no TLS over a Unix domain "
-            f"socket. Use {SCHEME}: and let the socket's file permissions be the access control"
+            f"socket. Use {SCHEME}: and control access with the socket file's permissions"
         )
     if parts.scheme != SCHEME:
         return None
@@ -127,7 +122,7 @@ def parse_unix_url(url: str) -> UnixTarget | None:
 
         raise UnixUrlError(
             f"the request target in {url!r} must begin with '/': the part after the ':' is an HTTP "
-            f"request target, not a path relative to anything"
+            f"request target and cannot be a relative path"
         )
 
     return UnixTarget(path=path, uri=f"ws://{parts.netloc or _DEFAULT_AUTHORITY}{route or '/'}")

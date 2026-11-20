@@ -18,8 +18,8 @@ way a client calls it on a server.
 
 ### Unary
 
-One value out, one value back. The opener sends `end` with the opening payload, so the remote knows
-that no more payloads follow and can answer immediately.
+The opener sends one payload and receives one payload. The opener sends `end` with the opening
+payload, so the remote knows that no more payloads follow and can answer immediately.
 
 ```python
 # fragment
@@ -53,8 +53,8 @@ peer.onStream(async (payload, stream) => {
 
 ### Streaming response
 
-One value out, many values back. The opening frame is the same as for unary; only the handler's
-answer and the caller's consumption differ.
+The opener sends one payload and receives several. The opening frame is the same as for unary; only
+the handler's answer and the caller's consumption differ.
 
 ```python
 # fragment
@@ -105,8 +105,9 @@ The stream closes when both directions have ended; until then either end may sti
 
 ### One-shot push
 
-Fire and forget. `notify()` is async, returns `None` (`undefined` in TypeScript), and returns no
-`Stream`, so the caller has no stream that could be left pending.
+The opener sends one payload and receives nothing back. `notify()` is async, returns `None`
+(`undefined` in TypeScript), and returns no `Stream`, so the caller has no stream that could be left
+pending.
 
 ```python
 # fragment
@@ -148,10 +149,11 @@ as a protocol error.
 
 This has two consequences:
 
-- **`open()` never queues.** It raises synchronously at the call site in exactly two
-  connection-state cases: `ConnectionGoingAway` when the remote has sent `goaway` (or this peer has),
-  and `ConnectionLost` while a reconnecting peer has no socket (nothing is buffered for the next
-  one). An [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the
+- **`open()` never queues.** It raises synchronously at the call site when no stream can be
+  opened on the connection: `ConnectionLost` while the connection is not established (between sockets,
+  before the hello is acknowledged, after the final close; nothing is buffered for the next one), and
+  `ConnectionGoingAway` when either peer has sent `goaway` or the connection's stream ids are
+  exhausted. An [open interceptor](/api/peer#peer-intercept-open-python) that raises fails the call the
   same way. It does *not* raise when the receiver's concurrent-stream limit is reached: that limit is
   enforced by the receiver, and the rejection arrives asynchronously as `StreamRefused` on the pending
   await. See [Connection lifecycle](/guide/connection-lifecycle).
@@ -212,7 +214,7 @@ Awaiting the *same* stream twice is allowed and is not a second claim: the value
 second await returns the same value as the first, not the next payload. `stream.result(...)` returns
 the same memoized value, with a deadline on the wait.
 
-## `request()` polices a second payload; `await stream` does not
+## `request()` rejects a second payload; `await stream` does not read it
 
 This is the only behavioural difference between the two calls that return one value.
 

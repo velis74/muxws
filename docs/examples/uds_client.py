@@ -1,7 +1,7 @@
 """Unix-domain-socket dialer: the ordinary public `connect()`, pointed at a socket file.
 
 Start `uds_server.py` first, then run `python uds_client.py`. The URL is
-`ws+unix://<tempdir>/muxws.sock:/ws` unless the `MUXWS_URL` environment variable says otherwise.
+`ws+unix://<tempdir>/muxws.sock:/ws` unless the `MUXWS_URL` environment variable is set.
 
 `connect()` selects the transport from the URL scheme; no extra argument or adapter is needed. The
 codec offer at the handshake, the `CodecMismatch` raised for HTTP 400, the heartbeat and the reconnect
@@ -33,8 +33,7 @@ async def main() -> None:
             print(f"chunk {chunk['chunk']} of {chunk['of']}")
 
         # The heartbeat is a muxws `ping` frame, sent over the same socket. Only the arrival of the pong
-        # is printed: the round-trip time varies between runs, and the guide compares this output
-        # exactly.
+        # is printed; the round-trip time varies between runs.
         await peer.ping()
         print("ping: answered")
     finally:

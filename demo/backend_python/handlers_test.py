@@ -1,6 +1,6 @@
 """The demo's backend against the in-memory transport.
 
-The main test is `test_ticks_keep_flowing_during_an_export`. It asserts on the frames recorded by
+The main test is `test_tick_streams_send_a_frame_between_any_two_export_fragments`. It asserts on the frames recorded by
 `on_frame`, and fails if the round-robin writer is replaced by a FIFO writer.
 """
 
@@ -172,7 +172,7 @@ async def market_wire(**service_options: Any) -> AsyncIterator[Wire]:
 # ---------------------------------------------------------------------------- export and ticks
 
 
-async def test_ticks_keep_flowing_during_an_export() -> None:
+async def test_tick_streams_send_a_frame_between_any_two_export_fragments() -> None:
     """WSM-INV-004: a megabyte on one stream does not stall the twenty other streams.
 
     Asserted on the frames the browser's `on_frame` recorded. The backend's sends are held while the
@@ -280,7 +280,7 @@ async def test_every_action_answers() -> None:
 async def test_the_rate_action_changes_how_often_the_board_pushes() -> None:
     """The `rate` action sets the board's tick interval, within bounds.
 
-    `TICK_INTERVAL` is a `sleep` in the generator and does not reflect the transport's capacity
+    `TICK_INTERVAL` is a wait in the tick loop and does not reflect the transport's capacity
     (`muxws/throughput_test.py` measures that); the board's default sends eighty frames per second.
     This asserts that the interval can be changed and that it is bounded: zero would turn the
     generator into a busy loop that starves the event loop it sends on.
@@ -399,7 +399,7 @@ async def test_the_kill_switch_closes_every_peer() -> None:
             await asyncio.sleep(0.005)
         # The browser's `on_close` is called.
         assert wire.closes, "the kill switch did not call the browser's on_close"
-        print(f"the browser was told: code={wire.closes[0].code} clean={wire.closes[0].was_clean}")
+        print(f"the browser's on_close received: code={wire.closes[0].code} clean={wire.closes[0].was_clean}")
         assert wire.dialer.is_open is False
         assert wire.dialer.streams == {}
         # WSM-REG-016: the registry removes a closed peer through its own `on_close` hook, independently
@@ -416,3 +416,25 @@ async def test_the_kill_switch_closes_every_peer() -> None:
             print(f"a pushed stream ended with: {type(lost).__name__}: {lost}")
         else:
             raise AssertionError("a stream on a killed connection still accepted a send")
+
+
+async def test_a_rate_change_wakes_the_tick_streams_waiting_on_the_old_interval() -> None:
+    """After `rate`, every tick stream sends within the new interval, not after the old one runs out."""
+    async with market_wire(tick_interval=30.0) as wire:
+        await wire.hello()
+        await wire.until_the_board_is_live()
+        ticks = wire.tick_streams()
+
+        def sent_per_stream() -> dict[int, int]:
+            counts = dict.fromkeys(ticks, 0)
+            for frame in wire.received():
+                if frame.stream in counts and frame.type == "data":
+                    counts[frame.stream] += 1
+            return counts
+
+        before = sent_per_stream()
+        await wire.dialer.request({"action": "rate", "interval_ms": 10})
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while any(count <= before[stream] for stream, count in sent_per_stream().items()):
+            assert asyncio.get_running_loop().time() < deadline, "a tick stream still waits on the 30 s interval"
+            await asyncio.sleep(0.01)

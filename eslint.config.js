@@ -3,6 +3,16 @@ import velis from 'eslint-config-velis';
 export default [
   ...velis,
   {
+    ignores: [
+      '.venv/*',
+      'dist/*',
+      'coverage/*',
+      'node_modules/*',
+      'docs/.vitepress/cache/*',
+      'docs/.vitepress/dist/*',
+    ],
+  },
+  {
     rules: {
       'no-redeclare': 'off',
       '@typescript-eslint/no-redeclare': 'error',
@@ -13,11 +23,10 @@ export default [
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
       ],
     },
-    ignores: ['.venv/*', 'dist/*', 'coverage/*', 'node_modules/*', 'docs/*', 'vite.config.ts'],
+    ignores: ['vite.config.ts'],
   },
   {
-    // The demo frontend. It has its own tsconfig; `lint:ci` includes `demo/frontend` in its eslint
-    // globs.
+    // The demo frontend, parsed with its own tsconfig.
     files: ['demo/frontend/**/*.ts', 'demo/frontend/**/*.vue'],
     languageOptions: {
       parserOptions: { project: './demo/frontend/tsconfig.json' },
@@ -55,7 +64,6 @@ export default [
   {
     // The Node demo backend. The root tsconfig `include`s only `ts/**/*`, so without this entry the
     // typed rules cannot parse these files and `eslint demo/backend_node` fails with a parsing error.
-    // `lint:ci` includes `demo/backend_node` in its eslint globs.
     files: ['demo/backend_node/**/*.ts'],
     languageOptions: {
       parserOptions: { project: './demo/backend_node/tsconfig.json' },
@@ -67,5 +75,23 @@ export default [
         clearTimeout: 'readonly',
       },
     },
+  },
+  {
+    // The demo's Playwright test and its config, Node ESM with their own tsconfig.
+    files: ['demo/e2e/**/*.ts'],
+    languageOptions: {
+      parserOptions: { project: './demo/e2e/tsconfig.json' },
+      globals: { performance: 'readonly', process: 'readonly', setTimeout: 'readonly' },
+    },
+  },
+  {
+    // The TypeScript documentation examples, type-checked against the package sources.
+    files: ['docs/examples/**/*.ts'],
+    languageOptions: { parserOptions: { project: './docs/examples/tsconfig.json' } },
+    settings: { 'import/resolver': { typescript: { project: './docs/examples/tsconfig.json' } } },
+  },
+  {
+    files: ['docs/.vitepress/config.ts'],
+    languageOptions: { parserOptions: { project: './docs/.vitepress/tsconfig.json' } },
   },
 ];

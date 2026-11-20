@@ -154,7 +154,7 @@ class StreamReset(MuxwsError):
 
 
 class RemoteError(StreamReset):
-    """The remote handler raised. Carries the serialized error object, if the remote sent one."""
+    """The remote handler raised. Carries the serialised error object, if the remote sent one."""
 
     code = ResetCode.APPLICATION_ERROR
 
@@ -164,13 +164,16 @@ class RemoteError(StreamReset):
 
 
 class StreamTimeout(StreamReset):
-    """A local deadline expired; the remote was told to stop working."""
+    """A local deadline expired; the stream was reset with TIMEOUT."""
 
     code = ResetCode.TIMEOUT
 
 
 class StreamRefused(StreamReset):
-    """Not accepted and definitively not processed. Retry - elsewhere, or after a delay."""
+    """The remote refused the stream and did not process it.
+
+    The operation may be retried on another connection or after a delay.
+    """
 
     code = ResetCode.REFUSED
 

@@ -1,4 +1,4 @@
-"""Surviving a disconnect: the same dialer with `hello=` and `reconnect=Reconnect()`.
+"""Reconnecting dialer: the quick-start dialer with `hello=` and `reconnect=Reconnect()`.
 
 Start `quickstart_server.py` first, then run `python reconnect_client.py`. The client sends one
 request and exits, so `on_reconnect` does not fire unless the connection drops; it shows where a

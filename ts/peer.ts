@@ -91,14 +91,14 @@ export interface PeerOptions {
   isDialer: boolean;
   errorSerializer?: ErrorSerializer;
   /**
-   * Test-only (WSM-FRG-005). The cap is a protocol constant; the conformance runner lowers it to
-   * exercise fragmentation with small fixtures. A value too small to hold an envelope plus one
-   * indivisible unit raises `ProtocolError` at construction (WSM-FRG-034).
+   * Test-only (WSM-FRG-005). The cap is a protocol constant; a lower value exercises fragmentation with
+   * small fixtures. A value too small to hold an envelope plus one indivisible unit raises `ProtocolError`
+   * at construction (WSM-FRG-034).
    */
   maxFrameBytes?: number;
   /**
    * The largest reassembled payload this peer accepts, in bytes. Local and not announced
-   * (WSM-FRG-035); a sender learns of it only from the resulting reset.
+   * (WSM-FRG-035); the reset sent for a payload above it is the only report of it to the sender.
    */
   maxPayloadBytes?: number;
   /**
@@ -147,17 +147,9 @@ export function defaultErrorSerializer(error: unknown): unknown {
 // --------------------------------------------------------------------------- small helpers
 
 /**
- * Wait one macrotask turn, so timer callbacks and socket events can run.
- *
- * WSM-INV-004 depends on this. `nextFrame()` resolves immediately when there is work, and a socket
- * with buffer space resolves its send immediately, so awaiting them only drains the microtask queue.
- * Producers driven by a timer or an inbound socket message run as macrotasks; without this yield the
- * write loop would send every fragment of a large payload before any of them could enqueue a frame,
- * and the round-robin would have only one lane.
- *
- * Uses `setImmediate` where available (Node), otherwise `MessageChannel`, and `setTimeout(0)` only as
- * a last resort: browsers clamp nested timers to 4 ms, which would limit a per-frame yield to a few
- * hundred frames per second.
+ * Wait one macrotask turn, so timer callbacks and socket events can enqueue frames between two writes
+ * (WSM-INV-004). Uses `setImmediate` (Node), otherwise `MessageChannel`, and `setTimeout(0)` last,
+ * because browsers clamp nested timers to 4 ms.
  */
 const yieldToOtherTasks: () => Promise<void> = (() => {
   const immediate = (globalThis as { setImmediate?: (callback: () => void) => unknown }).setImmediate;
@@ -258,11 +250,11 @@ function resolveCall(first: unknown, second: RequestOptions | undefined, keys: R
 }
 
 /**
- * @internal WSM-FRG-034: a cap too small to hold an envelope plus one unit raises `ProtocolError` at
- * construction. `dialAndEstablish` also calls it before the first dial.
+ * @internal Return `cap`; raise `ProtocolError` when it is too small to hold an envelope plus one
+ * indivisible unit of payload (WSM-FRG-034).
  *
- * The cap is a protocol constant (WSM-FRG-004); a smaller value is passed only through the test-only
- * constructor option of WSM-FRG-005, which the conformance runner uses.
+ * The cap is a protocol constant (WSM-FRG-004); a smaller value comes only from the test-only
+ * constructor option of WSM-FRG-005.
  */
 export function checkedFrameCap(cap: number, codec: Codec): number {
   if (cap === MAX_FRAME_BYTES) return cap;
@@ -481,7 +473,7 @@ export class Peer {
    *
    * At most one is reported per peer. When the attempt cap is reached through hello failures, the
    * last loss already carries `willRetry: false`, and the helper's own give-up call to `notifyClose`
-   * is then suppressed. `isClosed` reads it, and `onClose` hands it to a handler registered after it
+   * is then suppressed. `isClosed` reads it, and `onClose` passes it to a handler registered after it
    * (WSM-RCN-047).
    */
   private finalClose: CloseReason | null = null;
@@ -581,7 +573,7 @@ export class Peer {
     this.lastActivityMs = this.clock();
   }
 
-  /** Live streams, read-only. */
+  /** A snapshot of the live streams, by id. */
   get streams(): ReadonlyMap<number, Stream> {
     return new Map(this.liveStreams);
   }
@@ -623,7 +615,7 @@ export class Peer {
     this.reconnectHandlers.push(handler);
   }
 
-  /** @internal Called by `ConnectionLoop` after the hello is acknowledged. */
+  /** @internal Call the `onReconnect` handlers with `attempt`. Precondition: the hello is acknowledged. */
   fireReconnect(attempt: number): void {
     this.fanOut('onReconnect', this.reconnectHandlers, attempt, this);
   }
@@ -733,9 +725,7 @@ export class Peer {
     this.errorHandlers.push(handler);
   }
 
-  /**
-   * @internal Called by `Stream`. Report the failure of a stream without a consumer (WSM-API-016).
-   */
+  /** @internal Report the failure of a stream without a consumer (WSM-API-016). */
   reportStreamError(error: unknown, stream: Stream | null = null): void {
     if (this.errorHandlers.length === 0) {
       logger.debug(
@@ -770,18 +760,10 @@ export class Peer {
   }
 
   /**
-   * @internal `open()`'s body without the `isOpen` and `goaway` guard. The reconnect driver uses it to
-   * send the hello.
-   *
-   * `isOpen` is false between adopting a socket and the hello acknowledgement (WSM-RCN-043), so
-   * `open()` throws in that window and no application frame precedes the hello (WSM-RCN-023). The
-   * hello is sent in that window, so the driver calls this method. It is not a parameter of the
-   * public `open()`, so applications cannot bypass the guard.
-   *
-   * Allocation and enqueue are one indivisible step (WSM-SID-006): there is no `await` in this
-   * method. An `await` between the allocation and the `enqueue` would let two concurrent calls
-   * interleave and send stream ids out of order (WSM-INV-005). A `oneway` stream carries `end` and is closed once
-   * its `open` is enqueued (WSM-STM-041).
+   * @internal `open()` without the `isOpen` and `goaway` guard, for the hello, which is sent before
+   * `isOpen` is true (WSM-RCN-023/043). Allocation and enqueue contain no `await`, so concurrent calls
+   * cannot send stream ids out of order (WSM-SID-006, WSM-INV-005). A `oneway` stream carries `end` and
+   * is closed once its `open` is enqueued (WSM-STM-041).
    */
   allocateAndEnqueue<T = unknown>(first?: unknown, second?: OpenOptions, oneway = false): Stream<T> {
     if (this.exhausted()) {
@@ -846,7 +828,7 @@ export class Peer {
     }
   }
 
-  /** The WSM-SID-007 shutdown in progress, if any; tests await it. */
+  /** The WSM-SID-007 shutdown in progress, if any. */
   exhaustionShutdown: Promise<void> | null = null;
 
   private exhausted(): boolean {
@@ -917,7 +899,7 @@ export class Peer {
 
   // ------------------------------------------------------------------ the writer
 
-  /** @internal Called by `Stream` and `Peer`. Synchronous, so `open()` does not suspend mid-allocation. */
+  /** @internal Queue `frame` for the writer. Synchronous, so `open()` does not suspend mid-allocation. */
   enqueue(frame: Frame): void {
     this.writer.enqueue(frame);
   }
@@ -1104,7 +1086,7 @@ export class Peer {
     const stream = this.liveStreams.get(frame.stream);
     const continuesOpen = stream !== undefined && stream.opening && hasFragment(frame);
     if (frame.type === 'open' && !continuesOpen) {
-      // The id of an over-cap `open` is validated and counts toward the high-water mark, so a later
+      // The id of an over-cap `open` is validated and counts towards the high-water mark, so a later
       // `data` or `reset` on it is ignored (WSM-STM-002) and is not above the mark (WSM-STM-003).
       if (!(await this.admitRemoteOpen(frame.stream))) return false;
     } else if (stream === undefined && (frame.type === 'data' || frame.type === 'reset')) {
@@ -1119,8 +1101,8 @@ export class Peer {
         `an encoded message of ${size} bytes exceeds this receiver's cap (WSM-FRG-031)`,
       );
     } else {
-      // No live stream, typically an over-cap `open`. The reset is still sent, because it is the only
-      // way the sender learns of the unannounced limit.
+      // No live stream, typically an over-cap `open`. The reset is still sent: the limit is not
+      // announced, and the reset is the only report of it to the sender.
       this.enqueue({
         type: 'reset',
         stream: frame.stream,
@@ -1226,9 +1208,8 @@ export class Peer {
     this.willRetry = false;
     await this.connectionLoop?.stop();
     if (!this.open_) {
-      // Between two sockets the last loss reported `willRetry: true`; this is the close that tells the
-      // application no reconnection follows (WSM-RCN-040/046). On a peer already closed, `notifyClose`
-      // suppresses it.
+      // Between two sockets the last loss reported `willRetry: true`; this close reports
+      // `willRetry: false` (WSM-RCN-040/046). On a peer already closed, `notifyClose` suppresses it.
       this.notifyClose({ code: 1000, reason: reason ?? '', wasClean: true, willRetry: false });
       return;
     }
@@ -1244,8 +1225,8 @@ export class Peer {
   }
 
   /**
-   * Send `goaway` once. `last_stream` is the highest stream id the remote opened and this peer
-   * dispatched, so it has the remote's parity.
+   * Send `goaway` once. `last_stream` is the remote's highest admitted open, refused ones included
+   * (WSM-CON-020), so it has the remote's parity.
    */
   private sendGoaway(code: ResetCode, reason: string | null): void {
     if (this.goaway.sent) return;
@@ -1336,7 +1317,7 @@ export class Peer {
         return true;
       }
       // Refused without invoking the handler, so the opener may retry elsewhere (WSM-STM-036). The
-      // limit is not announced; the sender learns of it only from this reset.
+      // limit is not announced; this reset is the only report of it to the sender.
       this.enqueue({
         type: 'reset',
         stream: streamId,
@@ -1510,7 +1491,7 @@ export class Peer {
     try {
       payload = this.errorSerializer(error);
     } catch (serializerError) {
-      // WSM-STM-034 is unconditional: if the serializer throws, the reset is sent without a payload,
+      // WSM-STM-034 is unconditional: if the serialiser throws, the reset is sent without a payload,
       // so the opener still receives the failure.
       logger.error(`muxws conn=${this.id} errorSerializer threw; sending the reset without a payload`, serializerError);
       payload = null;
@@ -1680,8 +1661,8 @@ export class Peer {
    * Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
    *
    * Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset this stream with
-   * PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the peers still agree about every other
-   * stream and the connection stays open (WSM-STM-020/024).
+   * PROTOCOL_ERROR and return `ABSENT`. Each message is decoded independently, so other streams are unaffected and
+   * the connection stays open (WSM-STM-020/024).
    */
   private reassemble(stream: Stream, frame: Frame): unknown {
     try {
@@ -1797,15 +1778,9 @@ export class Peer {
 
   /**
    * @internal Socket loss: every live stream fails with `ConnectionLost` before `onClose` handlers run.
-   *
-   * Also called by the reconnect helper (`ts/reconnect.ts`) when a missing pong or an incomplete
-   * hello shows the socket is dead without a socket error, so every loss is reported through this one
-   * path (WSM-RCN-011).
-   *
-   * `notify: false` suppresses `onClose`; it is used for a first connection that was never
-   * established, where `connect()` rejects instead (WSM-RCN-006) and the caller has no peer to attach
-   * handlers to. The peer is still marked dead, so `isOpen` is false immediately rather than after the
-   * read loop observes the close.
+   * Every loss, including one the heartbeat or the hello detects, is reported here (WSM-RCN-011).
+   * `notify: false` marks the peer dead without calling `onClose`, for a first connection that was
+   * never established (WSM-RCN-006).
    */
   die(cause: ConnectionClosed, options: { notify?: boolean } = {}): void {
     if (!this.open_) return;
@@ -1883,15 +1858,9 @@ export class Peer {
   }
 
   /**
-   * @internal Close the underlying socket; nothing else.
-   *
-   * When the heartbeat declares a socket dead, WSM-RCN-011 requires marking it dead and closing it
-   * locally; `die()` does only the first. Without the close, the read loop stays in
-   * `socket.receive()`, `serve()` does not settle, and the reconnect supervisor never redials.
-   *
-   * `code` defaults to 1000, not 1006: 1006 means "closed without a close frame" and MUST NOT be sent.
-   * `ws` throws for it, which would leave the socket open. The peer reports 1006 as the close code
-   * of the loss, but sends 1000.
+   * @internal Close the underlying socket; nothing else. `die()` does not close it, and the read loop
+   * ends only when it is closed (WSM-RCN-011). `code` defaults to 1000: 1006 must not be sent, and `ws`
+   * throws for it.
    */
   async closeSocketLocally(code = 1000, reason = ''): Promise<void> {
     try {
@@ -1902,7 +1871,7 @@ export class Peer {
     }
   }
 
-  /** @internal Called by `Stream` on close. No state is retained per closed stream (WSM-STM-001). */
+  /** @internal Drop a closed stream. No state is retained per closed stream (WSM-STM-001). */
   forget(stream: Stream): void {
     this.liveStreams.delete(stream.id);
     const recorder = stream.recorder;

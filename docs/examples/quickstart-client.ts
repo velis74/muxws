@@ -2,7 +2,7 @@
  * Quick-start dialer in TypeScript, on Node, against the same `quickstart_server.py`.
  *
  * Run it with `npx tsx quickstart-client.ts`. The URL is `ws://127.0.0.1:8000/ws` unless the
- * `MUXWS_URL` environment variable says otherwise.
+ * `MUXWS_URL` environment variable is set.
  *
  * Importing `muxws` registers the built-in `json` codec. `muxws/node` provides `connect` over the
  * `ws` package; it is the only module in the package that imports `ws`. A browser dialer imports

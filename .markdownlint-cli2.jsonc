@@ -8,6 +8,6 @@
     // VitePress builds heading anchors differently from markdownlint's GitHub slugs (`0.4.0` -> `0-4-0`)
     "MD051": false
   },
-  // docs/design/ holds the design briefs as they were handed over; they are not published
+  // docs/design/ holds the design rationale; it is not published
   "ignores": [".venv/**", "**/node_modules/**", "**/dist/**", "coverage/**", "docs/.vitepress/cache/**", "docs/design/**"]
 }

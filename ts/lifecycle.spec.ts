@@ -96,12 +96,12 @@ class Pair {
 const built: Pair[] = [];
 
 /** Build a peer pair without starting it, so a test can register handlers first. */
-function makePair(): Pair {
+function makePair(options: { maxConcurrentStreams?: number } = {}): Pair {
   const [left, right] = memoryPair();
   const codec = new JsonCodec();
   const pair = new Pair(
-    new Peer(left, { codec, isDialer: true }),
-    new Peer(right, { codec, isDialer: false }),
+    new Peer(left, { ...options, codec, isDialer: true }),
+    new Peer(right, { ...options, codec, isDialer: false }),
     left,
     right,
     codec,
@@ -287,7 +287,7 @@ describe('ping and pong', () => {
     pair.acceptor.onStream(replyNow);
     pair.start();
 
-    // Swallow every pong on the way back in.
+    // Drop every incoming pong before dispatch.
     const dialer = internals(pair.dialer);
     const original = dialer.dispatch.bind(pair.dialer);
     dialer.dispatch = async (frame: Frame): Promise<boolean> => (frame.type === 'pong' ? true : original(frame));
@@ -334,7 +334,7 @@ describe('ping and pong', () => {
   });
 
   it('keys pings by nonce and never by order', async () => {
-    // Matching by position would credit a late echo to the next ping and invent an RTT.
+    // Matching by position would assign a late echo to the next ping and report a wrong RTT.
     const registry = new PingRegistry();
     const first = registry.open('aaa');
     const second = registry.open('bbb');
@@ -407,6 +407,26 @@ describe('goaway', () => {
     // The acceptor allocates even ids; the streams it promises to finish are the dialer's odd ones.
     expect(goaway.last_stream).toBe(3);
     expect((goaway.last_stream as number) % 2).toBe(1);
+  });
+
+  it('counts an open refused over the concurrency limit in last_stream', async () => {
+    // WSM-CON-020: the refused open is at or below `last_stream`; its own reset refuses it.
+    const pair = makePair({ maxConcurrentStreams: 1 });
+    pair.acceptor.onStream(hold);
+    pair.start();
+
+    const held = pair.dialer.open({ q: 1 });
+    const refused = pair.dialer.open({ q: 2 });
+    await pair.settle();
+
+    await pair.acceptor.close({ code: ResetCode.NO_ERROR, reason: 'shutting down', drainMs: 20 });
+    await pair.settle();
+
+    const goawayFrames = pair.framesOfType('acceptor', 'goaway');
+    const goaway = goawayFrames[goawayFrames.length - 1];
+    expect([held.id, refused.id]).toEqual([1, 3]);
+    expect(goaway.last_stream).toBe(refused.id);
+    expect(await rejection(refused)).toBeInstanceOf(StreamRefused);
   });
 
   it('refuses incoming opens after sending goaway', async () => {
@@ -513,13 +533,13 @@ describe('goaway', () => {
     await pair.settle();
 
     expect(pair.acceptor.isOpen).toBe(false);
-    // `signal.aborted` is the TypeScript witness of Python's `stream.closed.is_set()`; the two move
+    // `signal.aborted` is the TypeScript counterpart of Python's `stream.closed.is_set()`; the two change
     // together on every close path (WSM-API-023).
     expect(stream.signal.aborted).toBe(true);
   });
 
   it('sends goaway, then drains, then closes', async () => {
-    // WSM-CON-025: the rule is the order, so the order is asserted.
+    // WSM-CON-025 specifies the order of the three steps; the test asserts that order.
     const pair = makePair();
     pair.acceptor.onStream(replyNow);
     pair.start();

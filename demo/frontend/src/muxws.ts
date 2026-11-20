@@ -193,7 +193,7 @@ const throughput = { framesIn: 0, framesOut: 0, bytesIn: 0, bytesOut: 0 };
 /**
  * Measurement state for one large payload: the fragments of the payload, and the data frames on other
  * streams received between its first and last fragment. This is the quantity that
- * `handlers_test.py::test_ticks_keep_flowing_during_an_export` asserts on. With a FIFO writer
+ * `handlers_test.py::test_tick_streams_send_a_frame_between_any_two_export_fragments` asserts on. With a FIFO writer
  * `interleaved` is zero; with the round-robin writer it is not (WSM-INV-004).
  */
 interface Probe {
@@ -291,6 +291,10 @@ function onConnectionClose(reason: CloseReason): void {
   store.stale = true;
   store.rttMs = null;
   store.liveStreams = 0;
+  // `boardOpened` counts the streams of the current connection. The reset is here and not in
+  // `onReconnected`: the backend opens the new board streams on the replayed hello, before
+  // `onReconnect` is called, and no stream is resumed (WSM-RCN-030).
+  store.boardOpened = 0;
   say(
     `socket closed: code ${reason.code}, "${reason.reason || 'no reason given'}", clean=${reason.wasClean}, ` +
       `willRetry=${reason.willRetry}`,
@@ -301,10 +305,6 @@ function onReconnected(attempt: number, reconnected: Peer): void {
   store.reconnects = attempt;
   store.peerId = reconnected.id;
   store.connection = 'live';
-  // Reset, so `boardOpened` counts the streams of this connection only. No stream is resumed
-  // (WSM-RCN-030): the board consists of twenty new streams the backend opens after the replayed
-  // hello.
-  store.boardOpened = 0;
   lossReported = false;
   lastTickAt.clear();
   say(`reconnected on attempt ${attempt}: hello replayed, peer.id is now ${reconnected.id}, no stream survived`);
@@ -334,14 +334,8 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
       applyTick(row);
     }
   } catch (error) {
-    // WSM-RCN-030: every stream open at a connection loss fails with an error. The UI reports it,
-    // because a board that stops updating looks the same as a market without price changes. Twenty
-    // streams fail together, so each is counted and one line is logged.
-    //
-    // `ConnectionLost` means the socket closed under a live stream. A plain `StreamReset` means the
-    // producer cancelled the stream first; the backend's kill switch does this before closing, because
-    // board streams do not end by themselves and `close()` would wait for its full drain window. The
-    // log line names which of the two occurred.
+    // A stream fails on a connection loss (WSM-RCN-030, `ConnectionLost`) or on the backend's reset
+    // before it closes (`StreamReset`). Every failure is counted; the first one is logged.
     store.streamsLost += 1;
     if (!lossReported) {
       lossReported = true;
@@ -358,15 +352,9 @@ async function onPushedStream(payload: unknown, stream: Stream): Promise<void> {
 }
 
 /**
- * Received rows not yet rendered, newest per symbol. Not reactive.
- *
- * Writing every tick directly into `store.rows` blocks the page at a 10 ms interval: twenty symbols at
- * a hundred ticks a second are two thousand reactive writes a second, each scheduling a re-render of
- * the grid, while the display repaints at most about sixty times a second. The main thread then cannot
- * process input, including the control that lowers the rate.
- *
- * No frame is dropped: every frame is received and counted and its lateness measured. Only rendering
- * is coalesced.
+ * Received rows not yet rendered, newest per symbol. Not reactive: rendering is coalesced to one
+ * write per symbol per animation frame, so a 10 ms tick interval does not block input. Every frame is
+ * still received, counted and timed.
  */
 const pending = new Map<string, BoardRow>();
 
@@ -614,7 +602,13 @@ async function streamHistory(symbol: string): Promise<void> {
 async function fragmented<T>(action: string, symbol: string): Promise<{ payload: T; report: FragmentReport }> {
   if (peer === null) throw new ConnectionLost('there is no peer');
   const stream = peer.open<T>({ action, symbol }, { end: true });
-  probe = { streamId: stream.id, bytes: 0, fragments: 0, interleaved: 0, worstLatencyMs: 0 };
+  probe = {
+    streamId: stream.id,
+    bytes: 0,
+    fragments: 0,
+    interleaved: 0,
+    worstLatencyMs: 0,
+  };
   const startedAt = performance.now();
   try {
     // The peer reassembles the fragments and resolves with the whole payload (WSM-FRG-010).

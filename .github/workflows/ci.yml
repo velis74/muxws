@@ -45,9 +45,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci
-      # `lint:ci`, not `lint`: `lint` runs with `--fix`, which rewrites auto-fixable violations and
-      # exits 0, so in CI those violations would pass unreported.
-      - run: npm run lint:ci
+      - run: npm run lint
       - run: npm test
       - run: npm run build
       # The packed declarations, type-checked by a consumer under bundler, node16, nodenext and node10.
@@ -64,6 +62,32 @@ jobs:
           name: node-coverage
           path: coverage/coverage-final.json
         if: github.event_name == 'pull_request'
+
+  # The browser demo in Chromium, once per backend: `demo/e2e/demo.e2e.ts` starts `demo.py --browser`
+  # and uses every control on the page.
+  demo-e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [python, node]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv sync --locked
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+        env:
+          MUXWS_DEMO_BACKEND: ${{ matrix.backend }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: demo-e2e-${{ matrix.backend }}
+          path: demo/e2e/test-results
+        if: failure()
 
   coverage:
     name: Incremental coverage check
@@ -96,6 +120,8 @@ jobs:
             demo.py
             docs/**
             interop/**
+            scripts/**
+            ts/index.ts
           log-level: INFO
           base-ref: ${{ github.base_ref }}
           head-ref: HEAD

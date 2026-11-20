@@ -38,7 +38,7 @@ origin_logger = logging.getLogger("muxws.origin")
 
 
 def resolve_codec(override: Codec | None = None) -> Codec:
-    """An explicit `codec=` wins (WSM-CDC-012); otherwise the configured name (WSM-CDC-010/016).
+    """An explicit `codec=` takes precedence (WSM-CDC-012); otherwise the configured name (WSM-CDC-010/016).
 
     Never falls back to JSON (WSM-INV-015). Raises `CodecNotRegistered` for an unregistered name.
     """
@@ -153,18 +153,10 @@ def _websocket_dialer(
     (WSM-CDC-016/020).
     """
     offered = offer(resolved.name, subprotocols)
-    # Parsed here, not inside `dial()`: a malformed `ws+unix:` URL, a `wss+unix:` URL and a platform
-    # without AF_UNIX raise from `connect()` before any socket is opened, and every reconnect dials
-    # the same socket file.
+    # Outside `dial()`: a bad address raises before any socket opens; every reconnect dials the same target.
     unix = parse_unix_url(url)
-    # `parse_unix_url` is stdlib-only, so a malformed `ws+unix:` URL raises `UnixUrlError` even where
-    # `websockets` is absent. `verify_dialable_url` then checks the dependency, which supplies the URL
-    # parser, and then the URL.
-    #
-    # Both checks run outside `dial()`. The `except` in `dial()` answers a refused upgrade with
-    # `CodecMismatch` (WSM-CDC-022/024), and its string fallback matches `HTTP 400` in an
-    # `InvalidURI` that quotes the URL, so `connect("ws:/HTTP 400")` would be reported as a codec
-    # mismatch (WSM-ERR-016).
+    # Outside `dial()`: its `HTTP 400` fallback would report an `InvalidURI` quoting the URL as
+    # `CodecMismatch` (WSM-ERR-016).
     verify_dialable_url(url, uri=unix.uri if unix is not None else None)
 
     async def dial() -> SocketAdapter:
@@ -182,14 +174,10 @@ def _websocket_dialer(
                     additional_headers=headers,
                 )
             else:
-                # Imported only in this branch, so a TCP dial does not import it. `websockets.asyncio`
-                # is available at the minimum supported `websockets` version, since the top-level
-                # `connect` above resolves to it.
+                # Imported only for a Unix-socket dial.
                 from websockets.asyncio.client import unix_connect
 
-                # `uri=` is the logical URL: the HTTP handshake needs a request target and a `Host`,
-                # which a filesystem path does not provide. The other arguments are the same as in the
-                # TCP arm.
+                # `uri=` supplies the handshake's request target and `Host`, which a socket path lacks.
                 connection = await unix_connect(
                     unix.path,
                     uri=unix.uri,
@@ -214,7 +202,7 @@ def _websocket_dialer(
     return dial
 
 
-#: The status an acceptor answers for a codec it does not speak (WSM-CDC-022), and the only status
+#: The status an acceptor answers for a codec it is not configured for (WSM-CDC-022), and the only status
 #: treated as a codec refusal. Any other failure is raised as it is.
 _REFUSED = 400
 

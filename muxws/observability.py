@@ -22,7 +22,6 @@ class CloseReason:
     was_clean: bool
     #: True when the reconnect helper will dial again. False when `max_attempts` is exhausted, after
     #: `close()`, and always for a peer without the reconnect helper.
-
     will_retry: bool = False
 
 

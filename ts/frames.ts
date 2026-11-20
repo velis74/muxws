@@ -10,7 +10,7 @@ import { ProtocolError } from './errors';
 /**
  * The sentinel distinguishing "no payload" from an explicit `null`.
  *
- * A unique symbol: no other value compares equal to it, `JSON.stringify` does not serialize it, and
+ * A unique symbol: no other value compares equal to it, `JSON.stringify` does not serialise it, and
  * it prints as `Symbol(ABSENT)` in assertion output.
  */
 export const ABSENT: unique symbol = Symbol('ABSENT');

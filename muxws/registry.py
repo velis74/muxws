@@ -3,8 +3,8 @@
 The registry does not observe `tags`. `tags` is a plain dict; writing a tag does no registry work, and
 the index changes only when `register` or `deregister` is called (WSM-REG-013, WSM-REG-014).
 
-Usage rule: **look up on keys you do not mutate, and mutate keys you do not look up.** A consumer that
-needs both on one key calls `register(peer)` after each write.
+Usage rule: a key used in `peers_for` lookups is not changed after `register`. A consumer that changes
+a key it also looks up calls `register(peer)` after each write.
 """
 
 from __future__ import annotations
@@ -32,11 +32,8 @@ class PeerRegistry:
         #: The reverse map, so `register` can replace all of a peer's entries without scanning the
         #: index (WSM-REG-012).
         self._entries: dict[Peer, set[tuple[str, Hashable]]] = {}
-        #: Peers whose close hook is installed. A consumer may call `register(peer)` after every tag
-        #: write (WSM-REG-017); the hook is installed once per peer, not once per call (WSM-REG-001).
-        #: `Peer` calls its close handlers on every connection loss and keeps them across a reconnect
-        #: (WSM-RCN-032, WSM-RCN-040), so the hook stays installed and deregisters the peer on each loss.
-        #: A weak set, so the registry does not keep a peer alive.
+        #: Peers whose close hook is installed: one hook per peer however often `register` is called
+        #: (WSM-REG-001); weak, so the registry does not keep a peer alive.
         self._hooked: weakref.WeakSet[Peer] = weakref.WeakSet()
 
     def __len__(self) -> int:
@@ -44,7 +41,7 @@ class PeerRegistry:
 
     @property
     def index_size(self) -> int:
-        """How many (key, value) buckets exist. WSM-REG-014 asserts this does not grow."""
+        """How many (key, value) buckets exist."""
         return len(self._index)
 
     def register(self, peer: Peer) -> None:

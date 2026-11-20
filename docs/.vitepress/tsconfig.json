@@ -1,0 +1,14 @@
+{
+  // The VitePress site configuration, type-checked and linted against the `vitepress` types.
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["config.ts"]
+}

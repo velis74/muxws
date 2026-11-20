@@ -16,3 +16,4 @@ build/
 .coverage
 .claude/
 .venv/
+/demo/e2e/test-results

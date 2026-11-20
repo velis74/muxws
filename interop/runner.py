@@ -51,7 +51,7 @@ EXPORT_ROWS = 5
 EXPORT_GAP = 0.01
 #: Interval between rows of the producer that is cancelled mid-flight.
 DRIP_GAP = 0.02
-#: Rows the `slow` stream produces; it is the stream that must survive the goaway drain.
+#: Rows the `slow` stream produces; this stream must complete during the goaway drain.
 SLOW_ROWS = 3
 SLOW_GAP = 0.05
 
@@ -322,17 +322,8 @@ async def run_tst_004(peer: muxws.Peer, journal: Journal, pushes: list[Any], *, 
         f"{label}: the server pushed {pushes!r}",
     )
 
-    # Between the export's first and last inbound frame there must be an inbound frame of another
-    # stream. Only inbound frames are counted: the six outbound opens are sent together regardless of
-    # how the acceptor answers.
-    #
-    # This assertion does not test the round-robin writer; the export handler's pauses satisfy it
-    # without one. WSM-FRG-019 is tested by
-    # `writer_test.py::test_round_robin_selects_across_streams_not_fifo` and the
-    # `small-frame-overtakes-a-fragmented-payload` fixture. This check asserts that neither
-    # implementation answers streams one at a time. Asserting that the `big` reply's fragments are
-    # non-contiguous would depend on another stream having data queued at that moment, and would be
-    # timing-dependent.
+    # Between the export's first and last inbound frame there is an inbound frame of another stream:
+    # neither implementation answers streams one at a time. Outbound frames are not counted.
     inbound = [entry for entry in journal.entries if entry[0] == "rx"]
     export_positions = [index for index, entry in enumerate(inbound) if entry[2] == export_id]
     check(bool(export_positions), f"{label}: no inbound frame for the export stream {export_id}")
@@ -432,7 +423,7 @@ async def collect(stream: Stream, into: list[Any]) -> None:
 
 
 async def run_tst_005(url: str, *, label: str) -> None:
-    """Kill the acceptor process with streams open, restart it, and hold the peer to WSM-TST-005."""
+    """Kill the acceptor process with streams open, restart it, and check the peer against WSM-TST-005."""
     hellos: list[str] = []
     reconnects: list[tuple[int, int]] = []
     closes: list[Any] = []
@@ -491,7 +482,7 @@ async def run_tst_005(url: str, *, label: str) -> None:
 
     check(
         reconnects == [(1, 1)],
-        f"{label}: on_reconnect fired {reconnects!r}; WSM-TST-005 wants exactly one, after the "
+        f"{label}: on_reconnect fired {reconnects!r}; WSM-TST-005 requires exactly one, after the "
         f"replayed hello was acknowledged",
     )
     check(
@@ -540,19 +531,8 @@ def check_jitter_dispersed(delays: list[float], *, label: str) -> None:
 
 # --------------------------------------------------------------------------- WSM-CDC-007: the corpus
 #
-# The cross-language part of WSM-CDC-007: "a Python peer and a TypeScript peer, both configured with
-# that codec, running the sequence corpus". `muxws/conformance_test.py` and `ts/conformance.spec.ts`
-# replay `conformance/sequences/` with both peers in one process; this runs the corpus with one peer
-# in each language.
-#
-# A sequence fixture scripts both peers as one ordered list of steps. The dialer process conducts: it
-# reads the script, executes the steps whose `peer` is its own role, and sends every other step over
-# a control channel to the acceptor process, which executes it through the same `Side` class and
-# replies. The steps run in fixture order, as in the in-process runners, and every fixture can run.
-#
-# The control channel carries only a step index and the ordinal -> stream id table. Both processes
-# load the fixture from disk, so each resolves `$bytes` placeholders (`conformance/README.md`) from
-# the same file and no JSON encoding of bytes is needed.
+# Replays `conformance/sequences/` with one peer in each language; the dialer conducts and sends the
+# acceptor's steps over a control channel (`conformance/README.md`, "Cross-process replay").
 
 #: Read from disk by both processes; not sent over the control channel.
 CONFORMANCE = Path(__file__).resolve().parent.parent / "conformance"
@@ -1067,7 +1047,7 @@ class Control:
         return await self._answer(message)
 
     async def dispatch(self, message: dict[str, Any]) -> None:
-        """Send a command and go straight on to the next step, collecting the answer later.
+        """Send a command without waiting for its acknowledgement; the acknowledgement is read before the next command.
 
         Used only for `close`, which the corpus defines as "started and not awaited - `close()` sends
         `goaway` and then drains, and the steps after it are what the drain window exists to let

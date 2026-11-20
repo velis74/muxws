@@ -56,12 +56,12 @@ def _reassemble(parts: list[Frame], codec: JsonCodec) -> Any:
 
 
 def test_max_frame_bytes_is_the_protocol_constant():
-    """WSM-FRG-004: 64 KiB, never negotiated, never announced, never read from configuration."""
+    """WSM-FRG-004: the constant is 64 KiB; it is not negotiated, announced or read from configuration."""
     assert MAX_FRAME_BYTES == 65_536
 
 
 def test_encoded_length_counts_utf8_bytes_not_characters():
-    """WSM-FRG-002: a non-BMP character is four bytes, whatever any language calls its length."""
+    """WSM-FRG-002: length is counted in UTF-8 bytes; a non-BMP character is four bytes."""
     assert encoded_length("abc") == 3
     assert encoded_length("č") == 2
     assert encoded_length("𝕄") == 4
@@ -129,11 +129,11 @@ def _assert_take_invariant(text: str, start: int, budget: int) -> None:
     assert data[start:].startswith(taken), case
     assert len(taken) <= budget, case
 
-    # 3. maximal: either the string is spent, or the next codepoint would overrun the budget.
+    # 3. maximal: either the string is consumed, or the next codepoint exceeds the budget.
     next_width = _first_codepoint_width(text, start + len(taken))
     assert next_width is None or len(taken) + next_width > budget, case
 
-    # 4. empty exactly when the first codepoint does not fit - never as a way of making progress.
+    # 4. empty if and only if the first codepoint does not fit.
     first_width = _first_codepoint_width(text, start)
     assert (taken == b"") == (first_width is None or first_width > budget), case
 
@@ -165,7 +165,7 @@ def test_a_budget_smaller_than_the_first_codepoint_takes_nothing():
 
 
 def test_a_budget_landing_exactly_on_a_boundary_takes_the_whole_codepoint():
-    """Nothing is given back at an exact fit; the byte at the cut begins the next codepoint."""
+    """At an exact fit the whole codepoint is taken; the byte at the cut begins the next codepoint."""
     assert _take("ččč", 0, 4) == "čč"
     assert _take("ččč", 0, 5) == "čč"
     assert _take("ččč", 0, 6) == "ččč"
@@ -182,7 +182,7 @@ def test_four_byte_codepoints_are_taken_whole_or_not_at_all():
 
 
 def test_an_offset_at_the_end_of_the_string_takes_nothing():
-    """The splitter reaches this on the pass where the payload is spent and only a terminator is due."""
+    """The splitter reaches this on the pass where the payload is consumed and only the terminator remains."""
     assert _take("abč", 4, 100) == ""
     assert _take("", 0, 100) == ""
 
@@ -377,7 +377,7 @@ def test_fitting_frame_is_returned_untouched(codec: JsonCodec):
 
 
 def test_cap_below_envelope_floor_raises(codec: JsonCodec):
-    """WSM-FRG-034: raise at once rather than be discovered later as an infinite split loop."""
+    """WSM-FRG-034: a cap below the envelope raises immediately instead of producing an infinite split loop."""
     frame = Frame("data", stream=1, payload=PAYLOADS["ascii"])
     with pytest.raises(ProtocolError, match="envelope"):
         split_frame(frame, 32, codec)
@@ -427,7 +427,7 @@ def test_corpus_payloads_survive_a_small_cap(case: dict[str, Any], codec: JsonCo
 
 
 class _BinaryJsonCodec:
-    """A toy binary codec, so the byte-boundary half of the splitter has something to exercise.
+    """A minimal binary codec for testing the splitter's byte-boundary path.
 
     The shipped binary codec is msgpack; this one tests that the splitter slices bytes at byte
     boundaries and that `binary` is declared rather than inferred. `latin-1` round-trips any byte
@@ -520,7 +520,7 @@ def test_trailers_too_large_for_the_cap_raise_rather_than_split(codec: JsonCodec
 
 
 def test_the_closing_fragment_may_be_empty(codec: JsonCodec):
-    """A terminator carrying no payload bytes is still a terminator, and reassembles cleanly."""
+    """A terminator with no payload bytes ends the sequence, and the payload reassembles."""
     frame = Frame("data", stream=1, payload={"body": "x" * 900}, end=True, trailers={"checksum": "d" * 130})
     parts = split_frame(frame, 256, codec)
     rejoined = "".join(str(part.fragment) for part in parts)

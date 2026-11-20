@@ -24,8 +24,8 @@ class SocketAdapter(Protocol):
     async def receive(self) -> str | bytes:
         """The next inbound message, waiting for one.
 
-        **Raises `ConnectionClosed` when the socket ends**; this is the only way the peer learns that
-        the connection died. An adapter that returned a sentinel, or blocked after the socket closed,
+        **Raises `ConnectionClosed` when the socket ends**; this exception is the peer's only indication
+        that the connection ended. An adapter that returned a sentinel, or blocked after the socket closed,
         would leave the read loop and every pending await waiting indefinitely (WSM-INV-011).
         """
         ...

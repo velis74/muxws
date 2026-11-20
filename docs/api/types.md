@@ -34,7 +34,7 @@ bytes and two keys.
 | `code` | `int \| None` / `number \| null` | `None` / `null` | A `ResetCode` value, on `reset` and `goaway`. Carried as an integer, so a code this generation does not define is preserved. |
 | `reason` | `str \| None` / `string \| null` | `None` / `null` | Human-readable text accompanying `code`. Never parsed for meaning. |
 | `nonce` | `str \| None` / `string \| null` | `None` / `null` | Correlates a `pong` with the `ping` it answers. Echoed back verbatim. |
-| `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has dispatched. Streams above it were not processed and can be retried elsewhere. |
+| `last_stream` | `int \| None` / `number \| null` | `None` / `null` | On `goaway`: the highest stream id, of **the remote's** parity, that this peer has received. Streams above it were not processed and can be retried elsewhere; a stream at or below it that this peer refused gets its own `reset(REFUSED)`. |
 | `oneway` | `bool` / `boolean` | `False` / `false` | On `open`: the opener reads nothing on the stream, and the receiver sends no frame on it. Set by `notify()`, always with `end`. Carried on the first fragment. |
 
 Envelope keys are emitted in a fixed order — `type`, then `stream`, then the rest alphabetically —
@@ -781,7 +781,7 @@ export class Assembler {
 | `in_progress` / `inProgress` | `bool` / `boolean` | `False` / `false` | True between the first fragment and the one that arrives without `more`. |
 | `byte_length` / `byteLength` | `int` / `number` | `0` | Bytes accumulated so far, measured the way `encoded_length` measures them. |
 | `reset()` | `() -> None` / `() => void` | — | Drops the partial buffer and releases the bytes with it. Called when the stream is reset. |
-| `feed(frame, codec)` | `frame: Frame`, `codec: Codec` | both required | Absorbs one fragment frame. `codec` is used only on the closing fragment, to decode the concatenation. |
+| `feed(frame, codec)` | `frame: Frame`, `codec: Codec` | both required | Adds one fragment frame to the buffer. `codec` is used only on the closing fragment, to decode the concatenation. |
 
 ### Return
 
@@ -934,9 +934,9 @@ void main();
 ## `Exchange`
 
 One finished stream, as handed to every [`on_exchange`](/api/peer#peer-on-exchange-python) /
-[`onExchange`](/api/peer#peer-onexchange-typescript) handler: what each side sent, how the stream ended
-and how long it took. `request` is what the side that opened the stream sent and `response` what the
-other side sent, whichever peer reports it.
+[`onExchange`](/api/peer#peer-onexchange-typescript) handler: what each side sent, how the stream
+ended and how long it took. `request` is what the side that opened the stream sent and `response`
+what the other side sent, in the records of both peers.
 
 Python's is a frozen slotted dataclass, TypeScript's a frozen class instance. Payloads are held by
 reference, not copied.
@@ -1017,10 +1017,13 @@ for example to redact a value, does not change the `Exchange`. The keys appear i
 Binary values (`bytes`, `bytearray`, `memoryview` in Python; `Uint8Array` and other `ArrayBuffer` views
 in TypeScript) anywhere in headers, payloads or trailers become base64 strings.
 
-With `trim_payload_size` set, each payload is serialised to compact JSON text; if its UTF-8 length
-exceeds the limit, the payload is replaced by a string: its first `trim_payload_size` bytes, cut back to
-a character boundary, followed by `…(trimmed N bytes)…`, where `N` is the number of bytes cut off. A
-payload within the limit stays a value. Headers and trailers are never trimmed.
+With `trim_payload_size` set, each payload is serialised to the compact JSON text `JSON.stringify` writes,
+in both languages: numbers in JavaScript's form (`1.0` is `1`, `NaN` and infinities are `null`), object keys
+in JavaScript's property order (integer keys ascending first), lone surrogates escaped, and a value JSON
+cannot represent (a Python `datetime`, a TypeScript `bigint`) as the string `str(value)` / `String(value)`.
+If its UTF-8 length exceeds the limit, the payload is replaced by a string: its first `trim_payload_size`
+bytes, cut back to a character boundary, followed by `…(trimmed N bytes)…`, where `N` is the number of
+bytes cut off. A payload within the limit stays a value. Headers and trailers are never trimmed.
 
 ### Raises
 
@@ -1313,8 +1316,8 @@ handler receives a server push, with the same signature and semantics.
 
 A handler that raises produces `reset(APPLICATION_ERROR)` on that stream, with the reason text and
 the `error_serializer`'s payload. It never produces `REFUSED`, which is reserved for streams that were
-definitively not processed. Only one handler is registered per peer; registering a second replaces
-the first and logs a warning.
+definitively not processed. On a `oneway` stream it produces no frame and is logged. Only one
+handler is registered per peer; registering a second replaces the first and logs a warning.
 
 ### Signature
 
@@ -1539,7 +1542,7 @@ void main();
 
 The type of an interceptor registered with `peer.intercept_open(...)` / `peer.interceptOpen(...)`.
 It is called synchronously inside every `open()`, `notify()` and `request()` on that peer, before a
-stream id is allocated, and shapes the headers the `open` frame carries.
+stream id is allocated, and modifies the headers the `open` frame carries.
 
 It receives a fresh mapping holding a shallow copy of the caller's headers and mutates it in place:
 adding, replacing or deleting keys. It cannot touch the rest of the frame. The reconnect helper's
@@ -1635,7 +1638,8 @@ await dialer.close({ drainMs: 100 });
 
 The type of an interceptor registered with `peer.intercept_reply_headers(...)` /
 `peer.interceptReplyHeaders(...)`. It is called once per stream the remote opened, synchronously, by
-the call that sends this peer's first frame on it, and shapes the leading headers that frame carries.
+the call that sends this peer's first frame on it, and modifies the leading headers that frame
+carries.
 
 It receives a fresh mapping holding a shallow copy of the headers that call was given and mutates it
 in place. It cannot touch the rest of the frame.
@@ -1667,8 +1671,9 @@ The parameters of the callable itself:
 ### Raises
 
 The type raises nothing. An implementation that raises fails the call that sends the first frame
-with that exception: no later interceptor runs, nothing is sent, and the first frame stays unspent.
-In the implicit end of a handler that returns, the stream is reset with `APPLICATION_ERROR` instead.
+with that exception: no later interceptor runs, nothing is sent, and the stream's next frame still
+counts as its first. In the implicit end of a handler that returns, the stream is reset with
+`APPLICATION_ERROR` instead.
 
 ### Example
 
@@ -1888,7 +1893,7 @@ logger.level = 'warn';
 
 ## `FrameDirection` (TypeScript)
 
-Which way a frame was travelling, as handed to `peer.onFrame` (WSM-OBS-003).
+The direction of a frame, as passed to `peer.onFrame` (WSM-OBS-003).
 
 `'tx'` is reported **before** the codec encodes, `'rx'` **after** it decodes, so a handler receives a
 logical `Frame`, not bytes, in both directions. Python's `on_frame` takes the same two

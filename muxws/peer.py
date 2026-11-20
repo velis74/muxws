@@ -100,7 +100,7 @@ class Peer:
         self._error_serializer = error_serializer or default_error_serializer
         self._max_frame_bytes = _checked_frame_cap(max_frame_bytes, codec)
         #: The largest reassembled payload this peer accepts. Local and never announced (WSM-FRG-035);
-        #: a sender learns of it only from the reset it receives.
+        #: the only indication to a sender is the reset it receives.
         self._max_payload_bytes = max_payload_bytes
         #: How many streams the remote may have open on this peer at once. Local, never announced, and
         #: not checked by the sender (WSM-STM-036).
@@ -190,8 +190,8 @@ class Peer:
         """Whether a socket is attached, so a frame put on the writer now can reach the wire.
 
         Differs from `is_open` during the hello window: there `is_open` is false (WSM-RCN-043) while
-        the socket is open and carries the hello. `Stream.reset()` uses this property, so a reset of a
-        stream the acceptor pushed during the hello window is sent to the remote (WSM-STM-021).
+        the socket is open and carries the hello. A reset of a stream the acceptor pushed during the
+        hello window is sent to the remote while this is true (WSM-STM-021).
         """
         return self._is_open
 
@@ -202,7 +202,7 @@ class Peer:
 
     @property
     def streams(self) -> Mapping[int, Stream]:
-        """Live streams, read-only."""
+        """A snapshot of the live streams, by id."""
         return dict(self._streams)
 
     @property
@@ -316,13 +316,7 @@ class Peer:
     # ------------------------------------------------------------------ opening
 
     def open(self, payload: Any = None, *, headers: dict[str, Any] | None = None, end: bool = False) -> Stream:
-        """Open a stream. Synchronous; between sockets it raises instead of queuing the open (WSM-API-001/004).
-
-        The guard and the allocation are separate methods. The reconnect helper's hello is sent while
-        `is_open` is still false, because its acknowledgement establishes the connection
-        (WSM-RCN-004/043), so the helper calls `_allocate_and_enqueue` directly. The guard takes no
-        parameters, so no call through this method can bypass it and precede the hello (WSM-RCN-023).
-        """
+        """Open a stream. Synchronous; between sockets it raises instead of queuing the open (WSM-API-001/004)."""
         return self._open(payload, headers=headers, end=end, oneway=False)
 
     def _open(self, payload: Any, *, headers: dict[str, Any] | None, end: bool, oneway: bool) -> Stream:
@@ -334,8 +328,8 @@ class Peer:
     def _intercepted_reply_headers(self, headers: dict[str, Any] | None, stream: Stream) -> dict[str, Any] | None:
         """The leading headers of this peer's answer on `stream`, as the reply interceptors leave them.
 
-        Called by the stream before its first frame is marked as sent, so after an interceptor raises
-        the stream can still send its first frame (WSM-API-028).
+        Runs before the stream's first frame is marked as sent, so after an interceptor raises the
+        stream can still send its first frame (WSM-API-028).
         """
         if not self._reply_interceptors:
             return headers
@@ -349,6 +343,7 @@ class Peer:
         Wire order therefore equals allocation order. If two `open()` calls could interleave here, ids
         could go on the wire out of order, which the remote treats as a protocol error (WSM-INV-005).
         A `oneway` stream carries `end` and is closed once its `open` is enqueued (WSM-STM-041).
+        Has no `is_open` guard, so the hello can go out before the connection is open (WSM-RCN-023/043).
         """
         if self._exhausted():
             raise ConnectionGoingAway(
@@ -388,7 +383,7 @@ class Peer:
         if self._goaway.received:
             raise ConnectionGoingAway(
                 f"the remote sent goaway (code {self._goaway.received_code}); no new stream can be "
-                f"opened on this connection. Dial again to get one that can."
+                f"opened on this connection. Open streams on a new connection."
             )
         if self._goaway.sent:
             raise ConnectionGoingAway("this peer sent goaway and opens no further streams (WSM-CON-021)")
@@ -479,12 +474,8 @@ class Peer:
                     await self._socket.send_text(encoded)  # type: ignore[arg-type]
                 # Fragment n+1 is sliced after fragment n has reached the socket (WSM-FRG-018).
                 self._writer.advance(frame.stream if frame.stream is not None else CONNECTION_LANE)
-                # Yield one event-loop turn per frame (WSM-INV-004). `next_frame()` returns without
-                # suspending when there is work, and `send_text` on a socket with buffer space (uvicorn
-                # on loopback, `MemorySocket`) also completes without suspending. Without this yield
-                # the loop sends every queued frame and fragment in one run of this task, no other
-                # task can enqueue a frame in between, and frames of different streams do not
-                # interleave unless the socket applies backpressure.
+                # One event-loop turn per frame (WSM-INV-004): neither `next_frame()` nor a socket with
+                # buffer space suspends, so without it other streams' frames would not interleave.
                 await asyncio.sleep(0)
             except ConnectionClosed:
                 return
@@ -688,7 +679,7 @@ class Peer:
             self._ping_started.pop(nonce, None)
 
     def _on_pong(self, frame: Frame) -> None:
-        """Settle the ping this nonce belongs to; a nonce nobody is waiting for is dropped."""
+        """Settle the ping this nonce belongs to; a nonce with no outstanding ping is dropped."""
         if frame.nonce is None:
             return
         elapsed = asyncio.get_running_loop().time() - self._ping_started.get(frame.nonce, 0.0)
@@ -726,7 +717,7 @@ class Peer:
         self._die(ConnectionClosed(reason or "closed", code=1000, reason=reason or "", was_clean=True))
 
     def _send_goaway(self, code: ResetCode, reason: str | None) -> None:
-        """Enqueue `goaway` once. `last_stream` is the highest id the remote opened on this peer.
+        """Enqueue `goaway` once. `last_stream` is the remote's highest admitted open, refused ones included.
 
         The id has the remote's parity. With this peer's own highest id instead, the remote would
         treat its streams as unprocessed and fail them all.
@@ -738,7 +729,10 @@ class Peer:
         self._enqueue(Frame("goaway", code=int(code), reason=reason, last_stream=self._highest_remote_open))
 
     async def _on_goaway(self, frame: Frame) -> bool:
-        """The remote is stopping. Refuse what it never processed; let the rest finish."""
+        """Record a received `goaway` and fail local streams above its `last_stream` with REFUSED.
+
+        Other streams continue.
+        """
         self._goaway.received = True
         self._goaway.received_code = frame.code
         self._goaway.received_reason = frame.reason
@@ -812,7 +806,7 @@ class Peer:
                 logger.warning("muxws conn=%s dropped oneway stream %s: concurrency limit reached", self.id, stream_id)
                 return True
             # Refused without invoking the handler, so the opener may retry it elsewhere
-            # (WSM-STM-036). The limit is not announced; the sender learns of it from this reset.
+            # (WSM-STM-036). The limit is not announced; this reset is the only indication to the sender.
             self._enqueue(
                 Frame(
                     "reset",
@@ -949,12 +943,12 @@ class Peer:
         """Reset the stream with APPLICATION_ERROR, never REFUSED (WSM-STM-034/WSM-INV-008).
 
         REFUSED states that the operation did not happen. A handler that raises may already have had
-        side effects, so the opener must not be told it is safe to retry.
+        side effects, so the opener does not receive a code that marks the stream as safe to retry.
         """
         try:
             payload = self._error_serializer(exc)
         except Exception:  # noqa: BLE001
-            # The reset is sent even when the serializer raises (WSM-STM-034); without it the opener
+            # The reset is sent even when the serialiser raises (WSM-STM-034); without it the opener
             # would wait indefinitely.
             logger.exception("muxws conn=%s error_serializer raised; sending the reset without a payload", self.id)
             payload = None
@@ -1106,8 +1100,8 @@ class Peer:
         """Add one fragment to the stream's payload. Returns the payload, or `ABSENT` while more are expected.
 
         Fragments that mix text and binary values, or a joined payload the codec cannot decode, reset
-        this stream with PROTOCOL_ERROR and return `ABSENT`. Each message decoded on its own, so the
-        peers still agree about every other stream and the connection stays open (WSM-STM-020/024).
+        this stream with PROTOCOL_ERROR and return `ABSENT`. Each message is decoded on its own, so
+        the peers still agree about every other stream and the connection stays open (WSM-STM-020/024).
         """
         try:
             return stream._assembler.feed(frame, self._codec)
@@ -1201,10 +1195,9 @@ class Peer:
     def _die(self, cause: ConnectionClosed, *, notify: bool = True) -> None:
         """Socket death: every live stream fails with `ConnectionLost`, then `on_close` handlers run.
 
-        `notify=False` is used only for a first connection that was never established: `connect()`
-        raises instead (WSM-RCN-006), and the caller never received the peer, so no handler is
-        registered. The peer is still marked dead, so `is_open` is false regardless of how the read
-        loop and the cancellation are ordered.
+        `notify=False` skips the handlers. It applies to a first connection that was never established,
+        whose peer has no handler registered (WSM-RCN-006). The peer is still marked dead, so `is_open`
+        is false regardless of how the read loop and the cancellation are ordered.
         """
         if not self._is_open:
             return
@@ -1235,10 +1228,6 @@ class Peer:
     def _notify_close(self, reason: CloseReason) -> None:
         """Call the `on_close` handlers with `reason`.
 
-        Separate from `_die` because exhausting `max_attempts` is not a socket loss, and it MUST still
-        call `on_close` once with `will_retry` false (WSM-RCN-044). Callers: `_die` for every socket
-        loss, and the reconnect helper when it gives up.
-
         At most one `will_retry=False` close is reported per peer; a second one is suppressed.
         When the attempt cap is spent by failed hellos, the last socket loss already reported
         `will_retry=False`, and the helper's report is suppressed (WSM-RCN-044).
@@ -1264,8 +1253,7 @@ class Peer:
         `Peer` survives; `Stream` objects do not (WSM-RCN-032). The id space starts empty and the
         high-water marks reset.
 
-        `tags` is not cleared. WSM-RCN-033 applies to the acceptor, where a reconnect creates a new
-        `Peer`; only a dialer adopts a socket. WSM-INV-014 states the rule without that qualification.
+        `tags` is kept (WSM-INV-014).
 
         The connection id advances, so the reconnect appears in logs under a new `conn=` (WSM-API-009).
         """
@@ -1391,7 +1379,7 @@ def _checked_frame_cap(cap: int, codec: Codec) -> int:
     """Raise `ProtocolError` when `cap` cannot hold an envelope plus one unit of payload (WSM-FRG-034).
 
     Checked at construction. The cap is a protocol constant (WSM-FRG-004); a smaller value comes only
-    from the test-only construction argument of WSM-FRG-005, which the conformance runner uses.
+    from the test-only construction argument of WSM-FRG-005.
     """
 
     from muxws.fragment import split_frame

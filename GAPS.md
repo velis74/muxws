@@ -1,7 +1,7 @@
 # Gaps
 
-Open gaps between `SPEC.md`, the briefs under `docs/design/briefs/`, the implementations and their
-tests, and known deviations of v1 from `SPEC.md`. A gap is deleted when it is closed.
+Open gaps between `SPEC.md`, the implementations and their tests, and known deviations of v1 from
+`SPEC.md`. A gap is deleted when it is closed.
 
 ## Known deviations
 
@@ -57,7 +57,8 @@ own form. `SPEC.md` does not state which form is correct.
   `interop/runner.ts` is satisfied by the handlers' sleeps and passes without round-robin selection.
   The rule's witnesses are `writer_test.py` and
   `conformance/sequences/small-frame-overtakes-a-fragmented-payload.json`.
-- **`WSM-FRM-006`, Python.** `peer_test.py::test_an_envelope_lookalike_payload_survives_being_fragmented`
+- **`WSM-FRM-006`, Python.**
+  `peer_test.py::test_an_envelope_lookalike_payload_is_delivered_unchanged_after_fragmentation`
   compares against the object passed to the library, so a library that deletes a reserved key from
   the caller's own dict passes it. The TypeScript counterpart snapshots the payload before the send.
 - **`WSM-AUT-002`, TypeScript.** `ts/peer.spec.ts` *"never interprets per-stream headers"* compares
@@ -74,9 +75,6 @@ own form. `SPEC.md` does not state which form is correct.
 
 ## Rules witnessed in one port only
 
-- `WSM-API-016` is a TypeScript rule whose only citation is in `stream_test.py`. The TypeScript test,
-  `ts/stream.spec.ts` *"reaches the error hook and raises no unhandled rejection"*, does not name
-  it.
 - `WSM-CDC-026` has no TypeScript witness: no TypeScript test asserts that `accept()` performs the
   upgrade or that the application must not accept first.
 - `WSM-AUT-003`, library clause: no TypeScript test asserts that each reconnect of `muxws/node`'s
@@ -88,13 +86,13 @@ own form. `SPEC.md` does not state which form is correct.
 
 ## Rules held by something other than a citing test
 
-- `WSM-PKG-004` is enforced by `eslint` and `ruff` (`npm run lint:ci`, `ruff check .`), not by a test.
+- `WSM-PKG-004` is enforced by `eslint` and `ruff` (`npm run lint`, `ruff check .`), not by a test.
 - The "zero mandatory arguments" half of `WSM-API-003` is enforced in TypeScript by `tsc --noEmit`.
 - `WSM-TST-004` and `WSM-TST-005` are enforced by the `cross-language` workflow's steps.
 - These rules have no citation and are held by a test that does not name them: `WSM-API-013`,
-  `WSM-BPR-002`, `WSM-CDC-003`, `WSM-FRG-033`, `WSM-FRM-010`, `WSM-FRM-011`, `WSM-FRM-014`,
-  `WSM-INV-003`, `WSM-INV-009`, `WSM-SID-003`, `WSM-STM-012`, `WSM-STM-013`, `WSM-STM-015`. Renaming
-  or changing such a test does not report that the rule lost its witness.
+  `WSM-BPR-002`, `WSM-CDC-003`, `WSM-FRG-033`, `WSM-FRM-010`, `WSM-FRM-011`, `WSM-INV-003`,
+  `WSM-INV-009`, `WSM-SID-003`, `WSM-STM-012`, `WSM-STM-013`, `WSM-STM-015`. Renaming or changing
+  such a test gives no indication that the rule no longer has a witness.
 
 ## Platforms and environments not exercised
 

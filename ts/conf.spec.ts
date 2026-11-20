@@ -204,7 +204,7 @@ describe('the acceptor', () => {
     expect(socket.untouched).toBe(true);
   });
 
-  it('lets an explicit codec argument win over settings - WSM-CDC-012', async () => {
+  it('uses an explicit codec argument instead of settings.codec - WSM-CDC-012', async () => {
     settings.codec = 'msgpack'; // unregistered: reading it raises
     const socket = new FakeWsConnection('muxws.v1.json');
 

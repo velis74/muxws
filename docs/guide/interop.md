@@ -157,11 +157,38 @@ them:
    then encode each fragment frame, check that it fits the cap, and re-split it if it does not. The
    reservation is an estimate; the check guarantees the cap. `frames/v1-fragment-boundaries.json`
    detects off-by-one errors in the cut points.
-3. **The state machine and the id rules.** Dialer ids are odd, acceptor ids are even, and each peer's
-   own opens are strictly increasing. A frame for an id below the high-water mark is silently ignored;
-   a frame for an id above it is a connection error. `sequences/` tests this.
+3. **The state machine and the id rules.** Dialer ids are odd, acceptor ids are even, and each
+   peer's own opens are strictly increasing. A `data` or `reset` for an id that is no longer live
+   (or was never opened) at or below the high-water mark is ignored without an error; one above the
+   mark is a connection error, and so is an `open` whose id is not above its opener's previous one.
+   `sequences/` tests this.
 4. **Misbehaviour.** `invalid/` specifies which failures reset one stream and which end the connection,
    in the `connection_survives` column.
+
+## Live cross-language checks
+
+The workflow `.github/workflows/cross-language.yml` connects a Python peer and a TypeScript peer over a
+real socket through `interop/drive.sh`, in both role assignments and under every shipped codec. Each leg
+runs three scenarios:
+
+| Scenario | What it runs |
+|---|---|
+| `main` | The hand-written scenario (WSM-TST-004) over TCP. |
+| `unix` | The same scenario over a socket file. It tests the `ws+unix:` URL grammar, which each implementation parses with its own code: each acceptor reports the request target it received, and the driver compares it with the route in the URL, query string included. |
+| `corpus` | The sequence corpus (WSM-CDC-007), replayed with one peer in each language. |
+
+A separate leg kills the acceptor with streams open and starts a second one on the same port
+(WSM-TST-005); it runs over TCP only, because a killed acceptor does not unlink its socket file.
+
+The codec is set in both environment variables, `MUXWS_CODEC` and `VITE_MUXWS_CODEC` (WSM-CDC-010), and
+is also passed to the driver as an argument, so a process that did not receive the environment fails
+instead of running `json` under another codec's name.
+
+The last argument of a `corpus` call is the number of fixtures the leg must run: the whole corpus under
+`msgpack` and one fewer under `json`, which cannot carry `bytes-payload-under-binary-codec`
+(WSM-CDC-008). The number is fixed in the workflow, so a conductor that skips fixtures fails. Adding a
+sequence fixture requires raising these numbers and `EXPECTED_SEQUENCE_FIXTURES` in both conformance
+runners.
 
 ## See also
 

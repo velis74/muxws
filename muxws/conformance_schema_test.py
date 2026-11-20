@@ -19,7 +19,7 @@ INVALID_FILES = sorted((CONFORMANCE / "invalid").glob("*.json"))
 FRAME_FILES = [CONFORMANCE / "frames" / "v1-frames.json"]
 BOUNDARY_FILES = [CONFORMANCE / "frames" / "v1-fragment-boundaries.json"]
 
-#: The eight cases WSM-TST-003 enumerates, by fixture name.
+#: The nine cases WSM-TST-003 enumerates, by fixture name.
 REQUIRED_INVALID_CASES = {
     "open-wrong-parity",
     "open-id-not-monotonic",

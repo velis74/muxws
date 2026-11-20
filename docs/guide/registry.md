@@ -10,8 +10,8 @@ when a registered peer closes.
 
 ## `peer.tags`
 
-A plain `dict` in Python, a plain object in TypeScript. muxws does not read or write it (except that
-`PeerRegistry.register` reads it), and defines no keys in it.
+`peer.tags` is a plain `dict` in Python and a plain object in TypeScript. muxws does not read or
+write it (except that `PeerRegistry.register` reads it), and defines no keys in it.
 
 ```python
 # fragment

@@ -23,6 +23,49 @@ pip install muxws                       # extras: [starlette], [websockets], [ms
 npm install muxws                       # optional peers: ws, @msgpack/msgpack
 ```
 
+## Example
+
+A FastAPI acceptor (`pip install "muxws[starlette]" fastapi uvicorn`) that answers one payload with one
+reply and another with a stream of chunks:
+
+```python
+from fastapi import FastAPI, WebSocket
+from muxws import accept, Stream
+
+app = FastAPI()
+
+async def on_stream(payload: object, stream: Stream) -> None:
+    if payload == {"say": "hello"}:
+        await stream.reply({"greeting": "hello, muxws"})
+    elif isinstance(payload, dict) and isinstance(payload.get("count"), int):
+        for n in range(1, payload["count"] + 1):
+            await stream.send({"chunk": n})
+        await stream.end()
+
+@app.websocket("/ws")
+async def muxws_endpoint(websocket: WebSocket) -> None:
+    peer = await accept(websocket)
+    peer.on_stream(on_stream)
+    await peer.serve()
+```
+
+A Node dialer (`npm install muxws ws`); a browser imports `connect` from `muxws` instead:
+
+```ts
+import 'muxws';
+import { connect } from 'muxws/node';
+
+const peer = await connect('ws://127.0.0.1:8000/ws');
+const answer = await peer.request<{ greeting: string }>({ say: 'hello' }, { timeoutMs: 5000 });
+for await (const chunk of peer.open<{ chunk: number }>({ count: 3 }, { end: true })) {
+  console.log(chunk.chunk);
+}
+await peer.close();
+```
+
+The [Getting started](https://docs.velis.si/muxws/guide/getting-started) guide runs both and adds a Python
+dialer.
+
 ## Documentation
 
 The manual is at **[docs.velis.si/muxws](https://docs.velis.si/muxws/)**. `npm run docs:dev` builds and

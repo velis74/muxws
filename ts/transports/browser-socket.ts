@@ -28,17 +28,10 @@ export const POLICY_VIOLATION = 1008;
  * Thrown for a `ws+unix:` url passed to the browser entry point, which has no filesystem socket
  * transport (WSM-ERR-016).
  *
- * The only concrete `TransportUnsupportedError` of the platform-`WebSocket` transport. It is defined in
- * this module and re-exported by `ts/index.ts` (WSM-ERR-016 placement): consumers import it from
- * `'muxws'`. `muxws/node` does not export it, because `muxws/node` can dial unix sockets.
- *
  * It has the same name as `muxws.transports.unix.UnixSocketsUnsupportedError`; both mean that the url
  * names a socket file that cannot be dialled from this environment. In Python the cause is an
  * interpreter without `AF_UNIX`; here it is the browser entry point, which excludes `ws`
  * (WSM-API-022). It is not a `TransportUrlError`, because the url is valid and `muxws/node` dials it.
- *
- * It is thrown by `refuseUnixScheme` in `ts/index.ts`, not by `BrowserSocket.connect`, because the
- * scheme is checked before `connect()` resolves the codec.
  */
 export class UnixSocketsUnsupportedError extends TransportUnsupportedError {
   constructor(message?: string, options: { cause?: unknown } = {}) {
@@ -167,7 +160,7 @@ export class BrowserSocket implements SocketAdapter {
     });
   }
 
-  /** Close the socket and resolve once it is actually closed. Idempotent. */
+  /** Close the socket and resolve once its `readyState` is `CLOSED`. Idempotent. */
   async close(code = 1000, reason = ''): Promise<void> {
     if (this.socket.readyState === CLOSED) {
       // No close event follows, so `wasClean` is derived from the code as in `websockets_`

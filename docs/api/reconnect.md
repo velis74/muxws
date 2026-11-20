@@ -14,7 +14,7 @@ acceptor's side a reconnection is a new connection with a new `Peer`.
   subprotocol accepted, *and* the hello is acknowledged. If the counter reset when the socket opened,
   a server that accepts sockets while its backend is down would be redialled at a fixed interval
   instead of with exponential backoff.
-- **A reconnect restores a live socket and an accepted identity, and nothing else.** No stream
+- **A reconnect restores only a live socket and an accepted identity.** No stream
   survives, nothing is replayed, the stream id space starts empty, and `tags` start empty on the
   acceptor's side, where the connection has a new `Peer`.
 - **Durations are seconds as floats in Python and milliseconds as integers in TypeScript.**

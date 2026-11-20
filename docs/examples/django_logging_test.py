@@ -1,4 +1,4 @@
-"""Applies `django_logging.LOGGING` the way Django does and checks where the lines land."""
+"""Applies `django_logging.LOGGING` the way Django does and checks which file each log line is written to."""
 
 import importlib
 import logging

@@ -102,7 +102,7 @@ interface Board {
  * Waits `ms` milliseconds, or until `signal` aborts.
  *
  * It resolves on abort instead of rejecting; the caller checks `signal.aborted` afterwards. The
- * callers' `try` blocks therefore see only real failures such as `StreamReset` and `StreamClosed`.
+ * callers' `try` blocks therefore catch no abort, only errors such as `StreamReset` and `StreamClosed`.
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return Promise.resolve();
@@ -152,6 +152,9 @@ export class MarketService {
   private readonly actionTable: Map<string, Action>;
 
   private tickInterval: number;
+
+  /** Aborted and replaced on every rate change; wakes the sleeping tick streams. */
+  private rateChanged = new AbortController();
 
   private readonly historyDelay: number;
 
@@ -243,15 +246,9 @@ export class MarketService {
   // ------------------------------------------------------------------ the hello
 
   /**
-   * Handles the hello (the subscription). It is an ordinary stream with no wire marking (WSM-RCN-021).
-   *
-   * The dialer sends it through `connect({hello})`, so it is replayed on every new socket
-   * (WSM-RCN-020) and this method runs on a new `Peer` after every reconnect. An acceptor's `tags` end
-   * with their connection (WSM-RCN-033), so the peer is tagged and registered here, on each connection.
-   *
-   * The frontend does not use the reply: `connect()`'s reconnect helper owns this stream and discards
-   * its replies, and the acknowledgement WSM-RCN-022 requires is this handler returning. The symbol
-   * data arrives on the pushed tick streams.
+   * Handles the hello (the subscription), an ordinary stream with no wire marking (WSM-RCN-021). Runs
+   * on every connection, including each reconnect (WSM-RCN-020), and tags and registers the peer there,
+   * because an acceptor's `tags` end with their connection (WSM-RCN-033).
    */
   private async hello(peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const tags = fieldOf(payload, 'tags');
@@ -284,7 +281,14 @@ export class MarketService {
       throw new Error(`interval_ms must be between 1 and 5000; got ${JSON.stringify(requested)}`);
     }
     this.tickInterval = requested;
-    await stream.reply({ ok: true, interval_ms: requested, symbols: this.market.symbols.length });
+    // The streams sleeping on the old interval send now and then sleep the new one.
+    this.rateChanged.abort();
+    this.rateChanged = new AbortController();
+    await stream.reply({
+      ok: true,
+      interval_ms: requested,
+      symbols: this.market.symbols.length,
+    });
   }
 
   // ------------------------------------------------------------------ server push
@@ -341,7 +345,7 @@ export class MarketService {
       // the frontend holds no symbol data of its own.
       await stream.send(this.market.snapshot(symbol));
       for (;;) {
-        await sleep(this.tickInterval, board.stop.signal);
+        await sleep(this.tickInterval, AbortSignal.any([board.stop.signal, this.rateChanged.signal]));
         if (board.stop.signal.aborted) return;
         await stream.send(this.market.tick(symbol));
       }
@@ -366,15 +370,8 @@ export class MarketService {
   }
 
   /**
-   * Streaming and cancellable (WSM-ERR-012/013).
-   *
-   * In the Python port the browser's `cancel()` cancels the handler's task and `CancelledError` is
-   * raised at its pending `await`. TypeScript cannot interrupt a pending `await`, so the peer aborts
-   * `stream.signal` instead (WSM-API-023): the sleep below ends early and the loop checks
-   * `signal.aborted`. A handler that ignored the signal would keep producing points after the
-   * cancellation, which WSM-ERR-012 forbids.
-   *
-   * `history_cancelled` counts cancellations observed by this handler.
+   * Streaming and cancellable (WSM-ERR-012/013): a cancel aborts `stream.signal` (WSM-API-023), which
+   * ends the sleep and stops the loop. `history_cancelled` counts cancellations seen by this handler.
    */
   private async history(_peer: Peer, payload: unknown, stream: Stream): Promise<void> {
     const symbol = symbolOf(payload);
@@ -456,7 +453,10 @@ export class MarketService {
       // for its full window.
       this.forget(peer);
       try {
-        await peer.close({ code: ResetCode.NO_ERROR, reason: "the demo's kill switch" });
+        await peer.close({
+          code: ResetCode.NO_ERROR,
+          reason: "the demo's kill switch",
+        });
       } catch (error) {
         logger.debug(`muxws demo: peer ${peer.id} was already gone when the kill switch reached it`, error);
       }

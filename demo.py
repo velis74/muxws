@@ -168,7 +168,7 @@ def missing_dependencies(backend=DEFAULT_BACKEND, frontend=True, uds=False, benc
 
 
 def check_before_starting(backend=DEFAULT_BACKEND, frontend=True, uds=False, bench=False):
-    """Refuse to start with a list of what to install, rather than failing later and elsewhere."""
+    """Exit with status 1 before starting anything, listing what is missing and the commands that install it."""
     problems = missing_dependencies(backend, frontend, uds=uds, bench=bench)
     if not problems:
         return
@@ -231,7 +231,7 @@ def build_parser():
             "  python demo.py --bench --full     msgpack and twenty concurrent streams as well\n"
             "\n"
             "Ctrl-C stops the backend and the dev server together. MUXWS_DEMO_PORT moves the\n"
-            "backend off 8020; the Vite proxy in demo/frontend/vite.config.ts has to be told too."
+            "backend off 8020; the proxy target in demo/frontend/vite.config.ts must be changed to match."
         ),
     )
     # At most one demo per run; argparse rejects combinations. No demo is the default: without a
@@ -286,7 +286,7 @@ def parse_arguments(argv=None):
     named_backend = arguments.backend or arguments.backend_option
 
     if arguments.backend and arguments.backend_option and arguments.backend != arguments.backend_option:
-        # Two different backends named; neither is chosen silently.
+        # Two different backends named: rejected with an error instead of choosing one.
         parser.error(f"asked for both '{arguments.backend}' and '--backend {arguments.backend_option}'; pick one")
 
     if arguments.uds or arguments.bench:
@@ -314,6 +314,18 @@ def parse_arguments(argv=None):
     return arguments
 
 
+def watch_sigterm():
+    """Install a SIGTERM handler that only records the signal, and return the record (a list).
+
+    SIGTERM's default action ends the process without running `finally`. A handler that raises
+    `SystemExit` can interrupt `subprocess` internals at any point and skip the cleanup, so the caller
+    polls the record instead. An IDE's stop button, `kill` and supervisors send SIGTERM.
+    """
+    received = []
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: received.append(True))
+    return received
+
+
 def run_fe():
     # `npm run demo:dev` starts a process tree (npm, a shell, vite), and `fe_proc.terminate()` reaches
     # only this process. If only this process ended, vite would keep port 5173, and the next run would
@@ -322,18 +334,17 @@ def run_fe():
     # The tree therefore gets its own process group, and the `finally` below kills the group.
     # `start_new_session` also removes it from the terminal's foreground group, so Ctrl-C does not
     # reach npm directly; the `finally` sends the signal instead.
+    stop = watch_sigterm()
+    # Ctrl-C reaches this child too; the parent stops it with `fe_proc.terminate()`.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     process = subprocess.Popen(["npm", "run", "demo:dev"], start_new_session=True)  # noqa: S603, S607
-    # SIGTERM's default action terminates the process without running `finally`. Converting it to
-    # SystemExit makes the cleanup below run on `fe_proc.terminate()`.
-    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
-    entry_point = os.getppid()
+    # The entry point, not `os.getppid()`: under the `forkserver` start method the OS parent is the
+    # fork server, which outlives the entry point.
+    entry_point = multiprocessing.parent_process()
     try:
-        # Also watches the parent: `fe_proc.terminate()` is not reached on every exit. When the entry
-        # point receives SIGTERM (an IDE's stop button, `kill`, a supervisor), `uvicorn.run()` does not
-        # return, its `finally` does not run, and this process would be reparented to init with the
-        # dev server still running. `os.getppid()` changes however the parent exits, including
-        # SIGKILL. The exit status is not checked: npm exits non-zero on every normal stop.
-        while process.poll() is None and os.getppid() == entry_point:
+        # Also watches the entry point, which ends without `fe_proc.terminate()` on SIGKILL. The exit
+        # status is not checked: npm exits non-zero on every normal stop.
+        while process.poll() is None and entry_point.is_alive() and not stop:
             time.sleep(0.25)
     finally:
         # The whole group: `npm run demo:dev` is npm, a shell, npm again, a shell and vite, and
@@ -356,21 +367,19 @@ def run_fastapi():
     uvicorn.run("demo.backend_python.main:app", host=HOST, port=PORT, reload=False)
 
 
-def run_node():
+def run_node(stop):
     """Run the TypeScript backend, started and stopped the same way `run_fe` handles the dev server.
 
     `npm run` starts a process tree (npm, a shell, tsx, node). Signalling only the spawned process
     leaves node running on port 8020, and the next run's frontend connects to that old backend.
-    The tree therefore gets its own process group, and the `finally` below kills the group.
+    The tree therefore gets its own process group, and the `finally` below kills the group. Returns
+    when the backend exits or `stop`, the record from `watch_sigterm`, holds a SIGTERM.
     """
     process = subprocess.Popen(["npm", "run", "demo:backend:node"], start_new_session=True)  # noqa: S603, S607
-    # SIGTERM's default action terminates the process without running the `finally` below, which
-    # would leave the group running. `run_fastapi` needs no handler because uvicorn installs its own.
-    # An IDE's stop button, `kill` and supervisors send SIGTERM.
-    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     try:
         # The exit status is not checked: npm exits non-zero on every normal stop, including Ctrl-C.
-        process.wait()
+        while process.poll() is None and not stop:
+            time.sleep(0.25)
     finally:
         # The group, not the process. See `run_fe`.
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -463,12 +472,8 @@ def run_uds():
 
 
 def run_bench(full=False):
-    """The throughput matrix, measured and then printed as one report.
-
-    `demo/bench/` is imported inside the function so the other demos do not load it.
-    `demo.bench` performs the measurement; this function only passes `--full`.
-    """
-    from demo.bench import format_report, run_matrix
+    """Measure the throughput matrix and print it as one report; `full` widens the matrix."""
+    from demo.bench import format_report, run_matrix  # Imported here so the other demos do not load it.
 
     # On stderr, so `python demo.py --bench > report.txt` writes only the report to the file. Each cell
     # runs a pair of processes for a fixed time and prints nothing until the matrix is finished.
@@ -482,10 +487,13 @@ def run_bench(full=False):
     print(format_report(results, round_trips, notes))
 
 
-def run_backend(backend):
-    """Whichever backend was asked for: uvicorn in this process, or Node in a group under it."""
+def run_backend(backend, stop):
+    """Run the requested backend: uvicorn in this process, or Node in a child process group.
+
+    `stop` is the record `watch_sigterm` returns; uvicorn ends on SIGTERM by itself.
+    """
     if backend == "node":
-        run_node()
+        run_node(stop)
     else:
         run_fastapi()
 
@@ -540,8 +548,11 @@ if __name__ == "__main__":
     if options.frontend:
         fe_proc = multiprocessing.Process(target=run_fe, daemon=True)
         fe_proc.start()
+    # uvicorn restores this handler and raises the captured SIGTERM again after its shutdown; with the
+    # default action the process would end here without the teardown below.
+    stop = watch_sigterm()
     try:
-        run_backend(chosen_backend)
+        run_backend(chosen_backend, stop)
     except KeyboardInterrupt:
         pass
     finally:

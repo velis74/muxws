@@ -83,7 +83,7 @@ def test_round_trip_over_the_whole_frame_corpus(case: dict[str, Any], codec: Msg
 
 
 def test_the_corpus_covers_every_v1_frame_type():
-    """Every v1 frame type is in the corpus, so the parametrized test above covers all of them.
+    """Every v1 frame type is in the corpus, so the parametrised test above covers all of them.
 
     Asserted here as well as in the JSON tests, because this file runs the corpus through the second
     codec, and the round-trip test above passes for a corpus of any size.
@@ -128,7 +128,7 @@ def test_decoded_strings_are_text_not_bytes(codec: MsgpackCodec):
     assert isinstance(frame.payload["label"], str)
 
 
-def test_a_payload_with_an_integer_map_key_decodes_rather_than_killing_the_connection(codec: MsgpackCodec):
+def test_a_payload_with_an_integer_map_key_decodes_without_closing_the_connection(codec: MsgpackCodec):
     """`strict_map_key=False`. The msgpack default raises on a non-string map key.
 
     muxws does not restrict the content of an application payload; a `ValueError` from the unpacker
@@ -169,10 +169,11 @@ def test_bytes_and_text_stay_distinguishable(codec: MsgpackCodec):
 
 
 def test_json_codec_refuses_bytes_rather_than_base64_encoding_them():
-    """WSM-CDC-008's other half: under JSON, bytes are not a payload type and muxws does not invent one.
+    """WSM-CDC-008: under JSON, bytes are not a payload type.
 
-    The base64 of `b"\\x00\\xff"` is `AP8=`; asserting its absence makes this test fail if the codec
-    encodes bytes instead of refusing them.
+    The codec refuses them and does not encode them as another type. The base64 of `b"\\x00\\xff"` is
+    `AP8=`; asserting its absence makes this test fail if the codec encodes bytes instead of refusing
+    them.
     """
     json_codec = JsonCodec()
     with pytest.raises(TypeError, match="WSM-CDC-008") as info:
@@ -213,10 +214,11 @@ def test_a_non_map_message_is_a_protocol_error(codec: MsgpackCodec):
 
 
 def test_a_text_message_is_a_protocol_error_not_a_recoding(codec: MsgpackCodec):
-    """WSM-CDC-002: a binary codec is chosen by declaration, so text on the wire is the remote's bug.
+    """WSM-CDC-002: a binary codec is chosen by declaration.
 
-    No recoding can recover the bytes, because the transport has already lost them, so a recoding
-    would turn a detectable violation into silent corruption.
+    A text message under it is a protocol error by the remote. No recoding can recover the bytes,
+    because the transport has already lost them, so a recoding would replace a detected protocol error
+    with an undetected wrong payload.
     """
     with pytest.raises(ProtocolError, match="text"):
         codec.decode('{"type":"ping"}')
@@ -365,7 +367,7 @@ async def _echo(payload: Any, stream: Stream) -> None:
 
 
 async def test_binary_codec_uses_send_bytes_never_send_text(registered: MsgpackCodec):
-    """WSM-CDC-002 through the real `Peer`: `binary` selects the send method, and nothing else does.
+    """WSM-CDC-002 through the real `Peer`: only `binary` selects the send method.
 
     Builds the peers the way an application does (`register_codec`, then `get_codec`, then `Peer`)
     and asserts on the `SocketAdapter` spy, because the in-memory transport accepts a `str` on
@@ -409,7 +411,7 @@ async def test_a_large_bytes_payload_survives_fragmentation_over_a_live_peer_pai
 
     A lowered cap is a runner/test construction argument (WSM-FRG-005), never a wire value. Every
     message is measured as its buffer length (WSM-FRG-003), which is the same measurement the
-    splitter had to make for the payload to arrive intact.
+    splitter uses.
     """
     left, right = memory_pair()
     dialer = Peer(left, codec=registered, is_dialer=True, max_frame_bytes=1024)
