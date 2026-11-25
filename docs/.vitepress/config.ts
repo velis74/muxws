@@ -7,11 +7,15 @@ export default defineConfig({
     'delay small ones. Python and TypeScript.',
   // docs/design/ holds design documents that are not part of the published site.
   srcExclude: ['design/**'],
-  head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/muxws-icon.svg' }]],
-  // Canonical URL of each page as published on docs.velis.si, under the `--base` given to the build.
+  // Favicon and canonical URL of each page as published on docs.velis.si, under the `--base` given to the
+  // build: VitePress does not prefix `head` hrefs with the base.
   transformHead({ pageData, siteConfig }) {
+    const base = siteConfig.site.base;
     const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html');
-    return [['link', { rel: 'canonical', href: `https://docs.velis.si${siteConfig.site.base}${path}` }]];
+    return [
+      ['link', { rel: 'icon', type: 'image/svg+xml', href: `${base}muxws-icon.svg` }],
+      ['link', { rel: 'canonical', href: `https://docs.velis.si${base}${path}` }],
+    ];
   },
   themeConfig: {
     logo: '/muxws-icon.svg',
