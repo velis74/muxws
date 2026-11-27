@@ -105,3 +105,13 @@ jobs:
       - name: typescript examples
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: MUXWS_PYTHON="$PWD/.venv/bin/python" npx vitest run docs/examples/examples.spec.ts
+
+  # the required status check: fails when any other job of this workflow failed or was cancelled
+  all-green:
+    name: all-green (cross-language)
+    if: always()
+    needs: [cross-language]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

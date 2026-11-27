@@ -130,3 +130,12 @@ jobs:
 
   # Interop runs in `cross-language.yml`, in both role assignments over both codecs, on the same
   # triggers as this workflow.
+
+  # the required status check: fails when any other job of this workflow failed or was cancelled
+  all-green:
+    if: always()
+    needs: [python, node, demo-e2e, coverage]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
